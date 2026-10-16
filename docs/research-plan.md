@@ -47,3 +47,10 @@ Record source, statement, encoding, proof status, and falsification attempt.
 Promote a result through: conjecture → convincing notes proof → Lean formal
 statement → kernel-checked proof → external-to-Lean correspondence audit.
 If a proof direction stalls, document the exact barrier.
+
+## Executable reference
+
+`python3 scripts/evaluate.py 6` computes `S(6) = 10` using memoized
+partial-order minimax (tests cover n = 0..6). This is computational evidence,
+not a Lean theorem or complexity-class separation. The evaluator may become
+expensive at n ≥ 7.
