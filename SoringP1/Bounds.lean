@@ -53,8 +53,6 @@ lemma le_S_of_pow_lt (n k : ℕ) (h : 2 ^ (k - 1) < n.factorial) : k ≤ S n := 
   have h4 : 2 ^ S n ≤ 2 ^ (k - 1) := Nat.pow_le_pow_right (by norm_num) h2
   omega
 
-theorem thirteen_le_S_seven : 13 ≤ S 7 := le_S_of_pow_lt 7 13 (by norm_num)
-
 theorem sixteen_le_S_eight : 16 ≤ S 8 := le_S_of_pow_lt 8 16 (by norm_num)
 
 end SoringP1
