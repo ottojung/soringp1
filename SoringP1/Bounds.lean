@@ -44,4 +44,17 @@ theorem log2_factorial_le_S (n : ℕ) : Nat.log2 n.factorial ≤ S n := by
     Nat.pow_lt_pow_right (by norm_num) (Nat.lt_succ_self _)
   exact absurd (le_trans h2 h3) (not_le.mpr hlt)
 
+/-- A usable form of the information lower bound: if `2 ^ (k-1) < n!` then
+`k ≤ S n`. (Take `k` a lower bound on `log₂ n!`.) -/
+lemma le_S_of_pow_lt (n k : ℕ) (h : 2 ^ (k - 1) < n.factorial) : k ≤ S n := by
+  by_contra hlt
+  have h2 : S n ≤ k - 1 := by omega
+  have h3 : n.factorial ≤ 2 ^ S n := factorial_le_two_pow_S n
+  have h4 : 2 ^ S n ≤ 2 ^ (k - 1) := Nat.pow_le_pow_right (by norm_num) h2
+  omega
+
+theorem thirteen_le_S_seven : 13 ≤ S 7 := le_S_of_pow_lt 7 13 (by norm_num)
+
+theorem sixteen_le_S_eight : 16 ≤ S 8 := le_S_of_pow_lt 8 16 (by norm_num)
+
 end SoringP1
