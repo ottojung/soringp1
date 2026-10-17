@@ -1,28 +1,47 @@
-# Formalization plan
+# Formalization boundary — exploration is the default
 
-Inspired by AssemblyP1's exploration-first methodology.
+**Decision (2026-10-17): pause routine expansion of the Lean library.**
+The goal is to discover a substantial result about evaluating S(n), then
+formally check it. Formalization is not an independent measure of progress.
 
-**Boundary A (initial bootstrap).** Give a faithful sorting decision-tree
-model and make feasible budgets and the minimum value meaningful.
-The initial Lean model already has the basic tree, interpreter, correctness
-predicate, feasibility predicate, and minimization specification.
-**Status: largely complete.** Existence (`exists_hasBudget`), attainment and
-minimality (`hasBudget_S`, `S_le_iff`, `S_is_minimal`), the information lower
-bound (`n! ≤ 2^(S n)`), and small reference instances (`S(0..3) = 0,0,1,3`)
-are kernel-checked. See `docs/kernel-results.md` for the exact theorem
-inventory and the remaining open fronts (tight upper bound, `S 4`, a checked
-executable evaluator, and the machine-model/complexity bridge).
+## Existing boundary: preserve, don't duplicate
 
-**Exploration (default).** Prefer informal mathematical arguments, executable
-experiments, adversarial examples, and connections to optimal decision-tree
-theory. In particular, search for a *structural characterization* of S(n)
-that avoids enumerating partial orders. Do not expand Lean code merely to
-record unproven heuristic ideas.
+The repository already kernel-checks a faithful adaptive comparison-tree
+model, feasibility/attainment of S, bounds, monotonicity, and exact small
+values through n=6. The minimax module defines `adv` and constructs a
+sorting tree; the height-achievement direction has not yet been proved.
+See `kernel-results.md` for the precise inventory. Existing CI, proof
+objects and correspondence checks stay intact.
 
-**Boundary B (mature results).** Formalize a complete algorithm/complexity
-bound or lower-bound reduction once a coherent independent proof exists.
-Prove the complexity class encoding and machine-model bridge; do not leave
-resource bounds as comments attached to a function definition.
+## Active boundary: exploration
 
-**Verification.** Build all Lean modules, kernel replay them, and audit axioms.
-A theorem of a surrogate problem is not automatically a theorem about S.
+Prefer primary literature, pencil-and-paper arguments, candidate structural
+recurrences, complexity theory, counterexamples and small reproducible
+experiments. Document deductions and failed approaches in
+`exploration-agenda.md` and further research notes.
+
+Routine proofs of familiar inequalities, further isolated small-n instances,
+and nonessential helper-lemma chains are **not** active milestones.
+Do not create new Lean tasks without a demonstrated research need.
+
+## Exception for the unfinished minimax bridge
+
+The missing theorem `height (minimaxTree S) ≤ adv S` would complete a
+useful correspondence. Attempt only a clearly bounded, straightforward
+repair. The current definitional-equality/unfolding problem in `adv`
+is documented in `kernel-results.md`. If that obstruction requires
+substantial redesign, stop, document the blocker, and pursue the research
+fronts instead. This exception is not authorization for an open-ended
+sequence of Lean-engineering subprojects.
+
+## Return to Lean for mature results
+
+A proposed theorem should be supported by an independent mathematical
+argument or algorithm, an explicit claimed novelty/usefulness, an audited
+model and input encoding, and a concrete explanation of the value added by
+kernel checking. Then prove any necessary correctness and machine-cost
+bridges. Never confuse a Lean termination proof, a computable recurrence,
+or finite tests with a Turing-machine time bound.
+
+Verification remains `lake build --wfail` and
+`lake env leanchecker SoringP1`, plus axiom and correspondence review.
