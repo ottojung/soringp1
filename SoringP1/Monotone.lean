@@ -213,6 +213,12 @@ lemma run_prune {n : ℕ} (U : ComparisonTree (n + 1)) (r : Equiv.Perm (Fin n))
             rw [ite_eq_right (fun hx => hc (hcond.mp hx))] at hh
             exact ihno hh
 
+/-- Feasibility is monotone in `n`: a budget feasible for `n + 1` keys is
+feasible for `n` (prune the extra key). -/
+lemma hasBudget_prune {n k : ℕ} (h : HasBudget (n + 1) k) : HasBudget n k := by
+  obtain ⟨T, hcorr, hheight⟩ := h
+  exact ⟨prune T, fun r => run_prune T r (hcorr (ext r)), le_trans (height_prune T) hheight⟩
+
 /-- The sorting number is monotone: `S n ≤ S (n + 1)`. -/
 theorem S_mono (n : ℕ) : S n ≤ S (n + 1) := by
   obtain ⟨T, hTcorr, hTheight⟩ := exists_tree_S (n + 1)
