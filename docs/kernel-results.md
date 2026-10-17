@@ -82,6 +82,13 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
   both children of a comparison node satisfy it). Supersedes the loose
   `n(n+2)+(n+1)+1`.
 
+### Evaluator groundwork (`SoringP1/Minimax.lean`)
+- `splitPairs (S) : Finset (Fin n × Fin n)` — comparison pairs that split a
+  ranking set into two nonempty parts.
+- `card_filter_lt`, `split_of_lt`, and `splitPairs_nonempty : 2 ≤ S.card →
+  (splitPairs S).Nonempty` — a pair that splits `S` always exists when `S` has
+  at least two rankings (the combinatorial core of the exact minimax evaluator).
+
 ## Open fronts
 
 1. **Tighter upper bound — DONE (A10).** `S_le_tight : S n ≤ n(n-1)/2` is
@@ -91,6 +98,9 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
    hand.
 3. **Evaluator correspondence (general).** A checked executable minimax /
    partial-order evaluator and a proof that it computes `S` on its domain.
+   Groundwork done: `SoringP1/Minimax.lean` (`splitPairs_nonempty`). Remaining:
+   define the recurrence `adv`, prove `adv S ≤ height T` for trees sorting `S`,
+   and construct the achieving tree.
 4. **Complexity classes.** Encode `S` (or its threshold language) against a
    Turing-machine/resource model and prove an upper bound under a fixed
    encoding — distinguishing unary (`2^{O(n²)}` in `n`, i.e. EXPTIME) from
