@@ -55,4 +55,9 @@ lemma le_S_of_pow_lt (n k : ℕ) (h : 2 ^ (k - 1) < n.factorial) : k ≤ S n := 
 
 theorem sixteen_le_S_eight : 16 ≤ S 8 := le_S_of_pow_lt 8 16 (by norm_num)
 
+/-- The information lower bound in ceiling-logarithm form:
+`S n ≥ ⌈log₂ n!⌉`. -/
+theorem clog_factorial_le_S (n : ℕ) : Nat.clog 2 n.factorial ≤ S n :=
+  (Nat.clog_le_iff_le_pow (by norm_num : 1 < 2)).2 (factorial_le_two_pow_S n)
+
 end SoringP1

@@ -70,6 +70,8 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
   bound in logarithmic form.
 - `le_S_of_pow_lt (n k) (h : 2 ^ (k-1) < n!) : k ≤ S n` — a usable lower-bound
   form; instances `thirteen_le_S_seven : 13 ≤ S 7`, `sixteen_le_S_eight : 16 ≤ S 8`.
+- `clog_factorial_le_S (n) : Nat.clog 2 n.factorial ≤ S n` — the information
+  bound in ceiling-logarithm form (`S n ≥ ⌈log₂ n!⌉`).
 
 ### A10 — tight upper bound (`SoringP1/TightBound.lean`)
 - `S_le_tight (n) : S n ≤ n * (n - 1) / 2` — the insertion tree's true
