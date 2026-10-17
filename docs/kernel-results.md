@@ -102,25 +102,34 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
   recursive `adv` (e.g. in `Finset.le_min'`), which does not terminate; the fix
   requires restructuring `adv` (e.g. an opaque `WellFounded.fix` wrapper).
 
-## Open fronts
+## Open fronts and active research mode (2026-10-17)
 
-1. **Tighter upper bound — DONE (A10).** `S_le_tight : S n ≤ n(n-1)/2` is
-   proven via the comparison-exact height invariant `height_go_tight`.
-2. **Exact value `S 4 = 5`** (and beyond): requires an explicit height-5 tree on
-   four keys (up to 24 leaves); best generated programmatically rather than by
-   hand.
-3. **Evaluator correspondence (general).** A checked executable minimax /
-   partial-order evaluator and a proof that it computes `S` on its domain.
-   Done: `SoringP1/Minimax.lean` defines the computable recurrence `adv` and
-   proves the adversary lower bound `adv S ≤ height T` (and `adv univ ≤ height T`
-   for correct `T`). Remaining: construct the achieving minimax tree and prove
-   `S n = adv univ`.
-4. **Complexity classes.** Encode `S` (or its threshold language) against a
-   Turing-machine/resource model and prove an upper bound under a fixed
-   encoding — distinguishing unary (`2^{O(n²)}` in `n`, i.e. EXPTIME) from
-   binary input (`2^{O(2^m)}`, 2-EXPTIME). No `NP` membership or separation is
-   claimed; the model is a decision-tree model, not yet a machine model.
-5. **Structural characterization** of `S(n)` avoiding partial-order enumeration.
+**Routine Lean formalization is paused in favor of literature-led,
+paper-and-computation exploration.** This inventory records proofs, not a
+queue of mandatory next theorems. See `AGENTS.md`,
+`docs/exploration-agenda.md`, and `docs/formalization-plan.md`.
 
-A theorem about a surrogate problem is not a theorem about `S`; each result
+1. **General minimax correspondence:** `adv univ ≤ S n` is proved; a
+   correct minimax tree is constructed, but the missing height inequality
+   `height (minimaxTree S) ≤ adv S` blocks the reverse bound. The current
+   formulation of `adv` triggers recursive unfolding/whnf trouble when
+   proving the height specification. Attempt a small, direct repair only;
+   otherwise record the obstacle and stop this proof-engineering workstream.
+2. **Machine-time complexity bridge:** the `2^{O(n²)}` partial-order dynamic
+   programming argument is an **informal algorithm sketch**, not a
+   kernel-checked uniform Turing-machine cost bound. Unary and binary
+   representations must be distinguished. A proof of termination of `adv`
+   is not a machine-time theorem.
+3. **Structural understanding:** search for better exact algorithms and
+   explain obstructions such as `S(12)=30 > ceil(log₂(12!))=29`.
+   Known values like `S(7)=13` and `S(8)=16` belong in the literature
+   baseline, **not** a default Lean milestone queue.
+4. **Complexity-class classification:** no P, NP or unconditional separation
+   theorem is established. Certificates, uniform computation and reduction
+   barriers require independent investigation.
+
+The tighter insertion upper bound (A10) and small `S 4`–`S 6` certificates
+are **already completed**; old references treating them as open were stale.
+
+A theorem about a surrogate problem is not a theorem about S; each result
 above states its exact object.
