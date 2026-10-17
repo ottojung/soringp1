@@ -79,4 +79,32 @@ theorem three_le_S_three : 3 ≤ S 3 := by
       _ < 6 := by norm_num
   omega
 
+/-! ## n = 3: three comparisons, attaining the information bound. -/
+
+/-- The optimal three-comparison sorting tree on three keys. -/
+def treeThree : ComparisonTree 3 :=
+  .compare 0 1
+    (.compare 1 2
+      (.leaf (Equiv.refl (Fin 3)))
+      (.compare 0 2
+        (.leaf (Equiv.swap 1 2))
+        (.leaf (finRotate 3).symm)))
+    (.compare 0 2
+      (.leaf (Equiv.swap 0 1))
+      (.compare 1 2
+        (.leaf (finRotate 3))
+        (.leaf (Equiv.swap 0 2))))
+
+theorem treeThree_correct : Correct treeThree := by
+  intro ranking
+  fin_cases ranking <;> decide
+
+theorem hasBudget_three : HasBudget 3 3 :=
+  ⟨treeThree, treeThree_correct, by decide⟩
+
+theorem S_three : S 3 = 3 := by
+  apply le_antisymm
+  · rw [S_le_iff]; exact hasBudget_three
+  · exact three_le_S_three
+
 end SoringP1
