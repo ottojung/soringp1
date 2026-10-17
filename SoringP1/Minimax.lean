@@ -282,4 +282,12 @@ theorem minimaxTree_sorts {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) :
     · rw [ComparisonTree.run, ite_eq_right (not_lt.mpr (le_of_lt hlt))]
       exact ih _ hssub2 r (Finset.mem_filter.mpr ⟨hr, hlt⟩)
 
+/-- `adv S = 0` exactly when `S` has at most one ranking. -/
+theorem adv_eq_zero_iff {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) : adv S = 0 ↔ S.card ≤ 1 := by
+  rw [adv]
+  by_cases h : S.card ≤ 1
+  · rw [dite_eq_left h]; exact ⟨fun _ => h, fun _ => rfl⟩
+  · rw [dite_eq_right h]
+    exact ⟨fun hc => absurd hc (by omega), fun hc => absurd hc h⟩
+
 end SoringP1

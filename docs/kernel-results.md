@@ -93,6 +93,7 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
 - `adv_le_height : Sorts S T → adv S ≤ height T` — the adversary lower bound.
 - `adv_le_height_correct : Correct T → adv univ ≤ height T`.
 - `adv_univ_le_S (n) : adv univ ≤ S n` — the adversary bound in infimum form.
+- `adv_eq_zero_iff (S) : adv S = 0 ↔ S.card ≤ 1`.
 - `bestPair S` — an optimal comparison pair (argmin of the minimax cost), and
   `bestPair_le`; `minimaxTree S` — the minimax sorting tree (compare the optimal
   pair, recurse); `minimaxTree_sorts : Sorts S (minimaxTree S)`. The height half
