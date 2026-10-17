@@ -28,18 +28,26 @@ NP does not directly classify a numeric function; its membership for this
 language is a research question, not an assumption. See
 [the problem statement](docs/problem.md) for exact definitions and caveats.
 
-## Research
+## Active direction: exploration before further formalization
 
+As of October 17, 2026, **mathematical exploration is the default**. The
+Lean foundation remains checked and maintained, but routine lemmas and
+known small-instance results are no longer the research queue. The priority
+is to find and falsify structural hypotheses, understand established
+sorting-number literature, improve exact algorithms, and study realistic
+complexity-class and certificate barriers. Return to Lean for a mature,
+substantive discovery or an essential correctness/cost-model bridge.
+
+- [Exploration agenda, known results and sparsity barrier](docs/exploration-agenda.md)
 - [Problem statement and encodings](docs/problem.md)
 - [Research directions and milestones](docs/research-plan.md)
 - [Lean formalization boundary](docs/formalization-plan.md)
 - [Research and evidence workflow](AGENTS.md)
 - [Lean model](SoringP1/Model.lean)
 
-Like [AssemblyP1](https://github.com/ottojung/assemblyp1), this project is
-**exploration-first**: formalize an exact target early, then investigate on
-paper and by computation, and kernel-check mature results rather than building
-speculative Lean infrastructure.
+The [development contract](AGENTS.md) makes this priority explicit for agents.
+The outstanding minimax correspondence may be finished if straightforward;
+otherwise document the Lean blocker and redirect effort toward research.
 
 ## Build
 
@@ -52,5 +60,7 @@ lake build --wfail
 lake env leanchecker SoringP1
 ```
 
-CI builds and kernel-replays the proof modules. The current formal
-foundation is intentionally small; **no P/NP separation is proved yet**.
+CI builds and kernel-replays the existing proof modules. **No P/NP
+separation is proved yet.** This research repository has no application
+server to deploy: merging to `main` publishes the research instructions;
+Viche/Antonina worker scheduling is a separate operational change.
