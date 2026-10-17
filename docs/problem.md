@@ -16,8 +16,10 @@ we investigate a procedure that *computes* S(n); the individual sorting tree
 being minimized over is not required to be described uniformly in n.
 
 The Lean model in `SoringP1/Model.lean` encodes comparison trees and the
-minimization specification. Its existence and correctness correspondence
-obligations are *not yet proven*.
+minimization specification. Correct sorting trees exist for every n, and the
+minimum is attained (`exists_hasBudget`, `hasBudget_S`, `S_le_iff`).
+The general minimax evaluator correspondence and the machine-cost model
+remain open; see `kernel-results.md`.
 
 ## Encodings and exact questions
 
@@ -52,16 +54,24 @@ NP membership of a threshold language is not established by exhibiting a
 sorting decision tree: such a tree may require exponentially many nodes
 relative to the input length.
 
-## What is known initially
+## What is established and what is not
 
 - Standard sorting algorithms and the decision-tree information bound give
-  `ceil(log2(n!)) ≤ S(n) ≤ O(n log n)`.
+  `ceil(log2(n!)) ≤ S(n) ≤ O(n log n)`. The repository kernel-checks an
+  elementary `S(n) ≤ n(n−1)/2`, not the sharper `O(n log n)` algorithm bound.
+  Exact small values through n=6 are checked. The sorting-number literature
+  already knows `S(7)=13`, `S(8)=16`, and `S(12)=30` (where the information
+  lower bound is 29): see `literature.md`.
 - A partial-order minimax recurrence gives **time 2^{O(n²)} measured in numeric n**
   to compute S exactly, assuming ordinary polynomial-cost finite-state
   bookkeeping. See [the derivation](upper-bound.md).
 - Thus `SORT-BOUND-U ∈ EXPTIME`. This does *not* imply
   `SORT-BOUND-B ∈ EXPTIME`: its proven bound from this algorithm is
   `2^{2^{O(m)}}` where m is the bit length of binary n, hence in 2-EXPTIME.
+- The unary threshold language is sparse (only polynomially many encodings
+  of pairs of unary inputs of bounded length). Mahaney's theorem entails
+  that ordinary polynomial-time many-one NP-hardness of this language would
+  imply P=NP. This is a research constraint, not membership in P or NP.
 - Neither `SORT-BOUND-U ∈ NP` nor `SORT-BOUND-U ∉ NP` is being claimed.
   Similarly, no separation from P is established.
 
