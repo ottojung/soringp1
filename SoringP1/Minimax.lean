@@ -290,4 +290,72 @@ theorem adv_eq_zero_iff {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) : adv S = 0 
   · rw [dite_eq_right h]
     exact ⟨fun hc => absurd hc (by omega), fun hc => absurd hc h⟩
 
+set_option maxHeartbeats 0 in
+theorem minimaxTree_height {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) :
+    ComparisonTree.height (minimaxTree S) ≤ adv S := by
+  induction S using Finset.strongInductionOn with
+  | _ S ih =>
+  rw [minimaxTree]
+  by_cases h : S.card ≤ 1
+  · rw [dite_eq_left h, adv, dite_eq_left h]; simp [ComparisonTree.height]
+  · rw [dite_eq_right h, adv, dite_eq_right h]
+    set bp := bestPair S (splitPairs_nonempty (by omega)) with hbp
+    have hpmem : bp.1 ∈ splitPairs S := bp.2
+    have hyne : (S.filter (fun r => r bp.1.1 < r bp.1.2)).Nonempty := by
+      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.2.1
+    have hnne : (S.filter (fun r => r bp.1.2 < r bp.1.1)).Nonempty := by
+      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.2.2
+    have hssub1 : S.filter (fun r => r bp.1.1 < r bp.1.2) ⊂ S :=
+      Finset.filter_ssubset.mpr (let ⟨r, hr⟩ := hnne
+        ⟨r, (Finset.mem_filter.mp hr).1,
+          fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq))⟩)
+    have hssub2 : S.filter (fun r => r bp.1.2 < r bp.1.1) ⊂ S :=
+      Finset.filter_ssubset.mpr (let ⟨r, hr⟩ := hyne
+        ⟨r, (Finset.mem_filter.mp hr).1,
+          fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq))⟩)
+    have h1 := ih _ hssub1
+    have h2 := ih _ hssub2
+    have hne2 : ((splitPairs S).attach.image (fun pp =>
+          max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
+              (adv (S.filter (fun r => r pp.1.2 < r pp.1.1))))).Nonempty := by
+      rw [Finset.image_nonempty, Finset.attach_nonempty_iff]
+      exact splitPairs_nonempty (by omega)
+    have hle : max (adv (S.filter (fun r => r bp.1.1 < r bp.1.2)))
+          (adv (S.filter (fun r => r bp.1.2 < r bp.1.1)))
+        ≤ ((splitPairs S).attach.image (fun pp =>
+            max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
+                (adv (S.filter (fun r => r pp.1.2 < r pp.1.1))))).min' hne2 := by
+      apply Finset.le_min'
+      intro y hy
+      obtain ⟨pp, _, rfl⟩ := Finset.mem_image.mp hy
+      exact bestPair_le pp.2
+    have hmax : max (ComparisonTree.height (minimaxTree (S.filter (fun r => r bp.1.1 < r bp.1.2))))
+                    (ComparisonTree.height (minimaxTree (S.filter (fun r => r bp.1.2 < r bp.1.1))))
+        ≤ max (adv (S.filter (fun r => r bp.1.1 < r bp.1.2)))
+              (adv (S.filter (fun r => r bp.1.2 < r bp.1.1))) :=
+      max_le (le_trans h1 (le_max_left _ _)) (le_trans h2 (le_max_right _ _))
+    simp only [ComparisonTree.height]
+    exact le_trans (Nat.add_le_add_left hmax 1) (Nat.add_le_add_left hle 1)
+
+/-- The minimax tree sorts `S` and has height at most `adv S`. -/
+theorem minimaxTree_spec {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) :
+    Sorts S (minimaxTree S) ∧ ComparisonTree.height (minimaxTree S) ≤ adv S :=
+  ⟨minimaxTree_sorts S, minimaxTree_height S⟩
+
+/-- The minimax value is a feasible budget for `n` keys. -/
+theorem hasBudget_adv_univ (n : ℕ) :
+    HasBudget n (adv (Finset.univ : Finset (Equiv.Perm (Fin n)))) :=
+  ⟨minimaxTree _, fun r => minimaxTree_sorts _ r (Finset.mem_univ r), minimaxTree_height _⟩
+
+/-- The upper half: `S n ≤ adv univ`. -/
+theorem S_le_adv_univ (n : ℕ) :
+    S n ≤ adv (Finset.univ : Finset (Equiv.Perm (Fin n))) :=
+  (S_le_iff (n := n)).2 (hasBudget_adv_univ n)
+
+/-- **Exact minimax characterisation of the sorting number**:
+`S n` equals the partial-order minimax value `adv univ`. -/
+theorem S_eq_adv_univ (n : ℕ) :
+    S n = adv (Finset.univ : Finset (Equiv.Perm (Fin n))) :=
+  le_antisymm (S_le_adv_univ n) (adv_univ_le_S n)
+
 end SoringP1
