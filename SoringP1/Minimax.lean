@@ -189,4 +189,46 @@ theorem adv_le_height_correct {n : ℕ} (T : ComparisonTree n) (h : Correct T) :
     adv (Finset.univ : Finset (Equiv.Perm (Fin n))) ≤ ComparisonTree.height T :=
   adv_le_height _ T (fun r _ => h r)
 
+/-- A comparison pair achieving the minimax value at `S`. -/
+noncomputable def bestPair {n : ℕ} (S : Finset (Equiv.Perm (Fin n)))
+    (hne : (splitPairs S).Nonempty) : {p : Fin n × Fin n // p ∈ splitPairs S} :=
+  ⟨Classical.choose (Finset.exists_min_image (splitPairs S)
+      (fun p => max (adv (S.filter (fun r => r p.1 < r p.2)))
+                    (adv (S.filter (fun r => r p.2 < r p.1)))) hne),
+   (Classical.choose_spec (Finset.exists_min_image (splitPairs S)
+      (fun p => max (adv (S.filter (fun r => r p.1 < r p.2)))
+                    (adv (S.filter (fun r => r p.2 < r p.1)))) hne)).1⟩
+
+lemma bestPair_le {n : ℕ} {S : Finset (Equiv.Perm (Fin n))} {hne} {p : Fin n × Fin n}
+    (hp : p ∈ splitPairs S) :
+    max (adv (S.filter (fun r => r (bestPair S hne).1.1 < r (bestPair S hne).1.2)))
+        (adv (S.filter (fun r => r (bestPair S hne).1.2 < r (bestPair S hne).1.1)))
+    ≤ max (adv (S.filter (fun r => r p.1 < r p.2))) (adv (S.filter (fun r => r p.2 < r p.1))) :=
+  (Classical.choose_spec (Finset.exists_min_image (splitPairs S)
+    (fun p => max (adv (S.filter (fun r => r p.1 < r p.2)))
+                  (adv (S.filter (fun r => r p.2 < r p.1)))) hne)).2 p hp
+
+/-- The minimax sorting tree for a set of rankings: compare an optimal pair, recurse. -/
+noncomputable def minimaxTree {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) : ComparisonTree n :=
+  if h : S.card ≤ 1 then
+    .leaf (if hne : S.Nonempty then (Classical.choose hne).symm else 1)
+  else
+    let p := (bestPair S (splitPairs_nonempty (by omega))).1
+    .compare p.1 p.2 (minimaxTree (S.filter (fun r => r p.1 < r p.2)))
+                      (minimaxTree (S.filter (fun r => r p.2 < r p.1)))
+termination_by S.card
+decreasing_by
+  · have hp := (bestPair S (splitPairs_nonempty (by omega))).2
+    unfold splitPairs at hp
+    rw [Finset.mem_filter] at hp
+    obtain ⟨r, hr⟩ := hp.2.2.2
+    exact filter_card_lt (Finset.mem_filter.mp hr).1
+      (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
+  · have hp := (bestPair S (splitPairs_nonempty (by omega))).2
+    unfold splitPairs at hp
+    rw [Finset.mem_filter] at hp
+    obtain ⟨r, hr⟩ := hp.2.2.1
+    exact filter_card_lt (Finset.mem_filter.mp hr).1
+      (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
+
 end SoringP1
