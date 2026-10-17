@@ -34,4 +34,14 @@ theorem n_sub_one_le_S (n : ℕ) : n - 1 ≤ S n := by
   have h2 : n.factorial ≤ 2 ^ S n := factorial_le_two_pow_S n
   exact (Nat.pow_le_pow_iff_right (by norm_num : 1 < 2)).1 (le_trans h1 h2)
 
+theorem log2_factorial_le_S (n : ℕ) : Nat.log2 n.factorial ≤ S n := by
+  by_contra h
+  have hle : S n + 1 ≤ Nat.log2 n.factorial := by omega
+  have h2 : 2 ^ (S n + 1) ≤ n.factorial :=
+    (Nat.le_log2 (Nat.factorial_ne_zero n)).1 hle
+  have h3 : n.factorial ≤ 2 ^ S n := factorial_le_two_pow_S n
+  have hlt : 2 ^ S n < 2 ^ (S n + 1) :=
+    Nat.pow_lt_pow_right (by norm_num) (Nat.lt_succ_self _)
+  exact absurd (le_trans h2 h3) (not_le.mpr hlt)
+
 end SoringP1

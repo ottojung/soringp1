@@ -63,6 +63,8 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
 ### A9 — elementary general bounds (`SoringP1/Bounds.lean`)
 - `n_sub_one_le_S (n) : n - 1 ≤ S n` — at least `n - 1` comparisons are needed,
   via `two_pow_pred_le_factorial : 2 ^ (n - 1) ≤ n!` and the information bound.
+- `log2_factorial_le_S (n) : Nat.log2 n.factorial ≤ S n` — the information
+  bound in logarithmic form.
 
 ### A10 — tight upper bound (`SoringP1/TightBound.lean`)
 - `S_le_tight (n) : S n ≤ n * (n - 1) / 2` — the insertion tree's true
