@@ -1,56 +1,88 @@
-# Research roadmap
+# Exploration-first research program
 
-The long-term goal is deliberately ambitious. These are independent research
-fronts, not assertions that a separation can be obtained by brute force.
+**Active direction (2026-10-17): mathematical discovery before more Lean.**
+The objective is to understand the complexity of *evaluating the optimal
+sorting number* S(n), not to collect Lean proofs about comparison sorting.
+Treat this document as research guidance, not a theorem-completion queue.
 
-## A. Definition and exact upper bound
+## What we already have
 
-Produce a Lean theorem identifying S with optimal sorting decision-tree
-height, prove feasibility for every n, and kernel-check a compact
-partial-order minimax evaluator. Separate correctness from a machine-level
-2^{O(n²)} running-time proof; establish the unary EXPTIME consequence.
+The repository contains a faithful adaptive comparison-tree model, existence
+and attainment proofs, information-theoretic and insertion upper bounds,
+exact kernel-checked values through n=6, and part of a minimax correspondence
+in `SoringP1/Minimax.lean`. For exact provenance and current gaps, see
+`kernel-results.md`. The informal partial-order recurrence has a
+`2^{O(n²)}` state-enumeration bound measured in numeric n; this is not a
+kernel-checked machine-time theorem.
 
-## B. Faster characterization
+Exact values are already known in the literature through substantially
+larger n than our evaluator handles. In particular `S(7)=13`, `S(8)=16`,
+and `S(12)=30` are established; `ceil(log₂(12!))=29`. See
+`literature.md` and `exploration-agenda.md`. Avoid re-proving literature
+facts as the default research activity.
 
-Seek transformations of arbitrary optimal decision trees into canonical forms
-that sharply reduce the state space. Explore partial-order symmetries,
-orbit representatives, entropy/linear-extension relaxations, and structural
-decompositions. Any proposed exact recurrence must be adversarially checked
-against established small-n sorting numbers.
+## Independent research fronts (no fixed order)
 
-## C. P/NP framing and certificates
+### Structural characterization and state compression
 
-Analyze the unary threshold language. A sorting tree has many leaves, so it
-is *not* an obvious polynomial-size NP witness. Study whether succinct
-certificates exist, whether they can be verified efficiently, and whether
-one can compute S from an NP predicate or vice versa. Never conflate an
-NP-hard general optimal-decision-tree problem with this one-parameter family.
+Search for exact recurrences with a smaller state space than labelled
+partial-order enumeration. Investigate symmetry quotients, canonical
+representatives, decomposition, unavoidable branching configurations, and
+obstructions to uniform representations. For each candidate, give a
+mathematical argument for exactness, and attempt to falsify it on known cases.
+Measure complexity in the *input encoding* rather than simply n.
 
-## D. Lower bounds / reductions
+### Hardness, certificates and structural complexity
 
-Explore reductions from established problems, diagonalization barriers,
-and the limits of finite-instance enumeration. A reduction must preserve
-the uniform family, fixed query type, worst-case minimax objective,
-parameter encoding, and answer threshold. Seek unconditional reductions
-only; avoid circular consequences of assumed P≠NP.
+Investigate what an efficiently checkable certificate of `S(n) ≤ k` or
+`S(n) > k` would require. Explicitly test whether a proposed witness is
+polynomial in unary or binary input length. Separate unrestricted
+decision-tree optimisation from the fixed one-parameter family S(n).
+The unary threshold language is sparse: ordinary many-one NP-hardness
+would imply P=NP by Mahaney's theorem. Record limitations on proposed
+reductions *before* attempting a formal proof.
 
-## E. Independent literature and computational audits
+### Insights from optimal comparison sorting
 
-Review exact-comparison sorting, decision-tree complexity, comparison sorting
-with partial information, the difference from sorting networks, and known
-finite-n certificates. Use small cases to test *definitions and conjectures*,
-not as evidence for a superpolynomial complexity separation.
+Read the primary literature, beginning with Ford–Johnson and proofs of
+small-n optimality. Explain why the information lower bound ceases to be
+tight at n=12, and test whether the known obstruction suggests a general
+invariant or more compact evaluator. Distinguish adaptive decision trees,
+sorting networks and partial-information sorting.
 
-## Deliverable standards
+### Executable investigations
 
-Record source, statement, encoding, proof status, and falsification attempt.
-Promote a result through: conjecture → convincing notes proof → Lean formal
-statement → kernel-checked proof → external-to-Lean correspondence audit.
-If a proof direction stalls, document the exact barrier.
+Use small Python or other transparent experiments as a falsification tool.
+Benchmarks should record state counts, time, memory, symmetry reductions and
+independent reference values. Do not claim a complexity class consequence
+from computing finitely many S(n).
 
-## Executable reference
+## What counts as progress
 
-`python3 scripts/evaluate.py 6` computes `S(6) = 10` using memoized
-partial-order minimax (tests cover n = 0..6). This is computational evidence,
-not a Lean theorem or complexity-class separation. The evaluator may become
-expensive at n ≥ 7.
+A useful research contribution has a precise question, model and encoding,
+primary sources, a candidate mathematical claim/algorithm/reduction,
+a written argument or reproducible experiment, a serious counterexample
+attempt, and a clear statement of uncertainty. Negative results and
+identified barriers are valuable. Avoid manufactured tasks that only add
+routine Lean lemmas.
+
+## Lean checkpoint, not Lean workstream
+
+Preserve and test the existing kernel-checked model. The outstanding
+`height (minimaxTree S) ≤ adv S` proof may be finished if a small and
+obvious repair works; otherwise document the proof-engineering blocker and
+move on. A future Lean task needs an independent mathematical justification:
+a meaningful new theorem, a mature algorithm, a subtle correctness proof,
+or a necessary cost-model/correspondence bridge.
+
+The long-term objective still includes kernel checking a major result. We
+do **not** assume a P/NP separation exists or can be proved with the
+currently available techniques.
+
+## References and starting note
+
+- [Exploration agenda and complexity barriers](exploration-agenda.md)
+- [Primary literature and model checks](literature.md)
+- [Exact problem statement and encodings](problem.md)
+- [Formalization boundary](formalization-plan.md)
+- [Kernel-checked results inventory](kernel-results.md)
