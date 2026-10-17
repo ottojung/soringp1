@@ -82,12 +82,16 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
   both children of a comparison node satisfy it). Supersedes the loose
   `n(n+2)+(n+1)+1`.
 
-### Evaluator groundwork (`SoringP1/Minimax.lean`)
+### Evaluator (`SoringP1/Minimax.lean`)
 - `splitPairs (S) : Finset (Fin n × Fin n)` — comparison pairs that split a
-  ranking set into two nonempty parts.
-- `card_filter_lt`, `split_of_lt`, and `splitPairs_nonempty : 2 ≤ S.card →
-  (splitPairs S).Nonempty` — a pair that splits `S` always exists when `S` has
-  at least two rankings (the combinatorial core of the exact minimax evaluator).
+  ranking set into two nonempty parts; `splitPairs_nonempty : 2 ≤ S.card →
+  (splitPairs S).Nonempty` (the combinatorial core).
+- `adv (S) : ℕ` — the partial-order minimax value (least worst-case comparison
+  count for sorting every ranking in `S`), **computable** by recursion on
+  `S.card`; `filter_card_lt` gives the termination measure.
+- `Sorts S T` — `T` sorts every ranking in `S`.
+- `adv_le_height : Sorts S T → adv S ≤ height T` — the adversary lower bound.
+- `adv_le_height_correct : Correct T → adv univ ≤ height T`.
 
 ## Open fronts
 
@@ -98,9 +102,10 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
    hand.
 3. **Evaluator correspondence (general).** A checked executable minimax /
    partial-order evaluator and a proof that it computes `S` on its domain.
-   Groundwork done: `SoringP1/Minimax.lean` (`splitPairs_nonempty`). Remaining:
-   define the recurrence `adv`, prove `adv S ≤ height T` for trees sorting `S`,
-   and construct the achieving tree.
+   Done: `SoringP1/Minimax.lean` defines the computable recurrence `adv` and
+   proves the adversary lower bound `adv S ≤ height T` (and `adv univ ≤ height T`
+   for correct `T`). Remaining: construct the achieving minimax tree and prove
+   `S n = adv univ`.
 4. **Complexity classes.** Encode `S` (or its threshold language) against a
    Turing-machine/resource model and prove an upper bound under a fixed
    encoding — distinguishing unary (`2^{O(n²)}` in `n`, i.e. EXPTIME) from

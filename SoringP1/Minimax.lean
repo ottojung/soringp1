@@ -1,11 +1,12 @@
 import SoringP1.Attainment
 
 /-!
-# The partial-order minimax: groundwork
+# The partial-order minimax evaluator
 
-Comparison pairs that split a set of rankings into two nonempty parts, and the
-fact that such a pair always exists when the set has at least two elements.
-This is the combinatorial core of the exact minimax evaluator.
+`S n` is an infimum over (infinitely many) trees. This file sets up the
+partial-order minimax recurrence `adv` (the standard exact evaluator): the least
+worst-case comparison count for sorting a set of rankings, computable by
+recursion on the cardinality of that set.
 -/
 
 namespace SoringP1
@@ -72,5 +73,120 @@ lemma splitPairs_nonempty {n : ℕ} {S : Finset (Equiv.Perm (Fin n))} (h : 2 ≤
   rcases lt_or_gt_of_ne ha with hlt | hlt
   · exact split_of_lt h1 h2 hlt
   · exact split_of_lt h2 h1 hlt
+
+lemma filter_card_lt {n : ℕ} {S : Finset (Equiv.Perm (Fin n))}
+    {q : Equiv.Perm (Fin n) → Prop} [DecidablePred q] {r : Equiv.Perm (Fin n)}
+    (hrS : r ∈ S) (hrq : ¬ q r) : (S.filter q).card < S.card :=
+  Finset.card_lt_card (Finset.filter_ssubset.mpr ⟨r, hrS, hrq⟩)
+
+/-- The partial-order minimax value for a set of rankings. -/
+noncomputable def adv {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) : ℕ :=
+  if h : S.card ≤ 1 then 0
+  else
+    1 + ((splitPairs S).attach.image (fun pp =>
+          max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
+              (adv (S.filter (fun r => r pp.1.2 < r pp.1.1))))).min'
+        (by
+          rw [Finset.image_nonempty, Finset.attach_nonempty_iff]
+          exact splitPairs_nonempty (by omega : 2 ≤ S.card))
+termination_by S.card
+decreasing_by
+  · have hpred := pp.property
+    unfold splitPairs at hpred
+    rw [Finset.mem_filter] at hpred
+    obtain ⟨r, hr⟩ := hpred.2.2.2
+    exact filter_card_lt (Finset.mem_filter.mp hr).1
+      (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
+  · have hpred := pp.property
+    unfold splitPairs at hpred
+    rw [Finset.mem_filter] at hpred
+    obtain ⟨r, hr⟩ := hpred.2.2.1
+    exact filter_card_lt (Finset.mem_filter.mp hr).1
+      (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
+
+/-- `T` sorts every ranking in `S`. -/
+def Sorts {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) (T : ComparisonTree n) : Prop :=
+  ∀ r ∈ S, ComparisonTree.run r T = r.symm
+
+/-- Adversary lower bound: any tree sorting `S` has height at least `adv S`. -/
+theorem adv_le_height {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) (T : ComparisonTree n)
+    (hT : Sorts S T) : adv S ≤ ComparisonTree.height T := by
+  induction T generalizing S with
+  | leaf π =>
+      have hcard : S.card ≤ 1 := by
+        rw [Finset.card_le_one]
+        intro r1 h1 r2 h2
+        have h : r1.symm = r2.symm := (hT r1 h1) ▸ (hT r2 h2)
+        have h2' := congrArg Equiv.symm h
+        rwa [Equiv.symm_symm r1, Equiv.symm_symm r2] at h2'
+      rw [adv, dite_eq_left hcard]
+      simp [ComparisonTree.height]
+  | compare i j yes no ihyes ihno =>
+      by_cases hcard : S.card ≤ 1
+      · rw [adv, dite_eq_left hcard]; simp [ComparisonTree.height]
+      · rcases eq_or_ne i j with hij | hne
+        · subst hij
+          refine le_trans (ihno S ?_) (le_trans (le_max_right _ _) (Nat.le_add_left _ _))
+          intro r hr
+          simpa [ComparisonTree.run] using hT r hr
+        · rcases Finset.eq_empty_or_nonempty (S.filter (fun r => r j < r i)) with hno | hno
+          · refine le_trans (ihyes S ?_) (le_trans (le_max_left _ _) (Nat.le_add_left _ _))
+            intro r hr
+            have h := hT r hr
+            have hrj : ¬ (r j < r i) := fun hc => by
+              have hm : r ∈ S.filter (fun r => r j < r i) := Finset.mem_filter.mpr ⟨hr, hc⟩
+              rw [hno] at hm; exact Finset.notMem_empty r hm
+            have hlt : r i < r j := lt_of_le_of_ne (not_lt.mp hrj) (fun he => hne (r.injective he))
+            simpa [ComparisonTree.run, hlt] using h
+          · rcases Finset.eq_empty_or_nonempty (S.filter (fun r => r i < r j)) with hy | hy
+            · refine le_trans (ihno S ?_) (le_trans (le_max_right _ _) (Nat.le_add_left _ _))
+              intro r hr
+              have h := hT r hr
+              have hri : ¬ (r i < r j) := fun hc => by
+                have hm : r ∈ S.filter (fun r => r i < r j) := Finset.mem_filter.mpr ⟨hr, hc⟩
+                rw [hy] at hm; exact Finset.notMem_empty r hm
+              have hlt : r j < r i := lt_of_le_of_ne (not_lt.mp hri) (fun he => (Ne.symm hne) (r.injective he))
+              simpa [ComparisonTree.run, not_lt.mpr (le_of_lt hlt)] using h
+            · rw [adv, dite_eq_right hcard]
+              set m := ((splitPairs S).attach.image (fun pp =>
+                    max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
+                        (adv (S.filter (fun r => r pp.1.2 < r pp.1.1))))).min' _ with hm
+              have hsplit : (i, j) ∈ splitPairs S := by
+                simp only [splitPairs, Finset.mem_filter, Finset.mem_univ, true_and]
+                exact ⟨hne, hy, hno⟩
+              have hmem : max (adv (S.filter (fun r => r i < r j)))
+                    (adv (S.filter (fun r => r j < r i)))
+                  ∈ (splitPairs S).attach.image (fun pp =>
+                    max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
+                        (adv (S.filter (fun r => r pp.1.2 < r pp.1.1)))) := by
+                refine Finset.mem_image.mpr ⟨⟨(i, j), hsplit⟩, Finset.mem_attach _ _, ?_⟩
+                rfl
+              have hmin : m ≤ max (adv (S.filter (fun r => r i < r j)))
+                                  (adv (S.filter (fun r => r j < r i))) := by
+                rw [hm]; exact Finset.min'_le _ _ hmem
+              have h1 := ihyes (S.filter (fun r => r i < r j)) (fun r hr => by
+                have h := hT r (Finset.mem_filter.mp hr).1
+                rw [ComparisonTree.run, ite_eq_left (Finset.mem_filter.mp hr).2] at h
+                exact h)
+              have h2 := ihno (S.filter (fun r => r j < r i)) (fun r hr => by
+                have h := hT r (Finset.mem_filter.mp hr).1
+                rw [ComparisonTree.run,
+                  ite_eq_right (not_lt.mpr (le_of_lt (Finset.mem_filter.mp hr).2))] at h
+                exact h)
+              have hmax : max (adv (S.filter (fun r => r i < r j)))
+                    (adv (S.filter (fun r => r j < r i)))
+                  ≤ max (ComparisonTree.height yes) (ComparisonTree.height no) :=
+                max_le (le_trans h1 (le_max_left _ _)) (le_trans h2 (le_max_right _ _))
+              calc 1 + m ≤ 1 + max (adv (S.filter (fun r => r i < r j)))
+                                    (adv (S.filter (fun r => r j < r i))) :=
+                    Nat.add_le_add_left hmin 1
+                _ ≤ 1 + max (ComparisonTree.height yes) (ComparisonTree.height no) :=
+                    Nat.add_le_add_left hmax 1
+                _ = ComparisonTree.height (ComparisonTree.compare i j yes no) := rfl
+
+/-- The adversary bound for a correct tree. -/
+theorem adv_le_height_correct {n : ℕ} (T : ComparisonTree n) (h : Correct T) :
+    adv (Finset.univ : Finset (Equiv.Perm (Fin n))) ≤ ComparisonTree.height T :=
+  adv_le_height _ T (fun r _ => h r)
 
 end SoringP1
