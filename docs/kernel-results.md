@@ -51,6 +51,9 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
   lower bounds from A2.
 - Hence **`S(0..6) = 0, 0, 1, 3, 5, 7, 10` are all exact and kernel-checked**,
   matching `scripts/evaluate.py`. Each value equals `⌈log₂ n!⌉` for `n ≤ 6`.
+- `SoringP1/SmallValues7.lean`: `thirteen_le_S_seven : 13 ≤ S 7`,
+  `S_seven_le : S 7 ≤ 21` (and `S_seven_bracket`) — `S 7` is beyond the
+  evaluator/generator range but is bracketed by the general bounds.
 
 ### A8 — monotonicity (`SoringP1/Monotone.lean`)
 - `S_mono (n) : S n ≤ S (n + 1)` — the optimal comparison count is
