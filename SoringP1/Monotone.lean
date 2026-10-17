@@ -111,4 +111,113 @@ lemma stripMax_symm_ext {n : ℕ} (r : Equiv.Perm (Fin n)) :
   rw [h2]
   rfl
 
+/-- Prune an `(n + 1)`-key decision tree to an `n`-key tree by treating the
+last key as the largest: comparisons against it have a known outcome. -/
+noncomputable def prune {n : ℕ} : ComparisonTree (n + 1) → ComparisonTree n
+  | .leaf σ => .leaf (stripMax σ)
+  | .compare i j yes no =>
+      if hi : i = Fin.last n then prune no
+      else if hj : j = Fin.last n then prune yes
+      else .compare (Fin.castPred i hi) (Fin.castPred j hj) (prune yes) (prune no)
+
+lemma height_prune {n : ℕ} (U : ComparisonTree (n + 1)) :
+    height (prune U) ≤ height U := by
+  induction U with
+  | leaf σ => simp only [prune, height]; exact le_refl 0
+  | compare i j yes no ihyes ihno =>
+      by_cases hi : i = Fin.last n
+      · subst i
+        have hp : prune (.compare (Fin.last n) j yes no) = prune no := by
+          simp only [prune]
+          rw [dite_eq_left trivial]
+        rw [hp]
+        simp only [height]
+        omega
+      · by_cases hj : j = Fin.last n
+        · subst j
+          have hp : prune (.compare i (Fin.last n) yes no) = prune yes := by
+            simp only [prune]
+            rw [dite_eq_right hi, dite_eq_left trivial]
+          rw [hp]
+          simp only [height]
+          omega
+        · have hp : prune (.compare i j yes no) =
+              .compare (Fin.castPred i hi) (Fin.castPred j hj) (prune yes) (prune no) := by
+            simp only [prune]
+            rw [dite_eq_right hi, dite_eq_right hj]
+          rw [hp]
+          simp only [height]
+          exact Nat.add_le_add_left (max_le_max ihyes ihno) 1
+
+/-- Running the pruned tree on `r` mirrors running the original tree on the
+extension `ext r`, as long as the original run is correct. -/
+lemma run_prune {n : ℕ} (U : ComparisonTree (n + 1)) (r : Equiv.Perm (Fin n))
+    (h : run (ext r) U = (ext r).symm) : run r (prune U) = r.symm := by
+  induction U with
+  | leaf σ =>
+      simp only [run] at h
+      simp only [prune, run]
+      rw [h]
+      exact stripMax_symm_ext r
+  | compare i j yes no ihyes ihno =>
+      by_cases hi : i = Fin.last n
+      · subst i
+        have hp : prune (.compare (Fin.last n) j yes no) = prune no := by
+          simp only [prune]
+          rw [dite_eq_left trivial]
+        rw [hp]
+        have hlt : ¬ (ext r (Fin.last n) < ext r j) := by
+          rw [ext_last]
+          exact not_lt_of_ge (Fin.le_last _)
+        have hh := h
+        simp only [run] at hh
+        rw [ite_eq_right hlt] at hh
+        exact ihno hh
+      · by_cases hj : j = Fin.last n
+        · subst j
+          have hp : prune (.compare i (Fin.last n) yes no) = prune yes := by
+            simp only [prune]
+            rw [dite_eq_right hi, dite_eq_left trivial]
+          rw [hp]
+          have hlt : ext r i < ext r (Fin.last n) := by
+            rw [← Fin.castSucc_castPred i hi, ext_castSucc, ext_last]
+            exact Fin.castSucc_lt_last _
+          have hh := h
+          simp only [run] at hh
+          rw [ite_eq_left hlt] at hh
+          exact ihyes hh
+        · have hp : prune (.compare i j yes no) =
+              .compare (Fin.castPred i hi) (Fin.castPred j hj) (prune yes) (prune no) := by
+            simp only [prune]
+            rw [dite_eq_right hi, dite_eq_right hj]
+          rw [hp]
+          simp only [run]
+          have hi' : ext r i = Fin.castSucc (r (Fin.castPred i hi)) := by
+            conv_lhs => rw [← Fin.castSucc_castPred i hi]
+            rw [ext_castSucc]
+          have hj' : ext r j = Fin.castSucc (r (Fin.castPred j hj)) := by
+            conv_lhs => rw [← Fin.castSucc_castPred j hj]
+            rw [ext_castSucc]
+          have hcond : (ext r i < ext r j) ↔
+              (r (Fin.castPred i hi) < r (Fin.castPred j hj)) := by
+            rw [hi', hj', Fin.castSucc_lt_castSucc_iff]
+          by_cases hc : r (Fin.castPred i hi) < r (Fin.castPred j hj)
+          · rw [ite_eq_left hc]
+            have hh := h
+            simp only [run] at hh
+            rw [ite_eq_left (hcond.mpr hc)] at hh
+            exact ihyes hh
+          · rw [ite_eq_right hc]
+            have hh := h
+            simp only [run] at hh
+            rw [ite_eq_right (fun hx => hc (hcond.mp hx))] at hh
+            exact ihno hh
+
+/-- The sorting number is monotone: `S n ≤ S (n + 1)`. -/
+theorem S_mono (n : ℕ) : S n ≤ S (n + 1) := by
+  obtain ⟨T, hTcorr, hTheight⟩ := exists_tree_S (n + 1)
+  have hbudget : HasBudget n (height T) :=
+    ⟨prune T, fun r => run_prune T r (hTcorr (ext r)), height_prune T⟩
+  exact le_trans ((S_le_iff (n := n) (k := height T)).2 hbudget) hTheight
+
 end SoringP1
