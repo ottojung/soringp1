@@ -60,6 +60,10 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
   largest element are fixed and the element is stripped from leaves, so the
   pruned tree is correct with no greater height.
 
+### A9 — elementary general bounds (`SoringP1/Bounds.lean`)
+- `n_sub_one_le_S (n) : n - 1 ≤ S n` — at least `n - 1` comparisons are needed,
+  via `two_pow_pred_le_factorial : 2 ^ (n - 1) ≤ n!` and the information bound.
+
 ## Open fronts
 
 1. **Tighter upper bound.** The proven bound is `n(n+2)+(n+1)+1`; the true
