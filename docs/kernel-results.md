@@ -95,10 +95,11 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
 - `adv_univ_le_S (n) : adv univ ≤ S n` — the adversary bound in infimum form.
 - `bestPair S` — an optimal comparison pair (argmin of the minimax cost), and
   `bestPair_le`; `minimaxTree S` — the minimax sorting tree (compare the optimal
-  pair, recurse). The specification `minimaxTree_spec` (sorts `S` and height
-  ≤ `adv S`) is **not yet proven**: its natural proof hits a definitional-
-  equality loop unfolding the recursive `adv`; the remaining step is to phrase
-  it so the compared `adv` arguments are syntactically equal.
+  pair, recurse); `minimaxTree_sorts : Sorts S (minimaxTree S)`. The height half
+  of the specification (`height (minimaxTree S) ≤ adv S`) is **not yet proven**:
+  its natural proof hits a definitional-equality/whnf loop unfolding the
+  recursive `adv` (e.g. in `Finset.le_min'`), which does not terminate; the fix
+  requires restructuring `adv` (e.g. an opaque `WellFounded.fix` wrapper).
 
 ## Open fronts
 

@@ -240,4 +240,46 @@ theorem adv_univ_le_S (n : ℕ) :
   · rintro k ⟨T, hcorr, hheight⟩
     exact le_trans (adv_le_height_correct T hcorr) hheight
 
+/-- `minimaxTree S` sorts every ranking in `S`. -/
+theorem minimaxTree_sorts {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) :
+    Sorts S (minimaxTree S) := by
+  induction S using Finset.strongInductionOn with
+  | _ S ih =>
+  rw [minimaxTree]
+  by_cases h : S.card ≤ 1
+  · rw [dite_eq_left h]
+    by_cases hS : S.Nonempty
+    · rw [dite_eq_left hS]
+      intro r hr
+      rw [ComparisonTree.run,
+        Finset.card_le_one.mp h r hr (Classical.choose hS) (Classical.choose_spec hS)]
+    · rw [dite_eq_right hS]
+      have hempty : S = ∅ := Finset.not_nonempty_iff_eq_empty.mp hS
+      intro r hr
+      rw [hempty] at hr
+      exact (Finset.notMem_empty r hr).elim
+  · rw [dite_eq_right h]
+    set bp := bestPair S (splitPairs_nonempty (by omega)) with hbp
+    have hpmem : bp.1 ∈ splitPairs S := bp.2
+    have hpne : bp.1.1 ≠ bp.1.2 := by
+      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.1
+    have hnne : (S.filter (fun r => r bp.1.2 < r bp.1.1)).Nonempty := by
+      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.2.2
+    have hyne : (S.filter (fun r => r bp.1.1 < r bp.1.2)).Nonempty := by
+      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.2.1
+    have hssub1 : S.filter (fun r => r bp.1.1 < r bp.1.2) ⊂ S :=
+      Finset.filter_ssubset.mpr (let ⟨r, hr⟩ := hnne
+        ⟨r, (Finset.mem_filter.mp hr).1,
+          fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq))⟩)
+    have hssub2 : S.filter (fun r => r bp.1.2 < r bp.1.1) ⊂ S :=
+      Finset.filter_ssubset.mpr (let ⟨r, hr⟩ := hyne
+        ⟨r, (Finset.mem_filter.mp hr).1,
+          fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq))⟩)
+    intro r hr
+    rcases lt_or_gt_of_ne (fun he => hpne (r.injective he)) with hlt | hlt
+    · rw [ComparisonTree.run, ite_eq_left hlt]
+      exact ih _ hssub1 r (Finset.mem_filter.mpr ⟨hr, hlt⟩)
+    · rw [ComparisonTree.run, ite_eq_right (not_lt.mpr (le_of_lt hlt))]
+      exact ih _ hssub2 r (Finset.mem_filter.mpr ⟨hr, hlt⟩)
+
 end SoringP1
