@@ -64,13 +64,17 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
 - `n_sub_one_le_S (n) : n - 1 ≤ S n` — at least `n - 1` comparisons are needed,
   via `two_pow_pred_le_factorial : 2 ^ (n - 1) ≤ n!` and the information bound.
 
+### A10 — tight upper bound (`SoringP1/TightBound.lean`)
+- `S_le_tight (n) : S n ≤ n * (n - 1) / 2` — the insertion tree's true
+  comparison count (insert position `i` costs ≤ `i`), via the comparison-exact
+  height invariant `height_go_tight` (`Hinto`, `Haux`; a length-only invariant so
+  both children of a comparison node satisfy it). Supersedes the loose
+  `n(n+2)+(n+1)+1`.
+
 ## Open fronts
 
-1. **Tighter upper bound.** The proven bound is `n(n+2)+(n+1)+1`; the true
-   insertion-sort worst case is `n(n−1)/2`. The current `go` proof counts every
-   recursion step as fuel (so required fuel = comparisons + structural steps,
-   not comparisons alone), which blocks the obvious tightening. Needs either a
-   refactored fuel accounting or a separately constructed, tightly bounded tree.
+1. **Tighter upper bound — DONE (A10).** `S_le_tight : S n ≤ n(n-1)/2` is
+   proven via the comparison-exact height invariant `height_go_tight`.
 2. **Exact value `S 4 = 5`** (and beyond): requires an explicit height-5 tree on
    four keys (up to 24 leaves); best generated programmatically rather than by
    hand.
