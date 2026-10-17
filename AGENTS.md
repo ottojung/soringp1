@@ -2,10 +2,48 @@
 
 ## Research objective
 
-Classify the complexity of computing the exact worst-case comparison-sorting
-number S(n), with a Lean-kernel-checked end result. See `docs/problem.md`
-for the mathematical semantics and encodings. Do not substitute the time
-complexity of sorting an input list for the complexity of evaluating S(n).
+Study the computational complexity of computing the exact worst-case
+comparison-sorting number S(n). The long-term goal includes Lean kernel-checked
+results, but **discovery comes first**. See `docs/problem.md` for the fixed
+model and encodings.
+
+## Operating mode: exploration first (2026-10-17)
+
+This is the operative priority for researchers and autonomous agents:
+
+- **Prioritize mathematics, literature, algorithms, falsification and experiments.**
+  Do not create consecutive Lean milestones to formalize standard bounds,
+  another known small value, minor corollaries, or infrastructure for its own
+  sake. Counting finished theorems is not evidence of progress toward
+  classifying the complexity of evaluating S.
+- Start from the established literature, not by rediscovering known exact
+  sorting numbers. Record the original source, sorting model, and why the
+  result matters for evaluating S(n).
+- Work on independent research fronts: structural compression of the
+  minimax state space; certificates and complexity barriers; and
+  combinatorial obstructions (e.g. information bound non-tightness).
+  Productive counterexamples and negative results are valid deliverables.
+- Prefer a concise written mathematical argument and a small experimental
+  program to speculative new Lean files. Keep the model and encoding explicit.
+- **Freeze routine Lean expansion** until there is a mature, substantive
+  claim or a critical ambiguity in correspondence to the intended problem.
+  Existing Lean files and CI are preserved and must remain working.
+- **One narrowly scoped exception:** the missing height specification of
+  `minimaxTree` may be completed if straightforward. The current recursive
+  `adv` unfolding/elaboration loop must not become an unbounded
+  proof-engineering campaign: if the direct fix is nontrivial, write down the
+  precise blocker and return to exploration. Do not launch a parade of
+  auxiliary Lean milestones to route around it.
+- Don't launch tasks just to occupy agents. Do not infer an obligation to
+  continuously formalize from the availability of compute.
+
+Before starting a proposed formalization, write a short justification:
+which independent discovery it verifies, why its statement matters to
+the complexity of evaluating S, what simpler paper/computational checks
+were tried, and what the complete correspondence obligation is.
+
+The current exploration agenda is `docs/exploration-agenda.md`; the
+research workflow and open directions are `docs/research-plan.md`.
 
 ## Model fidelity
 
@@ -23,37 +61,43 @@ complexity of sorting an input list for the complexity of evaluating S(n).
   in NP simply because one can exhibit a sorting algorithm.
 - NP is not itself a class of total numeric functions; do not describe P, NP
   and “above NP” as a mutually exclusive trichotomy.
+- The unary two-parameter threshold language is sparse; by Mahaney's
+  theorem, NP-hardness under polynomial-time many-one reductions would imply
+  P = NP. Do not present such a reduction as a routine milestone.
+- A hardness result for unrestricted partial-order/decision-tree optimization
+  does not automatically apply to the specific family S(n).
 - Confirm the exact problem statement before claiming any major separation.
 
-## Research cadence (adapted from AssemblyP1)
+## Research cadence
 
-1. Keep the source-faithful formal target small and auditable.
-2. Explore in mathematical notes, computation, examples, algorithms, reductions,
-   and counterarguments; maintain independent competing approaches.
-3. Formalize substantive intermediate claims only when they clarify an
-   immediate model ambiguity or enable verification of a mature proof.
-4. Return to Lean for a convincing complete theorem, including any required
-   correctness and complexity-cost-model bridges.
-5. Never silently weaken the goal to a different restricted sorting model.
+1. Check primary literature and already-known counterexamples.
+2. Formulate a precise, falsifiable question or candidate theorem, with
+   intended impact on evaluation complexity.
+3. Work on paper and in small experiments. Seek negative examples, symmetry
+   reductions, alternative algorithms and complexity barriers.
+4. Report sources, definitions, strongest evidence, failed attempts,
+   possible novelty, and the next obstacle in research notes.
+5. Only formalize a mature result if it materially increases confidence in an
+   important theorem or closes a necessary model/cost-model bridge.
 
 ## Evidence and proof policy
 
-Keep separate labels: **definition**, **conjecture**, **empirical observation**,
-**external theorem**, **paper proof**, and **kernel-checked theorem**.
-A passing Lean build alone does not prove that the statement corresponds to the
-intended complexity model. Do not introduce `sorry`, `admit`, or new
-`axiom` declarations as proof substitutes.
+Separate **definition**, **literature result**, **deduction**, **conjecture**,
+**empirical observation**, **paper proof**, and **kernel-checked theorem**.
+A passing Lean build alone does not prove that the statement corresponds to
+the intended complexity model. Do not introduce `sorry`, `admit`, or new
+`axiom` declarations as substitutes.
 
-Before integrating a theorem: run `lake build --wfail`, replay with
-`lake env leanchecker SoringP1`, and inspect axioms. CI is a necessary gate,
-not a replacement for correspondence review. Prefer short, reviewable commits.
-Preserve useful failed approaches and precise blockers in docs or durable tasks.
+Before integrating a new theorem: run `lake build --wfail`, replay with
+`lake env leanchecker SoringP1`, and inspect axioms. CI is necessary but
+not sufficient; maintain source/model correspondence. Preserve useful failed
+approaches in research notes. Do not promise a proof of P vs NP or a hardness
+separation.
 
-No implied theorem is “almost proved” merely because a formalization compiles.
-The project's objective may be open or require breakthroughs.
+## Provenance and delivery
 
-## Provenance
-
-When citing nontrivial facts, record a primary source and the exact
-definition used there. Notes and third-party formalizations can suggest
-directions, but are not automatically imported axioms.
+Record a primary source and the exact model for nontrivial external facts.
+Prefer short, reviewable commits; **commits merged to main must be signed**.
+The project is a research library: merging documentation and passing GitHub
+CI is the GitHub-side deployment, not a deployment to an application server.
+Any Antonina/Viche dispatch or host update must be verified separately.
