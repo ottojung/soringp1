@@ -6,8 +6,12 @@ Inspired by AssemblyP1's exploration-first methodology.
 model and make feasible budgets and the minimum value meaningful.
 The initial Lean model already has the basic tree, interpreter, correctness
 predicate, feasibility predicate, and minimization specification.
-Outstanding: a proved existence/attainment lemma for S, model correspondence
-with ordinary adaptive comparison algorithms, and small reference instances.
+**Status: largely complete.** Existence (`exists_hasBudget`), attainment and
+minimality (`hasBudget_S`, `S_le_iff`, `S_is_minimal`), the information lower
+bound (`n! ≤ 2^(S n)`), and small reference instances (`S(0..3) = 0,0,1,3`)
+are kernel-checked. See `docs/kernel-results.md` for the exact theorem
+inventory and the remaining open fronts (tight upper bound, `S 4`, a checked
+executable evaluator, and the machine-model/complexity bridge).
 
 **Exploration (default).** Prefer informal mathematical arguments, executable
 experiments, adversarial examples, and connections to optimal decision-tree
