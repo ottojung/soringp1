@@ -52,6 +52,14 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
 - Hence **`S(0..6) = 0, 0, 1, 3, 5, 7, 10` are all exact and kernel-checked**,
   matching `scripts/evaluate.py`. Each value equals `⌈log₂ n!⌉` for `n ≤ 6`.
 
+### A8 — monotonicity (`SoringP1/Monotone.lean`)
+- `S_mono (n) : S n ≤ S (n + 1)` — the optimal comparison count is
+  nondecreasing in `n`.
+- Built by pruning an `(n+1)`-tree to an `n`-tree (`ext`, `stripMax`, `prune`,
+  `stripMax_symm_ext`, `height_prune`, `run_prune`): comparisons against the
+  largest element are fixed and the element is stripped from leaves, so the
+  pruned tree is correct with no greater height.
+
 ## Open fronts
 
 1. **Tighter upper bound.** The proven bound is `n(n+2)+(n+1)+1`; the true
