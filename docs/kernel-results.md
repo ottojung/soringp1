@@ -54,6 +54,8 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
 - `SoringP1/SmallValues7.lean`: `thirteen_le_S_seven : 13 ≤ S 7`,
   `S_seven_le : S 7 ≤ 21` (and `S_seven_bracket`) — `S 7` is beyond the
   evaluator/generator range but is bracketed by the general bounds.
+- `SoringP1/TightSmall.lean`: `S_eq_clog_of_le_six (n) (h : n ≤ 6) :
+  S n = Nat.clog 2 n.factorial` — the information bound is tight for `n ≤ 6`.
 
 ### A8 — monotonicity (`SoringP1/Monotone.lean`)
 - `S_mono (n) : S n ≤ S (n + 1)` — the optimal comparison count is
