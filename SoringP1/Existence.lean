@@ -267,4 +267,162 @@ lemma auxInv_stepNo {x q : Fin n} {pre tl : List (Fin n)}
 
 end Lemmas
 
+/-! ## Step 4: correctness of the insertion tree -/
+
+lemma one_le_boundInto (n m : ℕ) : 1 ≤ boundInto n m := by
+  have h : n + 1 ≤ boundInto n m := by
+    show n + 1 ≤ (n - m) * (n + 2) + (n + 1)
+    exact Nat.le_add_left _ _
+  omega
+
+lemma one_le_boundAux (n : ℕ) (x : Fin n) (suf : List (Fin n)) :
+    1 ≤ boundAux n x suf := by
+  have hx : 1 ≤ n - x.val := by have := x.isLt; omega
+  have hR : n + 2 ≤ (n - x.val) * (n + 2) := by
+    calc n + 2 = 1 * (n + 2) := by ring
+      _ ≤ (n - x.val) * (n + 2) := Nat.mul_le_mul_right _ hx
+  have : 1 ≤ (n - x.val) * (n + 2) := by omega
+  exact le_trans this (Nat.le_add_right _ _)
+
+lemma boundInto_le (n m : ℕ) (hlt : m < n) (k : ℕ) (sp : List (Fin n))
+    (hlen : sp.length = m) (hb : boundInto n m ≤ k + 1) :
+    boundAux n ⟨m, hlt⟩ sp ≤ k := by
+  have hA : boundAux n ⟨m, hlt⟩ sp = (n - m) * (n + 2) + m := by
+    simp only [boundAux]; rw [hlen]
+  have hI : boundInto n m = (n - m) * (n + 2) + (n + 1) := rfl
+  rw [hI] at hb
+  rw [hA]
+  omega
+
+lemma boundAux_succ_le (n : ℕ) (x : Fin n) (suf : List (Fin n)) (k : ℕ)
+    (hb : boundAux n x suf ≤ k + 1) : boundInto n (x.val + 1) ≤ k := by
+  have hx1 : 1 ≤ n - x.val := by have := x.isLt; omega
+  have hR : n + 2 ≤ (n - x.val) * (n + 2) := by
+    calc n + 2 = 1 * (n + 2) := by ring
+      _ ≤ (n - x.val) * (n + 2) := Nat.mul_le_mul_right _ hx1
+  have hI : boundInto n (x.val + 1) = (n - x.val) * (n + 2) - 1 := by
+    simp only [boundInto]
+    rw [show n - (x.val + 1) = (n - x.val) - 1 by omega, Nat.sub_mul]
+    omega
+  have hA : boundAux n x suf = (n - x.val) * (n + 2) + suf.length := rfl
+  rw [hA] at hb
+  rw [hI]
+  omega
+
+lemma boundAux_tl_le (n : ℕ) (x : Fin n) (q : Fin n) (tl : List (Fin n)) (k : ℕ)
+    (hb : boundAux n x (q :: tl) ≤ k + 1) : boundAux n x tl ≤ k := by
+  have hA1 : boundAux n x (q :: tl) = (n - x.val) * (n + 2) + tl.length + 1 := by
+    simp only [boundAux, List.length_cons]
+    omega
+  have hA2 : boundAux n x tl = (n - x.val) * (n + 2) + tl.length := rfl
+  rw [hA1] at hb
+  rw [hA2]
+  omega
+
+lemma go_correct (n : ℕ) (ranking : Equiv.Perm (Fin n)) :
+    ∀ fuel,
+      (∀ (m : ℕ) (hm : m ≤ n) (sp : List (Fin n)),
+          IntoInv ranking m sp → boundInto n m ≤ fuel →
+          ComparisonTree.run ranking (go n fuel (.into m hm sp)) = ranking.symm) ∧
+      (∀ (x : Fin n) (pre suf : List (Fin n)),
+          AuxInv ranking x pre suf → boundAux n x suf ≤ fuel →
+          ComparisonTree.run ranking (go n fuel (.aux x pre suf)) = ranking.symm) := by
+  intro fuel
+  induction fuel with
+  | zero =>
+      refine ⟨?_, ?_⟩
+      · intro m hm sp hinv hb
+        have := one_le_boundInto n m
+        omega
+      · intro x pre suf hinv hb
+        have := one_le_boundAux n x suf
+        omega
+  | succ k ih =>
+      refine ⟨?_, ?_⟩
+      · intro m hm sp hinv hb
+        by_cases hmn : m = n
+        · rw [go.eq_2, dite_eq_left hmn]
+          show permOfList sp = ranking.symm
+          have hlen : sp.length = n := by rw [hinv.length_eq, hmn]
+          rw [permOfList, dite_eq_left ⟨hinv.nodup, hlen⟩]
+          exact permFromSortedSeq_eq_symm ranking hinv.nodup hlen hinv.sorted
+        · rw [go.eq_2, dite_eq_right hmn]
+          have hlt : m < n := by omega
+          exact ih.2 ⟨m, hlt⟩ [] sp (intoInv_toAux hlt hinv)
+            (boundInto_le n m hlt k sp hinv.length_eq hb)
+      · intro x pre suf hinv hb
+        cases suf with
+        | nil =>
+            rw [go.eq_3]
+            exact ih.1 (x.val + 1) _ (pre ++ [x]) (auxInv_intoEnd hinv)
+              (boundAux_succ_le n x [] k hb)
+        | cons q tl =>
+            rw [go.eq_4]
+            show (if ranking x < ranking q then
+                    ComparisonTree.run ranking
+                      (go n k (.into (x.val + 1) _ (pre ++ [x] ++ q :: tl)))
+                  else ComparisonTree.run ranking
+                      (go n k (.aux x (pre ++ [q]) tl))) = ranking.symm
+            by_cases hxq : ranking x < ranking q
+            · rw [ite_eq_left hxq]
+              exact ih.1 (x.val + 1) _ (pre ++ [x] ++ q :: tl) (auxInv_stepYes hinv hxq)
+                (boundAux_succ_le n x (q :: tl) k hb)
+            · rw [ite_eq_right hxq]
+              exact ih.2 x (pre ++ [q]) tl (auxInv_stepNo hinv hxq)
+                (boundAux_tl_le n x q tl k hb)
+
+/-! ## Step 5: height bound -/
+
+lemma height_go (n : ℕ) : ∀ fuel (st : InsState n),
+    ComparisonTree.height (go n fuel st) ≤ fuel := by
+  intro fuel
+  induction fuel with
+  | zero =>
+      intro st
+      rw [go.eq_1]
+      simp [ComparisonTree.height]
+  | succ k ih =>
+      intro st
+      cases st with
+      | into m hm sp =>
+          by_cases hmn : m = n
+          · rw [go.eq_2, dite_eq_left hmn]
+            simp [ComparisonTree.height]
+          · rw [go.eq_2, dite_eq_right hmn]
+            exact le_trans (ih _) (Nat.le_succ k)
+      | aux x pre suf =>
+          cases suf with
+          | nil =>
+              rw [go.eq_3]
+              exact le_trans (ih _) (Nat.le_succ k)
+          | cons q tl =>
+              rw [go.eq_4]
+              simp only [ComparisonTree.height]
+              have h1 := ih (.into (x.val + 1) (by have := x.isLt; omega) (pre ++ [x] ++ q :: tl))
+              have h2 := ih (.aux x (pre ++ [q]) tl)
+              omega
+
+/-! ## Step 6: existence -/
+
+/-- The explicit insertion-sort decision tree on `n` keys. -/
+noncomputable def sortTree (n : ℕ) : ComparisonTree n :=
+  go n (n * (n + 2) + (n + 1) + 1) (.into 0 (Nat.zero_le n) [])
+
+theorem sortTree_correct (n : ℕ) : Correct (sortTree n) := by
+  intro ranking
+  unfold sortTree
+  exact (go_correct n ranking (n * (n + 2) + (n + 1) + 1)).1 0 (Nat.zero_le n) []
+    ⟨List.nodup_nil, rfl, (by intro a; simp), List.Pairwise.nil⟩
+    (by simp only [boundInto, Nat.sub_zero]; omega)
+
+theorem sortTree_height (n : ℕ) :
+    ComparisonTree.height (sortTree n) ≤ n * (n + 2) + (n + 1) + 1 := by
+  unfold sortTree
+  exact height_go n _ _
+
+/-- The main existence theorem: for every `n`, there exists a correct
+comparison decision tree sorting `n` distinct keys. -/
+theorem exists_hasBudget (n : ℕ) : ∃ k, HasBudget n k :=
+  ⟨n * (n + 2) + (n + 1) + 1, sortTree n, sortTree_correct n, sortTree_height n⟩
+
 end SoringP1
