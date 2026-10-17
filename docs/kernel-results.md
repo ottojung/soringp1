@@ -92,6 +92,7 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
 - `Sorts S T` — `T` sorts every ranking in `S`.
 - `adv_le_height : Sorts S T → adv S ≤ height T` — the adversary lower bound.
 - `adv_le_height_correct : Correct T → adv univ ≤ height T`.
+- `adv_univ_le_S (n) : adv univ ≤ S n` — the adversary bound in infimum form.
 - `bestPair S` — an optimal comparison pair (argmin of the minimax cost), and
   `bestPair_le`; `minimaxTree S` — the minimax sorting tree (compare the optimal
   pair, recurse). The specification `minimaxTree_spec` (sorts `S` and height

@@ -231,4 +231,13 @@ decreasing_by
     exact filter_card_lt (Finset.mem_filter.mp hr).1
       (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
 
+/-- The adversary lower bound in infimum form: `adv univ ≤ S n`. -/
+theorem adv_univ_le_S (n : ℕ) :
+    adv (Finset.univ : Finset (Equiv.Perm (Fin n))) ≤ S n := by
+  rw [S]
+  apply le_csInf
+  · exact ⟨_, sortTree n, sortTree_correct n, le_refl _⟩
+  · rintro k ⟨T, hcorr, hheight⟩
+    exact le_trans (adv_le_height_correct T hcorr) hheight
+
 end SoringP1
