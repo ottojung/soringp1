@@ -17,9 +17,10 @@ between EXPTIME in input length and double-exponential time.
   permutation of `n` distinct labelled keys.
 - `SORT-BOUND-B = { bin(n) # bin(k) : S(n) ≤ k }` — both parameters **binary**.
 - `SORT-BOUND-U = { 1^n # 1^k : S(n) ≤ k }` — both parameters **unary** (for contrast).
-- Input lengths: `L_B = |bin(n)| + 1 + |bin(k)| = Θ(log(n+1) + log(k+1))`;
-  `L_U = n + k + 1 = Θ(n + k)`.
-- `S(n) ∈ [⌈log₂ n!⌉, n⌈log₂ n⌉]`; the informative window has width `Θ(n)`.
+- Input lengths: `L_B = |bin(n)| + 1 + |bin(k)| = Θ(log(n+2) + log(k+2))`;
+  `L_U = n + k + 1 = Θ(n + k + 1)`.
+- For `n≥2`, `S(n) ∈ [⌈log₂ n!⌉, n⌈log₂ n⌉]`; this
+  upper/lower-bound window has width `Θ(n)`. For `n=0,1`, `S(n)=0`.
 
 ---
 
@@ -29,18 +30,24 @@ between EXPTIME in input length and double-exponential time.
 input `bin(n)#bin(k)`, the input length is
 
 ```
-L_B = ⌊log₂ n⌋ + 1 + 1 + ⌊log₂ k⌋ + 1 = Θ(log(n+1) + log(k+1)).
+L_B = ell(n) + 1 + ell(k) = Θ(log(n+2) + log(k+2)),
 ```
 
-For **informative** instances (`k ≤ U(n) = n⌈log₂ n⌉`), `log k = O(log n)`, so
-`L_B = Θ(log n)`. For **trivially large** `k ≥ U(n)`, the answer is always yes
-(merge-sort witnesses `S(n) ≤ U(n) ≤ k`), and such instances are decided in
-`O(L_B)` time without any search.
+Here `ell(0)=1` and `ell(t)=floor(log₂ t)+1` for `t≥1`: zero is
+encoded by the one-character string `0`.
+
+First, `S(0)=S(1)=0`: accept any nonnegative `k` for `n=0,1`.
+For `n≥2` set `U(n)=n⌈log₂ n⌉`; accept immediately when `k≥U(n)`
+(merge sort), and reject immediately when `k<⌈log₂(n!)⌉` (information
+lower bound). Only the remaining window requires minimax search.
+For **nontrivial** instances (`n≥2`, `k<U(n)`), `log(k+2)=O(log n)`, so
+`L_B = Θ(log n)`. For **trivially large** `k≥U(n)`, the answer is yes with
+`O(L_B)` preprocessing; very small `k` can also yield an immediate no.
 
 `[deduction]` **Proposition 1.2 (numeric parameter vs input length).** Under binary
 encoding, `n ≤ 2^{L_B}` and `k ≤ 2^{L_B}`. Hence any runtime expressed as a function
-of numeric `n` must be translated via `n = 2^{Θ(L_B)}` to obtain a bound in input
-length. A runtime `2^{poly(n)}` becomes `2^{2^{poly(L_B)}}`, which is **double
+of numeric `n` must be translated using `n ≤ 2^{L_B}`; for nontrivial
+instances `L_B=Θ(log n)`, so `n=2^{Θ(L_B)}` in that regime. A runtime `2^{poly(n)}` becomes `2^{2^{poly(L_B)}}`, which is **double
 exponential** in `L_B`, not exponential.
 
 ---
@@ -189,7 +196,7 @@ lower bound would require an independent complexity-theoretic argument.
 
 | Proposition | Statement | Status |
 |---|---|---|
-| 1.1 | `L_B = Θ(log(n+1) + log(k+1))`; informative: `Θ(log n)` | `[deduction]` |
+| 1.1 | `L_B = Θ(log(n+2) + log(k+2))`; nontrivial: `Θ(log n)` | `[deduction]` |
 | 1.2 | `n ≤ 2^{L_B}`; `2^{poly(n)} = 2^{2^{poly(L_B)}}` | `[deduction]` |
 | 2.1 | DP: `2^{O(n²)}` → `2-EXPTIME` binary | `[deduction]` |
 | 2.2 | DFS: `2^{O(n log² n)}` time, `2^{O(L_B)}` space → `EXPSPACE` binary | `[deduction]` |
