@@ -40,12 +40,13 @@ sparse/`P/poly` structure of the unary threshold language.
 - Exact minimax correspondence: `S(n) = adv univ` (`SoringP1/Minimax.lean`),
   where `adv` is the partial-order minimax recurrence.
 
-**Informative window.** Let `I(n) = ⌈log₂ n!⌉` and `U(n) = n⌈log₂ n⌉`. Then
-`S(n) ∈ [I(n), U(n)]` and `U(n) − I(n) = Θ(n)` (because `log₂ n! = n log₂ n −
-Θ(n)`). Hence for `k < I(n)` the answer to `S(n) ≤ k` is **no**, for
-`k ≥ U(n)` it is **yes**, and the only interesting `k` lie in a window of `Θ(n)`
-consecutive integers. This window is used in the binary non-sparsity argument
-(§4).
+**Forced regions and informative window.** Let `I(n) = ⌈log₂ n!⌉` and
+`U(n) = n⌈log₂ n⌉`. Then `S(n) ∈ [I(n), U(n)]` and `U(n) − I(n) = Θ(n)` (because
+`log₂ n! = n log₂ n − Θ(n)`). The input `k` is arbitrary. For `k < I(n)` the
+answer to `S(n) ≤ k` is **no**, and for `k ≥ U(n)` it is **yes** (since
+`S(n) ≤ U(n) ≤ k`); these are *forced* answers. The only uncertain `k` lie in
+the window `[I(n), U(n))`, of width `Θ(n)`. The forced-yes region
+`[U(n), ∞)` is used in the binary non-sparsity argument (§4).
 
 ---
 
@@ -159,12 +160,13 @@ recurrence therefore decides `SORT-BOUND-U` in exponential time. ∎
 
 `[deduction]` **Theorem 2.2 (binary).** `SORT-BOUND-B ∈ 2-EXPTIME`.
 
-*Proof.* For `bin(n)#bin(k)`, `L_B = Θ(log(n+1) + log(k+1))`. Since
-`k ≤ n(n−1)/2 = O(n²)`, `log(k+1) = O(log(n+1))`, so `L_B = Θ(log n)` and
-`n = 2^{Θ(L_B)}`. Substituting into Theorem 1.6,
+*Proof.* For `bin(n)#bin(k)`, `L_B = |bin(n)| + 1 + |bin(k)| =
+Θ(log(n+1) + log(k+1))`. The input `k` is arbitrary (it need not be `≤ n²`).
+In particular `|bin(n)| ≤ L_B`, so `n ≤ 2^{L_B}` and `n² ≤ 2^{2 L_B}`.
+Substituting into Theorem 1.6,
 
 ```
-2^{O(n²)} = 2^{O(2^{2 L_B})} = 2^{2^{O(L_B)}},
+2^{O(n²)} ≤ 2^{O(2^{2 L_B})} = 2^{2^{O(L_B)}},
 ```
 
 which is the definition of `2-EXPTIME`. ∎
@@ -172,8 +174,8 @@ which is the definition of `2-EXPTIME`. ∎
 `[deduction]` **Remark 2.3 (the gap is encoding, not algorithm).** The same
 numeric-`n` bound `2^{O(n²)}` becomes `EXPTIME` under the unary encoding and
 `2-EXPTIME` under the binary encoding. The binary encoding compresses `n`
-exponentially, so the same computation is doubly exponential in the input
-length. This is why `SORT-BOUND-U ∈ EXPTIME` does **not** imply
+exponentially (`n ≤ 2^{L_B}`), so the same computation is doubly exponential in
+the input length. This is why `SORT-BOUND-U ∈ EXPTIME` does **not** imply
 `SORT-BOUND-B ∈ EXPTIME`.
 
 `[deduction]` **Remark 2.4 (relation to the game/ATM bounds).** The Executive
@@ -184,12 +186,12 @@ machine playing the comparison game, using `APTIME = PSPACE` and
 `2^{O(n²)}` DP bound is weaker (`EXPSPACE ⊆ 2-EXPTIME`) but elementary and
 self-contained; both are correct and neither contradicts the other.
 
-`[deduction]` **Remark 2.5 (function versus decision).** By binary search on `k`
-over the informative window `[I(n), U(n)]` (width `Θ(n)`), `SORT-BOUND` decides
-`S(n) ≤ k` with `O(log n)` calls to a function evaluator, and conversely a
-threshold decider yields `S(n)` by binary search. So `SORT-BOUND-U ∈ P` iff
-`S_unary ∈ FP`, and `SORT-BOUND-B ∈ P` iff `S_binary ∈ FP`. The classes are
-defined on the respective input lengths.
+`[deduction]` **Remark 2.5 (function versus decision).** Given an evaluator for
+`S(n)`, the threshold decision `S(n) ≤ k` is a single comparison. Conversely,
+given a decider for `SORT-BOUND`, the value `S(n)` is obtained by binary search
+over `k` in the window `[I(n), U(n)]` (width `Θ(n)`), using `O(log n)` calls.
+Hence `SORT-BOUND-U ∈ P` iff `S_unary ∈ FP`, and `SORT-BOUND-B ∈ P` iff
+`S_binary ∈ FP`. The classes are defined on the respective input lengths.
 
 ---
 
@@ -239,10 +241,11 @@ per `n`.
 
 `[deduction]` **Remark 3.5 (monotonicity in `n` does not provably shrink the
 advice).** The kernel-checked `S_mono` gives an alternative encoding by
-increments `S(n)−S(n−1)`. But increments can be `Θ(log n)` (e.g. around powers
-of two, where `S(n) ≈ n log₂ n`), so each increment still needs `Θ(log n)` bits
-and the worst case remains `Θ(L log L)`. Monotonicity is useful structurally but
-does not by itself yield `o(L log L)` advice.
+increments `S(n)−S(n−1)`. The upper bound on an increment is `U(n) − I(n−1) =
+Θ(n)` (the gap between the merge-sort upper bound and the information lower
+bound), so an increment may need `Θ(log n)` bits and the worst case remains
+`Θ(L log L)`. Monotonicity is useful structurally but does not by itself yield
+`o(L log L)` advice.
 
 `[deduction]` **Remark 3.6 (`P/poly` is nonuniform and weak).** Theorem 3.3 is a
 *nonuniform* upper bound: the advice `a_L` need not be computable, and `P/poly`
@@ -250,7 +253,54 @@ membership does not imply membership in `P`, in `NP`, or in any uniform class.
 In fact the general fact `sparse ⊆ P/poly` (Lemma 3.2) is the *same* structural
 property that triggers the Mahaney barrier (§4). So `SORT-BOUND-U ∈ P/poly` and
 "many-one NP-hardness of `SORT-BOUND-U` would imply `P = NP`" are two faces of
-one fact, not a contradiction.
+one fact, not a contradiction. Theorem 3.7 below gives an even sharper
+nonuniform bound.
+
+---
+
+### 3.4 A sharper nonuniform bound: `P/log` via the length cutoff
+
+`[deduction]` **Theorem 3.7 (`SORT-BOUND-U ∈ P/log`).** `SORT-BOUND-U ∈ P/O(log L)`, i.e. `P/log`, with advice length `O(log L)`.
+
+*Proof.* Write the total input length as `L = n+k+1`, so `k = L−1−n`.
+Membership is `S(n) ≤ k = L−1−n`, equivalently
+
+```
+f(n) := n + S(n) ≤ L − 1.
+```
+
+By the kernel-checked `S_mono`, `S(n) ≤ S(n+1)`, so
+`f(n+1) − f(n) = 1 + S(n+1) − S(n) ≥ 1 > 0`. Hence `f` is **strictly
+increasing**. Therefore, for each `L`, the set `{ n ∈ [0, L−1] : f(n) ≤ L−1 }`
+is an initial interval `[0, t_L]`, where
+`t_L := max{ n ≤ L−1 : f(n) ≤ L−1 }` (and `t_L ≥ 0` because `n = 0` always
+satisfies `f(0) = S(0) = 0 ≤ L−1` for `L ≥ 1`).
+
+Define the advice `a_L` to be the binary encoding of `t_L` in `⌈log₂ L⌉` bits
+(`t_L ∈ [0, L−1]`, so this fits). On input `x` of length `L`, the machine first
+checks well-formedness — exactly one `#`, only `1`s on both sides, and
+`n+k+1 = L` — then parses `n`, reads `t_L`, and accepts iff `n ≤ t_L`. This
+runs in `O(L)` time. Hence `SORT-BOUND-U ∈ P/O(log L) = P/log`. ∎
+
+*Edge cases.* `S(0) = 0` (kernel-checked `S_zero`), so `f(0) = 0`. For `L = 1`
+the only well-formed string is `#` (`n = k = 0`), and `t_1 = 0`; the verifier
+accepts iff `n = 0 ≤ 0`. For `L = 0` the empty string is not well-formed and is
+rejected. For every `L ≥ 1`, `n = 0` is always accepted (the string `#1^{L−1}`).
+
+`[deduction]` **Remark 3.8 (nonuniform; strictly sharper than Theorem 3.3).** The
+advice `t_L` is a single number per length and need not be efficiently
+computable; Theorem 3.7 is a nonuniform bound and does **not** imply
+`SORT-BOUND-U ∈ P` or any uniform membership. It is strictly sharper than
+Theorem 3.3: monotonicity of `f(n) = n + S(n)` collapses the advice from `L+1`
+stored values (`O(L log L)` bits) to one cutoff (`O(log L)` bits).
+
+`[deduction]` **Remark 3.9 (fixed total length is essential).** The argument
+uses the canonical fixed-total-length encoding `L = n+k+1`, in which `k` is
+determined by `L` and `n`, so the advice depends only on `L`. In a
+separate-input representation whose two lengths are not tied to a single total
+`L`, the advice would have to depend on the pair of lengths and the single
+cutoff compression would not directly apply. The well-formedness check (one
+delimiter, unary blocks) is part of the `O(L)` verification.
 
 ---
 
@@ -294,14 +344,16 @@ that `SORT-BOUND-U` is in `P`, in `NP`, or in `coNP`.
 
 `[deduction]` **Theorem 4.6.** `SORT-BOUND-B` is **not** sparse.
 
-*Proof.* Fix `m` large and let `n ≤ 2^{m/3}`. Then `|bin(n)| ≤ m/3 + 1`. For
-`k` in the informative window `[I(n), U(n)]`, `k ≤ U(n) ≤ n⌈log₂ n⌉ ≤
-2^{m/3}·m` for large `m`, so `|bin(k)| ≤ m/3 + log₂ m + 1`. Hence
-`|bin(n)| + 1 + |bin(k)| ≤ 2m/3 + log₂ m + 3 ≤ m`. The window has `Θ(n)`
-integers, so at least `n/4` of them are admissible for large `n`. Therefore the
-number of strings of `SORT-BOUND-B` of length at most `m` is at least
-`Σ_{n≤2^{m/3}} n/4 = Θ(2^{2m/3})`, which is exponential in `m` and therefore
-not polynomial. ∎
+*Proof.* Fix `m` large and let `1 ≤ n ≤ 2^{m/3}`. Then `|bin(n)| ≤ m/3 + 1`, so
+the largest `k` for which `bin(n)#bin(k)` has length at most `m` satisfies
+`|bin(k)| ≤ K_n := m − 1 − |bin(n)| ≥ 2m/3 − 2`. Every `k ≥ U(n)` is
+*guaranteed* to be in `SORT-BOUND-B`, because `S(n) ≤ U(n) ≤ k`. The number of
+such `k` with `|bin(k)| ≤ K_n` is at least `2^{K_n} − U(n)`. Since
+`U(n) ≤ n⌈log₂ n⌉ ≤ 2^{m/3}·(m/3+1) ≤ 2^{m/3 + log₂ m + 1}` and
+`2^{K_n} ≥ 2^{2m/3 − 2}`, for large `m` this count is at least `2^{2m/3 − 3}`.
+Summing over `n ≤ 2^{m/3}`, the number of strings of `SORT-BOUND-B` of length at
+most `m` is at least `2^{m/3}·2^{2m/3 − 3} = 2^{m−3}`, which is exponential in
+`m` and therefore not polynomial. ∎
 
 `[deduction]` **Corollary 4.7.** The Mahaney/Fortune/Ogiwara–Watanabe barriers
 do **not** apply to `SORT-BOUND-B`. This is the sharpest formal difference
@@ -329,26 +381,31 @@ barrier, not a hardness proof.
 
 ### 5.1 Size of an explicit tree
 
-`[deduction]` **Lemma 5.1.** A correct comparison tree sorting `n` keys has
-exactly `n!` leaves and `2n! − 1` nodes.
+`[deduction]` **Lemma 5.1.** Every correct comparison tree sorting `n` keys has
+**at least** `n!` leaves (the `n!` permutations reach pairwise distinct leaves).
+An **optimal** tree has exactly `n!` leaves and `2n! − 1` nodes; an arbitrary
+correct tree may have additional unreachable leaves.
 
 *Proof.* A leaf is reached by the permutations consistent with its comparison
 transcript. Correctness forces each leaf to be reached by at most one
 permutation (two distinct permutations reaching the same leaf could not both be
-sorted correctly by that leaf). Every permutation must reach some leaf, so there
-are exactly `n!` leaves. A full binary tree with `n!` leaves has `2n! − 1`
-nodes. ∎
+sorted correctly by that leaf). Every permutation must reach some leaf, so the
+`n!` permutations occupy `n!` pairwise distinct leaves; hence at least `n!`
+leaves. An optimal tree cannot contain an unreachable leaf (such a branch can
+be pruned without increasing the height), so it has exactly `n!` leaves, and a
+full binary tree with `n!` leaves has `2n! − 1` nodes. ∎
 
 `[experiment]` The repository's `scripts/evaluate.py`/`generate_optimal_tree.py`
-and the Executive draft confirm `nodes = 2n! − 1` and `leaves = n!` for
-`n ≤ 6`.
+and the Executive draft confirm `nodes = 2n! − 1` and `leaves = n!` for the
+optimal trees they construct, `n ≤ 6`.
 
 ### 5.2 The tree witness is not polynomial
 
 `[deduction]` **Theorem 5.2.** An explicit correct sorting tree is **not** a
 polynomial-size certificate for `S(n) ≤ k`.
 
-*Proof.* By Lemma 5.1 the tree has `2n! − 1` nodes.
+*Proof.* By Lemma 5.1 any correct tree has at least `n!` leaves, hence at least
+`n!` nodes (and an optimal one has `2n! − 1` nodes).
 - **Unary:** in the informative window `L_U = Θ(n)`, and
   `n! = 2^{Θ(n log n)} = 2^{Θ(L_U log L_U)}`, which is super-polynomial in
   `L_U`.
@@ -369,9 +426,9 @@ these nondeterministic bounds, so the tree witness yields no new membership.
 
 | Candidate witness for `S(n) ≤ k` | Checkability | Size | Status |
 |---|---|---|---|
-| explicit adaptive tree | poly in tree size | `2n! − 1` | super-polynomial; not `NP` (Thm 5.2) |
+| explicit adaptive tree | poly in tree size | `≥ n!` leaves (optimal: `2n! − 1` nodes) | super-polynomial; not `NP` (Thm 5.2) |
 | memoized DP table over posets | poly in table size | `P_n = 2^{Θ(n²)}` | super-polynomial (Thm 1.6) |
-| branching program / DAG strategy | poly in DAG size | `≥ #reachable states = 2^{Θ(n²)}` worst case | no poly bound known `[open]` |
+| branching program / DAG strategy | poly in DAG size | no poly upper bound known | `[open]`; whether optimal play confines a DAG to poly many states is open |
 | program computing the strategy | not known poly (universal over `n!` inputs) | poly possible | `[open]` |
 | potential / invariant | not known | ? | `[open]`; `log₂ e(P)` is not tight |
 | nonuniform advice `S(0..L)` | poly with advice | `O(L log L)` | `P/poly`, not uniform (Thm 3.3) |
@@ -412,8 +469,8 @@ Moreover, since every poset is reachable (Lemma 1.3), the DP's runtime is
 
 `[deduction]` **Falsification attempt 6.5 (does monotonicity collapse the
 advice?).** Suppose one claims `S_mono` lets us store only `O(L)` advice.
-Refuted: increments can be `Θ(log n)`, so the worst case is `Θ(L log L)`
-(Remark 3.5).
+Refuted: the upper bound on an increment is `Θ(n)`, so an increment may need
+`Θ(log n)` bits and the worst case is `Θ(L log L)` (Remark 3.5).
 
 ---
 
@@ -450,33 +507,39 @@ session log) confirms the counting claims:
 
 ```
  L   unary strings ≤ L   advice bits ≤   O(L log L)
- 4         10                 30            12
- 8         36                 72            32
-12         78                117            48
-20        210                210           100
-40        820                492           240
+  4         10                 30            12
+  8         36                 72            32
+ 12         78                117            48
+ 20        210                210           100
+ 40        820                492           240
 
- m   binary strings ≤ m   2^(2m/3)
-12            313           2.56e2
-16           3483           1.63e3
-20          33757           1.03e4
-24        2572070           6.55e4
+ m   guaranteed-in-B strings ≤ m   2^(m-3)
+ 12              3666                   5.12e2
+ 16             79626                   8.19e3
+ 20           1561482                   1.31e5
+ 24          33304362                   2.10e6
+ 28         602846378                   3.36e7
 
  n   reachable poset states
- 0              1
- 1              1
- 2              3
- 3             19
- 4            219
- 5           4231
- 6         130023
+  0              1
+  1              1
+  2              3
+  3             19
+  4            219
+  5           4231
+  6         130023
 ```
 
 - The reachable-state counts are exactly OEIS **A001035** (labelled posets),
   confirming Lemma 1.3/1.4.
 - The unary count is `O(L²)` (Lemma 3.1) and the advice bound is `O(L log L)`
   (Theorem 3.3).
-- The binary count grows exponentially in `m` (Theorem 4.6).
+- The binary count uses only *guaranteed* members (`k ≥ U(n)`), and grows
+  exponentially in `m` (Theorem 4.6).
+- The length cutoff `t_L` (Theorem 3.7) is confirmed for `L ≤ 7` using the exact
+  `S(0..6) = 0,0,1,3,5,7,10`: the accepted `n` are exactly `[0, t_L]` with
+  `t_1=0, t_2=1, t_3=1, t_4=2, t_5=2, t_6=2, t_7=3`, and each `t_L` fits in
+  `⌈log₂ L⌉` bits.
 
 No finite computation here proves a complexity separation.
 
@@ -491,10 +554,11 @@ No finite computation here proves a complexity separation.
 | poset DP runs in `2^{O(n²)}` numeric; no log overhead | `[deduction]` Thm 1.6, Rem 1.7 |
 | `SORT-BOUND-U` is sparse | `[deduction]` Lem 3.1 |
 | `SORT-BOUND-U ∈ P/poly` with `O(L log L)` advice | `[deduction]` Thm 3.3 |
+| `SORT-BOUND-U ∈ P/log` via length cutoff `t_L` | `[deduction]` Thm 3.7 |
 | `SORT-BOUND-U` not many-one NP-hard unless `P=NP` | `[literature]` Mahaney |
 | `SORT-BOUND-U` not Turing NP-hard unless `PH=Σ₂P` | `[literature]` Karp–Lipton |
 | `SORT-BOUND-B` not sparse; Mahaney inapplicable | `[deduction]` Thm 4.6 |
-| explicit tree witness has `2n!−1` nodes; not `NP` | `[deduction]` Thm 5.2 |
+| explicit tree witness has `≥ n!` leaves; not `NP` | `[deduction]` Thm 5.2 |
 | `SORT-BOUND-U`/`-B ∈ NP` or `coNP` | `[open]` |
 | `SORT-BOUND-U`/`-B` hard for `NP`/`PSPACE`/`EXPSPACE` | `[open]` |
 | poly-size certificate for `S(n) ≤ k` or `> k` | `[open]` Thm 5.4 |
@@ -565,9 +629,9 @@ No finite computation here proves a complexity separation.
 The central obstruction remains the **absence of a compact canonical object**
 describing optimal comparison play. The only known upper-bound certificates are
 exponential (explicit trees) or super-polynomial (poset tables); the only known
-lower-bound potential (`log₂ e(P)`) is `#P`-hard and not tight. The `P/poly`
-membership of `SORT-BOUND-U` (Theorem 3.3) is a nonuniform fact and does not
-close this gap. The most informative next experiment is to measure the number
+lower-bound potential (`log₂ e(P)`) is `#P`-hard and not tight. The `P/log`
+membership of `SORT-BOUND-U` (Theorem 3.7, sharpening Theorem 3.3) is a
+nonuniform fact and does not close this gap. The most informative next experiment is to measure the number
 of distinct poset states lying on *some* height-`S(n)` optimal play, for
 `n = 7…10`, and compare it with `n!`, with A001035, and with `poly(n)`. If it is
 polynomially bounded, a succinct branching-program certificate route becomes
