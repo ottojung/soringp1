@@ -86,11 +86,12 @@ Let `P^op` be the order dual: `x <^op y ⟺ y < x`.
 
 **Theorem 3.** `F(P^op) = F(P)` for every finite poset `P`.
 
-*Proof.* Strong induction on the number of relations `r(P)` (comparable pairs).
+*Proof.* Strong induction on the **number of incomparable pairs**
+`c(P) = binom(n,2) - r(P)`, where `r(P)` counts comparable unordered pairs.
 If `P` is total then so is `P^op` and both values are `0`. Otherwise fix an
 incomparable pair `{x, y}`. Incomparability is self-dual, so `P` and `P^op`
 have the same incomparable pairs. Since `(P + x<y)^op = P^op + y<x` and adding a
-relation strictly increases `r`, the induction hypothesis gives
+relation strictly **decreases** `c`, the induction hypothesis applies and gives
 
     F(P + x<y) = F(P^op + y<x),      F(P + y<x) = F(P^op + x<y).
 
@@ -116,12 +117,19 @@ This is the duality analogue of the relabelling factor.
 A quotient can be sound at two logically different levels.
 
 **Definition (sound state quotient).** An equivalence `~` on states is a *sound
-DP quotient* if (i) `F` is constant on classes **and** (ii) the transition is
-well defined on classes: whenever `P ~ Q`, the multiset of successor classes
-`{ [P+x<y], [P+y<x] : x ‖ y in P }` equals the analogous multiset for `Q`.
+DP quotient* when (i) `F` is constant on classes and (ii) the **multiset of
+unordered successor-class PAIRS**, one pair per unordered incomparable move,
+is well defined on classes. In symbols, whenever `P ~ Q`, the multiset
 
-Condition (ii) is what makes the class a legitimate *state*; (i) alone only says
-that the value happens to be class-invariant. Relabelling and duality satisfy
+    {{ [P+x<y], [P+y<x] } : {x,y} incomparable in P}
+
+of unordered *two-element multisets* of classes must equal the analogous
+multiset for `Q`. Flattening all successor classes into one multiset is
+insufficient: minimax takes a `max` **inside each move** and then a `min`
+**between moves**, and flattening loses that grouping.
+
+Condition (ii) supports the recursive minimax transition on the quotient;
+(i) alone only says that the value happens to be class-invariant. Relabelling and duality satisfy
 both: `π` and `δ` are automorphisms of the move graph (bijections on states
 commuting with `extend`). The comparability-graph collapse satisfies (i)
 empirically but **fails (ii)** (Section 6c); it is therefore a value collapse,
@@ -235,8 +243,9 @@ comparability graph. This is **unsound**.
 
 **Witness at `n = 7`.** Two posets with isomorphic comparability graphs:
 
-* `A`, successors `(0,0,1,3,5,5,37)`, relations `0<2, 0<3, 1<3, 0<4, 2<4,
-  0<5, 2<5, 0<6, 2<6, 5<6`, has `F(A) = 6`;
+* `A`, successors `(0,0,1,3,5,5,37)`, relations `2<0, 3<0, 3<1, 4<0,
+  4<2, 5<0, 5<2, 6<0, 6<2, 6<5` (as the bitmasks encode: bit `j` in
+  `succ[i]` means `i<j`), has `F(A) = 6`;
 * `B`, successors `(0,0,2,1,1,9,59)`, has `F(B) = 7`.
 
 Their comparability graphs are isomorphic (explicit isomorphism
