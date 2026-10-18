@@ -71,6 +71,14 @@ These are research notes (not Lean theorems), each with a companion program:
   memoization, no advice) decides `S(n) ≤ k`; deterministic time
   `2^{O(n log² n)}` in numeric `n`, improving the recorded `2^{O(n²)}` DP
   bound; poly-space unary, `EXPSPACE` binary.
+- [Sound pruning and move reduction for the budgeted DFS](docs/research-budget-pruning.md)
+  — `scripts/budgeted_pruning_experiments.py`. Provably sound, poly-space
+  pruning: the poset-level information cutoff `e(P) > 2^d`, the Hanamura–Iwata
+  `e ≤ 7` acceptance base, and `Aut(P)` move orbits (both outcomes retained).
+  Cuts the `S(5)` binary search `261,662 → 750` calls (349×) and preserves
+  `S(0..5)`; ordinal-sum allocation is exact but does not reduce no-memoization
+  calls (negative result). No asymptotic exponent improvement; the cutoff stops
+  helping exactly at the `n = 12` information-bound gap.
 
 The reference minimax evaluator is `scripts/evaluate.py` (exact for small `n`).
 
