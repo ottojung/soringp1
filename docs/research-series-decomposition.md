@@ -4,9 +4,10 @@
 from the deterministic direct-sum theorem for decision trees applied to the
 ordinal sum of posets. The associated decomposition is a *standard literature
 result*. The practical DP finding is a *negative empirical observation* for
-`n ≤ 5`: the rule is exact but does not reduce the state space, and the fraction
-of decomposable states decreases over the measured range. No Lean formalization
-is proposed.
+`n ≤ 5`: the rule is exact but does not reduce the stored state count in
+these tests, and the fraction of decomposable states decreases over the measured
+range. These finite tests do not establish an asymptotic trend. No Lean
+formalization is proposed.
 
 ## 1. Model and definitions
 
@@ -81,7 +82,8 @@ sum theorem* for decision-tree complexity: for independent relations on disjoint
 variable sets, the exact decision-tree complexity of the joint relation is the
 sum of the individual complexities (R. Jain, H. Klauck, M. Sántha, *Optimal
 Direct Sum Results for Deterministic and Randomized Decision Tree Complexity*,
-arXiv:1004.0105, 2010, Theorem 1).  Here the two "variables" are the `A`-order
+*Information Processing Letters* 110(20):893–897 (2010), DOI
+10.1016/j.ipl.2010.07.020; arXiv:1004.0105, Theorem 1).  Here the two "variables" are the `A`-order
 and the `B`-order, which are independent because cross-block order is fixed.
 The proof above is the textbook adversary potential argument specialized to
 ordinal sums.
@@ -168,12 +170,12 @@ graph connected) gives:
 | 5 | 4231      | 2251         | 53%      |
 
 The fraction of *decomposable* states is decreasing (67%, 63%, 56%, 47% for
-`n = 2..5`).  Since the DP explores all posets reachable from the antichain,
-the pruning benefit of the rule therefore shrinks with `n` over the measured
-range; it is a small constant-factor device at best, not an asymptotic
-compression.  (The trend is consistent with the fact that a random poset is
-almost surely incomparability-connected, but this note does not prove the
-limit.)
+`n = 2..5`).  Since the DP explores all posets reachable from the antichain, the observed
+fraction of states eligible for series decomposition decreases in this range.
+**No asymptotic runtime conclusion follows**: decomposable states may be
+disproportionately expensive, and a different implementation could exploit
+the identity differently. The measured trend is consistent with random-poset
+incomparability connectivity, but the note does not prove any limit.
 
 ## 6. More general series decomposition
 
@@ -197,9 +199,10 @@ The identity `F(A ⊕ B) = F(A) + F(B)` is an exact *structural* fact.  It does
 - No complexity-class consequence follows.  This note makes no claim about
   `SORT-BOUND-U`, `P`, `NP`, or any separation.
 
-The honest reading is that the ordinal-sum rule is a useful *identity* and a
-minor constant-factor pruning device, but not a route to compressing exact
-minimax evaluation.
+The honest reading is that ordinal-sum additivity is a useful *identity*;
+in these tests its practical value is modest. Its impact in more sophisticated
+exact evaluators remains open, and it does not alone yield an efficient exact
+algorithm for arbitrary S(n).
 
 ## 8. Novelty assessment
 
