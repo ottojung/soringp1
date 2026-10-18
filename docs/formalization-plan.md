@@ -8,10 +8,10 @@ formally check it. Formalization is not an independent measure of progress.
 
 The repository already kernel-checks a faithful adaptive comparison-tree
 model, feasibility/attainment of S, bounds, monotonicity, and exact small
-values through n=6. The minimax module defines `adv` and constructs a
-sorting tree; the height-achievement direction has not yet been proved.
-See `kernel-results.md` for the precise inventory. Existing CI, proof
-objects and correspondence checks stay intact.
+values through n=6. The minimax module now proves `S_eq_adv_univ`, including
+correctness and the height bound for the constructed `minimaxTree` (A24).
+See `kernel-results.md` for the precise inventory. Existing CI and checked
+proof objects stay intact.
 
 ## Active boundary: exploration
 
@@ -24,15 +24,12 @@ Routine proofs of familiar inequalities, further isolated small-n instances,
 and nonessential helper-lemma chains are **not** active milestones.
 Do not create new Lean tasks without a demonstrated research need.
 
-## Exception for the unfinished minimax bridge
+## Former minimax exception — completed
 
-The missing theorem `height (minimaxTree S) ≤ adv S` would complete a
-useful correspondence. Attempt only a clearly bounded, straightforward
-repair. The current definitional-equality/unfolding problem in `adv`
-is documented in `kernel-results.md`. If that obstruction requires
-substantial redesign, stop, document the blocker, and pursue the research
-fronts instead. This exception is not authorization for an open-ended
-sequence of Lean-engineering subprojects.
+The bounded minimax height attempt succeeded in A24. The Lean kernel checks
+`minimaxTree_height` and `S_eq_adv_univ`. This closes the correctness
+correspondence; it does **not** establish an efficient uniform algorithm to
+evaluate `S(n)` and does not authorize routine follow-on formalization.
 
 ## Return to Lean for mature results
 

@@ -95,10 +95,9 @@ results. A useful negative result counts as progress.
 Keep the existing kernel-checked foundation. A new formalization should be
 motivated by an independently justified, substantial result or an immediate
 model-fidelity need, with a complete statement and an explicit explanation of
-what verification will add. The missing minimax tree height proof may get
-one bounded attempt if its solution is straightforward; otherwise document
-the obstruction and redirect effort rather than making it an unbounded
-proof-engineering project.
+what verification will add. The previously missing minimax tree height
+proof is now completed (A24); direct attention to structural research and
+complexity-theoretic questions instead of routine proof-engineering.
 
 ## Deliverables produced (2026-10-17, exploration-first)
 
