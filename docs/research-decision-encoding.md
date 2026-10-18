@@ -80,8 +80,8 @@ ATM bound gives `SORT-BOUND-B ∈ EXPSPACE`. The ATM runs in time `2^{O(L_B)}`, 
 its **deterministic simulation** requires either double-exponential time or
 single-exponential space; the tighter deterministic bound is **EXPSPACE**.
 
-`[deduction]` **Proposition 2.4 (best known upper bound).** The strongest known
-deterministic upper bound for `SORT-BOUND-B` is:
+`[deduction]` **Proposition 2.4 (strongest upper bound established in this repository).**
+The strongest deterministic upper bound established here for `SORT-BOUND-B` is:
 
 ```
 SORT-BOUND-B ∈ EXPSPACE.
@@ -116,12 +116,13 @@ does **not** imply EXPTIME membership. The budgeted DFS bound
 `2^{O(n log² n)}` is double exponential in the binary input length and does not
 establish `SORT-BOUND-B ∈ EXPTIME`.
 
-`[deduction]` **Proposition 3.4 (is EXPTIME achievable?).** Whether
-`SORT-BOUND-B ∈ EXPTIME` is **open**. The game `G(n,k)` has `k = 2^{O(L_B)}` rounds
+`[deduction]` **Proposition 3.4 (is EXPTIME achievable?).** Membership of
+`SORT-BOUND-B` in `EXPTIME` is **not established by these arguments**. The game `G(n,k)` has `k = 2^{O(L_B)}` rounds
 and branching factor `n² = 2^{O(L_B)}`, so the game tree has size
 `2^{2^{O(L_B)}}`. No deterministic algorithm running in time `2^{poly(L_B)}` is
-known. The obstacle is the absence of a compact canonical object describing
-optimal comparison play (see §5).
+provided by this project. This is a research question here, not an
+unqualified claim about the worldwide literature; a compact canonical object
+for optimal comparison play might help.
 
 ---
 
@@ -134,9 +135,11 @@ so an explicit tree is doubly exponential in the input length. Verifying a tree 
 polynomial in the **tree size**, not in the input length. Hence the tree witness
 yields at most a `N2EXP` verifier, not `NP`.
 
-`[deduction]` **Proposition 4.2 (DP table is not a certificate).** The memoized DP
-table has `P_n = 2^{Θ(n²)}` entries (Kleitman–Rothschild), each requiring `O(n²)`
-bits. Under binary encoding this is `2^{2^{O(L_B)}}` bits — doubly exponential.
+`[deduction]` **Proposition 4.2 (full DP state space is not a compact certificate).**
+The set of all labelled posets has `P_n = 2^{Θ(n²)}` potential entries (Kleitman–Rothschild), each describable with `O(n²)`
+bits. Full tabulation under binary encoding would require
+`2^{2^{O(L_B)}}` bits — doubly exponential; this does not show every
+partial or goal-directed DP must store all of them.
 No polynomial-size certificate is known for either `S(n) ≤ k` or `S(n) > k`.
 
 `[deduction]` **Proposition 4.3 (no known succinct certificate).** Neither
@@ -159,21 +162,26 @@ many-one reductions unless `P = NP`. Under Turing reductions, NP-hardness would
 collapse `PH` to `Σ₂P` (Karp–Lipton; Ogiwara–Watanabe).
 
 `[deduction]` **Proposition 5.3 (binary non-sparsity).** `SORT-BOUND-B` is **not**
-sparse: for large `m`, there are `≥ 2^{m−3}` strings of length `≤ m` (counting
-guaranteed-yes inputs with `k ≥ U(n)`). The Mahaney barrier does **not** apply.
-This is the sharpest formal difference between the two encodings. It is **not**
-evidence of hardness; it merely removes the sparse-set obstruction.
+sparse: for `m≥4`, fix `n=1` and vary the positive integer `k` among
+binary strings of length at most `m−2`. Since `S(1)=0`, every one of these
+`2^{m−2}−1 ≥ 2^{m−3}` distinct length-`≤m` strings is a yes-instance.
+Thus the Mahaney sparse-set barrier does **not** apply as stated to this
+binary language. This particular density witness uses **trivial** large-`k`
+instances, so its density alone conveys no hardness information. A separate
+analysis would be required for the promise/restricted *informative* sublanguage.
 
 ---
 
-## 6. Space lower bound (conjecture)
+## 6. State representation is not a space lower bound
 
-`[conjecture]` **Proposition 6.1 (space barrier).** Any algorithm deciding
-`SORT-BOUND-B` requires `Ω(n²) = Ω(2^{2 L_B})` space, because the game state is a
-poset on `n` elements requiring `n²` bits to represent. This would imply
-`SORT-BOUND-B ∉ PSPACE`. However, this is a **conjecture**, not a proven lower
-bound: it is conceivable (though unlikely) that a symmetry-based or algebraic
-method could decide the game without materializing the full poset.
+`[deduction]` **Observation 6.1 (no lower bound follows from explicit state
+size).** The current minimax algorithms store an `n`-element partial order as
+an `n×n` relation, requiring `O(n²)` bits. This is an **upper bound for a
+particular representation**, not a lower bound on the space needed to decide
+the special binary language `SORT-BOUND-B`. A different algorithm might not
+construct a poset at all. Therefore no `Ω(n²)` space lower bound or
+`SORT-BOUND-B ∉ PSPACE` conclusion is justified. Establishing a space
+lower bound would require an independent complexity-theoretic argument.
 
 ---
 
@@ -186,18 +194,18 @@ method could decide the game without materializing the full poset.
 | 2.1 | DP: `2^{O(n²)}` → `2-EXPTIME` binary | `[deduction]` |
 | 2.2 | DFS: `2^{O(n log² n)}` time, `2^{O(L_B)}` space → `EXPSPACE` binary | `[deduction]` |
 | 2.3 | ATM: `O(k·n²)` time, `O(n²)` space → `EXPSPACE` binary | `[deduction]` |
-| 2.4 | Best known: `SORT-BOUND-B ∈ EXPSPACE` | `[deduction]` |
+| 2.4 | Repository upper bound: `SORT-BOUND-B ∈ EXPSPACE` | `[deduction]` |
 | 3.1 | EXPTIME = `2^{poly(L_B)}` | `[definition]` |
 | 3.2 | `2^{O(n log² n)} = 2^{2^{O(L_B)}}` double exponential | `[deduction]` |
 | 3.3 | `EXPTIME ⊊ 2-EXPTIME`; DFS bound ≠ EXPTIME | `[deduction]` |
-| 3.4 | `SORT-BOUND-B ∈ EXPTIME`? | `[open]` |
+| 3.4 | `SORT-BOUND-B ∈ EXPTIME` not established here | `[open]` |
 | 4.1 | Tree witness: `≥ n!` leaves, `2^{2^{Θ(L_B)}}` binary; not `NP` | `[deduction]` |
-| 4.2 | DP table: `2^{Θ(n²)}` entries, doubly exponential binary | `[deduction]` |
+| 4.2 | Full DP state space: `2^{Θ(n²)}` potential entries, doubly exponential binary | `[deduction]` |
 | 4.3 | No known succinct certificate for either direction | `[open]` |
 | 5.1 | Mahaney: sparse NP-hard ⇒ `P = NP` | `[literature]` |
 | 5.2 | `SORT-BOUND-U` sparse; Mahaney barrier applies | `[deduction]` |
 | 5.3 | `SORT-BOUND-B` not sparse; barrier inapplicable | `[deduction]` |
-| 6.1 | `Ω(n²)` space conjecture ⇒ `∉ PSPACE` | `[conjecture]` |
+| 6.1 | Explicit poset encoding size does **not** prove a space lower bound | `[deduction]` |
 
 ---
 
@@ -209,7 +217,7 @@ method could decide the game without materializing the full poset.
 - `SORT-BOUND-B ∈ NP` or `coNP` (open, Proposition 4.3);
 - `SORT-BOUND-B` hard for any class above `P` (open);
 - any unconditional separation (`P ≠ NP`, `EXPTIME ≠ 2-EXPTIME`, etc.);
-- the `Ω(n²)` space lower bound (conjecture, Proposition 6.1);
+- any `Ω(n²)` space lower bound or `PSPACE` nonmembership (Observation 6.1);
 - optimality of the `2^{O(n log² n)}` DFS bound.
 
 ---
@@ -259,9 +267,9 @@ method could decide the game without materializing the full poset.
 
 The central obstruction is the **absence of a compact canonical object** describing
 optimal comparison play. The game `G(n,k)` has `2^{O(L_B)}` rounds and branching
-factor `2^{O(L_B)}`, giving a game tree of size `2^{2^{O(L_B)}}`. The best
-deterministic bound is `EXPSPACE` (via ATM simulation). Whether `SORT-BOUND-B ∈ EXPTIME`
-is open and would require either a fundamentally new algorithm or a breakthrough in
+factor `2^{O(L_B)}`, giving a game tree of size `2^{2^{O(L_B)}}`. The strongest deterministic bound **established here** is `EXPSPACE`
+(via ATM simulation). Whether `SORT-BOUND-B ∈ EXPTIME` is unresolved
+**within this project** and would require either a fundamentally new algorithm or a breakthrough in
 lower-bound technique. The most informative next experiment is to measure the number
 of distinct poset states on *some* height-`S(n)` optimal play for `n = 7…10` and
 compare with `n!`, A001035, and `poly(n)`.
