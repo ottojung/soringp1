@@ -35,6 +35,10 @@ import random
 import sys
 import time
 
+# Prototype guard only: Python's default recursion limit is 1000, which is below
+# the budget depth d = U(n) for large n. The proven O(d) space bound is for the
+# Turing-machine model, which uses its own explicit stack and is uniform in n;
+# this limit is a bounded-prototype convenience, not part of the complexity claim.
 sys.setrecursionlimit(100000)
 
 

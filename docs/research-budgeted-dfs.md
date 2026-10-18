@@ -92,10 +92,12 @@ T(n,d) ≤ (2B)^d · poly(n) = (n(n-1))^d · poly(n) = 2^{O(d log n)} · poly(n)
 ```
 
 The `poly(n)` covers `is_total` `O(n^2)`, `incomparable_pairs` `O(n^2)`, and
-`closure` `O(n^2)` per node; all budget/ index counters are `O(log n)` bits.
-Worst case is attained when the answer is `False` (every pair tried, both
-branches) or the sole working pair is last. *Branching does not store all
-choices* — the DFS backtracks (§5).
+`closure` `O(n^2)` per node; all budget/index counters are `O(log n)` bits.
+The DFS short-circuits: for a pair, if the first branch fails it skips the
+second, and on success it returns immediately, so a node may make fewer than
+`2B` recursive calls. The bound `(2B)^d` is a valid worst-case upper bound
+regardless (a node never makes more than `2B` calls). *Branching does not store
+all choices* — the DFS backtracks (§5).
 
 **Total for `S(n)`.** With `d = U(n) = O(n log n)` and `O(log n)` binary-search
 probes (each `≤ U(n)`, sum dominated by the largest):
@@ -125,8 +127,11 @@ state is the stack.
 ## 6. Query complexity `[deduction]`
 
 Computing `S(n)` makes `O(log U(n)) = O(log n)` threshold queries (one
-`CanSort(∅,·)` each). This is optimal up to constants for binary search over an
-`O(n log n)`-wide window, since each query is a yes/no oracle.
+`CanSort(∅,·)` each). In the **monotone blackbox model** — the only access to
+`S(n)` is a yes/no oracle for `S(n) ≤ k` that is monotone in `k` — binary
+search over the `O(n log n)`-wide window `[0, U(n)]` is optimal up to
+constants, since each query is one bit and `Θ(log n)` bits are needed to
+distinguish `Θ(n log n)` candidate values.
 
 ## 7. Numeric `n` vs input length `[deduction]`
 
@@ -137,28 +142,29 @@ encoding:
   poly. So `S_unary ∈ FPSPACE` and `SORT-BOUND-U` is decidable in deterministic
   poly-space (consistent with, and more time-specific than, the `PSPACE` bound of
   `docs/research-certificates-barriers.md` Claim A, which gives no explicit time).
-- **Binary** (`N = Θ(log n)` bits): `n = 2^{Θ(N)}`, so
-  `n log² n = 2^{Θ(N)}·N² = 2^{Θ(N)}`. Time `2^{2^{Θ(N)}}`, space
-  `O(n³ log n) = 2^{O(N)}`. So `S_binary ∈ FEXPSPACE` and `SORT-BOUND-B` in
+- **Binary** (`bin(n) # bin(k)`): the informative case is `k ≤ U(n)`, where
+  `log k = O(log n)`, so total input `N = Θ(log n)` bits and `n ≤ 2^N`. Then
+  `n log² n = 2^{Θ(N)}·N² = 2^{Θ(N)}`, giving time `2^{2^{Θ(N)}}` and space
+  `O(n³ log n) = 2^{O(N)}`. For `k ≥ U(n)` we preprocess a trivial accept
+  (merge-sort witnesses `S(n) ≤ U(n)`), so such inputs need no search and do
+  not affect the worst case. Hence `S_binary ∈ FEXPSPACE` and `SORT-BOUND-B` in
   deterministic `EXPSPACE` — matching Claim A. **This is not an EXPTIME result.**
 
-## 8. DFS strictly dominates the memoized DP `[deduction]`
+## 8. Worst-case comparison with the memoized DP `[deduction]`
 
 The memoized DP of `docs/upper-bound.md` visits **all** labelled posets
 (`A001035(n) = 2^{Θ(n²)}`), including posets needing more than `S(n)`
 comparisons to build. The budgeted DFS restricts to posets reachable within
-`d = S(n)` comparisons, of which there are at most `(2B)^d = 2^{O(n log² n)}`
-distinct (fewer than the DP's `2^{Θ(n²)}`), and it revisits them without
-storing them. Net, for **both** time and space:
+`d = S(n)` comparisons — at most `(2B)^d = 2^{O(n log² n)}` distinct — and
+revisits them without storing them. So the DFS's *asymptotic worst-case
+upper bounds* on time (`2^{O(n log² n)}` vs `2^{Θ(n²)}`) and space
+(poly vs `2^{Θ(n²)}`) are both smaller than the DP's.
 
-```
-DFS:  time 2^{O(n log² n)},  space poly(n)     ⊂
-DP:   time 2^{Θ(n²)},        space 2^{Θ(n²)}.
-```
-
-Not memoizing is asymptotically *better* here: the memoization overhead
-(materializing every poset) exceeds the cost of revisiting. `[deduction]`
-(small-`n` call counts in §10 are consistent).
+This is a statement about **worst-case upper bounds only**. It is *not* a
+per-instance runtime claim: on particular inputs a memoized search can be
+faster (it never revisits a state), and the two algorithms are different
+objects, so no dominance relation between their exact running times is
+asserted. We record only that the proven worst-case bounds improve.
 
 ## 9. Edge cases `[deduction]`
 
@@ -204,27 +210,31 @@ No `n ≥ 6` full-value run (`CanSort(∅, S(6)=10)` would be `≥ 20^10` nodes)
   game formulation and is very likely *known* informally, but it is **not**
   written in this repository and **is** sharper than the recorded deterministic
   `2^{O(n²)}`. We record it as a `[deduction]`, not a claimed novelty.
-- **No even sharper *obvious* bound:** beating `2^{O(n log² n)}` needs depth
-  `o(n log n)` or branching `o(n²)`, but `S(n) = Θ(n log n)` (merge-sort upper
-  + information lower bound) and the sorter must try `Θ(n²)` pairs in the
-  worst case. So `2^{O(n log² n)}` is the natural ceiling for *this* DFS;
-  improving it requires a non-DFS idea `[open]`.
+- **Sharper bounds are not ruled out.** The `2^{O(n log² n)}` bound is the
+  worst-case for *this specific* DFS (full branching `2B`, depth `S(n)`).
+  Whether a uniform algorithm can do better is open: pruning, canonicalization
+  (e.g. an `S_n`-quotient DFS without a memoization table), or a decomposition
+  theorem could reduce the effective branching or depth. We claim only the
+  `2^{O(n log² n)}` upper bound, not optimality of the DFS `[open]`.
 
 ## 12. What this does *not* establish `[deduction]`
 
 - No NP/coNP membership or hardness (the unary language is sparse; Mahaney
   blocks many-one NP-hardness unless `P = NP` — `docs/exploration-agenda.md`).
-- No improvement to the `PSPACE`/`EXPSAACE` *space* claims (DFS is already
+- No improvement to the `PSPACE`/`EXPSPACE` *space* claims (DFS is already
   poly-space unary); the contribution is the explicit deterministic *time*
   `2^{O(n log² n)}` in numeric `n`, replacing `2^{O(n²)}`.
 - No lower bound; the algorithm's exponential time is not shown optimal.
 
 ## 13. Next obstacle `[open]`
 
-Whether the reachable-within-`S(n)` poset count is genuinely `2^{o(n²)}` (as
-§8 assumes) or whether a smarter uniform algorithm (e.g. canonical-form DFS on
-the `S_n` quotient, which needs no memoization table) can push the exponent
-toward `2^{O(n log n)}`. The quotient's state count is still `2^{Θ(n²)}`, so a
-better bound needs a decomposition theorem, not just canonicalization.
+§4 already shows the number of posets reachable within `S(n)` comparisons is at
+most `(2B)^{S(n)} = 2^{O(n log² n)} = 2^{o(n²)}`, so the DFS explores a
+`2^{o(n²)}` subset of the `2^{Θ(n²)}` posets the memoized DP materializes. The
+finer open question is whether the *exponent* `n log² n` itself can be reduced:
+can a canonical-form DFS on the `S_n` quotient (no memoization table), a
+symmetry/pruning argument, or a decomposition theorem push the worst-case below
+`2^{O(n log² n)}`? The quotient's raw state count is still `2^{Θ(n²)}`, so a
+better bound would need new structure, not just canonicalization.
 
 **Reproduce:** `python3 scripts/budgeted_dfs.py --max-n 5`
