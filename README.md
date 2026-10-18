@@ -66,6 +66,11 @@ These are research notes (not Lean theorems), each with a companion program:
   the efficiency pruning is equivalent to leaf counting; five scalar invariants
   are falsified with smallest witnesses (same-`e` at `n = 5`, non-monotonicity
   at `n = 6`, merge family `Merge(2,4)`).
+- [Budgeted DFS for exact S(n)](docs/research-budgeted-dfs.md)
+  — `scripts/budgeted_dfs.py`. Pure budgeted DFS `CanSort(P,d)` (no
+  memoization, no advice) decides `S(n) ≤ k`; deterministic time
+  `2^{O(n log² n)}` in numeric `n`, improving the recorded `2^{O(n²)}` DP
+  bound; poly-space unary, `EXPSPACE` binary.
 
 The reference minimax evaluator is `scripts/evaluate.py` (exact for small `n`).
 
