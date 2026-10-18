@@ -144,7 +144,7 @@ encoding:
   `docs/research-certificates-barriers.md` Claim A, which gives no explicit time).
 - **Binary** (`bin(n) # bin(k)`): the informative case is `k ≤ U(n)`, where
   `log k = O(log n)`, so total input `N = Θ(log n)` bits and `n ≤ 2^N`. Then
-  `n log² n = 2^{Θ(N)}·N² = 2^{Θ(N)}`, giving time `2^{2^{Θ(N)}}` and space
+  `n log² n = 2^{Θ(N)}·N² = 2^{Θ(N)}`, giving time `2^{2^{O(N)}}` and space
   `O(n³ log n) = 2^{O(N)}`. For `k ≥ U(n)` we preprocess a trivial accept
   (merge-sort witnesses `S(n) ≤ U(n)`), so such inputs need no search and do
   not affect the worst case. Hence `S_binary ∈ FEXPSPACE` and `SORT-BOUND-B` in
@@ -211,7 +211,7 @@ No `n ≥ 6` full-value run (`CanSort(∅, S(6)=10)` would be `≥ 20^10` nodes)
   written in this repository and **is** sharper than the recorded deterministic
   `2^{O(n²)}`. We record it as a `[deduction]`, not a claimed novelty.
 - **Sharper bounds are not ruled out.** The `2^{O(n log² n)}` bound is the
-  worst-case for *this specific* DFS (full branching `2B`, depth `S(n)`).
+  worst-case for *this specific* DFS (possible branching up to `2B`, depth at most `S(n)`).
   Whether a uniform algorithm can do better is open: pruning, canonicalization
   (e.g. an `S_n`-quotient DFS without a memoization table), or a decomposition
   theorem could reduce the effective branching or depth. We claim only the
@@ -231,7 +231,7 @@ No `n ≥ 6` full-value run (`CanSort(∅, S(6)=10)` would be `≥ 20^10` nodes)
 §4 already shows the number of posets reachable within `S(n)` comparisons is at
 most `(2B)^{S(n)} = 2^{O(n log² n)} = 2^{o(n²)}`, so the DFS explores a
 `2^{o(n²)}` subset of the `2^{Θ(n²)}` posets the memoized DP materializes. The
-finer open question is whether the *exponent* `n log² n` itself can be reduced:
+finer open question is whether the *upper-bound exponent* `n log² n` can be reduced:
 can a canonical-form DFS on the `S_n` quotient (no memoization table), a
 symmetry/pruning argument, or a decomposition theorem push the worst-case below
 `2^{O(n log² n)}`? The quotient's raw state count is still `2^{Θ(n²)}`, so a
