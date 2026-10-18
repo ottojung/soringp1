@@ -74,25 +74,39 @@ can have sharing: different paths can reach the same poset state.
 
 ## 1. Polynomial-in-DAG-size verifier
 
-`[deduction]` **Theorem 1.1 (verifier).** Given a strategy DAG `D` for `n`
-keys and a budget `k`, there is a deterministic algorithm running in time
-`O(|D| · n² · log k)` that decides whether `D` encodes a correct sorting
-strategy of height `≤ k`.
+`[deduction]` **Theorem 1.1 (verifier).** Given a strategy DAG `D = (V, E)` for
+`n` keys and a budget `k`, there is a deterministic algorithm running in time
+`O((|V| + |E|) · n³ + |E| · log k)` that decides whether `D` encodes a correct
+sorting strategy of height `≤ k`.
 
-*Proof.* The verifier performs four checks:
+*Proof.* The verifier performs five checks:
 
-1. **Well-formedness**: Each node is a valid poset (check transitivity and
-   antisymmetry of the successor matrix). `O(n²)` per node.
-2. **Edge validity**: For each edge `((x,y), P₁, P₀)`, check that `{x,y}` is
-   incomparable in `P`, and that `P₁ = P+x<y`, `P₀ = P+y<x` (transitive
-   closure). `O(n²)` per edge.
-3. **Acyclicity**: Topological sort; if a cycle exists, reject. `O(|D| + |E|)`.
-4. **Height bound**: Dynamic programming over the DAG in topological order:
-   `height(leaf) = 0`, `height(P) = 1 + max(height(P₁), height(P₀))` for each
-   edge. Check `height(root) ≤ k`. `O(|E| · log k)` for the max-plus
-   arithmetic.
+1. **Root check**: Verify the root node is the empty poset (antichain). `O(n²)`.
+2. **Well-formedness**: Each node is a valid poset (check transitivity and
+   antisymmetry of the successor matrix). Naive transitivity checking costs
+   `O(n³)` per node (for each pair `(i,j)`, check that `j ∈ succ[i]` implies
+   `succ[j] ⊆ succ[i]`). Total: `O(|V| · n³)`.
+3. **Terminal check**: Each leaf (node with no outgoing edges) is a total
+   order. `O(n²)` per leaf.
+4. **Edge validity**: For each edge `((x,y), P₁, P₀)` from node `P`, check:
+   (a) `{x,y}` is incomparable in `P` (both `succ[x]` and `succ[y]` lack the
+   other's bit); (b) `P₁ = P+x<y` and `P₀ = P+y<x` (transitive closure);
+   (c) `P₁` and `P₀` are referenced nodes in `V`. Naive transitive closure
+   costs `O(n³)` per edge. Total: `O(|E| · n³)`.
+5. **Height bound**: Dynamic programming over the DAG in topological order
+   (computed in `O(|V| + |E|)`):
+   - `height(leaf) = 0` for each terminal node.
+   - For a non-terminal node `P` with moves `m₁, …, mᵣ` (each `mᵢ` is an edge
+     `((x,y), P₁, P₀)`), compute:
+     `height(P) = min over moves mᵢ of (1 + max(height(P₁), height(P₀)))`.
+   - Check `height(root) ≤ k`.
+   The max-plus arithmetic on values `≤ k` costs `O(log k)` per edge.
+   Total: `O(|E| · log k)`.
 
-Total: `O(|D| · n² · log k)`. ∎
+The `n³` factor in checks 2 and 4 is conservative (naive matrix operations).
+With bitset operations (e.g., using Python integers as bitsets), transitivity
+and closure can be done in `O(n² / 64)` per operation, but we state the
+conservative bound. ∎
 
 `[deduction]` **Remark 1.2 (what the verifier does and does not prove).**
 The verifier proves: *if* a DAG of size `|D|` is given, *then* we can check
@@ -150,15 +164,16 @@ still grows rapidly:
 
 ```
  n   DAG(all)   DAG(all)/n!   log2(DAG(all))   log2/n
- 3        19         3.17              4.25    1.42
- 4       181         7.54              7.50    1.87
- 5      1551        12.93             10.60    2.12
- 6     65551        91.04             16.00    2.67
+  3        19         3.17              4.25    1.42
+  4       181         7.54              7.50    1.87
+  5      1551        12.93             10.60    2.12
+  6     65551        91.04             16.00    2.67
 ```
 
-The ratio `log2(DAG(all))/n` is **increasing**, suggesting super-polynomial
-growth. This is consistent with the hypothesis that the all-optimal DAG size
-is `2^{Θ(n log n)}` (like `n!`) or `2^{Θ(n²)}` (like the full poset count).
+The ratio `log2(DAG(all))/n` is **increasing** over this range, which is
+*consistent with* super-polynomial growth, but `n ≤ 6` is too small to
+distinguish `2^{Θ(n log n)}`, `2^{Θ(n²)}`, or even `n^{Θ(log n)}` from
+polynomial growth. No asymptotic claim is made.
 
 `[experiment]` **Observation 2.5 (DAG(1) = 2n! − 1 exactly).** For all
 `n ≤ 6`, `DAG(1) = 2n! − 1`:
@@ -175,6 +190,39 @@ is `2^{Θ(n log n)}` (like `n!`) or `2^{Θ(n²)}` (like the full poset count).
 
 This confirms Theorem 2.1: a single optimal policy is a reduced tree with
 exactly `n!` leaves.
+
+`[deduction]` **Theorem 2.6 (distinct nodes have distinct labelled posets).**
+In a reduced deterministic sorting comparison tree, distinct reachable nodes
+have distinct labelled poset states.
+
+*Proof.* Let `u`, `v` be distinct reachable nodes with path posets `P_u`,
+`P_v` (transitive closures of comparisons on the root-to-node paths). Let
+`L(P_u)`, `L(P_v)` be their linear extensions (the permutations reaching
+them).
+
+In a tree, the permutation sets of distinct nodes are either disjoint or
+nested (one node is an ancestor of the other):
+
+- **Disjoint case**: `u` and `v` are in different subtrees. Then
+  `L(P_u) ∩ L(P_v) = ∅`, so `L(P_u) ≠ L(P_v)`, hence `P_u ≠ P_v`.
+- **Nested case**: `u` is an ancestor of `v`. Since the tree is **reduced**,
+  every comparison on the path from `u` to `v` is informative: it strictly
+  shrinks the permutation set. Thus `L(P_v) ⊂ L(P_u)` (strict subset), so
+  `L(P_u) ≠ L(P_v)`, hence `P_u ≠ P_v`.
+
+The poset determines its linear extensions, so equal posets would imply
+equal permutation sets, a contradiction. ∎
+
+`[deduction]` **Corollary 2.7 (hash-consing saves zero in a single policy).**
+In a single optimal policy (a tree), no two nodes have the same labelled poset
+(Theorem 2.6). Therefore, hash-consing — merging nodes with identical posets —
+saves **zero** nodes. This explains the observed `DAG(1) = unshared(1) =
+2n! − 1` for all `n ≤ 6`.
+
+`[deduction]` **Corollary 2.8 (quotient can compress).** The `S_n` quotient
+identifies posets that are isomorphic under relabelling. Different nodes can
+have isomorphic (but not identical) posets, so the quotient **can** compress.
+This is distinct from hash-consing, which only merges identical posets.
 
 ---
 
@@ -209,45 +257,107 @@ isomorphism classes of posets on a single optimal play. It is smaller than
 A000112 (unlabelled posets: `1, 2, 5, 16, 63, 318, 2045`), as expected
 since optimal play visits only a subset of all posets.
 
-`[deduction]` **Remark 3.3 (quotient is not a certificate).** Even if the
-quotient were polynomially bounded, it would not immediately give a
-polynomial certificate. The quotient identifies isomorphic posets, but the
-verifier would need to check that the quotient structure is consistent with
-some lift to labelled posets. This is a graph isomorphism problem, which is
-not known to be polynomial-time solvable (though it is in `quasi-poly`).
+`[deduction]` **Remark 3.3 (quotient certificate is poly-checkable).** A
+symmetry-quotient policy DAG **can** be verified in polynomial time in its
+own encoding **without** solving graph isomorphism. The certificate includes
+an explicit permutation `σ` (`n⌈log₂ n⌉` bits) for each outcome edge, witnessing
+that the computed successor poset maps onto the stored canonical child node.
+The verifier checks this permutation and closure in `O(n²)` per edge.
+
+The verifier performs:
+1. **Root check**: labelled root is the empty antichain.
+2. **Node check**: each non-terminal quotient node has one chosen comparison.
+3. **Edge check**: for each outcome edge, verify `σ` is a valid permutation,
+   compute the successor poset, apply `σ`, and check it equals the stored
+   canonical child.
+4. **Both outcomes**: each non-terminal node has both outgoing edges.
+5. **Acyclicity**: topological sort.
+6. **Terminal totals**: each leaf is a total order.
+
+Total: `O((|V| + |E|) · n²)` = polynomial in the certificate size. Graph
+isomorphism is **not** an obstacle for this witness model: the permutations
+are given in the certificate, not computed. The only open question is whether
+the **number** of quotient nodes is polynomially bounded (see §6).
+
+### 3.1 Quotient certificate needs explicit relabelling maps
+
+`[deduction]` **Theorem 3.4 (quotient certificate size).** If the `S_n`-quotient
+DAG is used as a certificate for `S(n) ≤ k`, each edge must carry an explicit
+**relabelling map** (a permutation `σ ∈ S_n`) specifying how the abstract
+quotient node corresponds to a concrete labelled poset. The certificate size
+is
+
+```
+|quotient_edges| × (n ⌈log₂ n⌉ + 2⌈log₂ n⌉)  bits,
+```
+
+where `n⌈log₂ n⌉` bits encode the permutation and `2⌈log₂ n⌉` bits encode the
+comparison pair.
+
+*Proof.* A quotient node is an isomorphism class `[P]` of posets. To execute
+the strategy on a concrete input, the verifier must know which concrete
+labelling of `[P]` applies at the current point in the computation. This
+requires a relabelling map `σ` from the abstract quotient node to the
+concrete poset. Without `σ`, the verifier cannot determine which pair to
+compare or which child to follow. ∎
+
+`[experiment]` **Table 3: Quotient certificate sizes for `n ≤ 6`.**
+
+```
+ n   q(all) nodes   qedges   perm bits/edge   cert bits (est.)
+  1             1        0               0               0
+  2             2        1               2               4
+  3             5        7               6              70
+  4            12       23               8             276
+  5            19       35              15             735
+  6           134      415              18            9960
+```
+
+`[experiment]` **Observation 3.5 (quotient certificate size).** The estimated
+certificate size grows from 4 bits (`n=2`) to 9960 bits (`n=6`). For unary
+encoding with informative `k = S(n)`, the input length is `L = n + k + 1 =
+Θ(n log n)`. At `n=6`, `L = 17`, and a polynomial certificate would need
+`poly(17)` bits; 9960 bits is roughly `17³`, which is not obviously polynomial.
+The growth rate is *consistent with* super-polynomial growth, but `n ≤ 6` is
+too small to distinguish `n^{Θ(log n)}` from `2^{Θ(n)}` from polynomial growth.
+No asymptotic claim is made.
+
+`[deduction]` **Remark 3.6 (no NP membership from quotient).** Even if the
+quotient certificate were polynomially bounded, it would establish only that
+`SORT-BOUND-U ∈ NP` (unary encoding), **not** `SORT-BOUND-B ∈ NP` (binary
+encoding). The binary encoding compresses `n` exponentially, so a certificate
+polynomial in `n` is exponential in `L_B = Θ(log n)`. Mahaney's theorem
+(Theorem 4.1) still blocks the NP-hardness route for the unary language.
 
 ---
 
 ## 4. Concrete no-go for naive polynomial certificates
 
-`[deduction]` **Theorem 4.1 (conditional barrier via Mahaney).** If a
-polynomial-size DAG certificate existed for `SORT-BOUND-U`, then
-`SORT-BOUND-U ∈ NP`. But `SORT-BOUND-U` is sparse (Lemma 3.1 of
-`research-encoding-consequences.md`). By Mahaney's theorem, a sparse set is
-not NP-hard under polynomial-time many-one reductions unless `P = NP`.
-Therefore:
+`[deduction]` **Theorem 4.1 (general sparse-set barrier via Mahaney).** This
+is a general fact about sparse languages, independent of any certificate
+format. If `SORT-BOUND-U` were NP-hard under polynomial-time many-one
+reductions, then `P = NP` (Mahaney's theorem, since `SORT-BOUND-U` is sparse
+by Lemma 3.1 of `research-encoding-consequences.md`).
 
-> **If** a polynomial-size DAG certificate exists for `SORT-BOUND-U`, **and**
-> `SORT-BOUND-U` is NP-hard, **then** `P = NP`.
+This barrier applies to **any** route to NP-hardness for `SORT-BOUND-U`,
+whether via DAG certificates, explicit trees, or any other witness format.
+It is **not** specific to the DAG approach. It does **not** prove that no
+polynomial DAG exists, and it does **not** prove that `SORT-BOUND-U` is not
+in NP.
 
-This is a **conditional** barrier. It does **not** prove that no polynomial
-DAG exists. It shows that the naive route to NP-hardness (exhibit a poly
-DAG, then prove NP-hardness) would imply `P = NP`, so such a proof cannot
-be routine.
-
-`[deduction]` **Theorem 4.2 (no poly DAG known for all-optimal).** The
-experiment shows `DAG(all)` grows super-polynomially for `n ≤ 6`. This is
-**evidence** (not a proof) that no polynomial-size all-optimal DAG exists.
-The growth rate `log2(DAG(all))/n ≈ 1.42, 1.87, 2.12, 2.67` for
-`n = 3,4,5,6` suggests exponential or super-exponential growth.
+`[experiment]` **Observation 4.2 (DAG(all) growth).** The experiment shows
+`DAG(all)` growing from 19 to 65551 for `n = 3,…,6`. The ratio
+`log2(DAG(all))/n` is increasing, which is *consistent with* super-polynomial
+growth, but `n ≤ 6` is too small to establish any asymptotic claim. No
+polynomial-size DAG certificate is known.
 
 `[deduction]` **Remark 4.3 (DAG approach does not claim NP membership).**
 The polynomial-in-DAG-size verifier (Theorem 1.1) does **not** establish
 `SORT-BOUND-U ∈ NP` or `SORT-BOUND-B ∈ NP`, because:
 - the DAG size is not bounded by a polynomial in the input length;
 - the verifier checks a given DAG, but does not prove DAG existence;
-- even if a poly DAG existed, Mahaney's theorem blocks the NP-hardness
-  route (Theorem 4.1).
+- even if a poly DAG existed, membership in NP would not imply hardness
+  (membership and hardness are separate questions).
 
 ---
 
@@ -267,12 +377,13 @@ The polynomial-in-DAG-size verifier (Theorem 1.1) does **not** establish
 
 Key observations:
 1. `DAG(1) = unshared(1) = 2n! − 1` for all `n ≤ 6`: a single optimal policy
-   is a tree.
-2. `DAG(all)` is much smaller than `unshared(all)` but still grows
-   super-polynomially.
+   is a tree (Theorem 2.6, Corollary 2.7).
+2. `DAG(all)` is larger than `DAG(1)` for `n ≥ 3` (more moves kept), but
+   much smaller than `unshared(all)` (hash-consing helps).
 3. The quotient by `S_n` reduces `DAG(all)` by a factor of ~500 at `n=6`,
    but the quotient itself grows (19 → 134 from `n=5` to `n=6`).
-4. `log2(DAG(all))/n` is increasing, suggesting no polynomial bound.
+4. `log2(DAG(all))/n` is increasing over `n = 3,…,6`, which is *consistent
+   with* super-polynomial growth, but no asymptotic claim is made.
 
 ---
 
@@ -280,15 +391,16 @@ Key observations:
 
 | Statement | Status |
 |---|---|
-| Verifier runs in `O(\|D\| · n² · log k)` | `[deduction]` Thm 1.1 |
+| Verifier runs in `O((\|V\|+\|E\|) · n³ + \|E\| · log k)` | `[deduction]` Thm 1.1 |
 | Single-policy DAG = tree (`2n!−1` nodes) | `[deduction]` Thm 2.1, `[experiment]` Obs 2.5 |
-| All-optimal DAG < unshared tree | `[deduction]` Thm 2.2, `[experiment]` Obs 2.4 |
-| All-optimal DAG grows super-polynomially | `[experiment]` Obs 2.4 (evidence, not proof) |
-| Quotient by S_n reduces DAG size | `[experiment]` Obs 3.1 |
-| Quotient is polynomially bounded | `[open]`; evidence suggests no |
-| Poly-size DAG certificate exists | `[open]`; evidence suggests no |
+| Distinct nodes have distinct posets (single policy) | `[deduction]` Thm 2.6, `[experiment]` Cor 2.7 |
+| Hash-consing saves zero in single policy | `[deduction]` Cor 2.7 |
+| Quotient by S_n can compress | `[experiment]` Obs 3.1 |
+| Quotient certificate is poly-checkable | `[deduction]` Remark 3.3 |
+| Quotient node count is polynomially bounded | `[open]`; evidence inconclusive |
+| Poly-size DAG certificate exists | `[open]`; none known |
 | `SORT-BOUND-U ∈ NP` via DAG | `[open]`; Thm 1.1 does not establish this |
-| `SORT-BOUND-U` NP-hard ⇒ `P = NP` | `[literature]` Mahaney (conditional) |
+| `SORT-BOUND-U` NP-hard ⇒ `P = NP` (general) | `[literature]` Mahaney |
 | `SORT-BOUND-U` sparse | `[deduction]` Lem 3.1, `research-encoding-consequences.md` |
 
 ---
@@ -296,21 +408,24 @@ Key observations:
 ## 7. Next unresolved obstacle
 
 The central question is whether the **all-optimal DAG size** is polynomially
-bounded in `n`. The experiment suggests it is not, but `n ≤ 6` is too small
-to distinguish `2^{Θ(n log n)}` from `2^{Θ(n²)}` from `n^{Θ(log n)}`. The
-next informative experiment is:
+bounded in `n`. The experiment is consistent with super-polynomial growth,
+but `n ≤ 6` is too small to distinguish `2^{Θ(n log n)}`, `2^{Θ(n²)}`,
+`n^{Θ(log n)}`, or even polynomial growth. No asymptotic claim is made.
 
-1. Compute `DAG(all)` and `quotient(all)` for `n = 7` (A001035(7) = 6129859
-   posets; feasible with the labelled DP but may take minutes).
-2. Fit the growth rate: is `log2(DAG(all))` closer to `n log n` or `n²`?
-3. If `DAG(all)` is `2^{Θ(n log n)}`, then even the all-optimal DAG is
-   super-polynomial, and the DAG certificate route is closed (conditionally,
-   via Mahaney).
-4. If `DAG(all)` is `2^{Θ(n)}`, then a polynomial-size certificate might
-   exist for a *subset* of optimal strategies (not all).
+Computing `DAG(all)` and `quotient(all)` for `n = 7` (A001035(7) = 6129859
+posets) would provide one more data point, but the labelled DP over 6 million
+posets is not automatically cheap on the target hardware (8 GB Phoebe) and
+is not prescribed here. A memory-bounded or quotient-based computation might
+be more appropriate.
 
-Either outcome is a useful, falsifiable result. The DAG approach does
-**not** claim NP membership without a size bound (Remark 4.3).
+The key open questions are:
+1. Is `DAG(all)` polynomially bounded? (Unknown; evidence is inconclusive.)
+2. Is `quotient(all)` polynomially bounded? (Unknown; evidence is inconclusive.)
+3. Does there exist *any* polynomial-size certificate for `SORT-BOUND-U`?
+   (Unknown; no such certificate is known.)
+
+The DAG approach does **not** claim NP membership without a size bound
+(Remark 4.3).
 
 ---
 

@@ -12,6 +12,10 @@ from strategy_dag_probe import (
     count_unshared_tree,
     count_unshared_tree_all_optimal,
     quotient_dag_nodes,
+    make_refined_canon,
+    extend,
+    incomparable_pairs,
+    is_total,
 )
 
 
@@ -72,6 +76,63 @@ class StrategyDAGTests(unittest.TestCase):
                 dag = StrategyDAG(n, values, keep_all_optimal=True)
                 tree = count_unshared_tree_all_optimal(n, values)
                 self.assertLess(dag.num_nodes, tree)
+
+
+class DistinctPosetsTheorem(unittest.TestCase):
+    """Theorem 2.6: distinct nodes have distinct labelled posets in a tree."""
+
+    def test_all_nodes_distinct_posets_single_policy(self):
+        for n in range(1, 7):
+            with self.subTest(n=n):
+                values = minimax_values(n)
+                dag = SinglePolicyDAG(n, values)
+                posets = list(dag.nodes.keys())
+                self.assertEqual(len(posets), len(set(posets)),
+                                 f"n={n}: duplicate posets in single-policy DAG")
+
+    def test_hash_consing_saves_zero_single_policy(self):
+        import math
+        for n in range(1, 7):
+            with self.subTest(n=n):
+                values = minimax_values(n)
+                dag = SinglePolicyDAG(n, values)
+                tree = count_unshared_tree(n, values)
+                self.assertEqual(dag.num_nodes, tree,
+                                 f"n={n}: hash-consing changed node count")
+                self.assertEqual(dag.num_nodes, 2 * math.factorial(n) - 1)
+
+
+class QuotientCertificate(unittest.TestCase):
+    """Quotient certificate size with relabelling maps."""
+
+    def test_quotient_edge_counts(self):
+        expected_qedges = {1: 0, 2: 1, 3: 7, 4: 23, 5: 35, 6: 415}
+        for n, expected in expected_qedges.items():
+            with self.subTest(n=n):
+                values = minimax_values(n)
+                canon = make_refined_canon(n)
+                empty = (0,) * n
+                seen = set()
+                qedges = [0]
+
+                def count_qedges(succ):
+                    c = canon(succ)
+                    if c in seen:
+                        return
+                    seen.add(c)
+                    if is_total(succ, n):
+                        return
+                    f_val = values[succ]
+                    for (i, j) in incomparable_pairs(succ, n):
+                        a = extend(succ, i, j)
+                        b = extend(succ, j, i)
+                        if 1 + max(values[a], values[b]) == f_val:
+                            qedges[0] += 1
+                            count_qedges(a)
+                            count_qedges(b)
+
+                count_qedges(empty)
+                self.assertEqual(qedges[0], expected)
 
 
 if __name__ == "__main__":
