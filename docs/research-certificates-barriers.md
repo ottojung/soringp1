@@ -186,11 +186,15 @@ not `PSPACE`.
 
 **Proof sketch.** For total length `≤ m` the unary encoding admits at most
 `O(m²)` pairs `(n,k)`, so `SORT-BOUND-U` is sparse. For the binary
-encoding, for every `n < 2^{m/2}` and every `k` in the informative window
-`[⌈log₂ n!⌉, n log₂ n]` (whose size is `Θ(n)`), the string
-`bin(n)#bin(k)` has length `≤ m`; hence the number of strings of length
-`≤ m` is at least `Σ_{n < 2^{m/2}} Θ(n) = Θ(2^m)`, which is not polynomial
-in `m`. ∎
+encoding, put `U(n) = n⌈log₂(n+1)⌉`, a valid merge-sort upper bound on
+`S(n)`. For large `m`, choose each `n` in
+`[2^{m/4-1}, 2^{m/4}]` (round endpoints to integers) and each `k` in
+`[U(n), 2U(n)]`. **Every one of these strings belongs to the language**
+because `k ≥ U(n) ≥ S(n)`. Their encodings have total length
+`≤ m/4 + O(1) + m/4 + O(log m) < m` for sufficiently large `m`.
+There are `2^{Ω(m)}` such pairs, so `SORT-BOUND-B` is not sparse.
+Unlike a count of `k` in the *uncertain* window between the information
+bound and the sorting upper bound, this counts guaranteed **yes** inputs. ∎
 
 This is the sharpest *difference* between the two encodings: the binary
 threshold language is a genuine dense language and is not blocked by the
@@ -198,31 +202,46 @@ sparse-set barrier.
 
 ### Claim C (no succinct tree certificate; size of explicit witnesses). `[deduction]` + `[experiment]`
 
-> An explicit correct sorting tree for `n` keys has exactly `n!` leaves
-> (in an optimal tree, no leaf is redundant) and `2·n! − 1` nodes. Thus an
-> explicit tree witness has size `2^{Θ(n log n)}`:
-> - unary: `n! = 2^{Θ(m log m)}`, **super-polynomial** in `m`;
-> - binary: `n! = 2^{Θ(2^m · m)}`, **doubly exponential** in `m`.
+> Every correct comparison tree for `n` keys must distinguish all `n!`
+> permutations, so it has **at least** `n!` distinct *reachable* leaves
+> and at least `2·n! − 1` nodes (comparison trees are full binary trees).
+> A non-reduced tree may have more leaves, including unreachable ones.
+> Pruning comparisons with only one feasible outcome produces a reduced
+> correct tree with exactly `n!` leaves and `2·n! − 1` nodes.
+> Thus an explicit tree witness need not be polynomial-sized:
+> - on informative **unary** inputs, with `S(n) ≤ k ≤ n⌈log₂(n+1)⌉`,
+>   the input length is `m=n+k+1=Θ(n log n)`, so `n!=2^{Θ(m)}`;
+> - on informative **binary** inputs, `m=Θ(log n)`, so
+>   `n!=2^{2^{Θ(m)}}`.
+> For trivially large `k`, acceptance needs no explicit tree.
 >
-> Verifying a given explicit tree is polynomial **in the size of the
-> tree**: for each root-to-leaf path, compute the transitive closure of the
-> comparisons on that path and check that it is total. Hence the "obvious"
-> nondeterministic witness yields only `NEXP` (unary) / `N2EXP` (binary),
-> both dominated by Claim A, and **not** `NP`.
+> The standard full-tree certificate can be verified in time polynomial
+> **in its own size**, not polynomial in the original input length.
+> It therefore yields at most a naive `NEXP` (unary) /
+> `N2EXP` (binary) verifier, not an `NP` proof. This does **not**
+> preclude an entirely different succinct certificate.
 
-**Proof sketch.** Correctness of a tree is equivalent to: every leaf's path
-poset is total. (If a leaf's path does not determine the order, two
-permutations reach it and at least one is mis-sorted.) Each path has length
-`≤ k` and closure costs `O(n²)`; there are `O(nodes)` paths. ∎
-The leaf count `n!` is exact because an optimal tree has no leaf reached by
-zero or by `≥2` permutations; the experiment confirms `nodes = 2·n! − 1`
-for `n ≤ 6`.
+**Proof sketch.** A deterministic tree sends each input permutation to
+exactly one reached leaf. Distinct permutations cannot share a reached
+leaf in a correct sorting tree, because the same leaf output cannot sort
+both, so at least `n!` leaves are reached. For a full binary tree,
+`nodes = 2·leaves − 1`. For a *reduced* tree, at each comparison
+node both outcomes are possible under the path constraints; whenever
+only one outcome is feasible, remove that node and retain the feasible
+subtree. This does not increase the height or compromise correctness,
+and after pruning every leaf is reached by exactly one permutation,
+so there are exactly `n!` leaves. For verification, check feasibility
+of each path's comparisons (acyclicity) and, on each feasible path, that
+their transitive closure determines a unique total order and that the
+leaf's output is correct. This is polynomial in `n` and the explicit
+tree size. The experiment confirms the *reduced optimal* count for
+`n ≤ 6`; it does not claim all possible trees have that size. ∎
 
 **Candidate succinct forms, and their status:**
 
 | Candidate witness for `S(n) ≤ k` | Checkability | Size | Status |
 |---|---|---|---|
-| explicit adaptive tree | poly in tree size | `2n!−1` | not poly; `[deduction]` |
+| explicit adaptive tree | poly in tree size | at least `2n!−1`; achievable after pruning | not polynomial; `[deduction]` |
 | DAG / branching-program compression | poly in DAG size | `≥ #` distinct reachable posets | worst case `2^{Θ(n²)}`; no poly bound `[open]` |
 | program computing the strategy | not known poly (universal over `n!` inputs) | poly possible | `[open]` |
 | inductive invariant / potential | not known | ? | `[open]`; information bound is the only known potential and it is not tight |
@@ -309,7 +328,7 @@ only calibrates witness sizes and the DP state space.
 | `SORT-BOUND-U ∈ PSPACE`, `SORT-BOUND-B ∈ EXPSPACE` | `[deduction]` Claim A |
 | `SORT-BOUND-U` sparse; not many-one NP-hard unless `P=NP` | `[literature]`+`[deduction]` Claim B |
 | `SORT-BOUND-B` not sparse; Mahaney inapplicable | `[deduction]` Claim B |
-| explicit tree witness has `2n!−1` nodes; verification poly in tree size | `[deduction]`+`[experiment]` Claim C |
+| reduced explicit tree has `2n!−1` nodes; general tree may be larger | `[deduction]`+`[experiment]` Claim C |
 | general decision-tree/network hardness does not transfer | `[deduction]` Claim D |
 | exact `S(n)` known for `n ≤ 22`; open for `n ≥ 23`; asymptotics open | `[literature]` |
 | `SORT-BOUND-U ∈ P` (i.e. `S` poly-time computable) | `[open]`; no poly algorithm known, widely doubted |
@@ -349,7 +368,7 @@ canonical object* describing optimal comparison play:
 
 1. **Upper bound.** We need a polynomial-size object from which the
    existence of a height-`k` tree follows, checkable in polynomial time.
-   The only known such object is the tree itself, of size `2n!−1`. A
+   The standard known witness is a reduced comparison tree of size `2n!−1`. A
    plausible route is a *canonical branching program / DAG* whose states
    are reachable posets; its worst-case size is the number of labelled
    posets (`2^{Θ(n²)}`), and it is **open** whether optimal play confines
