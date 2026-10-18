@@ -94,8 +94,28 @@ results. A useful negative result counts as progress.
 
 Keep the existing kernel-checked foundation. A new formalization should be
 motivated by an independently justified, substantial result or an immediate
-model-fidelity need, with a complete statement and an explicit explanation
-of what verification will add. The missing minimax tree height proof may get
+model-fidelity need, with a complete statement and an explicit explanation of
+what verification will add. The missing minimax tree height proof may get
 one bounded attempt if its solution is straightforward; otherwise document
 the obstruction and redirect effort rather than making it an unbounded
 proof-engineering project.
+
+## Deliverables produced (2026-10-17, exploration-first)
+
+Three fronts investigated; research notes with companion programs (see the
+README for the summary):
+
+- **Structural compression** — `docs/research-state-compression.md`,
+  `scripts/state_compression.py`. Reachable states are the labelled posets
+  (A001035); the `S_n` quotient is exact and recomputes `S(8)=16`, `S(9)=19`.
+- **Certificates and barriers** — `docs/research-certificates-barriers.md`.
+  `SORT-BOUND-U ∈ PSPACE`, `SORT-BOUND-B ∈ EXPSPACE`; sparsity barrier is
+  encoding-specific; no succinct tree certificate (`2·n! − 1` nodes).
+- **Information-bound non-tightness** — `docs/research-n12-nontightness.md`,
+  `scripts/nontightness_experiments.py`. No reusable scalar invariant; the
+  obstruction is structural/global (smallest local failure at `e = 8`, `n = 5`).
+
+These are hypotheses, falsifications and literature audits — not Lean theorems
+and not a complexity classification. The minimax evaluator is now exact and
+both-sided (A24: `S n = adv univ`); the still-open item is the complexity
+classification of `SORT-BOUND-U`/`SORT-BOUND-B`, not the evaluator.
