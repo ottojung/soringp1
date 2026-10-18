@@ -14,12 +14,13 @@ lower bounds are possible. This is a research goal, **not a claimed theorem**.
 Complexity classes require a representation of the input. We study both:
 
 - **Unary parameterization**: compute \(S(n)\) on input \(1^n\), returning a
-  binary integer. Here a dynamic program over partial orders gives a
-  \(2^{O(n^2)}\)-time upper bound, placing the associated threshold language
-  in **EXPTIME**.
+  binary integer. A dynamic program over partial orders gives a
+  \(2^{O(n^2)}\)-time upper bound (**EXPTIME**); a tighter game/ATM
+  formulation improves this to **PSPACE** (see the research notes below).
 - **Binary parameterization**: compute \(S(n)\) on the binary representation
-  of \(n\). The same algorithm gives a **double-exponential** upper bound
-  in the bit length; an EXPTIME bound does *not* follow.
+  of \(n\). The dynamic-program algorithm gives a **double-exponential**
+  upper bound in the bit length; the game/ATM formulation improves this to
+  **EXPSPACE**.
 
 The canonical decision language for discussing P, NP, and EXPTIME is
 \(\mathrm{SORT\text{-}BOUND}_{\mathrm{unary}}
@@ -44,6 +45,27 @@ substantive discovery or an essential correctness/cost-model bridge.
 - [Lean formalization boundary](docs/formalization-plan.md)
 - [Research and evidence workflow](AGENTS.md)
 - [Lean model](SoringP1/Model.lean)
+
+### Research deliverables (exploration-first, 2026-10-17)
+
+These are research notes (not Lean theorems), each with a companion program:
+
+- [Structural compression of the minimax state space](docs/research-state-compression.md)
+  — `scripts/state_compression.py`. Reachable states are exactly the labelled
+  posets (OEIS A001035); the `S_n` symmetry quotient is exact and recomputes
+  `S(8)=16`, `S(9)=19`; falsifies linear-extension-count and balanced-greedy
+  compression.
+- [Succinct certificates and complexity barriers](docs/research-certificates-barriers.md).
+  Improves the upper bounds to `SORT-BOUND-U ∈ PSPACE`, `SORT-BOUND-B ∈ EXPSPACE`
+  (game/ATM + `APTIME = PSPACE`); the unary language is sparse (Mahaney), the
+  binary one is not; the explicit tree witness has `2·n! − 1` nodes, so no `NP`.
+- [Why the information bound is not tight at n = 12](docs/research-n12-nontightness.md)
+  — `scripts/nontightness_experiments.py`. Audits Wells/Peczarski/Stober–Weiß;
+  the efficiency pruning is equivalent to leaf counting; five scalar invariants
+  are falsified with smallest witnesses (same-`e` at `n = 5`, non-monotonicity
+  at `n = 6`, merge family `Merge(2,4)`).
+
+The reference minimax evaluator is `scripts/evaluate.py` (exact for small `n`).
 
 The [development contract](AGENTS.md) makes this priority explicit for agents.
 The outstanding minimax correspondence may be finished if straightforward;
