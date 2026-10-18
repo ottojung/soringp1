@@ -58,7 +58,9 @@ These are research notes (not Lean theorems), each with a companion program:
 - [Succinct certificates and complexity barriers](docs/research-certificates-barriers.md).
   Improves the upper bounds to `SORT-BOUND-U ∈ PSPACE`, `SORT-BOUND-B ∈ EXPSPACE`
   (game/ATM + `APTIME = PSPACE`); the unary language is sparse (Mahaney), the
-  binary one is not; the explicit tree witness has `2·n! − 1` nodes, so no `NP`.
+  binary one is not; a **reduced** explicit sorting-tree witness has
+  `2·n! − 1` nodes and is not polynomial-sized in the input. This does
+  **not** rule out a different polynomial-size NP certificate.
 - [Why the information bound is not tight at n = 12](docs/research-n12-nontightness.md)
   — `scripts/nontightness_experiments.py`. Audits Wells/Peczarski/Stober–Weiß;
   the efficiency pruning is equivalent to leaf counting; five scalar invariants
@@ -68,8 +70,9 @@ These are research notes (not Lean theorems), each with a companion program:
 The reference minimax evaluator is `scripts/evaluate.py` (exact for small `n`).
 
 The [development contract](AGENTS.md) makes this priority explicit for agents.
-The outstanding minimax correspondence may be finished if straightforward;
-otherwise document the Lean blocker and redirect effort toward research.
+The minimax correspondence `S_eq_adv_univ` is now kernel-checked (A24).
+The remaining open problem is the uniform complexity of evaluating it;
+further routine Lean milestones are not the priority.
 
 ## Build
 

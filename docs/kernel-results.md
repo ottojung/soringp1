@@ -96,11 +96,13 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
 - `adv_eq_zero_iff (S) : adv S = 0 ↔ S.card ≤ 1`.
 - `bestPair S` — an optimal comparison pair (argmin of the minimax cost), and
   `bestPair_le`; `minimaxTree S` — the minimax sorting tree (compare the optimal
-  pair, recurse); `minimaxTree_sorts : Sorts S (minimaxTree S)`. The height half
-  of the specification (`height (minimaxTree S) ≤ adv S`) is **not yet proven**:
-  its natural proof hits a definitional-equality/whnf loop unfolding the
-  recursive `adv` (e.g. in `Finset.le_min'`), which does not terminate; the fix
-  requires restructuring `adv` (e.g. an opaque `WellFounded.fix` wrapper).
+  pair, recurse); `minimaxTree_sorts : Sorts S (minimaxTree S)`.
+- **A24 complete**: `minimaxTree_height (S) : height (minimaxTree S) ≤ adv S`;
+  `minimaxTree_spec` combines height and correctness;
+  `hasBudget_adv_univ`, `S_le_adv_univ` yield the upper half.
+- **`S_eq_adv_univ (n) : S n = adv univ`** — the exact minimax characterization,
+  kernel-checked and CI-verified (A24, commit `379c4a14`). This is a
+  mathematical equivalence, **not** a Turing-machine time bound.
 
 ## Open fronts and active research mode (2026-10-17)
 
@@ -109,22 +111,16 @@ paper-and-computation exploration.** This inventory records proofs, not a
 queue of mandatory next theorems. See `AGENTS.md`,
 `docs/exploration-agenda.md`, and `docs/formalization-plan.md`.
 
-1. **General minimax correspondence:** `adv univ ≤ S n` is proved; a
-   correct minimax tree is constructed, but the missing height inequality
-   `height (minimaxTree S) ≤ adv S` blocks the reverse bound. The current
-   formulation of `adv` triggers recursive unfolding/whnf trouble when
-   proving the height specification. Attempt a small, direct repair only;
-   otherwise record the obstacle and stop this proof-engineering workstream.
-2. **Machine-time complexity bridge:** the `2^{O(n²)}` partial-order dynamic
+1. **Machine-time complexity bridge:** the `2^{O(n²)}` partial-order dynamic
    programming argument is an **informal algorithm sketch**, not a
    kernel-checked uniform Turing-machine cost bound. Unary and binary
    representations must be distinguished. A proof of termination of `adv`
    is not a machine-time theorem.
-3. **Structural understanding:** search for better exact algorithms and
+2. **Structural understanding:** search for better exact algorithms and
    explain obstructions such as `S(12)=30 > ceil(log₂(12!))=29`.
    Known values like `S(7)=13` and `S(8)=16` belong in the literature
    baseline, **not** a default Lean milestone queue.
-4. **Complexity-class classification:** no P, NP or unconditional separation
+3. **Complexity-class classification:** no P, NP or unconditional separation
    theorem is established. Certificates, uniform computation and reduction
    barriers require independent investigation.
 
