@@ -58,11 +58,11 @@ be distinguished from the baseline's polynomial space.
 | method | space | preserves poly-space? |
 |---|---|---|
 | reference `can_sort` (baseline) | `O(d · n²)` bits (stack only) | yes |
-| `ext='enum'` (`e_exceeds`, capped DFS enumeration) | `O(n²)` bits (ideal stack + counter) | **yes** |
-| `ext='width'` (`width!` surrogate) | `O(n)` (subset scan) | yes |
+| `ext='enum'` (`e_exceeds`, capped DFS enumeration) | `O(n² log n + d)` bits (ideal stack + counter) | **yes** |
+| `ext='width'` (`width!` surrogate) | polynomial (subset scan) | yes |
 | `ext='exact'` (`linear_extensions`, subset/downset DP) | `O(2^n)` ideal counts (lru_cache) | **no** |
-| `hi_base` (`e_at_most(P, 7)`, enumerate ≤ 8) | `O(n²)` bits | **yes** |
-| `orbits` (`Aut(P)`, `O(n!)` per node) | `O(n² · n!)` transient | yes, but time-heavy |
+| `hi_base` (`e_at_most(P, 7)`, enumerate ≤ 8) | `O(n² log n)` bits | **yes** |
+| `orbits` (`Aut(P)`, enumerate `n!` permutations) | `O(n! · n log n)` bits for materialized automorphisms | **no** in current prototype |
 
 `[deduction]` `e_exceeds(succ, n, cap)` decides `e(P) > cap` by a depth-first
 enumeration of linear extensions that stops at `cap+1` of them. It keeps only the
@@ -214,8 +214,11 @@ exponent:
 * The worst case of `CanSort` is a *True* probe at `d = S(n)`, or any instance
   with `e(P) ≤ 2^d` but `F(P) > d`. The extension cutoff does not touch these
   (it only fires when `e(P) > 2^d`), so the worst-case node count is unchanged.
-* The poly-space property is preserved by `ext='enum'` / `hi_base` / `orbits`, so
-  the space bound is not regressed — but no new asymptotic space claim is made.
+* The poly-space property is preserved by `ext='enum'`, `ext='width'` and
+  `hi_base` **without** `orbits`. The current optional orbit routine stores
+  all automorphisms (`O(n!·n log n)` bits), **losing** that guarantee; a
+  streaming orbit implementation could retain polynomial space but is not
+  implemented or benchmarked here. No new asymptotic space claim is made.
 
 **The cutoff is strong exactly where the information bound is tight, and weak
 exactly at the known obstruction `[deduction]`.** For `n ≤ 11`,
