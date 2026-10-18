@@ -70,7 +70,8 @@ otherwise.
 **Claim (`[deduction]`).**
 
 ```
-F(P) ≥ info(P) + Σ_i delta_i .
+F(P) ≥ Σ_i ceil(log2 e(P_i)) + Σ_i delta_i
+     ≥ info(P) + Σ_i delta_i .
 ```
 
 *Proof.*
@@ -91,8 +92,10 @@ F(P) ≥ info(P) + Σ_i delta_i .
    ```
    using `ceil(log2 x) + ceil(log2 y) ≥ ceil(log2(xy))`. ∎
 
-**Pruning rule.** In a minimax search with remaining budget `d`, a state `P`
-can be pruned when `info(P) + Σ_i delta_i > d`. This is a valid lower bound and
+**Pruning rule.** In a minimax search with remaining budget `d`, prune if
+`Σ_i info(P_i) + Σ_i delta_i > d`. This is at least as strong as the earlier
+global-information formula `info(P)+Σ_i delta_i`. Crucially, even when every
+`delta_i = 0`, adding the factor-wise ceilings can beat the global ceiling. This is a valid lower bound and
 is the candidate rule checked here. It requires computing `e(P)` and the
 series decomposition; its practical value is untested.
 
@@ -113,6 +116,28 @@ incomparable.
 Exhaustive enumeration for `n ≤ 5` has **no** strict witness (4474 posets, 0
 failures, 0 strict). On `n = 6` the 720 strict witnesses are exactly the
 relabelings of `Merge(2, 4)` (`[experiment]`).
+
+## 4a. Rounding alone can yield a strict bound
+
+**An additional `n=7` witness (`[deduction]` + `[experiment]`).**
+Take `A = Merge(2,1)`, the disjoint union of a 2-chain and an isolated key.
+It has `e(A)=3` and `F(A)=2`. Let `B` be the four-key poset with successor
+bitmasks `(2,0,0,6)`, for which the reference evaluator verifies
+`e(B)=5` and `F(B)=3`. Then `P=A ⊕ B` has
+
+```
+ e(P)=15,  info(P)=ceil(log2 15)=4,
+ block-local bound=ceil(log2 3)+ceil(log2 5)=2+3=5,
+ F(P)=F(A)+F(B)=2+3=5.
+```
+
+Neither factor requires a positive certified merge gap. The improvement
+comes entirely from taking the ceilings *before* multiplying the extension
+counts. This is a structural lower-bound strengthening, not a faster
+algorithm for arbitrary `S(n)`; computing each `e(P_i)` may itself cost
+exponential time (although it uses smaller blocks than computing `e(P)`
+directly). The main `n=6` `Merge(2,4)` witness remains the smallest
+strict example examined in this project.
 
 ## 5. Experimental results
 

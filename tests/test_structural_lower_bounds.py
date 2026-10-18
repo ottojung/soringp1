@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from structural_lower_bounds import (  # noqa: E402
+    analyze,
     all_posets,
     ceil_log2,
     chain,
@@ -101,6 +102,19 @@ class TheoremB(unittest.TestCase):
         self.assertEqual(w["bound"], 5)
         self.assertEqual(w["F"], 5)
         self.assertGreater(w["bound"], w["info"])
+
+    def test_factor_local_rounding_witness_n7(self) -> None:
+        # The sum of two local ceilings can exceed the global ceiling.
+        a = chains_union((2, 1))
+        b = (2, 0, 0, 6)
+        p = ordinal_sum(a, b)
+        q = analyze(p)
+        self.assertEqual(q["e"], 15)
+        self.assertEqual(q["info"], 4)
+        self.assertEqual(q["block_info_sum"], 5)
+        self.assertEqual(q["total_delta"], 0)
+        self.assertEqual(q["bound"], 5)
+        self.assertEqual(q["F"], 5)
 
     def test_targeted_n6_witnesses(self) -> None:
         by_name = {row["name"]: row for row in targeted()}

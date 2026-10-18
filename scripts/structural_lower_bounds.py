@@ -28,7 +28,7 @@ The two mathematical contents checked here:
 * Theorem B (merge-factor compositional lower bound): if the ordinal-sum
   (series) decomposition of ``P`` contains certified non-tight merge factors
   ``Merge(a_i, b_i)`` with gaps ``delta_i > 0``, then
-  ``F(P) >= ceil(log2 e(P)) + sum delta_i``, strictly stronger than the
+  ``F(P) >= sum_i ceil(log2 e(P_i)) + sum_i delta_i``, strictly stronger than the
   information bound.  Checked for every poset on ``n <= 5`` (no strict
   witness occurs below ``n = 6``); the smallest strict witness is
   ``Merge(2, 4)`` on ``n = 6``, where ``e = 15``, ``ceil(log2 15) = 4`` and
@@ -252,8 +252,8 @@ def is_clique(succ: tuple[int, ...], comp: list[int]) -> bool:
 
 
 def is_chain(succ: tuple[int, ...]) -> bool:
-    """True iff the poset is a total order (single comparability clique)."""
-    return len(comparability_components(succ)) == 1
+    """True iff every distinct pair is comparable (a total order)."""
+    return not incomparable_pairs(succ)
 
 
 def merge_factor(succ: tuple[int, ...]) -> tuple[int, int] | None:
@@ -310,11 +310,13 @@ def analyze(succ: tuple[int, ...]) -> dict:
     info = ceil_log2(e)
     factors: list[dict] = []
     total_delta = 0
+    block_info_sum = 0
     for block in ordered_blocks(succ):
         if len(block) <= 1:
             factors.append({"kind": "singleton", "size": 1})
             continue
         sub = induced(succ, block)
+        block_info_sum += ceil_log2(linear_extensions(sub))
         mf = merge_factor(sub)
         if mf is not None:
             a, b = mf
@@ -345,7 +347,8 @@ def analyze(succ: tuple[int, ...]) -> dict:
         "e": e,
         "info": info,
         "total_delta": total_delta,
-        "bound": info + total_delta,
+        "block_info_sum": block_info_sum,
+        "bound": block_info_sum + total_delta,
         "factors": factors,
         "F": minimax(succ),
     }
