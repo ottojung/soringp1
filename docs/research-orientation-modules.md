@@ -99,20 +99,22 @@ is expected. The point is that `F` behaves differently.
 **Theorem 3.** If `S` is an interval module of `P` (every outside key is
 comparable to `S`), then `F(σ_S(P)) = F(P)`.
 
-*Proof.* Strong induction on the number `c(P)` of incomparable pairs. If `P`
-is total then so is `σ_S(P)` and both values are `0`. Otherwise every
-incomparable pair lies **inside** `S`: if `x ∈ S`, `y ∉ S` then `x,y` are
-comparable by hypothesis, so no move crosses `S`. Fix a move `{x,y} ⊆ S`.
-Adding `x < y` keeps `S` a module and keeps every outside key comparable to
-`S`, and `c` strictly decreases; so the induction hypothesis applies to
-`P+x<y`. Since reversing `S` commutes with adding the internal relation (with
-the orientation swapped), `σ_S(P+x<y) = σ_S(P)+y<x`, and likewise
-`σ_S(P+y<x) = σ_S(P)+x<y`. Hence
+*Proof.* An interval module `S` divides the outside keys into `A`, those
+below every member of `S`, and `B`, those above every member of `S`.
+There are no cross-incomparabilities. Moreover transitivity forces every
+element of `A` below every element of `B` (when `S` is nonempty).
+Consequently `P = P|_A ⊕ P|_S ⊕ P|_B` is an **ordinal sum**. Reversal
+replaces only the middle factor `P|_S` by its order dual. The exact
+ordinal-sum additivity theorem, proved in `docs/research-series-decomposition.md`,
+and the exact order-duality invariance of `F`, proved in
+`docs/research-compression-next.md`, give
 
-    max(F(P+x<y), F(P+y<x)) = max(F(σ_S(P)+x<y), F(σ_S(P)+y<x)).
+    F(σ_S(P)) = F(P|_A) + F((P|_S)^op) + F(P|_B)
+              = F(P|_A) + F(P|_S) + F(P|_B) = F(P).
 
-The move sets of `P` and `σ_S(P)` coincide (comparability is preserved), so the
-outer minima coincide and the recurrence gives `F(σ_S(P)) = F(P)`. ∎
+This also covers incomparable pairs entirely *outside* `S`, which a
+recurrence argument must not omit. Empty outside factors have cost zero;
+if `S` is all of `P`, the result reduces to order-duality invariance. ∎
 
 **Corollary 4.** If `P/S` is a chain (series quotient) then `σ_S` preserves
 `F`. ∎ (A chain quotient is an interval module.)
@@ -195,7 +197,7 @@ reversal`), with exactness of `F` on classes:
 
 `iso+dual` is exact (duality theorem). Module reversal gives the strongest
 compression but is **not sound**; MDT up to reversal is in between and is also
-**not sound**. No module-based quotient is exact at `n = 7`.
+**not sound**. Quotienting by **arbitrary** module reversals is not exact at `n = 7`; the restricted interval-module reversal quotient is sound by Theorem 3.
 
 ## 6. Falsifications and the role of the hypotheses
 
