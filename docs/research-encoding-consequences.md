@@ -382,18 +382,20 @@ barrier, not a hardness proof.
 ### 5.1 Size of an explicit tree
 
 `[deduction]` **Lemma 5.1.** Every correct comparison tree sorting `n` keys has
-**at least** `n!` leaves (the `n!` permutations reach pairwise distinct leaves).
-An **optimal** tree has exactly `n!` leaves and `2n! − 1` nodes; an arbitrary
-correct tree may have additional unreachable leaves.
+at least `n!` *reachable* leaves (the `n!` permutations reach pairwise distinct
+leaves). There **exists** an optimal (height `S(n)`) tree with exactly `n!`
+reachable leaves and `2n! − 1` nodes; an arbitrary optimal-height tree may
+contain additional unreachable leaves without increasing the maximum height.
 
 *Proof.* A leaf is reached by the permutations consistent with its comparison
 transcript. Correctness forces each leaf to be reached by at most one
 permutation (two distinct permutations reaching the same leaf could not both be
 sorted correctly by that leaf). Every permutation must reach some leaf, so the
 `n!` permutations occupy `n!` pairwise distinct leaves; hence at least `n!`
-leaves. An optimal tree cannot contain an unreachable leaf (such a branch can
-be pruned without increasing the height), so it has exactly `n!` leaves, and a
-full binary tree with `n!` leaves has `2n! − 1` nodes. ∎
+reachable leaves. To obtain a reduced optimal tree, take any optimal tree and
+prune its unreachable branches; pruning cannot increase the maximum height, so
+the result is still optimal and now has exactly the `n!` reachable leaves and no
+unreachable leaves. A full binary tree with `n!` leaves has `2n! − 1` nodes. ∎
 
 `[experiment]` The repository's `scripts/evaluate.py`/`generate_optimal_tree.py`
 and the Executive draft confirm `nodes = 2n! − 1` and `leaves = n!` for the
@@ -405,22 +407,27 @@ optimal trees they construct, `n ≤ 6`.
 polynomial-size certificate for `S(n) ≤ k`.
 
 *Proof.* By Lemma 5.1 any correct tree has at least `n!` leaves, hence at least
-`n!` nodes (and an optimal one has `2n! − 1` nodes).
-- **Unary:** in the informative window `L_U = Θ(n)`, and
-  `n! = 2^{Θ(n log n)} = 2^{Θ(L_U log L_U)}`, which is super-polynomial in
-  `L_U`.
+`n!` nodes (and a reduced optimal one has `2n! − 1` nodes).
+- **Unary:** for informative instances `k = S(n) = Θ(n log n)`, so
+  `L_U = n + k + 1 = Θ(n log n)`, and `n! = 2^{Θ(n log n)} = 2^{Θ(L_U)}`, which
+  is super-polynomial in `L_U`.
 - **Binary:** `n = 2^{Θ(L_B)}`, so `n! = 2^{Θ(2^{L_B}·L_B)}`, doubly
   exponential in `L_B`.
 
-Verifying an explicit tree is polynomial *in the size of the tree* (for each
-root-to-leaf path, compute the transitive closure of its comparisons and check
-totality; `O(n²)` per path). Since the tree itself is exponential (unary) or
-doubly exponential (binary) in the input length, the natural nondeterministic
-verifier runs in `NEXP` (unary) / `N2EXP` (binary), **not** `NP`. ∎
+Verifying an explicit tree is polynomial *in the size of the tree*: check the
+height bound, then for each root-to-leaf path compute the transitive closure of
+its comparisons; an inconsistent path has an unreachable leaf (ignored), while a
+total path has exactly one linear extension and the leaf output must match it.
+`O(n²)` per path. Since the tree itself is exponential (unary) or doubly
+exponential (binary) in the input length, the natural nondeterministic verifier
+runs in `NEXP` (unary) / `N2EXP` (binary), **not** `NP`. ∎
 
 `[deduction]` **Remark 5.3.** The upper bounds of §2 (`EXPTIME` unary,
 `2-EXPTIME` binary) and the stronger `PSPACE`/`EXPSPACE` game bounds dominate
 these nondeterministic bounds, so the tree witness yields no new membership.
+Note that the unary witness size is `2^{Θ(L_U)}`, not `2^{Θ(L_U log L_U)}`: for
+informative instances `L_U = Θ(n log n)` and `log₂(n!) = Θ(n log n)`. The
+super-polynomial conclusion is unchanged.
 
 ### 5.3 Candidate short certificates
 
@@ -558,7 +565,7 @@ No finite computation here proves a complexity separation.
 | `SORT-BOUND-U` not many-one NP-hard unless `P=NP` | `[literature]` Mahaney |
 | `SORT-BOUND-U` not Turing NP-hard unless `PH=Σ₂P` | `[literature]` Karp–Lipton |
 | `SORT-BOUND-B` not sparse; Mahaney inapplicable | `[deduction]` Thm 4.6 |
-| explicit tree witness has `≥ n!` leaves; not `NP` | `[deduction]` Thm 5.2 |
+| explicit tree witness has `≥ n!` leaves (`2^{Θ(L_U)}` unary); not `NP` | `[deduction]` Thm 5.2 |
 | `SORT-BOUND-U`/`-B ∈ NP` or `coNP` | `[open]` |
 | `SORT-BOUND-U`/`-B` hard for `NP`/`PSPACE`/`EXPSPACE` | `[open]` |
 | poly-size certificate for `S(n) ≤ k` or `> k` | `[open]` Thm 5.4 |
