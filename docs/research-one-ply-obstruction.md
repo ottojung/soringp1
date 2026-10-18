@@ -108,6 +108,12 @@ it stays within the existing `2^{O(n log^2 n)}` worst case of
 `docs/research-budgeted-dfs.md`, but the constant-factor overhead is real and is
 a pruning heuristic, not a faster exact algorithm. No EXPTIME/P-class claim.
 
+**Implementation status.** The polynomial-space capped-enumeration prune
+described above is a proved algorithmic possibility, **not** implemented in
+this probe. The small-instance reference code uses an `O(2^n)`-space
+downset DP to compute exact `e(P)`, so its experiments must not be mistaken
+for a measured polynomial-space prune.
+
 ## 3. The smallest strict witness
 
 `[definition]` A poset is a **strict witness** if `L1(P) > L0(P)`.
@@ -142,10 +148,29 @@ is the one-ply mechanism, distinct from the merge-factor gap `Merge(2, 4)`
 not a disjoint union of chains and is explained by the *pairwise split structure*
 of the extension set, not by merge cost.
 
-`[conjecture]` The gap `L1 - L0` is `0` for `n <= 4` and `>= 1` for all `n >= 5`;
-i.e. the one-ply bound is exact below `n = 5` and first strictly stronger at
-`n = 5`. The `n <= 4` half is `[experiment]`; the `n >= 5` half is open and is
-**not** settled by the bounded check here.
+**Proposition 3 (strict witnesses at every size `n ≥ 5`).** `[deduction]`
+For every `t ≥ 0`, let `P_t = W ⊕ C_t`, the ordinal sum of the witness
+`W` and a totally ordered `t`-key suffix. Then
+
+```
+e(P_t) = 8,   L0(P_t) = 3,   L1(P_t) = 4,   F(P_t) = 4.
+```
+
+*Proof.* Every original key is known to precede every suffix key; all suffix
+keys are mutually comparable. Thus all still-incomparable pairs lie inside
+`W`. Each linear extension of `W` has exactly one extension to `P_t`
+(append the fixed chain), giving `e(P_t)=e(W)`. A first comparison on
+an incomparable pair splits `P_t` into precisely the ordinal sums of the
+corresponding two children of `W` with `C_t`; their linear-extension counts
+are identical to those of the children of `W`. Therefore `L1(P_t)=L1(W)`,
+and `L0` is unchanged as well. Finally exact ordinal-sum additivity
+(`docs/research-series-decomposition.md`) gives `F(P_t)=F(W)+F(C_t)=4`.
+So `P_t` witnesses a strict `L1-L0=1` gap on `5+t` keys. ∎
+
+Exhaustive `n≤4` evidence establishes that `n=5` is the *smallest*
+size of a strict witness, and Proposition 3 establishes that a strict
+witness **exists** at every greater size (not that every poset is strict).
+The companion script constructs these suffix-extended examples.
 
 ## 4. Complexity caveats (explicit)
 

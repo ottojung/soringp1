@@ -147,6 +147,22 @@ def L1(succ: tuple[int, ...]) -> int:
 N5_WITNESS = (26, 0, 10, 0, 8)
 
 
+def append_total_suffix(succ: tuple[int, ...], t: int) -> tuple[int, ...]:
+    """Ordinal-sum the given poset with a new t-element totally ordered suffix.
+
+    Every original key precedes every suffix key. This is a fast constructive
+    infinite family of strict one-ply witnesses when applied to N5_WITNESS.
+    """
+    if t < 0:
+        raise ValueError("t must be nonnegative")
+    n = len(succ)
+    old_to_new = ((1 << t) - 1) << n
+    first = tuple(mask | old_to_new for mask in succ)
+    tail = tuple(sum(1 << j for j in range(n + i + 1, n + t))
+                 for i in range(t))
+    return first + tail
+
+
 def witness_splits(succ: tuple[int, ...]) -> list[tuple[int, int]]:
     """Extension counts ``(e(P+i<j), e(P+j<i))`` for each incomparable pair."""
     return [

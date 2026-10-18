@@ -19,6 +19,7 @@ from one_ply_obstruction import (  # noqa: E402
     L0,
     L1,
     N5_WITNESS,
+    append_total_suffix,
     all_posets,
     ceil_log2,
     linear_extensions,
@@ -54,6 +55,15 @@ class SmallestWitness(unittest.TestCase):
         # (orientation-independent: normalize each split to (min, max)).
         splits = sorted(tuple(sorted(s)) for s in witness_splits(N5_WITNESS))
         self.assertEqual(splits, [(2, 6), (2, 6), (3, 5), (3, 5)])
+
+    def test_strict_infinite_family_small_suffixes(self) -> None:
+        for t in range(4):
+            P = append_total_suffix(N5_WITNESS, t)
+            self.assertEqual(len(P), 5 + t)
+            self.assertEqual(linear_extensions(P), 8)
+            self.assertEqual(L0(P), 3)
+            self.assertEqual(L1(P), 4)
+            self.assertEqual(minimax(P), 4)
 
     def test_n5_witness_is_strict_and_valid(self) -> None:
         self.assertGreater(L1(N5_WITNESS), L0(N5_WITNESS))
