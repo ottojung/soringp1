@@ -103,10 +103,7 @@ sorting strategy of height `≤ k`.
    The max-plus arithmetic on values `≤ k` costs `O(log k)` per edge.
    Total: `O(|E| · log k)`.
 
-The `n³` factor in checks 2 and 4 is conservative (naive matrix operations).
-With bitset operations (e.g., using Python integers as bitsets), transitivity
-and closure can be done in `O(n² / 64)` per operation, but we state the
-conservative bound. ∎
+The `n³` factor in checks 2 and 4 is conservative (naive matrix operations). ∎
 
 `[deduction]` **Remark 1.2 (what the verifier does and does not prove).**
 The verifier proves: *if* a DAG of size `|D|` is given, *then* we can check
@@ -117,12 +114,18 @@ prove that `|D|` is polynomial in the input length. The verifier is a
 
 `[deduction]` **Remark 1.3 (no NP membership without a size bound).** To
 conclude `SORT-BOUND-U ∈ NP` from the verifier, one would need:
-(a) a proof that a polynomial-size DAG always exists for yes-instances, and
-(b) a proof that no polynomial-size DAG exists for no-instances (for
-`coNP`). Neither is known. The verifier alone establishes only that
-`SORT-BOUND-U ∈ NEXP` (unary) / `N2EXP` (binary), because the DAG itself
-may be exponential in the input length. This does not improve on the
-`PSPACE`/`EXPSPACE` game bounds of `research-certificates-barriers.md`.
+(a) a proof that a polynomial-size DAG always exists for yes-instances
+(certificate existence), and
+(b) the verifier is polynomial-time (already established in Theorem 1.1).
+No condition on no-instances is needed for NP membership: the verifier's
+soundness ensures that no-instances are correctly rejected (if no poly DAG
+exists for a no-instance, the verifier rejects it). `coNP` membership would
+require *separate* polynomial certificates of unsortability, not merely the
+nonexistence of a DAG. Neither NP nor coNP membership is known. The verifier
+alone establishes only that `SORT-BOUND-U ∈ NEXP` (unary) / `N2EXP` (binary),
+because the DAG itself may be exponential in the input length. This does not
+improve on the `PSPACE`/`EXPSPACE` game bounds of
+`research-certificates-barriers.md`.
 
 ---
 
@@ -262,49 +265,59 @@ symmetry-quotient policy DAG **can** be verified in polynomial time in its
 own encoding **without** solving graph isomorphism. The certificate includes
 an explicit permutation `σ` (`n⌈log₂ n⌉` bits) for each outcome edge, witnessing
 that the computed successor poset maps onto the stored canonical child node.
-The verifier checks this permutation and closure in `O(n²)` per edge.
 
 The verifier performs:
 1. **Root check**: labelled root is the empty antichain.
 2. **Node check**: each non-terminal quotient node has one chosen comparison.
 3. **Edge check**: for each outcome edge, verify `σ` is a valid permutation,
    compute the successor poset, apply `σ`, and check it equals the stored
-   canonical child.
+   canonical child. Naive transitive closure costs `O(n³)` per edge.
 4. **Both outcomes**: each non-terminal node has both outgoing edges.
 5. **Acyclicity**: topological sort.
 6. **Terminal totals**: each leaf is a total order.
+7. **Height bound**: DP over the DAG: `height(leaf) = 0`,
+   `height(P) = 1 + max(height(P₁), height(P₀))` for the chosen comparison.
+   Check `height(root) ≤ k`.
 
-Total: `O((|V| + |E|) · n²)` = polynomial in the certificate size. Graph
-isomorphism is **not** an obstacle for this witness model: the permutations
-are given in the certificate, not computed. The only open question is whether
-the **number** of quotient nodes is polynomially bounded (see §6).
+Total: `O((|V| + |E|) · n³ + |E| · log k)` = polynomial in the certificate
+size. Graph isomorphism is **not** an obstacle for this witness model: the
+permutations are given in the certificate, not computed. The only open
+question is whether the **number** of quotient nodes is polynomially bounded
+(see §6).
 
 ### 3.1 Quotient certificate needs explicit relabelling maps
 
-`[deduction]` **Theorem 3.4 (quotient certificate size).** If the `S_n`-quotient
-DAG is used as a certificate for `S(n) ≤ k`, each edge must carry an explicit
-**relabelling map** (a permutation `σ ∈ S_n`) specifying how the abstract
-quotient node corresponds to a concrete labelled poset. The certificate size
-is
+`[deduction]` **Theorem 3.4 (one explicit, polynomially checkable quotient certificate).**
+There is a certificate format for a relabelling-quotient sorting policy with
+one representative poset per state class, one selected comparison per
+nonterminal representative, and a *supplied* relabelling permutation `σ`
+for each of the two outcomes. The size of this encoding is at most
 
 ```
-|quotient_edges| × (n ⌈log₂ n⌉ + 2⌈log₂ n⌉)  bits,
+O(|V|·n² + |E|·(n·log₂(n+1) + log₂(|V|+1)) + log₂(k+1)) bits.
 ```
 
-where `n⌈log₂ n⌉` bits encode the permutation and `2⌈log₂ n⌉` bits encode the
-comparison pair.
+The `|V|·n²` term stores representative posets, the edge term includes
+permutations, comparison labels and target-node indices, and the last term
+stores the budget. The permutation-and-comparison **edge overhead** alone is
+`|E|·(n⌈log₂(max(2,n))⌉ + 2⌈log₂(max(2,n))⌉)` bits; it is *not*
+the size of the whole certificate.
 
-*Proof.* A quotient node is an isomorphism class `[P]` of posets. To execute
-the strategy on a concrete input, the verifier must know which concrete
-labelling of `[P]` applies at the current point in the computation. This
-requires a relabelling map `σ` from the abstract quotient node to the
-concrete poset. Without `σ`, the verifier cannot determine which pair to
-compare or which child to follow. ∎
+*Proof.* A representative poset is stored on the abstract labels `[n]`.
+After a comparison, explicitly compute each labelled successor and use
+the edge's supplied permutation to verify that it is isomorphic to the
+stored target representative. At execution time, composing these maps
+translates the chosen comparison back to the concrete input labels.
+The verifier checks all permutations directly, so graph isomorphism
+needs no search. The encoding costs follow by counting matrices, edge
+descriptions, indices and the budget. Supplying permutations is one
+**sufficient** witness format, not a claim that every imaginable compressed
+encoding must use them. ∎
 
-`[experiment]` **Table 3: Quotient certificate sizes for `n ≤ 6`.**
+`[experiment]` **Table 3: Quotient edge-relabel overhead estimates for `n ≤ 6` (not full certificate size).**
 
 ```
- n   q(all) nodes   qedges   perm bits/edge   cert bits (est.)
+ n   q(all) nodes   qedges   perm bits/edge   edge overhead bits (est.)
   1             1        0               0               0
   2             2        1               2               4
   3             5        7               6              70
@@ -313,10 +326,10 @@ compare or which child to follow. ∎
   6           134      415              18            9960
 ```
 
-`[experiment]` **Observation 3.5 (quotient certificate size).** The estimated
-certificate size grows from 4 bits (`n=2`) to 9960 bits (`n=6`). For unary
+`[experiment]` **Observation 3.5 (edge-relabel overhead).** The estimated
+edge overhead grows from 4 bits (`n=2`) to 9960 bits (`n=6`). For unary
 encoding with informative `k = S(n)`, the input length is `L = n + k + 1 =
-Θ(n log n)`. At `n=6`, `L = 17`, and a polynomial certificate would need
+Θ(n log n)`. At `n=6`, `L = 17`; testing polynomial-size certificates would require a proven asymptotic size bound, not just this finite overhead. A polynomial certificate would need
 `poly(17)` bits; 9960 bits is roughly `17³`, which is not obviously polynomial.
 The growth rate is *consistent with* super-polynomial growth, but `n ≤ 6` is
 too small to distinguish `n^{Θ(log n)}` from `2^{Θ(n)}` from polynomial growth.
