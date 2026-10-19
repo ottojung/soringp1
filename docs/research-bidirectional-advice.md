@@ -1,4 +1,4 @@
-# Bidirectional Advice Prototype (Stober–Weiß 2023)
+# Precomputed Winning-State Advice: A Toy Study Inspired by Bidirectional Search
 
 **Date:** 2026-10-18
 **Branch:** `research/bidirectional-advice-20261018`
@@ -7,7 +7,7 @@
 
 ## Research question
 
-Can a partial backward table of confirmed-YES states (exact minimax cost ≤ B)
+Can a partial precomputed table of confirmed-YES states (exact minimax cost ≤ B)
 reduce forward search cost for proving S(n) ≤ k, while maintaining soundness?
 What is the state/memory/runtime tradeoff?
 
@@ -26,9 +26,15 @@ Sections 3–4, 5.7. Key ideas adapted:
 - §4.1: Backward search enumerates predecessors (posets one comparison away
   from sortable). Full backward search is impractical alone (682·10⁶ posets
   for n=13 vs 1.8·10⁶ forward).
-- §4.2: Partial backward search — only store states meeting an efficiency
-  threshold. Forward search uses results as advice: if a state is in the
-  table, it is winning; if marked "unknown", forward must branch.
+- §4.2: The actual partial backward search uses an efficiency threshold
+  satisfying `E_tot ≤ E_thr < 2 E_tot`. **Lemma 4.2** gives a crucial
+  *coverage* guarantee: for a forward-reachable winning state `P` at depth
+  `c` with `E(P) ≤ E_thr`, `P` must be in the partial backward table on
+  that level. Consequently **absence below the threshold is a sound NO**
+  (while a present entry marked "unknown" must still be explored).
+  Outside the covered region, absence by itself proves nothing.
+  Our prototype does **not** implement this coverage condition, so we
+  *never* use absence as a NO answer.
 - §5.7: Predecessor enumeration via Hasse diagram edge removal + transitive
   closure computation.
 
@@ -36,7 +42,8 @@ Sections 3–4, 5.7. Key ideas adapted:
 
 Tiny Python prototype for n ≤ 5 (≤ 120 permutations, ≤ 4231 labelled posets):
 
-1. **Backward pass:** BFS from root (full antichain) over all reachable states.
+1. **Precomputation, NOT a backward predecessor pass:** BFS from root
+   (full antichain) over all reachable states.
    Compute exact minimax cost for each: `cost(s) = 0` if |s|≤1, else
    `1 + min over comparisons of max(cost(left), cost(right))`. Store all
    states with cost ≤ B in advice table.
@@ -46,8 +53,10 @@ Tiny Python prototype for n ≤ 5 (≤ 120 permutations, ≤ 4231 labelled poset
    - If s in advice and advice[s] ≤ b: prune as YES (sound: exact cost known).
    - Otherwise: **UNKNOWN ≠ FALSE** — must branch and explore children.
 
-3. **Soundness verification:** Every table entry independently recomputed;
-   assert exact match.
+3. **Internal consistency check:** Re-evaluate each table entry using
+   the same minimax recurrence but a separate cache. This tests stored
+   values for consistency; it is **not an independent proof** that the
+   recurrence or search model is correct.
 
 4. **Comparison:** Plain DFS (no advice, no memoization) at same budget.
 
@@ -55,13 +64,17 @@ Tiny Python prototype for n ≤ 5 (≤ 120 permutations, ≤ 4231 labelled poset
 
 ### Full table (B = S(n))
 
-| n | S(n) | Table states | Fwd nodes | Plain DFS nodes | Speedup |
+| n | S(n) | Table states | Fwd nodes | Plain DFS nodes | Forward-only node reduction* |
 |---|------|-------------|-----------|-----------------|---------|
 | 1 | 0 | 1 | 1 | 1 | 1.0x |
 | 2 | 1 | 3 | 1 | 3 | 3.0x |
 | 3 | 3 | 19 | 1 | 11 | 11.0x |
 | 4 | 5 | 219 | 1 | 101 | 101.0x |
 | 5 | 7 | 4231 | 1 | 107659 | 107659.0x |
+
+*All node-reduction ratios in this table **exclude precomputation**;
+the full table already solves every reachable state, including the root,
+so 107659× is **not an end-to-end algorithmic speedup**.*
 
 Forward search with full table visits only the root (immediate YES). Table
 size = number of labelled posets on n elements (OEIS A001035: 1, 3, 19, 219,
@@ -80,8 +93,9 @@ sharp: the last layer of backward states does most of the pruning work.
 
 ## Soundness
 
-All advice table entries verified by independent re-evaluation (test
-`TestSoundness`). Partial tables cause no false negatives
+All advice entries pass an internal consistency re-evaluation with the
+same minimax recurrence (test `TestSoundness`); the independent mathematical
+audit of the PR additionally reproduced state counts with a separate model. Partial tables cause no false negatives
 (`TestPartialTable_no_false_negative`): forward search always returns True
 when S(n) ≤ budget, even with empty advice.
 
@@ -95,7 +109,7 @@ when S(n) ≤ budget, even with empty advice.
   directly. Stober–Weiß reduce by congruence (isomorphic or dual-isomorphic),
   cutting state space by ~n! factor. For n=5 this matters (4231 → 63 unlabeled
   posets).
-- **No predecessor enumeration (§5.7):** Our backward pass uses forward BFS
+- **No predecessor enumeration (§5.7):** Our precomputation uses forward BFS
   from root, not backward search from leaves. True backward search requires
   the Hasse-diagram-based predecessor enumeration of §5.7, which is more
   complex but necessary for larger n.
@@ -109,7 +123,8 @@ For n ≤ 5, the prototype is a **feasibility demonstration only**. The
 bidirectional approach with efficiency thresholds (Stober–Weiß §4.2) is what
 enables n=16+ computation. Our contribution is:
 
-1. A verified toy implementation showing the advice mechanism is sound.
+1. A small reference implementation showing the confirmed-YES advice
+   mechanism is sound.
 2. Quantitative tradeoff data: table size vs forward search reduction.
 3. Confirmation that partial tables with UNKNOWN ≠ FALSE preserve correctness.
 

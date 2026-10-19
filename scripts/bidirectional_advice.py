@@ -7,10 +7,10 @@ States = subsets of permutations consistent with comparisons made so far.
 A state is winning if the remaining perms can be sorted within remaining budget.
 
 This script implements:
-- BACKWARD PASS: build partial table of confirmed-YES states (exact minimax cost
+- PRECOMPUTED ADVICE: build partial table of confirmed-YES states (exact minimax cost
   <= budget). No efficiency cutoff for now; all states with cost <= B are stored.
 - FORWARD PASS: DFS from root with advice-based pruning.
-- SOUNDNESS CHECK: each table entry verified by independent re-evaluation.
+- SOUNDNESS CHECK: each table entry verified by internal recurrence consistency re-evaluation.
 - COMPARISON: same DFS without advice (plain minimax) counts nodes/comparisons.
 
 "UNKNOWN ≠ FALSE": states absent from table are NOT assumed losing; forward search
@@ -46,10 +46,10 @@ def precompute_pair_masks(n, perms, perm_idx):
     return pairs
 
 # ---------------------------------------------------------------------------
-# BACKWARD PASS: compute exact minimax cost for all reachable states
+# PRECOMPUTED ADVICE: compute exact minimax cost for all reachable states
 # ---------------------------------------------------------------------------
 
-def backward_table(n, pairs, full_mask):
+def precomputed_advice_table(n, pairs, full_mask):
     """Return dict: state_bitmask -> exact minimax cost to sort that subset.
 
     cost(state) = 0 if popcount <= 1
@@ -151,7 +151,7 @@ def forward_search(n, pairs, full_mask, budget, advice):
 # ---------------------------------------------------------------------------
 
 def verify_advice_sound(n, pairs, advice):
-    """For every state in advice table, independently recompute minimax cost
+    """For every state in advice table, recompute with a separate cache minimax cost
     and assert it matches stored value. This proves table is sound."""
     memo = {}
 
@@ -215,7 +215,7 @@ def plain_dfs(n, pairs, full_mask, budget):
 
 KNOWN_S = {1: 0, 2: 1, 3: 3, 4: 5, 5: 7}
 
-def backward_table_partial(n, pairs, full_mask, max_cost):
+def precomputed_advice_table_partial(n, pairs, full_mask, max_cost):
     """Build partial advice table: only states with exact minimax cost <= max_cost.
     States with cost > max_cost are UNKNOWN (not stored)."""
     memo = {}
@@ -283,9 +283,9 @@ def run():
         full_mask = (1 << nperm) - 1
         s_n = KNOWN_S[n]
 
-        # Backward pass: full table
+        # Precomputation: full table
         print(f"Building backward advice table (full)...")
-        advice = backward_table(n, pairs, full_mask)
+        advice = precomputed_advice_table(n, pairs, full_mask)
         table_size = len(advice)
         print(f"Table size: {table_size} states")
 
@@ -316,7 +316,7 @@ def run():
         # Partial table experiments: budget < S(n)
         print(f"\n--- Partial table experiments (UNKNOWN != FALSE) ---")
         for partial_budget in range(max(0, s_n - 2), s_n):
-            partial_advice = backward_table_partial(n, pairs, full_mask, partial_budget)
+            partial_advice = precomputed_advice_table_partial(n, pairs, full_mask, partial_budget)
             psize = len(partial_advice)
             solvable_pp, nodes_pp, comps_pp = forward_search(n, pairs, full_mask, s_n, partial_advice)
             print(f"  Partial table (cost<={partial_budget}): {psize} states, "
@@ -340,7 +340,7 @@ def run():
     for r in results:
         print(f"{r['n']:>3} {r['S(n)']:>5} {r['table_size']:>7} {r['fwd_nodes']:>9} {r['dfs_nodes']:>10} {r['speedup']:>7.1f}x")
 
-    print("\nAll advice tables verified sound (independent re-evaluation).")
+    print("\nAll advice tables verified sound (internal recurrence consistency re-evaluation).")
     print("All n<=5 exact values reproduced correctly.")
 
 if __name__ == '__main__':
