@@ -51,6 +51,13 @@ https://ecommons.cornell.edu/entities/publication/02e42763-8a49-4dfe-9e73-59ccc0
 
 ## Independent exploration fronts
 
+The following fronts are illustrative, not a restrictive task queue. The
+binding [research orchestration policy](research-orchestration.md) requires
+at least ten concurrent independent SoringP1 agents on phoebe-dev;
+generate additional useful fronts rather than waiting for these to finish.
+
+
+
 These are **questions**, not a numbered queue of theorems to formalize.
 
 ### Structural compression of minimax states

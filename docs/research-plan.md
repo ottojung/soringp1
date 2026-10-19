@@ -33,7 +33,10 @@ algorithm, valid reduction, succinct representation or substantial no-go
 theorem for the special input family.
 
 Research should spend time on uncertain attempts, not merely polished
-corollaries. There is no requirement to spawn an agent per subsection.
+corollaries. The binding repository-wide orchestration policy requires
+**at least ten active SoringP1 research agents**, working on independent
+packets from the full live frontier; subsections are not a fixed task queue.
+See [research orchestration](research-orchestration.md).
 
 ### Structural characterization and state compression
 
@@ -77,8 +80,11 @@ complexity reduction or barrier, a global structural theorem with a
 credible complexity consequence, or a serious falsification of a major
 route. Investigations may leave only a compact comment with sources, the
 sharpest argument, disproof attempts and open obstacle. A polished PR,
-test file, research note, or increased agent count is **not itself progress**.
-Do not turn every small poset observation into a follow-up research task.
+test file, research note, or increased agent count is **not itself mathematical
+progress**. Maintaining ten agents is nevertheless an operational requirement;
+grow the frontier with distinct falsifiable approaches, not repetitive
+paperwork or routine formalization. Do not turn every small poset observation
+into a follow-up research task.
 
 ## Lean checkpoint, not Lean workstream
 
@@ -90,6 +96,17 @@ or a necessary cost-model/correspondence bridge.
 The long-term objective still includes kernel checking a major result. We
 do **not** assume a P/NP separation exists or can be proved with the
 currently available techniques.
+
+## Parallel research discipline
+
+Run at least ten independent SoringP1 agents on `phoebe-dev` while research
+is actionable. Replenish capacity promptly from the wider exploration
+portfolio, including novel algorithms, lower-bound mechanisms, certificate
+ideas, reductions, falsification attempts and literature audits. Do not use
+the number of open issues, host-load guesses, or absence of obvious new Lean
+work as a reason to serialize exploration. The orchestrator reconciles claims,
+reviews evidence and signs off on integrations; see
+[research orchestration](research-orchestration.md).
 
 ## References and starting note
 
