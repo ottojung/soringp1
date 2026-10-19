@@ -23,6 +23,17 @@ remain open; see `kernel-results.md`.
 
 ## Encodings and exact questions
 
+
+**Research priority:** unary encoding exclusively until the unary
+complexity program has been completed. The binary function and
+threshold language below are specified to keep the mathematical
+distinction precise; they are **not active research targets**.
+All new algorithms, certificates, descriptive-logic formulae,
+reductions and formalization claims must use unary input lengths
+`n` or `n+k+1`, as appropriate. A binary research stream can
+resume only after the unary goal is completed and the founder
+explicitly changes scope. See `AGENTS.md`.
+
 ### Function evaluation
 
 - `S_unary(1^n)` returns the binary representation of S(n).

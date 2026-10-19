@@ -7,6 +7,36 @@ comparison-sorting number S(n). The long-term goal includes Lean kernel-checked
 results, but **discovery comes first**. See `docs/problem.md` for the fixed
 model and encodings.
 
+## Binding unary-first research priority (2026-10-19)
+
+**Work exclusively on the unary-encoded problem first.** The active target
+is `SORT-BOUND-U = {1^n # 1^k : S(n) <= k}`, equivalently uniform
+evaluation of `S(n)` on input `1^n`. The resource input length is
+`N=n+k+1` for the threshold language, and `N=n` for the function.
+All live research packets, literature investigation, complexity-class
+claims, descriptive-logic formulae, and agent assignments must explicitly
+target the unary encoding and its uniform complexity.
+
+**Defer binary-encoded `SORT-BOUND-B` and `S_binary` research until
+the unary research objective is fully completed.** Do not run a parallel
+binary-complexity workstream, pursue binary EXPSPACE/EXPTIME improvements,
+or reopen binary work because a unary attack stalls or an agent becomes
+idle. The existing binary definitions and established bounds remain as
+historical mathematical context, not active tasks. Any future transition
+requires completion of the unary agenda and explicit founder direction.
+This directive supersedes older wording presenting both encodings as
+equally active research priorities.
+
+Maintain ten or more **independent unary-focused** research agents on
+`phoebe-dev` under the parallelism directive below. Diversify among
+unary exact threshold algorithms, near-tight bound-gap tests, structural
+obstructions and recurrences, sparse-language reductions and certificate
+barriers, and descriptive complexity (ordered FO(LFP)/ESO/FO(PFP) and
+EXPTIME logics). In descriptive complexity, distinguish the existence
+of a defining formula by a capture theorem from constructing and
+validating an explicit formula for this specific language. Do not claim
+P/NP membership, hardness, or a separation without a proof.
+
 ## Binding research parallelism directive (2026-10-19)
 
 **Maintain at least 10 simultaneously active SoringP1 research agents** while the

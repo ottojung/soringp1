@@ -2,6 +2,14 @@
 
 **Status:** research notes and working hypotheses, **not** Lean theorems or new complexity-class classifications.
 
+**Binding scope update (2026-10-19): research unary `SORT-BOUND-U`
+only, until completed.** All concurrent SoringP1 agents target the
+uniform unary problem; binary-encoded sorting-number complexity is
+deferred, not a parallel track. Existing binary facts below remain
+historical background, not action items. See [research
+orchestration](research-orchestration.md).
+
+
 ## Baseline before further formalization
 
 The exact minimax sorting number `S(n)` is already studied extensively. For
@@ -73,7 +81,7 @@ Measure *state counts and computation time*, not only `S(n)` outputs.
 What might a polynomially checkable certificate of `S(n) ≤ k` look like
 without explicitly listing an exponential-size sorting tree? What would a
 certificate for `S(n) > k` require? Explore limitations and succinct
-representations on paper first; keep unary vs binary input length explicit.
+representations on paper first; measure certificates against unary input length `n+k+1`.
 Distinguish the complexity of *general decision-tree optimization* from
 the single-parameter family `S(n)`.
 
@@ -127,4 +135,4 @@ README for the summary):
 These are hypotheses, falsifications and literature audits — not Lean theorems
 and not a complexity classification. The minimax evaluator is now exact and
 both-sided (A24: `S n = adv univ`); the still-open item is the complexity
-classification of `SORT-BOUND-U`/`SORT-BOUND-B`, not the evaluator.
+classification of unary `SORT-BOUND-U`, not the evaluator; binary work is deferred.

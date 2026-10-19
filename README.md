@@ -11,7 +11,18 @@ lower bounds are possible. This is a research goal, **not a claimed theorem**.
 
 ## What exactly is being classified?
 
-Complexity classes require a representation of the input. We study both:
+
+**Current binding research scope: unary first (October 19, 2026).**
+All active work and at least ten concurrent independent research agents
+focus on `SORT-BOUND-U` and `S_unary`. Binary versions below remain
+mathematically defined and their previously proved bounds are preserved
+for reference, but **no new binary research proceeds until unary work
+is complete and the founder directs the transition**. See
+[unary-first research orchestration](docs/research-orchestration.md).
+
+Complexity classes require a representation of the input. We define both
+variants below for completeness, but only the unary encoding is an active
+research target:
 
 - **Unary parameterization**: compute \(S(n)\) on input \(1^n\), returning a
   binary integer. A dynamic program over partial orders gives a

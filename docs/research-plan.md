@@ -5,6 +5,15 @@ complexity of `S(n)` before publishing any new artifacts.**
 The objective is to understand the complexity of *evaluating the optimal
 sorting number* S(n), not to collect Lean proofs about comparison sorting.
 Treat this document as research guidance, **not** a theorem/PR queue.
+**Binding 2026-10-19 scope: unary only until fully completed.** The only
+active encoding is `SORT-BOUND-U={1^n # 1^k:S(n)<=k}`, with
+`S_unary(1^n)` its function counterpart. All ten or more concurrent
+agents must contribute to this unary research program. Binary encodings
+are definitions/background only and must not generate separate
+investigations before the unary goal is complete and the founder
+authorizes a scope transition. See `AGENTS.md` and
+[research orchestration](research-orchestration.md).
+
 Do not produce a research note, script, test, or Lean statement merely
 because an agent completed a work session; a concise result or obstacle
 in Antonina issue #301 is the default.
@@ -51,13 +60,24 @@ Measure complexity in the *input encoding* rather than simply n.
 
 Investigate what an efficiently checkable certificate of `S(n) ≤ k` or
 `S(n) > k` would require. Explicitly test whether a proposed witness is
-polynomial in unary or binary input length. Separate unrestricted
+polynomial in the **unary** input length `N=n+k+1`. Separate unrestricted
 decision-tree optimisation from the fixed one-parameter family S(n).
 The unary threshold language is sparse: ordinary many-one NP-hardness
 would imply P=NP by Mahaney's theorem. Record limitations on proposed
 reductions *before* attempting a formal proof.
 
 ### Insights from optimal comparison sorting
+
+In addition to quantitative bounds, pursue **unary descriptive
+complexity**. On appropriately ordered finite input structures, test
+explicit logical definitions of `SORT-BOUND-U` in FO(PFP) (capturing
+PSPACE), in a logic capturing EXPTIME, and the genuinely open smaller
+descriptions FO(LFP) (P) and existential second-order logic (NP).
+The already established unary PSPACE upper bound implies existence
+of an FO(PFP) definition via the capture theorem; building an explicit
+faithful formula remains a separate research problem. Do not infer a
+smaller-class definition from a compact-looking informal recursion.
+
 
 Read the primary literature, beginning with Ford–Johnson and proofs of
 small-n optimality. Explain why the information lower bound ceases to be

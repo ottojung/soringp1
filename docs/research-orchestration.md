@@ -4,6 +4,39 @@ This is SoringP1's operational adaptation of the exploration portfolio and
 parallel worker principles inherited from AssemblyP1. The binding authority
 is [AGENTS.md](../AGENTS.md).
 
+## Binding scope: unary before binary
+
+**All active research is unary-first until the unary classification
+program is complete.** The target is
+`SORT-BOUND-U={1^n # 1^k : S(n)<=k}` and its equivalent uniform
+function problem `S_unary(1^n)`. For complexity statements, account for
+the actual unary word input length `N=n+k+1`. Binary-encoded input
+remains only in background definitions and previous established
+results; there must be **no live binary work packets or binary
+research agents** until the unary objective is resolved and the
+founder authorizes broadening the scope. If an existing agent was
+assigned binary work, steer it to a distinct unary line immediately.
+
+The unary portfolio includes:
+* Threshold search in the `O(n)` interval between information
+  and Ford-Johnson comparison bounds: reduce the **cost of a
+  threshold decision**, not merely the number of candidates.
+* Ordered-finite-structure descriptive complexity: FO(LFP) (P),
+  existential second-order logic (NP), FO(PFP) (PSPACE), and an
+  EXPTIME-capturing logic such as SO(LFP). The PSPACE upper bound
+  already yields an existential *mathematical* definability result
+  in FO(PFP) by the capturing theorem; challenge agents to construct
+  explicit formulae and verify their sorting-game semantics.
+* Unary-uniform algorithms and parameterizations, structural
+  recurrences, information/pruning obstructions, certificate designs,
+  sparse-language complexity barriers, and independent source audits.
+
+Do not let apparent binary completeness, binary-specific techniques,
+or old task assignments override this research scope. The obligation
+to maintain ten active independent SoringP1 agents remains binding:
+broaden the **unary** question portfolio instead of launching binary
+fallback investigations.
+
 ## Parallelism is the default
 
 Keep **at least ten simultaneously active SoringP1 research agents**
@@ -54,7 +87,7 @@ and n=12 obstructions; threshold certificates and exact verification cost;
 encoding-faithful reductions for fixed-antichain S(n); additive/multiplicative
 recurrences and subproblem composition; outside-literature/model audits;
 independent falsification of central arguments; and algorithmic time/space
-bounds under unary versus binary input encoding. These are examples, **not**
+bounds measured against unary input length. These are examples, **not**
 a cap, an exclusive list or a compulsory fixed one-agent-per-topic mapping.
 
 ## Non-negotiable distinctions
