@@ -99,32 +99,84 @@ sense that the hierarchy can rise by one at a step (e.g. `L1 = L0 + 1` at the
 `n = 5` witness), but it cannot outrun the information bound by more than one
 per ply.
 
-## 4. Finite convergence
+## 4. Finite convergence is **always exact**
 
-**Theorem 3 (convergence).**  For each fixed `n`, the sequence
-`L_0(P) ≤ L_1(P) ≤ …` of integer-valued functions on the finite set of
-`n`-element posets is non-decreasing and bounded by `F`, hence stabilizes:
-there is a least `r*` with `L_{r*} = L_{r*+1} = …` pointwise, and
-`r* ≤ max_P (F(P) − L_0(P))`.  Define `L_∞(P) = lim_r L_r(P) ≤ F(P)`.
+**Theorem 3 (universal finite exactness).** For every finite poset `P`
+and every integer `r ≥ 0`,
 
-*Proof.*  Non-decreasing and bounded are Theorems 1.  A non-decreasing sequence
-of integers in `[L_0(P), F(P)]` takes at most `F(P) − L_0(P) + 1` values at each
-`P`, so it stabilizes pointwise; the *global* pointwise stabilization point is
-the maximum over the finitely many `P`.  ∎
+```
+min(F(P), r + 1) ≤ L_r(P) ≤ F(P).
+```
 
-The limit is a fixed point of the one-ply operator
-`Φ(X)(P) = 0` if `P` total, else `1 + min max(X(children))`:
-by definition `L_{r+1} = Φ(L_r)`, so once `L_{r*} = L_{r*+1}` we get
-`L_{r*+2} = Φ(L_{r*+1}) = Φ(L_{r*}) = L_{r*+1}`, and the iteration is constant
-from then on.  Since `F` also satisfies `F = Φ(F)` (its defining recurrence),
-`L_∞` is the *least* fixed point of `Φ` above `L_0`, and `L_∞ ≤ F`.
+In particular, if `F(P) > 0`, then `L_r(P) = F(P)` for every
+`r ≥ F(P)-1`. For total `P` (`F(P)=0`), equality holds for all
+`r`. Uniformly over all posets on `n` keys, the hierarchy stabilizes
+to `F` by horizon `r = max(0, S(n)-1)`.
 
-**The completeness question.**  `L_∞ = F` is *not* automatic from the
-definitions: it asks whether iterating the one-ply adversarial information
-bound from the leaf-counting bound reaches the exact minimax value.  The
-residual `F − L_∞` is a genuine structural quantity.  The experiments below
-show `L_∞ = F` for every labelled poset on `n ≤ 6`; whether `L_∞ = F` in
-general (in particular at `n = 12`, where `L0 = 29 < 30 = S(12)`) is open.
+*Proof.* The upper inequality is Theorem 1. We induct on `r` for the
+lower bound.
+
+At `r=0`, if `P` is total, `L_0(P)=F(P)=0`. Otherwise `P`
+admits at least two linear extensions, hence
+`L_0(P)=ceil(log2 e(P)) ≥ 1 = min(F(P),1)`.
+
+Suppose the bound holds at horizon `r` for every poset. Let `P`
+be non-total. For **every** incomparable pair `q` with two outcome
+children `P_q^+` and `P_q^-`, the defining exact minimax recurrence
+implies
+
+```
+max(F(P_q^+), F(P_q^-)) ≥ F(P)-1.
+```
+
+By the induction hypothesis on both children and monotonicity of
+`min(·,r+1)`,
+
+```
+max(L_r(P_q^+), L_r(P_q^-))
+    ≥ min(max(F(P_q^+), F(P_q^-)), r+1)
+    ≥ min(F(P)-1, r+1).
+```
+
+Take the minimum over all legal `q`, then add one:
+
+```
+L_{r+1}(P) ≥ 1+min(F(P)-1,r+1) = min(F(P),r+2).
+```
+
+This finishes the induction. Thus `r≥F(P)-1` makes the two bounds
+equal (including the terminal case separately). Finally
+`F(P)≤S(n)` because any sorting tree for the antichain sorts every
+linear extension of `P`, yielding the stated uniform horizon. ∎
+
+**Corollary 4 (unique fixed point).** The minimax operator
+`Φ(X)(P)=0` for total `P`, otherwise
+`1 + min_q max(X(P_q^+),X(P_q^-))` has exactly one finite-valued
+fixed point on the collection of posets with a given fixed number of
+keys, namely `F`.
+
+*Proof.* Every legal comparison strictly reduces `e(P)`; induct
+on `e(P)`. For `e(P)=1`, every fixed point has value zero.
+Assuming the value at every state with fewer extensions is uniquely
+determined, the recurrence uniquely determines the value at `P`,
+and it is `F(P)`. ∎
+
+**Why this does not give an efficient algorithm.** The uniform horizon
+`S(n)-1` can itself be `Θ(n log n)`, and evaluating `L_r` via
+the game tree still branches over incomparable comparisons at each
+level. Universal finite exactness is a structural theorem, **not** a
+polynomial-time algorithm or an upper bound on the computational
+complexity of exact `S(n)` beyond the already known brute-force search.
+
+**A false stronger bound.** The earlier draft claimed the stabilization
+horizon was at most `max_P(F(P)-L_0(P))` merely because the hierarchy
+has finitely many integer values. This reasoning was **incorrect**:
+several consecutive horizons can have the *same* value before a later
+increase. The explicit six-key witness `P=(48,0,0,0,0,0)` has
+`F(P)-L_0(P)=1` but `L_0=…=L_4=8` and `L_5=9`. No bound
+on the number of *iterations* follows from the number of *distinct
+values* unless strict increase at every iteration is proved.
+The bound `r≥F(P)-1` established above is valid.
 
 ## 5. Experiments
 
@@ -243,8 +295,8 @@ their technical ingredients map onto ours as follows.
   recurrence; their backward search and "advice" are algorithmic devices for
   computing `F`, orthogonal to the lookahead bounds.
 * **They do not iterate the bound.**  Their lower-bound certificates are
-  `L0`-based; the hierarchy `L1, L2, …` and the completeness question
-  `L∞ = F` are not part of their analysis.  When `L_r > L0`, the hierarchy is a
+  `L0`-based; the hierarchy `L1, L2, …` and the finite-exactness theorem proved here
+  are not part of their analysis.  When `L_r > L0`, the hierarchy is a
   strictly stronger family of lower bounds than their pruning, and it could in
   principle be used as extra pruning inside their forward search (we do not
   claim this yields a speed-up).
@@ -258,7 +310,9 @@ independent relations has `e = 16!/2^k`, a "chain of three" has `e = 16!/6`, and
 `L1(antichain_16) = 1 + 44 = 45 = L0` and
 `L2(antichain_16) = 1 + L1(antichain_16 + 0<1) = 1 + 44 = 45 < 46 = F`.
 So the antichain does not witness lookahead strictness up to two plies, and
-whether `L∞(antichain_16) = 46` is open.  This is the same phenomenon as the
+the exactness theorem above guarantees
+`L_r(antichain_16)=46` for `r≥45`, although the *smallest*
+horizon at which equality first holds remains uncomputed.  This is the same phenomenon as the
 `n = 12` non-tightness (`L0 = 29 < 30 = S(12)`), studied in
 `docs/research-n12-nontightness.md`.
 
@@ -273,28 +327,29 @@ whether `L∞(antichain_16) = 46` is open.  This is the same phenomenon as the
   polynomial-time guarantee from anything here.
 * The script runtimes (`0.3 s`, `~26 s`) are empirical observations about the
   finite labelled posets `n ≤ 6`, not a complexity bound.
-* `L∞ = F` is proved only experimentally here, for labelled posets on
-  `n ≤ 6`; it is a conjecture in general, not a theorem.
+* `L∞ = F` is **proved for all finite posets** (Theorem 3). This
+  fact is not a computational complexity-class result and does not
+  imply that a bounded or efficiently evaluated lookahead is exact.
 
 ## 8. Interpretation and next steps
 
-The lookahead hierarchy is a clean, monotone family of lower bounds with a
-fixed-point limit `L∞ ≤ F`.  The experiments locate its first non-triviality
-precisely: the one-ply bound is exact for `n ≤ 5`, and the first strict
-`L2 > L1` states (hence the first place where deeper lookahead strictly beats
-one ply) are at `n = 6`.  For `n ≤ 6` the hierarchy is *complete*
-(`L∞ = F`), so the residual `F − L∞` only becomes interesting at larger `n`.
+The hierarchy is a monotone sequence of sound lower bounds and is
+**provably complete for every finite poset**, not merely for the small
+instances explored here. Its significance is *when* each state
+stabilizes, rather than *whether* it eventually does. The `n≤6`
+experiments locate the first strict `L_2>L_1` witness at six elements.
+They also illustrate how many plies can pass without a value increase,
+invalidating the old proposed stabilization bound.
 
-Concrete open questions, in increasing difficulty:
+Concrete useful questions:
 
-1. Find the smallest `n` with `L∞(antichain_n) < S(n)` — equivalently, the
-   first `n` where iterated lookahead cannot certify the exact sorting number.
-   `n = 12` (`L0 = 29 < 30`) and `n = 16` (`L2 = 45 < 46`) are the first
-   candidates; the computation needs `L_r` on posets with a handful of
-   relations, which is feasible with a canonical-form memoized search but not
-   with the naive labelled enumeration used here.
-2. Is `L∞ = F` in general?  If yes, the hierarchy gives a "certificate"
-   interpretation of the exact minimax value; if no, the residual is a new
-   structural invariant.
-3. Does `L_r` pruning (for small `r`) reduce the search space of the
-   Stober–Weiß-style forward search, where `L0` pruning alone is insufficient?
+1. At `n=12` (where `S(12)=30>L_0=29`) or `n=16`
+   (where `S(16)=46>L_0=45`), determine the **smallest** horizon
+   `r` at which `L_r(antichain_n)=S(n)`; Theorem 3 guarantees
+   `r≤S(n)-1`, but this does not make computation cheap.
+2. Investigate whether small `r` gives useful additional pruning in
+   Stober–Weiß-style exact forward searches and measure the full cost of
+   evaluating the bound.
+3. Investigate the effect of ordinal-sum factorization on these horizons:
+   summing `L_r` over factors is sound and may be strictly stronger than
+   a global `L_r`, as explored separately in PR #22 and follow-up work.

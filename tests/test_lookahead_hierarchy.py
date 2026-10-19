@@ -62,6 +62,33 @@ class ChainAndDerivative(unittest.TestCase):
         self.assertEqual(self.summary["r_star"], 1)
 
 
+class UniversalConvergenceBound(unittest.TestCase):
+    """Finite-state regression for Theorem 3: min(F,r+1) <= L_r <= F.
+
+    The mathematical theorem covers *all* finite posets. This test merely
+    guards the implementation on all labelled n<=4 states and horizons 0..5.
+    """
+
+    def test_clipped_minimax_lower_bound(self) -> None:
+        for n in range(1, 5):
+            for P in all_posets(n):
+                f = minimax(P)
+                for r in range(0, 6):
+                    val = L(P, r)
+                    self.assertGreaterEqual(val, min(f, r + 1), (n, P, r))
+                    self.assertLessEqual(val, f, (n, P, r))
+                    if r >= max(0, f - 1):
+                        self.assertEqual(val, f, (n, P, r))
+
+    def test_old_iteration_count_bound_was_false(self) -> None:
+        # This P has F-L0=1, yet no improvement until five iterations.
+        P = (48, 0, 0, 0, 0, 0)
+        f = minimax(P)
+        self.assertEqual(f - L(P, 0), 1)
+        self.assertEqual(L(P, 4), f - 1)
+        self.assertEqual(L(P, 5), f)
+
+
 class N5OnePlyWitness(unittest.TestCase):
     def test_values(self) -> None:
         self.assertEqual(linear_extensions(N5_WITNESS), 8)
