@@ -103,7 +103,7 @@ L0(P) <= L1(P) <= B(P) <= F(P).
    using `L0 <= L1` per factor. ∎
 
 `[experiment]` Exhaustive check of the full chain on every poset with
-`n <= 5` elements (1 + 3 + 19 + 219 + 4231 = 4474 posets, shared memoized
+`n <= 5` elements (1 + 3 + 19 + 219 + 4231 = 4473 posets, shared memoized
 `F`): **0 failures**. On the same range `B = L1` everywhere.
 However, the earlier claim that the first strict example occurs at `n=10`
 was **false**: already `A ⊕ V` with `A=(0,0)` (a 2-antichain)
