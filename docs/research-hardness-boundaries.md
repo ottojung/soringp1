@@ -29,9 +29,15 @@ the unary sparse/`P/log` and binary non-sparsity claims already recorded in
   version `S(P) ≤ k`).
 - `SORT-BOUND-U = { 1^n # 1^k : S(n) ≤ k }` (both parameters unary).
 - `SORT-BOUND-B = { bin(n) # bin(k) : S(n) ≤ k }` (both parameters binary).
-- `GEN-SORT` = `{ ⟨P⟩ # bin(k) : S(P) ≤ k }`, where `⟨P⟩` is an **explicit**
-  encoding of a poset (an `n×n` comparability matrix, or the list of comparable
-  pairs). `GEN-SORT` is the natural decision version of `CanSort(P,k)`.
+- `GEN-SORT` = `{ ⟨P⟩ # bin(k) : S(P) ≤ k }`, with **the encoding fixed**
+  to an explicit labelled `n×n` comparability matrix (including `n` in a
+  parseable header). `GEN-SORT` here is the dense-matrix decision version of
+  `CanSort(P,k)`; its input has length `N = Ω(n²)` regardless of how many
+  entries in the matrix are zero. A sparse edge-list encoding **with `n`
+  encoded in binary and no explicit vertex list** defines a *different*
+  language: the antichain may then have only `O(log n)` input bits, so the
+  matrix-based `PSPACE`/runtime bounds cannot be transferred to it by
+  silently assuming `N = Θ(n²)`.
 
 `[deduction]` **Fact 0.1 (antichain dominates every poset).** For every poset
 `P` on `n` elements, `S(P) ≤ S(n)`. *Proof.* The linear extensions of `P` are a
@@ -89,13 +95,18 @@ so Mahaney's theorem is not available for it. `SORT-BOUND-B` is not sparse
 either (§4).
 
 `[deduction]` **Remark 1.5 (the generalized problem is not a single complexity
-question).** Its input length depends on the poset representation. For a dense
-poset, `N = Θ(n²)` and the budgeted DFS of `docs/research-budgeted-dfs.md` runs
-in time `2^{O(n log² n)} = 2^{O(√N log² N)}` and space `O(n³ log n) =
-O(N^{3/2} log N)`, so `GEN-SORT ∈ PSPACE` and `∈ EXPTIME` for that encoding.
-For a compact antichain, `N = O(log n)` and the same computation is the binary
-antichain problem, in `EXPSPACE` (`docs/research-certificates-barriers.md`,
-Claim A). A statement about "the complexity of `CanSort(P,k)`" is therefore
+question).** Its input length depends on the **encoding scheme**, not on whether
+the poset happens to have many relations. In the dense **matrix
+representation fixed in §0**, `N = Θ(n² + log(k+2))` and the budgeted DFS of `docs/research-budgeted-dfs.md` runs
+in time `2^{O(n log² n)} = 2^{O(√N log² N)}` and space `O(n³ log n) = O(N^{3/2} log N)`, so
+`GEN-SORT ∈ PSPACE ∩ EXPTIME` for that **matrix encoding** (with the
+budget `k` clamped to `O(n log n)` before minimax). For a *different
+sparse edge-list representation* with binary `n`, the antichain
+has `N = O(log n)`, and the same method gives only the
+`EXPSPACE` upper bound of `SORT-BOUND-B` (Claim A of
+`docs/research-certificates-barriers.md`). If a pair-list format also
+lists all `n` vertices explicitly, that representation instead has
+`N = Ω(n)` and yields `PSPACE`; one must specify which format is used. A statement about "the complexity of `CanSort(P,k)`" is therefore
 incomplete without fixing the poset encoding.
 
 ---
