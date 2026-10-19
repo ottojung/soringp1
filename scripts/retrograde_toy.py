@@ -132,6 +132,11 @@ def comparison_reachable(n):
 class Retrograde:
     """Backward DP result for one n.
 
+    The reverse transition graph is built OFFLINE from every enumerated state
+    (all-poset graph construction).  This is deliberately NOT the source's
+    on-the-fly Hasse-edge predecessor generation (``enumeratePredecessors``,
+    Section 5.7); see the module docstring for the distinction.
+
     Attributes:
       posets        list of all labelled poset states
       index         succ -> position
@@ -312,10 +317,29 @@ KNOWN_S = {0: 0, 1: 0, 2: 1, 3: 3, 4: 5}
 A001035 = {0: 1, 1: 1, 2: 3, 3: 19, 4: 219}
 
 
+def target_n4_posets(n=4):
+    """A handful of named n=4 posets, each built by legal comparisons so it is
+    guaranteed transitively closed and present in the enumerated state set."""
+    A = (0,) * n
+    return {
+        "antichain": A,
+        "chain": extend(extend(extend(A, 0, 1), 1, 2), 2, 3),
+        "one_pair": extend(A, 0, 1),
+        "two_pairs": extend(extend(A, 0, 1), 2, 3),
+        "chain3_plus_isolated": extend(extend(A, 0, 1), 1, 2),
+        "two_minima_vee": extend(extend(A, 0, 2), 1, 2),
+        "two_maxima_wedge": extend(extend(A, 0, 2), 0, 3),
+    }
+
+
 def validate(n_max=4, d_max=5):
-    """Return (rows, cross_checks, all_ok).  rows summarizes each n; the
-    cross-check verifies, for EVERY poset and every d <= d_max, that
-    retrograde F and the independent forward CanSort agree."""
+    """Comprehensive validation.  For EVERY poset on n <= n_max and every
+    d <= d_max, checks that the retrograde F and the independent forward
+    CanSort agree.  ``validate(4, 5)`` is the offline n=4 sweep and is intended
+    as a documented offline check, not a CI test; CI runs the bounded
+    ``validate(n_max=3)`` plus ``validate_targeted_n4`` instead.
+
+    Returns (rows, cross_checks, all_ok)."""
     rows = []
     cross_checks = 0
     ok = True
@@ -345,6 +369,27 @@ def validate(n_max=4, d_max=5):
                 if can_sort(succ, d) != (f <= d):
                     ok = False
     return rows, cross_checks, ok
+
+
+def validate_targeted_n4(d_max=5):
+    """Bounded n=4 validation for CI: the antichain, the chain, and several
+    structured posets, each checked against the forward oracle for all
+    d <= d_max.  Returns (F_by_name, cross_checks, all_ok)."""
+    R = Retrograde(4)
+    can_sort = make_forward_oracle(4)
+    F_by_name = {}
+    cross_checks = 0
+    ok = R.S == 5
+    for name, succ in target_n4_posets(4).items():
+        if succ not in R.index:
+            raise AssertionError(f"target poset {name} not in state set")
+        f = R.F[R.index[succ]]
+        F_by_name[name] = f
+        for d in range(0, d_max + 1):
+            cross_checks += 1
+            if can_sort(succ, d) != (f <= d):
+                ok = False
+    return F_by_name, cross_checks, ok
 
 
 def _print_tree(R, node, indent=0):
@@ -379,8 +424,13 @@ def main():
         )
     print()
     print(
-        "Forward cross-check: %d (poset, d) pairs with d <= %d agree with "
-        "independent CanSort: %s" % (checks, args.d_max, ok)
+        "Comprehensive OFFLINE cross-check: %d (poset, d) pairs with d <= %d "
+        "agree with independent CanSort: %s" % (checks, args.d_max, ok)
+    )
+    fnames, tchecks, tok = validate_targeted_n4(args.d_max)
+    print(
+        "Bounded CI cross-check (n=4 targeted, %d pairs): %s; F by poset: %s"
+        % (tchecks, tok, fnames)
     )
     print(
         "Storage note: reverse graph + counters are O(#states * n^2) = "

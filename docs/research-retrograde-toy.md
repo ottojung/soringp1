@@ -97,6 +97,15 @@ This is an honest **offline all-poset graph construction**, valid only because
 the state space is tiny (`A001035(4) = 219`). It is not the source's scalable
 method and does not claim to be.
 
+`[deduction]` **Explicit distinction.** The reverse transition graph used here
+is **offline-built** from the complete enumerated state set; it is *not* the
+source's true Hasse-predecessor generation. The source iterates Hasse edges and
+solves for the predecessor sets via `enumeratePredecessors` (Lemma 5.2 /
+Corollary 5.1); the toy instead materialises every state and every legal
+transition up front and inverts the whole graph. Both are "backward", but the
+predecessor machinery is different, and only the source's version is intended to
+scale.
+
 `[experiment]` The multiple-predecessor subtlety is nonetheless *present and
 handled* in the inverted graph: `pred[c]` lists every move id whose child is
 `c`, and several moves from different owners may share the same comparison pair.
@@ -130,10 +139,18 @@ antichain equals the enumerated set (so the "219 states" fixture is correct):
 | 3 | 19 | 21 | 3 | 3 |
 | 4 | 219 | 522 | 5 | 5 |
 
-`[experiment]` **Cross-check.** For *every* poset on `n ≤ 4` and *every*
-`d ≤ 5` (1458 `(poset, d)` pairs), the backward layer membership
-`F(P) ≤ d` agrees with the independent forward `CanSort(P,d)`. This is the
-validation required by the task; it is a finite identity on 243 states.
+`[experiment]` **Cross-check.** The comprehensive offline sweep checks *every*
+poset on `n ≤ 4` and *every* `d ≤ 5` (1458 `(poset, d)` pairs); the backward
+layer membership `F(P) ≤ d` agrees with the independent forward `CanSort(P,d)`.
+This is a finite identity on the 243 states with `n ≤ 4`.
+
+`[experiment]` **CI versus offline.** The regression test
+`tests/test_retrograde_toy.py` is kept bounded (well under 5 s): it runs the
+exhaustive sweep only for `n ≤ 3`, plus a *targeted* `n = 4` set (the antichain,
+the chain, and five structured posets) checked against the forward oracle, and
+the depth-5 antichain certificate. The full `n = 4` sweep `validate(n_max=4,
+d_max=5)` is the documented offline check and is **excluded from CI**; run it
+via `python3 scripts/retrograde_toy.py`.
 
 `[experiment]` **Backward certificate for the `n = 4` antichain at depth
 `S(4) = 5`.** The program emits a nested certificate whose root is
@@ -191,8 +208,8 @@ reported here as literature coverage only, not as a verified implementation.
 ### Reproduction
 
 ```
-python3 scripts/retrograde_toy.py            # tables + n=4 certificate
-python3 -m unittest tests.test_retrograde_toy -v
+python3 scripts/retrograde_toy.py            # offline n=4 sweep + certificate
+python3 -m unittest tests.test_retrograde_toy -v   # bounded CI checks (<5s)
 ```
 
 ## References
