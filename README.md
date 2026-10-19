@@ -77,10 +77,14 @@ These are research notes (not Lean theorems), each with a companion program:
   are falsified with smallest witnesses (same-`e` at `n = 5`, non-monotonicity
   at `n = 6`, merge family `Merge(2,4)`).
 - [Budgeted DFS for exact S(n)](docs/research-budgeted-dfs.md)
-  — `scripts/budgeted_dfs.py`. Pure budgeted DFS `CanSort(P,d)` (no
-  memoization, no advice) decides `S(n) ≤ k`; deterministic time
-  `2^{O(n log² n)}` in numeric `n`, improving the recorded `2^{O(n²)}` DP
-  bound; poly-space unary, `EXPSPACE` binary.
+  — `scripts/budgeted_dfs.py`, `scripts/transcript_dfs.py`. Pure budgeted DFS
+  `CanSort(P,d)` (no memoization, no advice) decides `S(n) ≤ k`; deterministic
+  time `2^{O(n log² n)}` in numeric `n`, improving the recorded `2^{O(n²)}` DP
+  bound. The transcript-only implementation decides comparability by graph
+  reachability and uses `O(n log² n)` bits of work space (vs `O(n³ log n)` for
+  a matrix-per-frame version); this also gives a sublinear-space upper bound
+  `O(√N log² N)` for dense-matrix `GEN-SORT` (`N = Ω(n²)`). Space upper bound
+  only: no tightness or class separation is claimed.
 - [Sound pruning and move reduction for the budgeted DFS](docs/research-budget-pruning.md)
   — `scripts/budgeted_pruning_experiments.py`. Provably sound, poly-space
   pruning: the poset-level information cutoff `e(P) > 2^d`, the Hanamura–Iwata

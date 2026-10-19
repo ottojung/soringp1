@@ -65,11 +65,13 @@ space = 2^{O(n²)} = 2^{2^{O(L_B)}}  →  not in EXPSPACE via this algorithm
 
 `[deduction]` **Proposition 2.2 (budgeted DFS).** The budgeted DFS of
 `docs/research-budgeted-dfs.md` decides `S(n) ≤ k` in time `2^{O(n log² n)}` and
-space `O(n³ log n)` (numeric `n`). Under binary encoding:
+space `O(n log² n)` bits (numeric `n`; the transcript-only implementation of
+that note §5.2; a matrix-per-frame implementation costs `O(n³ log n)` bits).
+Both are the same `2^{O(L_B)}` class below. Under binary encoding:
 
 ```
 time  = 2^{O(n log² n)} = 2^{2^{O(L_B)}}  →  2-EXPTIME
-space = O(n³ log n) = 2^{O(L_B)}          →  SORT-BOUND-B ∈ EXPSPACE
+space = O(n log² n) = 2^{O(L_B)}          →  SORT-BOUND-B ∈ EXPSPACE
 ```
 
 `[deduction]` **Proposition 2.3 (game/ATM).** The alternating Turing machine of
