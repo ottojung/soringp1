@@ -66,7 +66,7 @@ The unary threshold language is sparse: ordinary many-one NP-hardness
 would imply P=NP by Mahaney's theorem. Record limitations on proposed
 reductions *before* attempting a formal proof.
 
-### Insights from optimal comparison sorting
+### Descriptive complexity of the unary threshold language
 
 In addition to quantitative bounds, pursue **unary descriptive
 complexity**. On appropriately ordered finite input structures, test
@@ -78,6 +78,7 @@ of an FO(PFP) definition via the capture theorem; building an explicit
 faithful formula remains a separate research problem. Do not infer a
 smaller-class definition from a compact-looking informal recursion.
 
+### Insights from optimal comparison sorting
 
 Read the primary literature, beginning with Ford–Johnson and proofs of
 small-n optimality. Explain why the information lower bound ceases to be

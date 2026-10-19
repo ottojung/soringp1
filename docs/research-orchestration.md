@@ -24,9 +24,12 @@ The unary portfolio includes:
 * Ordered-finite-structure descriptive complexity: FO(LFP) (P),
   existential second-order logic (NP), FO(PFP) (PSPACE), and an
   EXPTIME-capturing logic such as SO(LFP). The PSPACE upper bound
-  already yields an existential *mathematical* definability result
-  in FO(PFP) by the capturing theorem; challenge agents to construct
-  explicit formulae and verify their sorting-game semantics.
+  already implies existence of a defining FO(PFP) sentence
+  by the capture theorem; challenge agents to construct
+  explicit formulae and verify their sorting-game semantics. See
+  [Immerman's descriptive complexity references](https://people.cs.umass.edu/~immerman/descriptive_complexity.html)
+  for the standard capture theorems. Take ordered finite input
+  structures and well-formed unary words seriously.
 * Unary-uniform algorithms and parameterizations, structural
   recurrences, information/pruning obstructions, certificate designs,
   sparse-language complexity barriers, and independent source audits.

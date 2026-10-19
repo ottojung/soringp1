@@ -23,7 +23,6 @@ remain open; see `kernel-results.md`.
 
 ## Encodings and exact questions
 
-
 **Research priority:** unary encoding exclusively until the unary
 complexity program has been completed. The binary function and
 threshold language below are specified to keep the mathematical

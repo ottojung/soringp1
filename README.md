@@ -11,7 +11,6 @@ lower bounds are possible. This is a research goal, **not a claimed theorem**.
 
 ## What exactly is being classified?
 
-
 **Current binding research scope: unary first (October 19, 2026).**
 All active work and at least ten concurrent independent research agents
 focus on `SORT-BOUND-U` and `S_unary`. Binary versions below remain
@@ -52,8 +51,8 @@ questions via Antonina on **phoebe-dev**, under the binding
 [research orchestration](docs/research-orchestration.md) policy.
 Agent count is not evidence of a breakthrough; diversify exploratory packets
 rather than generating filler PRs. Agents report findings and obstacles
-briefly to Antonina issue #301 without a mandatory commit; only mature results important to the central
-question go through review/publication. Existing research remains archived.
+briefly to Antonina issue #301 without a mandatory commit; only mature
+results important to the central question go through review/publication. Existing research remains archived.
 
 
 As of October 17, 2026, **mathematical exploration is the default**. The

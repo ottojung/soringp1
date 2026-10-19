@@ -9,7 +9,6 @@ deferred, not a parallel track. Existing binary facts below remain
 historical background, not action items. See [research
 orchestration](research-orchestration.md).
 
-
 ## Baseline before further formalization
 
 The exact minimax sorting number `S(n)` is already studied extensively. For
@@ -63,8 +62,6 @@ The following fronts are illustrative, not a restrictive task queue. The
 binding [research orchestration policy](research-orchestration.md) requires
 at least ten concurrent independent SoringP1 agents on phoebe-dev;
 generate additional useful fronts rather than waiting for these to finish.
-
-
 
 These are **questions**, not a numbered queue of theorems to formalize.
 
