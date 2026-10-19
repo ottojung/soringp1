@@ -133,7 +133,7 @@ antichain equals the enumerated set (so the "219 states" fixture is correct):
 `[experiment]` **Cross-check.** For *every* poset on `n ≤ 4` and *every*
 `d ≤ 5` (1458 `(poset, d)` pairs), the backward layer membership
 `F(P) ≤ d` agrees with the independent forward `CanSort(P,d)`. This is the
-validation required by the task; it is a finite identity on 242 states.
+validation required by the task; it is a finite identity on 243 states.
 
 `[experiment]` **Backward certificate for the `n = 4` antichain at depth
 `S(4) = 5`.** The program emits a nested certificate whose root is
