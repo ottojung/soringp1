@@ -104,10 +104,25 @@ L0(P) <= L1(P) <= B(P) <= F(P).
 
 `[experiment]` Exhaustive check of the full chain on every poset with
 `n <= 5` elements (1 + 3 + 19 + 219 + 4231 = 4474 posets, shared memoized
-`F`): **0 failures**. On the same range `B = L1` everywhere: **no strict
-`B > L1` occurs below `n = 10`**. The first exhibited strict separation is
-`W ⊕ W` at `n = 10` (§6). So the decomposition never hurts and first
-helps at `n = 10` in this range.
+`F`): **0 failures**. On the same range `B = L1` everywhere.
+However, the earlier claim that the first strict example occurs at `n=10`
+was **false**: already `A ⊕ V` with `A=(0,0)` (a 2-antichain)
+and `V=(0,0,1,3,7)` (five keys) has `n=7` and
+
+```
+A:     e=2, L1=F=1
+V:     e=8, L1=F=4
+A⊕V:   e=16, L0=4, L1=4, B=5, F=1+4=5.
+```
+
+The full successor-mask tuple is `(124,124,0,0,4,12,28)`. The first
+two components are incomparable within themselves but all keys in `A`
+are below all keys in `V`. A bounded independent enumeration of all
+series combinations with block-size splits `2+2`, `2+3`, `2+4`,
+`3+3`, and `2+2+2` found no strict example for total size at most six;
+the `n=7` construction is the **smallest found**. The `n=10`
+family `W⊕W` remains useful because its gap extends to an explicit
+unbounded additive family (§6).
 
 ## 4. Amplification along series powers
 
@@ -320,8 +335,8 @@ empirically.
   no-fixed-horizon negative result (§5); the exact `W^t` computation
   `L1 = 3t + 1` vs `B = F = 4t` with unbounded gap (Theorem 2); the
   implementation and amortized analysis of the polynomial-space prune (§7).
-* **Empirical in this note:** the `n <= 5` chain regression (0 failures,
-  no strict `B > L1` below `n = 10`), the `W^t` table, the amplification
+* **Empirical in this note:** the `n <= 5` chain regression (0 failures), the strict
+  `n=7` witness `A⊕V`, the `W^t` table, the amplification
   table, and the 1210-check prune equivalence regression.
 
 ## 10. Reproducing

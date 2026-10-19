@@ -47,12 +47,26 @@ class ChainInequalities(unittest.TestCase):
                 self.assertLessEqual(b, f, f"B > F at n={n}: {P}")
 
     def test_B_equals_L1_throughout_n_le_4(self) -> None:
-        # The decomposition is never harmful; the first strict B > L1 in
-        # this project is W (+) W at n = 10 (see WitnessFamily below).
+        # The decomposition is never harmful; a strict B > L1 example
+        # already exists at n=7, not at n=10.
         for n in range(1, 5):
             for P in all_posets(n):
                 self.assertEqual(B(P), L1(P), f"B != L1 at n={n}: {P}")
 
+
+class EarlierStrictWitness(unittest.TestCase):
+    def test_n7_ordinal_sum_gap(self) -> None:
+        # Discovered during independent PR review; refutes the original
+        # claim that the first strict compositional improvement is at n=10.
+        P = (124, 124, 0, 0, 4, 12, 28)
+        self.assertEqual(linear_extensions(P), 16)
+        self.assertEqual(L0(P), 4)
+        self.assertEqual(L1(P), 4)
+        self.assertEqual(B(P), 5)
+        # Exact value follows from ordinal-sum additivity; the five-key
+        # factor independently computes to F=4.
+        self.assertEqual(minimax((0, 0)), 1)
+        self.assertEqual(minimax((0, 0, 1, 3, 7)), 4)
 
 class WitnessFamily(unittest.TestCase):
     """``W^t``: exact global ``L1 = 3t + 1`` vs decomposed ``B = F = 4t``."""
