@@ -97,10 +97,16 @@ either (§4).
 `[deduction]` **Remark 1.5 (the generalized problem is not a single complexity
 question).** Its input length depends on the **encoding scheme**, not on whether
 the poset happens to have many relations. In the dense **matrix
-representation fixed in §0**, `N = Θ(n² + log(k+2))` and the budgeted DFS of `docs/research-budgeted-dfs.md` runs
-in time `2^{O(n log² n)} = 2^{O(√N log² N)}` and space `O(n³ log n) = O(N^{3/2} log N)`, so
-`GEN-SORT ∈ PSPACE ∩ EXPTIME` for that **matrix encoding** (with the
-budget `k` clamped to `O(n log n)` before minimax). For a *different
+representation fixed in §0**, `N = Θ(n² + log(k+2))` and the transcript-only
+budgeted DFS of `docs/research-budgeted-dfs.md` (§5.2, §7.1) runs in time
+`2^{O(n log² n)} = 2^{O(√N log² N)}` and work space `O(n log² n) = O(√N log² N)`
+bits, so `GEN-SORT ∈ DSPACE(O(√N log² N)) ∩ DTIME(2^{O(√N log² N)})` for that
+**matrix encoding** (with the budget `k` clamped to `O(n log n)` before
+minimax). This is a **sublinear-space** upper bound because `√N log² N = o(N)`;
+it is a space bound only, and no hardness, completeness or tightness is claimed.
+The `O(√N log² N)` bound assumes the matrix is on a read-only input tape and is
+queried by index; a matrix-per-frame implementation would instead cost
+`O(n³ log n) = O(N^{3/2} log N)` and give only `PSPACE`. For a *different
 sparse edge-list representation* with binary `n`, the antichain
 has `N = O(log n)`, and the same method gives only the
 `EXPSPACE` upper bound of `SORT-BOUND-B` (Claim A of
@@ -310,7 +316,7 @@ their "optimal" comparison counts are constant-factor optimal, not exact.
 | `SORT-BOUND-U ∈ P/log` (nonuniform) | `[deduction]` Thm 4.3 |
 | `SORT-BOUND-B` not sparse; Mahaney inapplicable | `[deduction]` Thm 4.4 |
 | `SORT-BOUND-U ∈ PSPACE`, `SORT-BOUND-B ∈ EXPSPACE` | `[deduction]` Claim A, `research-certificates-barriers.md` |
-| `GEN-SORT ∈ PSPACE`, `∈ EXPTIME` for dense poset encodings | `[deduction]` Rem 1.5 |
+| `GEN-SORT ∈ DSPACE(O(√N log² N)) ∩ EXPTIME` for dense poset encodings (sublinear space, upper bound only) | `[deduction]` Rem 1.5; `research-budgeted-dfs.md` §7.1 |
 | `SORT-BOUND-U ≤_m^p GEN-SORT`; upper bounds transfer down, hardness up | `[deduction]` Lem 1.1, Cor 1.3 |
 | `SORT-BOUND-B ≤_m^p GEN-SORT` via the antichain embedding | **fails** (exponential output, Lem 1.2) |
 | Hyafil–Rivest NP-completeness applies to `GEN-SORT`/`SORT-BOUND` | **does not transfer** (arbitrary subset tests) |
