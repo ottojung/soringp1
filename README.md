@@ -97,8 +97,11 @@ These are research notes (not Lean theorems), each with a companion program:
   bound. The transcript-only implementation decides comparability by graph
   reachability and uses `O(n log² n)` bits of work space (vs `O(n³ log n)` for
   a matrix-per-frame version); this also gives a sublinear-space upper bound
-  `O(√N log² N)` for dense-matrix `GEN-SORT` (`N = Ω(n²)`). Space upper bound
-  only: no tightness or class separation is claimed.
+  `O(√N log² N)` for dense-matrix `GEN-SORT` (`N = Ω(n²)`).
+  For unary `SORT-BOUND-U` with actual word length `N=n+k+1`,
+  budget-specific DFS gives the sharper **deterministic time
+  `2^{O(N log N)}` and work space `O(N log N)` bits** (see §5.3 of
+  the DFS note). All are upper bounds only, not class separations.
 - [Sound pruning and move reduction for the budgeted DFS](docs/research-budget-pruning.md)
   — `scripts/budgeted_pruning_experiments.py`. Provably sound, poly-space
   pruning: the poset-level information cutoff `e(P) > 2^d`, the Hanamura–Iwata

@@ -227,6 +227,38 @@ labelled posets for `n = 2,3,4`.
 - It is lost if an implementation materializes an `n×n` closure matrix or the
   incomparable-pair list per frame.
 
+### 5.3 Sharper bounds in actual unary threshold input length [deduction]
+
+For the **decision** language `SORT-BOUND-U`, let the complete input word
+be `1^n # 1^k` of length `N=n+k+1`. The depth of the budgeted decision
+DFS is `d=k`, **not** necessarily the worst-case constructive upper budget
+`U(n)=O(n log n)` used when *computing the numeric function S(n)*.
+
+**Proposition (uniform, read-only input):**
+
+`SORT-BOUND-U in DTIME(2^{O(N log(N+2))}) intersect DSPACE(O(N log(N+2)))`.
+
+*Proof.* First check the unary form and compute a constructive mergesort
+upper bound `U(n)=n*ceil(log2 max(2,n))` using logarithmic-bit counters.
+If `k>=U(n)`, accept immediately. Otherwise run the exact
+`CanSort(empty_n,k)` recurrence from sections 2-3. It has depth `d=k`,
+at most `n(n-1)` recursive calls per non-total state, and
+`poly(n+k)` time per call. Thus the total time is
+`2^{O(k log(n+2))} poly(N) <= 2^{O(N log(N+2))}` because
+`k<=N` and `n<=N`. By section 5.2, its workspace is
+`O((k+n) log(n+2)) <= O(N log(N+2))` bits. For `n<=1`, the order is
+already determined. End of proof.
+
+This is a **sharper input-length bound for threshold decision**, not
+a new algorithm and not a separation: the earlier
+`2^{O(n log^2 n)}` time and `O(n log^2 n)` space for computing the
+**function** `S_unary(1^n)` remain correct because computing the function
+uses budgets of size `Theta(n log n)` while its input has only `n`
+symbols. The present decision bound also yields membership in
+`DSPACE(N^2)`, hence in the finite-variable logic `VAR[3]` on
+ordered structures by the classical capture theorem, but does not imply
+`VAR[2]` or deterministic linear space `O(N)`.
+
 ## 6. Query complexity `[deduction]`
 
 Computing `S(n)` makes `O(log U(n)) = O(log n)` threshold queries (one
@@ -241,12 +273,14 @@ distinguish `Θ(n log n)` candidate values.
 The exponent `n log² n` is in **numeric `n`**, so the bound is sensitive to
 encoding:
 
-- **Unary** (`m = n+k+1` bits, `n ≤ m`): time `2^{O(m log² m)}`, space
-  `O(n log² n) = O(m log² m)` bits by §5.2 (the matrix-per-frame version costs
-  `O(m³ log m)`), which is poly. So `S_unary ∈ FPSPACE` and `SORT-BOUND-U` is
-  decidable in deterministic poly-space (consistent with, and more time-specific
-  than, the `PSPACE` bound of `docs/research-certificates-barriers.md` Claim A,
-  which gives no explicit time).
+- **Unary threshold** (`m = n+k+1` symbols): retaining the supplied
+  budget `d=k` yields **time `2^{O(m log(m+2))}` and
+  work space `O(m log(m+2))` bits**, per §5.3, strengthening the
+  coarser bound obtained by substituting `n≤m` into the function bounds.
+  For the **unary function** on input `1^n`, computing `S(n)` via
+  `O(log n)` threshold calls still uses time `2^{O(n log² n)}` and
+  work space `O(n log² n)` bits. Both are uniform and polynomial-space;
+  neither proves P, NP membership, or a class separation.
 - **Binary** (`bin(n) # bin(k)`): first test `k ≥ U(n) = O(n log n)` and accept
   immediately (merge-sort witnesses `S(n) ≤ U(n)`), so the search runs only on
   nontrivial instances with `k ≤ U(n)`. There `log k = O(log n)` and the input

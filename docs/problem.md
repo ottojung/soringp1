@@ -75,6 +75,12 @@ relative to the input length.
 - A partial-order minimax recurrence gives **time 2^{O(n²)} measured in numeric n**
   to compute S exactly, assuming ordinary polynomial-cost finite-state
   bookkeeping. See [the derivation](upper-bound.md).
+- A budget-specific transcript-only DFS strengthens the unary threshold
+  upper bound to deterministic `2^{O(N log(N+2))}` time and
+  `O(N log(N+2))` work-tape bits, where `N=n+k+1` is the actual
+  unary decision input length. The numeric function on input `1^n`
+  separately has `2^{O(n log² n)}` time and `O(n log² n)` space.
+  See `research-budgeted-dfs.md` §5.3 for the derivation.
 - Thus `SORT-BOUND-U ∈ EXPTIME`. This does *not* imply
   `SORT-BOUND-B ∈ EXPTIME`: its proven bound from this algorithm is
   `2^{2^{O(m)}}` where m is the bit length of binary n, hence in 2-EXPTIME.
