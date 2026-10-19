@@ -1,16 +1,20 @@
 # Exploration-first research program
 
-**Active direction (2026-10-17): mathematical discovery before more Lean.**
+**Binding pivot (2026-10-18): pursue mathematical discovery about the
+complexity of `S(n)` before publishing any new artifacts.**
 The objective is to understand the complexity of *evaluating the optimal
 sorting number* S(n), not to collect Lean proofs about comparison sorting.
-Treat this document as research guidance, not a theorem-completion queue.
+Treat this document as research guidance, **not** a theorem/PR queue.
+Do not produce a research note, script, test, or Lean statement merely
+because an agent completed a work session; a concise result or obstacle
+in Antonina issue #301 is the default.
 
 ## What we already have
 
 The repository contains a faithful adaptive comparison-tree model, existence
 and attainment proofs, information-theoretic and insertion upper bounds,
-exact kernel-checked values through n=6, and part of a minimax correspondence
-in `SoringP1/Minimax.lean`. For exact provenance and current gaps, see
+exact kernel-checked values through n=6, and the complete minimax correspondence
+`S_eq_adv_univ` in `SoringP1/Minimax.lean`. For exact provenance and current gaps, see
 `kernel-results.md`. The informal partial-order recurrence has a
 `2^{O(n²)}` state-enumeration bound measured in numeric n; this is not a
 kernel-checked machine-time theorem.
@@ -21,7 +25,15 @@ and `S(12)=30` are established; `ceil(log₂(12!))=29`. See
 `literature.md` and `exploration-agenda.md`. Avoid re-proving literature
 facts as the default research activity.
 
-## Independent research fronts (no fixed order)
+## High-risk questions bearing directly on S(n)
+
+**Priority is the one-parameter problem `S(n)`, not incremental bounds for
+arbitrary `F(P)`.** The latter matter only if they bridge to an asymptotic
+algorithm, valid reduction, succinct representation or substantial no-go
+theorem for the special input family.
+
+Research should spend time on uncertain attempts, not merely polished
+corollaries. There is no requirement to spawn an agent per subsection.
 
 ### Structural characterization and state compression
 
@@ -59,19 +71,19 @@ from computing finitely many S(n).
 
 ## What counts as progress
 
-A useful research contribution has a precise question, model and encoding,
-primary sources, a candidate mathematical claim/algorithm/reduction,
-a written argument or reproducible experiment, a serious counterexample
-attempt, and a clear statement of uncertainty. Negative results and
-identified barriers are valuable. Avoid manufactured tasks that only add
-routine Lean lemmas.
+Progress requires a **material update to what is known or plausibly
+possible about evaluating S(n)**: a new uniform bound/algorithm, a valid
+complexity reduction or barrier, a global structural theorem with a
+credible complexity consequence, or a serious falsification of a major
+route. Investigations may leave only a compact comment with sources, the
+sharpest argument, disproof attempts and open obstacle. A polished PR,
+test file, research note, or increased agent count is **not itself progress**.
+Do not turn every small poset observation into a follow-up research task.
 
 ## Lean checkpoint, not Lean workstream
 
-Preserve and test the existing kernel-checked model. The outstanding
-`height (minimaxTree S) ≤ adv S` proof may be finished if a small and
-obvious repair works; otherwise document the proof-engineering blocker and
-move on. A future Lean task needs an independent mathematical justification:
+Preserve and test the existing kernel-checked model. The earlier minimax height proof is now complete in the kernel-checked
+`minimaxTree_height` / `S_eq_adv_univ` results. Do not reopen it. A future Lean task needs an independent mathematical justification:
 a meaningful new theorem, a mature algorithm, a subtle correctness proof,
 or a necessary cost-model/correspondence bridge.
 

@@ -29,7 +29,17 @@ NP does not directly classify a numeric function; its membership for this
 language is a research question, not an assumption. See
 [the problem statement](docs/problem.md) for exact definitions and caveats.
 
-## Active direction: exploration before further formalization
+## Active direction: complexity-first theory without deliverable quotas
+
+**October 18, 2026 pivot:** The active goal is to change what we know about
+the *uniform complexity of evaluating S(n)*. Research agents are free to
+spend time on open-ended arguments, hypotheses and primary literature,
+including approaches that fail. A routine partial-order counterexample,
+small-n test, research note, PR or Lean lemma is **not** a milestone.
+Agents now report findings and obstacles briefly to Antonina issue #301
+without a mandatory commit; only mature results important to the central
+question go through review/publication. Existing research remains archived.
+
 
 As of October 17, 2026, **mathematical exploration is the default**. The
 Lean foundation remains checked and maintained, but routine lemmas and

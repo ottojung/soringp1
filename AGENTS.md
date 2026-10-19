@@ -7,7 +7,66 @@ comparison-sorting number S(n). The long-term goal includes Lean kernel-checked
 results, but **discovery comes first**. See `docs/problem.md` for the fixed
 model and encodings.
 
-## Operating mode: exploration first (2026-10-17)
+## Binding reset: complexity-first research, not artifact production (2026-10-18)
+
+**This section supersedes any older instructions that imply a required
+research note, script, test, Lean proof, agent run, or PR per investigation.**
+The expected result of most investigations is **increased understanding**,
+including a falsified attractive conjecture, a precise obstruction, or an
+honest inconclusive finding. A clean worktree and no PR are normal outcomes.
+
+The sole research objective is a significant theorem about the **uniform
+complexity of computing the special one-parameter function `S(n)`** or its
+carefully encoded threshold language. Optimizing `F(P)` for arbitrary
+partial orders is supporting research, not an end in itself: **before**
+spending time on it, identify a plausible bridge to a uniform bound,
+certificate, hardness reduction, exact structural characterization, or
+fundamental obstacle for `S(n)`. If that bridge fails, say so and stop
+that line instead of polishing supporting lemmas.
+
+**New default for every research agent:**
+1. Begin with one sharp question and at least one plausible line of
+   attack that would change our view of `S(n)` if it succeeded.
+2. Read relevant *primary literature*, carefully distinguish models,
+   and try hard to disprove the idea (paper argument first, a small
+   experiment only if it discriminates between hypotheses).
+3. Explore multiple genuinely different hypotheses if needed; accept
+   uncertainty and negative findings. Do not stop reasoning at the
+   first small lemma, counterexample, or successful test.
+4. Report substantive changes of knowledge, key references, failed
+   attempts and the next decisive obstacle in **Antonina issue #301**.
+   A concise research update is sufficient; **no mandatory artifact**.
+5. Do **not** automatically create a branch, PR, new test suite,
+   documentation page, GitHub issue or Lean milestone. Scratch experiments
+   can remain local on Phoebe. Do not schedule routine follow-on tasks
+   merely because an agent is idle.
+
+**Exceptional publication gate.** Seek integration only for a meaningful
+theoretical breakthrough about `S(n)`; a demonstrably improved uniform
+asymptotic bound; a rigorous encoding-preserving hardness reduction;
+a substantive, independently justified certificate/recurrence theorem;
+a decisive no-go theorem excluding a major route; or a necessary fix to
+model fidelity. First provide an independent paper argument, original
+sources, a serious falsification attempt, and a short explanation of
+**why this changes the central complexity question**. Then use minimal
+tests and peer review; a PR is optional, not the reward or goal.
+Formalize in Lean only when kernel checking would genuinely validate
+such a mature result or a critical model/cost correspondence.
+
+**Research scorecard:** What new claim about computing `S(n)` can we
+defend? Which hypothesis was ruled out? Did a bound, algorithm, or valid
+reduction change? What decisive question comes next? Counts of active
+agents, PRs, CI passes, solved local poset examples and Lean files do
+**not** measure progress. Avoid saturating workers merely to appear
+productive. If no credible route remains, report it and pause, rather
+than spawning a replacement workstream of routine formalization.
+
+The current open PR backlog is archival research, not a research
+milestone. Triage once for correctness and relevance, then merge
+substantive results or defer/close minor experiments with rationale.
+Do not create derivative paperwork to 'finish' the backlog.
+
+## Historical exploration-first guidance (2026-10-17)
 
 This is the operative priority for researchers and autonomous agents:
 
@@ -28,12 +87,9 @@ This is the operative priority for researchers and autonomous agents:
 - **Freeze routine Lean expansion** until there is a mature, substantive
   claim or a critical ambiguity in correspondence to the intended problem.
   Existing Lean files and CI are preserved and must remain working.
-- **One narrowly scoped exception:** the missing height specification of
-  `minimaxTree` may be completed if straightforward. The current recursive
-  `adv` unfolding/elaboration loop must not become an unbounded
-  proof-engineering campaign: if the direct fix is nontrivial, write down the
-  precise blocker and return to exploration. Do not launch a parade of
-  auxiliary Lean milestones to route around it.
+- **The former narrowly scoped height exception is already completed:**
+  `minimaxTree_height` and `S_eq_adv_univ` are kernel checked. Do not
+  reopen that proof-engineering stream.
 - Don't launch tasks just to occupy agents. Do not infer an obligation to
   continuously formalize from the availability of compute.
 
