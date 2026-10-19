@@ -79,6 +79,13 @@ These are research notes (not Lean theorems), each with a companion program:
   `S(0..5)`; ordinal-sum allocation is exact but does not reduce no-memoization
   calls (negative result). No asymptotic exponent improvement; the cutoff stops
   helping exactly at the `n = 12` information-bound gap.
+- [Hardness boundaries between generalized and antichain sorting](docs/research-hardness-boundaries.md)
+  — `scripts/hardness_boundaries.py`. Compares generalized `CanSort(P,k)` with
+  the antichain `S(n) ≤ k`; the containment reduction is polynomial only under
+  the unary encoding; audits Hyafil–Rivest (arbitrary subset tests) and Cardinal
+  et al. (constant-factor approximation, not exact); `e(P)` does not determine
+  `S(P)` (smallest witness `n = 5`, `e = 8`, `S = 3` vs `4`). No NP-hardness
+  or separation is claimed.
 
 The reference minimax evaluator is `scripts/evaluate.py` (exact for small `n`).
 
