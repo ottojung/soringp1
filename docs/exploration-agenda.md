@@ -82,13 +82,16 @@ Use the Python evaluator for experiments and regression checks.
 Compare search-space reduction ideas against known values and examples.
 No amount of small-instance computation proves a complexity separation.
 
-## Expected output from each investigation
+## Default output: insight, not a PR
 
-Record a *precise question*, source and model, candidate claim or algorithm,
-the smallest compelling example, one concrete falsification attempt,
-what was learned, and the next unresolved obstacle. Distinguish literature
-facts, deductions, experiments, conjectures, paper proofs, and Lean-checked
-results. A useful negative result counts as progress.
+Most investigations should end with a **short Antonina #301 comment**,
+not a file or commit: the precise question, strongest primary source,
+what was attempted, the decisive counterexample or obstruction (if any),
+and how it changes the prospects for *uniformly evaluating S(n)*. Negative
+or inconclusive results are welcome. Do not generate publication tasks
+from every small poset lemma or fill the board with routine status reports.
+Only a significant result clearing the exceptional publication gate in
+`AGENTS.md` justifies a new code/doc/Lean integration stream.
 
 ## When to resume Lean
 
