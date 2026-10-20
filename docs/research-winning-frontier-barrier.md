@@ -1,138 +1,177 @@
 # A large winning frontier survives exact information pruning
 
-**Status:** paper-level theorem with exact integer witness, independently
-auditable, not Lean-checked. **Scope:** comparison-sort minimax F(P)
-for a known partial order P, and S(n)=F(antichain_n). Asymptotics here
-use numeric n, not the binary length of n.
+**Status:** paper-level theorem and exact integer witnesses, independently
+auditable, not Lean-checked. **Model:** adaptive comparison sorting of
+distinct keys, where F(P) is the minimax remaining comparison count
+after learning partial order P. All asymptotics are in numeric n,
+not the length of its binary encoding.
 
-## Theorem
+## Statement
 
-For infinitely many n=2^(2r), let k=ceil(log₂(n!)). At a common
-depth t<=k, there are at least
+For infinitely many n=2^(2r), with k=ceil(log₂(n!)), there exists a
+common comparison depth t<=k with at least
 
 `2^((1/4-o(1)) n (log₂ n)^2)`
 
-pairwise **nonisomorphic** n-element posets P such that:
+pairwise **nonisomorphic** n-vertex partial orders P satisfying:
 
-1. P is reachable from the n-element antichain by exactly t legal
+1. P is reachable from the n-antichain by exactly t legal
    comparison outcomes.
-2. F(P)<=k-t: the sorter can finish within the remaining budget.
+2. F(P)<=k-t: a correct sorting procedure finishes within the
+   remaining comparison budget.
 
-These states are genuinely winning, not merely accepted by the
-information cutoff. An exact finite witness at n=1024 gives more
-than 2^381 such states. The antichain root may nevertheless be losing
-at budget k. This is NOT a computational time lower bound for S(n).
+These states are genuinely *winning*, not merely allowed by
+the linear-extension cutoff. A finite instance with **n=224**
+already exhibits more than **2^39** different nonisomorphic
+winning states at the same depth.
 
-## 1. Layered skeleton and independent choices
+This is NOT a time lower bound for computing S(n).
+A selective or symbolic algorithm need not enumerate every state;
+the root antichain may itself be losing at budget k.
 
-Let s=2^r and n=s². Create s levels L_i={(i,x):0<=x<s},
-for i=0,...,s-1. For each x and consecutive i,i+1 add edges
+## 1. The much simpler independent-edge construction
 
-`(i,x) < (i+1, 2x mod s)` and
-`(i,x) < (i+1, (2x+1) mod s)`.
+Choose integers s>=2 (number of columns) and L>=2 (number
+of levels), and let n=sL. Identify vertices as
 
-There are t0=2s(s-1) fixed edges. Every edge increases level by
-exactly one. Consequently, an edge joining *adjacent* levels
-cannot be implied by a different edge or any longer path.
-Each edge can be learned by a legal comparison in any order.
+`(i,x), 0<=i<L, 0<=x<s`.
 
-Exactly M=(s-1)(s²-2s) other adjacent-level pairs are absent.
-Choose an arbitrary subset A of m such pairs and append all its
-edges to make P_A. All edges go upward, so the construction is
-consistent; all t=t0+m outcomes are legal in any order. Crucially,
-the exact comparabilities across any pair of consecutive levels
-are *precisely* the selected edges. Thus the `binom(M,m)` choices
-produce that many distinct **labelled** reachable posets at depth t.
+For each fixed x, place the L−1 known comparisons
 
-## 2. Perfect matching gives only s already-sorted chains
+`(0,x)<(1,x)<...<(L−1,x)`.
 
-The two-edge skeleton has a *perfect matching* across each adjacent
-pair of levels. For x<s/2 choose the outgoing edge to 2x; for
-x>=s/2 choose the edge to (2x+1) mod s. These s destinations
-are exactly the even residues and the odd residues, respectively.
-Therefore this is a bijection and uses only installed edges.
+These t0=s(L−1) edges form exactly s disjoint, already-sorted
+chains, each of length L. There is no need for an elaborate
+high-expansion or de Bruijn skeleton.
 
-Composing the matching across all s-1 interfaces partitions
-the n=s² vertices into **s disjoint directed chains of length s**.
-Their internal ordering is already known. The arbitrary added
-edges A preserve these chains.
+Between each adjacent pair of levels choose any *additional*
+forward pair (i,x)<(i+1,y) with x != y. There are
 
-A tournament tree merges these s sorted chains using at most
-s-1 comparisons to initialize the heads and at most r=log₂s
-new comparisons after each of the first n-1 outputs, by
-updating along the winner's path. Hence, constructively,
+`M=(L−1)(s²−s)`
 
-`F(P_A) <= B = (s-1) + (n-1)r`.
+possible extra pairs. Choose any set A of m such pairs.
 
-The earlier proof unnecessarily used rs chains; that larger
-bound made the winning theorem effective only at enormous n.
+Every installed edge, initial or extra, can be learned in
+arbitrary order as a legal comparison outcome: all edges
+increase the level by exactly one, so a different multi-edge
+path can never imply an adjacent-level relation. Edges are
+consistent because all point forward. Furthermore, the
+relation across adjacent levels is exactly the set of
+installed edges. Thus the `binom(M,m)` choices give that
+many DISTINCT LABELLED partial orders P_A, each reachable
+in exactly
 
-## 3. Winning budget and count of isomorphism classes
+`t=t0+m`
 
-Set k=ceil(log₂(n!)), and choose
+comparison outcomes.
 
-`m = k - t0 - B`.
+## 2. All the constructed states are winning
 
-For all sufficiently large r, 0<m<M/2. By definition
-t=t0+m=k-B, and therefore *every* constructed P_A satisfies
-F(P_A)<=B=k-t. In particular exact linear-extension information
-pruning cannot discard these states.
+The s disjoint initial chains remain valid in every P_A.
+A standard balanced winner tournament merges their sorted
+heads with at most s−1 initial comparisons and at most
+h=ceil(log₂s) comparisons to update a chain head after
+each of the first n−1 outputs. Therefore
 
-Every unlabelled n-element poset has at most n! labellings.
-So there are at least `binom(M,m)/n!` distinct isomorphism classes.
+`F(P_A)<=B=(s−1)+(n−1)ceil(log₂s)`.
 
-Stirling gives k=n(2r-log₂e)+O(log n), t0=2n-2s,
-B=rn+O(s+r), and M=Theta(s³). Therefore
+Now let k=ceil(log₂(n!)) and choose
 
-`m=n(r-2-log₂e)+O(s+r+log n)=nr-O(n)`,
-and `M/m=Theta(s/r)`. Using
-`binom(M,m)>=(M/m)^m` for 1<=m<=M yields
+`m = k−t0−B`.
+
+Provided 0<m<=M, all constructed states are reachable at
+t=t0+m=k−B and satisfy
+
+`F(P_A)<=B=k−t`.
+
+They survive exact information pruning, because a winning
+comparison tree of height k−t has at most 2^(k−t) reachable
+total-order leaves. The construction supplies much more
+than information-theoretically possible states by enumeration,
+not a counterexample to the information bound for sorting.
+
+Each isomorphism class has at most n! different labellings.
+Hence the count of nonisomorphic, reachable, winning P_A is at
+least
+
+`binom(M,m)/n!`.
+
+## 3. Asymptotic lower bound
+
+Take s=L=2^r (so n=s² and h=r).
+Stirling's estimate gives
+
+`k=n(2r−log₂e)+O(log n)`,
+`t0=n−s`, `B=rn+O(s+r)`,
+
+and therefore
+
+`m=n(r−1−log₂e)+O(s+r+log n) = nr−O(n)`.
+
+Also M=(s−1)s(s−1)=Theta(s³) and M/m=Theta(s/r),
+so for all sufficiently large r we have 0<m<M/2.
+The elementary estimate `binom(M,m)>=(M/m)^m` yields
 
 `log₂[binom(M,m)/n!]`
-`>=m log₂(M/m)-log₂(n!)`
-`=n r²-O(n r log r)`
-`=(1/4-o(1)) n (log₂ n)^2`.
+`>=m log₂(M/m)−log₂(n!)`
+`=n r²−O(n r log r)`
+`=(1/4−o(1)) n (log₂ n)²`.
 
-This proves the asymptotic assertion.
+This proves the theorem. It strengthens the earlier
+unpublished two-edge, rs-chain construction in two ways:
+the chain count is s rather than rs, and *one known edge*
+per column and level interface suffices, freeing a larger
+number of budgeted independent extra comparisons.
 
-## 4. Exact witness at n=1024
+## 4. Exact finite witness with only 224 elements
 
-For r=5, s=32, n=1024, exact integer computations give:
+Take s=16 columns and L=14 levels. Then n=224 and
+h=ceil(log₂16)=4. Exact integer arithmetic gives:
 
-| Symbol | Value |
+| Quantity | Exact value |
 |---|---:|
-| k=ceil(log₂(1024!)) | 8770 |
-| t0=2s(s-1) | 1984 |
-| B=(s-1)+(n-1)r | 5146 |
-| m=k-t0-B | 1640 |
-| M=(s-1)(s²-2s) | 29760 |
-| t=t0+m | 3624 |
+| k=ceil(log₂(224!)) | 1431 |
+| t0=s(L−1) | 208 |
+| B=(s−1)+(n−1)h | 907 |
+| m=k−t0−B | 316 |
+| M=(L−1)(s²−s) | 3120 |
+| t=t0+m | 524 |
 
-The integer inequality
+The exact integer inequality
 
-`binom(29760,1640) > 2^381 * 1024!`
+`binom(3120,316)>2^39 * 224!`
 
-is checked without floating-point approximations by
-`tests/test_winning_frontier_barrier.py`. This proves the
-finite claim. At r=4, this particular quotient counting
-lower bound is <1, so r=5 is the first successful checked
-parameter, not a statement that all the n=256 posets
-are isomorphic.
+is certified by `tests/test_winning_frontier_barrier.py`,
+so **more than 2^39** pairwise nonisomorphic reachable
+states are each sortable within their remaining **907**
+comparisons.
 
-## Exactly what is, and is not, ruled out
+A symmetric check with s=L=16 (n=256) is even stronger
+in count: k=1684, t0=240, B=1035, m=409, M=3600, and
 
-**Ruled out:** An algorithm claiming uniform time
-2^(O(n log n)) that *explicitly lists every reachable
-winning poset* at each relevant information-budget level,
-even modulo isomorphism: this frontier is too large.
+`binom(3600,409)>2^148 * 256!`.
 
-**Not ruled out:** selective DFS, df-pn, symbolic state
-families, parametric sorting-certificate DAGs, algebraic
-quotients stronger than relabelling, or any algorithm
-computing S(n) without listing this frontier.
-There is no claim of NP-hardness, PSPACE-hardness,
-a P-vs-NP result, or a lower bound on the running
-time of arbitrary algorithms for unary SORT-BOUND-U.
+We have not proved that 224 is the smallest n for which
+*any possible* winning-frontier construction works.
+It is a readily checked witness from this simple
+rectangular-chain family.
 
-Earlier layered-skeleton research and independent reviews
-are tracked in [Antonina SoringP1 #301](https://vau.place/a/antonina/?issue=301).
+## What this theorem excludes (and does not)
+
+**Excluded:** any purported uniform 2^(O(n log n))
+algorithm whose method necessarily outputs **all**
+reachable winning partial orders at the information
+budget, even when identified up to isomorphism.
+Such an enumerated frontier has
+2^(Omega(n (log n)²)) separate states.
+
+**Not excluded:** selective minimax search, proof-number
+search, stronger state compression, parametric DAG
+sorting certificates, algebraic recurrences, or any
+method evaluating S(n) without listing the full
+frontier. The theorem does not establish a space
+lower bound for arbitrary solvers, NP/PSPACE hardness,
+or any classification of unary SORT-BOUND-U.
+
+Original and subsequent independent math audits are
+tracked on [Antonina SoringP1 #301](https://vau.place/a/antonina/?issue=301).

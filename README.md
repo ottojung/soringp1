@@ -50,8 +50,8 @@ note](docs/research-sergeev-asymptotic.md).
 An [explicit layered construction](docs/research-winning-frontier-barrier.md)
 has 2^((1/4-o(1)) n (log₂ n)²) nonisomorphic reachable
 states, each **winning** within its remaining comparison
-budget; the finite witness already has more than 2^381
-states at n=1024. This excludes *enumeration of every*
+budget; the finite witness already has more than 2^39
+states at n=224. This excludes *enumeration of every*
 winning state modulo labels, NOT computing S(n) by other
 methods or any complexity-class separation.
 
