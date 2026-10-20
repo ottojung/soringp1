@@ -125,8 +125,11 @@ exactly a *winning strategy* of the sorter in the following finite game.
 - `[literature]` `S(n) = ⌈log₂ n!⌉` for `n ≤ 11` and `n = 20, 21`; the
   information bound is **not** tight in general (`S(12)=30 > 29`). Exact
   `S(n)` is known only for `n ≤ 22` (and `S(28) ≥ 99`). For `n ≥ 23` the
-  value is open; the asymptotics of the "excess" `S(n) − log₂ n!` are
+  value is open. Sergeev's group-insertion theorem yields
+  `S(n)−log₂(n!)=O(n/(log n)^(1/5))=o(n)`; the sharper
+  behavior (including whether the excess is unbounded) remains
   open. There is **no** known polynomial-time algorithm computing `S(n)`.
+  See [Sergeev research note](research-sergeev-asymptotic.md).
 - `[literature]` Optimal decision-tree construction with arbitrary tests is
   NP-complete (Hyafil–Rivest) and min-height is NP-hard to approximate
   within `o(log n)` (Laber–Nogueira). Sorting-network verification is

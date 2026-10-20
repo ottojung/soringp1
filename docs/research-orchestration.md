@@ -18,9 +18,12 @@ founder authorizes broadening the scope. If an existing agent was
 assigned binary work, steer it to a distinct unary line immediately.
 
 The unary portfolio includes:
-* Threshold search in the `O(n)` interval between information
-  and Ford-Johnson comparison bounds: reduce the **cost of a
-  threshold decision**, not merely the number of candidates.
+* Threshold search: the explicit finite Ford–Johnson gap is `O(n)`,
+  but Sergeev's group-insertion theorem bounds the *true*
+  asymptotic excess by `O(n/(log n)^(1/5))`. Investigate
+  whether an effective finite upper bound can be extracted, and
+  reduce the **cost of threshold tests** rather than merely
+  their number. See [Sergeev research note](research-sergeev-asymptotic.md).
 * Ordered-finite-structure descriptive complexity: FO(LFP) (P),
   existential second-order logic (NP), FO(PFP) (PSPACE), and an
   EXPTIME-capturing logic such as SO(LFP). The PSPACE upper bound

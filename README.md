@@ -39,6 +39,13 @@ NP does not directly classify a numeric function; its membership for this
 language is a research question, not an assumption. See
 [the problem statement](docs/problem.md) for exact definitions and caveats.
 
+**Known asymptotic comparison-count bound (not an evaluator):**
+Sergeev proved `S(n)−log₂(n!)=O(n/(log n)^(1/5))=o(n)`,
+improving the classical linear Ford–Johnson gap. It does not
+compute exact `S(n)` or give an explicit finite numeric bound
+without instantiating constants. See [primary-source research
+note](docs/research-sergeev-asymptotic.md).
+
 ## Active direction: complexity-first theory with broad parallel exploration
 
 **October 18, 2026 pivot:** The active goal is to change what we know about
