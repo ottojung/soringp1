@@ -46,6 +46,15 @@ compute exact `S(n)` or give an explicit finite numeric bound
 without instantiating constants. See [primary-source research
 note](docs/research-sergeev-asymptotic.md).
 
+**Large winning-state frontier (paper theorem).**
+An [explicit layered construction](docs/research-winning-frontier-barrier.md)
+has 2^((1/4-o(1)) n (log₂ n)²) nonisomorphic reachable
+states, each **winning** within its remaining comparison
+budget; the finite witness already has more than 2^381
+states at n=1024. This excludes *enumeration of every*
+winning state modulo labels, NOT computing S(n) by other
+methods or any complexity-class separation.
+
 ## Active direction: complexity-first theory with broad parallel exploration
 
 **October 18, 2026 pivot:** The active goal is to change what we know about
