@@ -216,6 +216,28 @@ truth-table reductions unless `P = NP` (Ogiwara–Watanabe 1991); and not
 NP-hard under Turing reductions unless `PH = Σ₂P` (Karp–Lipton 1980). These are
 conditional barriers, not membership statements.
 
+`[literature]` **Theorem 4.2a (Berman–Hartmanis, 1977).**
+No polynomially sparse language is **EXPTIME-complete** under polynomial-time
+many-one reductions. This unconditional theorem concerns EXPTIME, unlike the
+conditional NP-hardness barrier from Mahaney. Original source: L. Berman and
+J. Hartmanis, *On isomorphisms and density of NP and other complete sets*,
+SIAM J. Comput. **6**(2) (1977), 305–322,
+https://doi.org/10.1137/0206023 (EXPTIME sparsity theorem).
+
+`[deduction]` **Corollary 4.2b (the unary threshold is not EXPTIME-hard).**
+`SORT-BOUND-U` is **unconditionally not EXPTIME-hard under
+polynomial-time many-one reductions**. Its strings of length `L` have
+the form `1^n#1^k` with `n+k+1=L`, hence there are at most `L`
+accepted strings of length `L` (and `O(L²)` up to length `L`),
+by Lemma 4.1. This is *not* "at most one accepted string per length":
+the accepted `n` may fill an initial interval, Theorem 4.3.
+The known deterministic budgeted evaluator places `SORT-BOUND-U`
+in EXPTIME. If the language were EXPTIME-hard under the stated
+reductions, it would be EXPTIME-complete, contradicting Theorem 4.2a.
+This does **not** exclude hardness under polynomial-time Turing
+reductions, does not prove membership in `P` or `NP`, and gives no
+complexity-class separation.
+
 `[deduction]` **Theorem 4.3 (`SORT-BOUND-U ∈ P/log`).** Write the total input
 length as `L = n + k + 1`, so membership is `S(n) ≤ L - 1 - n`, i.e.
 `f(n) := n + S(n) ≤ L - 1`. The kernel-checked monotonicity `S_mono` gives

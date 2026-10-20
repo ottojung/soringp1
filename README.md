@@ -46,6 +46,13 @@ compute exact `S(n)` or give an explicit finite numeric bound
 without instantiating constants. See [primary-source research
 note](docs/research-sergeev-asymptotic.md).
 
+**Unconditional hardness barrier (literature).** The unary
+threshold language is polynomially sparse and belongs to EXPTIME, so
+Berman–Hartmanis (1977) proves it **cannot be EXPTIME-hard under
+polynomial-time many-one reductions**. This is a limit on one kind of
+completeness, not an efficient evaluator or a P/NP separation; see
+[the reduction audit](docs/research-hardness-boundaries.md#4-encoding-audit-unary-sparseplog-and-binary-non-sparsity).
+
 **Large winning-state frontier (paper theorem).**
 An [explicit layered construction](docs/research-winning-frontier-barrier.md)
 has 2^((1/4-o(1)) n (log₂ n)²) nonisomorphic reachable
