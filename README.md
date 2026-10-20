@@ -12,7 +12,7 @@ lower bounds are possible. This is a research goal, **not a claimed theorem**.
 ## What exactly is being classified?
 
 **Current binding research scope: unary first (October 19, 2026).**
-All active work and at least ten concurrent independent research agents
+All active work and a target of five concurrent independent research agents
 focus on `SORT-BOUND-U` and `S_unary`. Binary versions below remain
 mathematically defined and their previously proved bounds are preserved
 for reference, but **no new binary research proceeds until unary work
@@ -46,7 +46,7 @@ the *uniform complexity of evaluating S(n)*. Research agents are free to
 spend time on open-ended arguments, hypotheses and primary literature,
 including approaches that fail. A routine partial-order counterexample,
 small-n test, research note, PR or Lean lemma is **not** a milestone.
-At least **ten SoringP1 research agents** work concurrently on independent
+Aim for **five concurrent SoringP1 research agents** on independent
 questions via Antonina on **phoebe-dev**, under the binding
 [research orchestration](docs/research-orchestration.md) policy.
 Agent count is not evidence of a breakthrough; diversify exploratory packets
