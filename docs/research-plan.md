@@ -7,7 +7,7 @@ sorting number* S(n), not to collect Lean proofs about comparison sorting.
 Treat this document as research guidance, **not** a theorem/PR queue.
 **Binding 2026-10-19 scope: unary only until fully completed.** The only
 active encoding is `SORT-BOUND-U={1^n # 1^k:S(n)<=k}`, with
-`S_unary(1^n)` its function counterpart. All ten or more concurrent
+`S_unary(1^n)` its function counterpart. All active
 agents must contribute to this unary research program. Binary encodings
 are definitions/background only and must not generate separate
 investigations before the unary goal is complete and the founder
@@ -43,7 +43,7 @@ theorem for the special input family.
 
 Research should spend time on uncertain attempts, not merely polished
 corollaries. The binding repository-wide orchestration policy requires
-**at least ten active SoringP1 research agents**, working on independent
+**a target of five active SoringP1 research agents**, working on independent
 packets from the full live frontier; subsections are not a fixed task queue.
 See [research orchestration](research-orchestration.md).
 
@@ -102,7 +102,7 @@ credible complexity consequence, or a serious falsification of a major
 route. Investigations may leave only a compact comment with sources, the
 sharpest argument, disproof attempts and open obstacle. A polished PR,
 test file, research note, or increased agent count is **not itself mathematical
-progress**. Maintaining ten agents is nevertheless an operational requirement;
+progress**. Maintaining five agents is nevertheless an operational requirement;
 grow the frontier with distinct falsifiable approaches, not repetitive
 paperwork or routine formalization. Do not turn every small poset observation
 into a follow-up research task.
@@ -120,7 +120,7 @@ currently available techniques.
 
 ## Parallel research discipline
 
-Run at least ten independent SoringP1 agents on `phoebe-dev` while research
+Run a target of five independent SoringP1 agents on `phoebe-dev` while research
 is actionable. Replenish capacity promptly from the wider exploration
 portfolio, including novel algorithms, lower-bound mechanisms, certificate
 ideas, reductions, falsification attempts and literature audits. Do not use

@@ -36,23 +36,23 @@ The unary portfolio includes:
 
 Do not let apparent binary completeness, binary-specific techniques,
 or old task assignments override this research scope. The obligation
-to maintain ten active independent SoringP1 agents remains binding:
+to maintain five active independent SoringP1 agents remains binding:
 broaden the **unary** question portfolio instead of launching binary
 fallback investigations.
 
 ## Parallelism is the default
 
-Keep **at least ten simultaneously active SoringP1 research agents**
+Target **five simultaneously active SoringP1 research agents**
 repository-wide whenever the complexity of S(n) remains open and research is
-actionable. Ten is a minimum, not a cap. Count live SoringP1 workers (not Viche
-or other-project agents), dispatch distinct independent packets to reach ten,
+actionable. Five is the normal target, not a hard cap. Count live SoringP1 workers (not Viche
+or other-project agents), dispatch distinct independent packets to reach five,
 and replenish completions and failures during the same orchestration pass.
 Use Antonina on **phoebe-dev only**. Do not serialize independent questions,
 ration dispatches against guesses about RAM/CPU, or wait for a PR to merge
 before launching unrelated work. Runtime resource management and actual
 provider errors belong to the execution layer, not research prioritization.
 
-If the apparent frontier has fewer than ten entries, diversify it before
+If the apparent frontier has fewer than five entries, diversify it before
 accepting idle workers. Generate new representations, structural conjectures,
 adversarial constructions, algorithms, complexity reductions, certificate
 formalisms, source/model checks, cheap discriminating computations and scaffold
@@ -64,8 +64,8 @@ problems. Avoid near-identical "solve S(n)" prompts and artificial deliverables.
    research, outstanding mathematical assumptions, and any failed approaches.
 2. Reconstruct the live portfolio of *materially different* approaches. A
    packet may exist without any corresponding GitHub issue or branch.
-3. Select and dispatch enough independent, high-value packets to maintain at
-   least ten concurrent SoringP1 research agents; retain separate worktrees
+3. Select and dispatch enough independent, high-value packets to maintain approximately
+   five concurrent SoringP1 research agents; retain separate worktrees
    for agents that may write files.
 4. Every packet identifies a precise question, potential consequence for the
    **uniform computation of S(n)**, permitted assumptions, non-goals,
@@ -95,14 +95,14 @@ a cap, an exclusive list or a compulsory fixed one-agent-per-topic mapping.
 
 ## Non-negotiable distinctions
 
-Ten agents is an execution policy, not evidence of a theorem. Do not treat
+Five agents is an execution policy, not evidence of a theorem. Do not treat
 bounded experiments or agreement among agents as a proof. Separate
 literature facts, conjectures, experiments, human proofs and Lean
 kernel-checked statements. Do not infer the hardness of fixed S(n) from
 hardness of arbitrary-poset optimization. The orchestrator retains final
 mathematical review and integration responsibility.
 
-This document and AGENTS.md supersede historical instructions that might
-limit SoringP1 to fewer than ten active agents, forbid generating new frontier
+This document and AGENTS.md supersede historical instructions that require
+more than five agents as the default target, forbid generating new frontier
 packets, require an issue before dispatch, or turn host-load guesses into
 research scheduling policy.

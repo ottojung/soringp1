@@ -27,7 +27,7 @@ requires completion of the unary agenda and explicit founder direction.
 This directive supersedes older wording presenting both encodings as
 equally active research priorities.
 
-Maintain ten or more **independent unary-focused** research agents on
+Maintain five **independent unary-focused** research agents on
 `phoebe-dev` under the parallelism directive below. Diversify among
 unary exact threshold algorithms, near-tight bound-gap tests, structural
 obstructions and recurrences, sparse-language reductions and certificate
@@ -39,16 +39,16 @@ P/NP membership, hardness, or a separation without a proof.
 
 ## Binding research parallelism directive (2026-10-19)
 
-**Maintain at least 10 simultaneously active SoringP1 research agents** while the
-problem remains open and actionable. This is a **repository-wide minimum
-steady-state target, not an upper limit**. Check the current SoringP1 pool at
+**Target five simultaneously active SoringP1 research agents** while the
+problem remains open and actionable. This is a **repository-wide steady-state
+target, not a hard cap or a mandatory floor**. Check the current SoringP1 pool at
 the start of each orchestration pass; launch a topologically independent batch
-to reach at least ten, and replenish completed, failed or stalled agents in
+to reach a target of five, and replenish completed, failed or stalled agents in
 the same pass. Do not leave useful workers idle while the orchestrator
 personally pursues substantial research. Agents belonging to other projects
-do not count toward the SoringP1 minimum.
+do not count toward the SoringP1 target.
 
-**Explore a wide frontier.** If fewer than ten obvious tasks exist, actively
+**Explore a wide frontier.** If fewer than five obvious tasks exist, actively
 generate distinct high-value research packets: alternative algorithms and
 representations, complexity reductions, certificates, counterexample hunts,
 primary-source audits, independent mathematical checks, and scaffold problems
@@ -82,7 +82,7 @@ research note, script, test, Lean proof, agent run, or PR per investigation.**
 The expected result of most investigations is **increased understanding**,
 including a falsified attractive conjecture, a precise obstruction, or an
 honest inconclusive finding. A clean worktree and no PR are normal outcomes.
-This does not suspend the ten-agent active research minimum or justify
+This does not suspend the five-agent research target or justify
 leaving the frontier idle.
 
 The sole research objective is a significant theorem about the **uniform
@@ -128,7 +128,7 @@ defend? Which hypothesis was ruled out? Did a bound, algorithm, or valid
 reduction change? What decisive question comes next? Counts of active
 agents, PRs, CI passes, solved local poset examples and Lean files do
 **not** measure mathematical progress. Nevertheless, maintain the binding
-ten-agent minimum: broaden independent research directions when a particular
+five-agent target: broaden independent research directions when a particular
 route ends, rather than letting the pool drain or substituting routine
 formalization. Document actual mathematical blockers without inventing
 filler tasks.
@@ -162,7 +162,7 @@ This is the operative priority for researchers and autonomous agents:
 - **The former narrowly scoped height exception is already completed:**
   `minimaxTree_height` and `S_eq_adv_univ` are kernel checked. Do not
   reopen that proof-engineering stream.
-- Keep at least ten independent SoringP1 investigations live; diversify
+- Keep a target of five independent SoringP1 investigations live; diversify
   questions rather than duplicating tasks. Do not infer an obligation to
   formalize from the availability of agents.
 
