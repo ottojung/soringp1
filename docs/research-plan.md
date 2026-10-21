@@ -120,7 +120,7 @@ currently available techniques.
 
 ## Parallel research discipline
 
-Run a target of five independent SoringP1 agents on `phoebe-dev` while research
+Run a target of five independent SoringP1 agents on `billy-dev` while research
 is actionable. Replenish capacity promptly from the wider exploration
 portfolio, including novel algorithms, lower-bound mechanisms, certificate
 ideas, reductions, falsification attempts and literature audits. Do not use

@@ -70,7 +70,7 @@ spend time on open-ended arguments, hypotheses and primary literature,
 including approaches that fail. A routine partial-order counterexample,
 small-n test, research note, PR or Lean lemma is **not** a milestone.
 Aim for **five concurrent SoringP1 research agents** on independent
-questions via Antonina on **phoebe-dev**, under the binding
+questions via Antonina on **billy-dev**, under the binding
 [research orchestration](docs/research-orchestration.md) policy.
 Agent count is not evidence of a breakthrough; diversify exploratory packets
 rather than generating filler PRs. Agents report findings and obstacles

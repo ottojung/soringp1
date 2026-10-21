@@ -1,5 +1,8 @@
 # SoringP1 research and development contract
 
+## Binding execution host (2026-10-21)
+All SoringP1 Antonina/Viche agents, worktrees, manual development, and experiments run **only on `billy-dev`**, following the founder's migration from `phoebe-dev`. Old host references in historical research notes do not authorize work elsewhere. GitHub-hosted Actions CI, PR review, and hosting remain expressly permitted, including Lean verification. Preserve existing agent identities and research history across host migrations.
+
 ## Research objective
 
 Study the computational complexity of computing the exact worst-case
@@ -28,7 +31,7 @@ This directive supersedes older wording presenting both encodings as
 equally active research priorities.
 
 Maintain five **independent unary-focused** research agents on
-`phoebe-dev` under the parallelism directive below. Diversify among
+`billy-dev` under the parallelism directive below. Diversify among
 unary exact threshold algorithms, near-tight bound-gap tests, structural
 obstructions and recurrences, sparse-language reductions and certificate
 barriers, and descriptive complexity (ordered FO(LFP)/ESO/FO(PFP) and
@@ -64,7 +67,7 @@ cost; runtime execution management is separate from research orchestration.
 Concrete provider failures, unavailable tools, and genuine dependency
 collisions are to be reported and recovered from, not converted into an
 unwritten concurrency cap. All SoringP1 agents and commands run on
-`phoebe-dev` only. The orchestrator retains independent verification and
+`billy-dev` only. The orchestrator retains independent verification and
 merging responsibility. Count of agents is an operational obligation, not
 mathematical evidence of progress.
 
@@ -108,7 +111,7 @@ that line instead of polishing supporting lemmas.
    A concise research update is sufficient; **no mandatory artifact**.
 5. Do **not** automatically create a branch, PR, new test suite,
    documentation page, GitHub issue or Lean milestone. Scratch experiments
-   can remain local on Phoebe. Replenish the active research pool with
+   can remain local on Billy. Replenish the active research pool with
    independent, evidence-seeking packets, not routine artifact-production tasks.
 
 **Exceptional publication gate.** Seek integration only for a meaningful

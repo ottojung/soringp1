@@ -50,7 +50,7 @@ repository-wide whenever the complexity of S(n) remains open and research is
 actionable. Five is the normal target, not a hard cap. Count live SoringP1 workers (not Viche
 or other-project agents), dispatch distinct independent packets to reach five,
 and replenish completions and failures during the same orchestration pass.
-Use Antonina on **phoebe-dev only**. Do not serialize independent questions,
+Use Antonina on **billy-dev only**. Do not serialize independent questions,
 ration dispatches against guesses about RAM/CPU, or wait for a PR to merge
 before launching unrelated work. Runtime resource management and actual
 provider errors belong to the execution layer, not research prioritization.
