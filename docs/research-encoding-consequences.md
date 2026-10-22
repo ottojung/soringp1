@@ -302,6 +302,54 @@ separate-input representation whose two lengths are not tied to a single total
 cutoff compression would not directly apply. The well-formedness check (one
 delimiter, unary blocks) is part of the `O(L)` verification.
 
+
+### 3.5 A nonuniform depth-two circuit upper bound
+
+`[deduction]` **Theorem 3.10 (`SORT-BOUND-U ∈ nonuniform AC⁰`).**
+For each fixed total input length `L`, membership in `SORT-BOUND-U`
+has a depth-two, polynomial-size Boolean circuit family (`O(L²)`
+literal occurrences). More precisely, let `t_L` be the cutoff from
+Theorem 3.7, and index the input symbols from `0` through `L−1`.
+For `L ≥ 1`, the circuit is
+
+```
+C_L(x) = OR_{0 ≤ i ≤ t_L} (
+              [x_i = #] AND
+              AND_{0 ≤ j < i} [x_j = 1] AND
+              AND_{i < j < L} [x_j = 1]
+         ).
+```
+
+Each term checks that the input consists of precisely `i` unary
+`1`s, one delimiter `#`, and then `L−i−1` unary `1`s. The circuit
+accepts exactly when the delimiter occurs at an index `i ≤ t_L`,
+equivalent to `S(i) ≤ L−1−i` by Theorem 3.7.
+There are at most `L` terms, each with at most `L` literals.
+For `L = 0`, use a rejecting constant circuit. Encoding each
+alphabet symbol with a fixed number of Boolean bits changes only
+a constant number of gates per equality test. Consequently this is
+a nonuniform `AC⁰` family: depth `O(1)` and size `poly(L)`. ∎
+
+`[deduction]` **Corollary 3.11 (a restricted unconditional
+hardness barrier).** `PARITY` cannot many-one reduce to
+`SORT-BOUND-U` by a polynomial-output-length `AC⁰` circuit
+reduction (in the standard fixed-output-length circuit model).
+
+*Proof.* Compose a putative `AC⁰` reduction circuit with the
+`AC⁰` decider of Theorem 3.10 at its output length. Depth remains
+constant and size remains polynomial, giving a nonuniform
+`AC⁰` circuit family for `PARITY`. This contradicts the
+classical `PARITY ∉ nonuniform AC⁰` lower bound
+(Håstad, STOC 1986, https://doi.org/10.1145/12130.12132). ∎
+
+This does **not** forbid polynomial-time reductions, prove
+`SORT-BOUND-U ∈ P`, or yield a uniform construction of the
+circuits: their choice of cutoff `t_L` may itself be
+computationally difficult. `AC⁰` circuit membership and
+`P/O(log L)` advice membership are two separate nonuniform
+descriptions of this particularly structured language, not
+a claim of a general containment between those two classes.
+
 ---
 
 ## 4. Reduction barriers: many-one, truth-table, Turing, and the binary version
@@ -452,14 +500,46 @@ exactly (Brightwell–Winkler) and is **not tight** (`S(12) = 30 > 29 =
 
 ## 6. Counterexamples and falsification attempts
 
-`[deduction]` **Counterexample 6.1 (`P/poly` does not imply `P`; sparse sets can
-be conditionally NP-hard).** Let `UNARY-SAT = { 1^{⟨φ⟩} : φ is a satisfiable
-propositional formula }`, where `⟨φ⟩` is a numeric code of `φ`. This language
-is sparse (at most one string per length) and NP-hard under polynomial-time
-many-one reductions (map `φ ↦ 1^{⟨φ⟩}`). By Lemma 3.2 it is in `P/poly`. By
-Mahaney (Theorem 4.1) it is in `P` iff `P = NP`. Thus `sparse ⊆ P/poly` does
-**not** imply `sparse ⊆ P`, and `SORT-BOUND-U ∈ P/poly` is not evidence for or
-against `SORT-BOUND-U ∈ P`.
+
+`[deduction]` **Counterexample 6.1 (sparse `P/poly` need not be
+uniformly polynomial-time decidable).** A unary language may be
+decidable but not in `P`, despite requiring only one bit of
+nonuniform advice per input length.
+
+Here is an explicit diagonal construction. Fix an effective enumeration
+`M_0, M_1, ...` of deterministic Turing machines in which each
+machine appears at arbitrarily large indices. For `n ≥ 1` let
+`i = v₂(n)` be the exponent of the largest power of two dividing
+`n`. On input `1^n`, simulate `M_i` on `1^n` for at most
+`n^(i+2)` steps and **accept iff `M_i` does not accept within
+that many steps**. Call this tally language `TALLY-DIAG`.
+Because `i ≤ log₂ n`, its decider runs in
+`2^{O((log n)²)}` time (allowing polynomial simulation overhead).
+It is therefore decidable and sparse.
+
+If a deterministic polynomial-time machine `M` decided
+`TALLY-DIAG` in time `O(n^d)`, take any sufficiently large
+index `i ≥ d` at which `M_i = M`. There are arbitrarily large
+numbers `n = 2^i(2t+1)` with `v₂(n) = i`. On all sufficiently
+large such inputs `M_i` halts within the allowed cutoff;
+the diagonal decider gives the opposite answer, a contradiction.
+Thus `TALLY-DIAG ∉ P` unconditionally, yet
+`TALLY-DIAG ∈ P/1 ⊆ P/poly`: advice for length `n` is the
+single membership bit. This exhibits the required distinction
+without assuming an unproved class separation. ∎
+
+**Correction to an earlier erroneous unary-SAT example.**
+Mapping a binary SAT instance `φ` to a unary string
+`1^{⟨φ⟩}` is **not** a polynomial-time many-one reduction
+for a standard length-respecting numeric encoding `⟨φ⟩`:
+the output generally has exponential length in `|φ|`.
+Indeed, under a conventional binary Gödel coding, the unary
+language `{1^{⟨φ⟩} : φ is satisfiable}` is itself in `P`:
+decode the index and brute-force assignments to a formula of
+length `O(log n)` in time polynomial in the unary input
+length `n`. The previous claim that it was a sparse,
+polynomial-time many-one NP-hard language was false; it
+would have contradicted Mahaney's theorem unless `P=NP`.
 
 `[deduction]` **Counterexample 6.2 (the binary language is not sparse).**
 Theorem 4.6; the Mahaney barrier does not transfer to `SORT-BOUND-B`.
