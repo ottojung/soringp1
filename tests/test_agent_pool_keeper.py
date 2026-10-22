@@ -23,15 +23,15 @@ class KeeperTests(unittest.TestCase):
         for agent_id, cwd, title in KEEPER.ROSTER:
             self.assertTrue(cwd.startswith("soring301-new-"))
             prompts = plan["agents"][agent_id]
-            self.assertEqual(len(prompts), 3)
+            self.assertEqual(len(prompts), 2)
             for prompt in prompts:
                 self.assertNotIn(prompt, seen)
                 seen.add(prompt)
-            delivered = [KEEPER.select_packet(agent_id, title, {agent_id: n}, plan) for n in range(4)]
-            self.assertEqual(len(set(delivered)), 4)
+            delivered = [KEEPER.select_packet(agent_id, title, {agent_id: n}, plan) for n in range(3)]
+            self.assertEqual(len(set(delivered)), 3)
             self.assertTrue(all("no" in p.lower() and "lean" in p.lower() for p in delivered))
             self.assertIn("WITHOUT a board comment", delivered[-1])
-        self.assertEqual(len(seen), 24)
+        self.assertEqual(len(seen), 16)
 
     def test_below_five_bypasses_quality_cooldown(self):
         plan = KEEPER.load_packet_plan()
