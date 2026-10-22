@@ -165,7 +165,7 @@ This is the operative priority for researchers and autonomous agents:
 - **The former narrowly scoped height exception is already completed:**
   `minimaxTree_height` and `S_eq_adv_univ` are kernel checked. Do not
   reopen that proof-engineering stream.
-- Keep a target of five independent SoringP1 investigations live; diversify
+- Keep independent SoringP1 investigations live only when each has a distinct, falsifiable complexity-relevant objective; diversify
   questions rather than duplicating tasks. Do not infer an obligation to
   formalize from the availability of agents.
 
