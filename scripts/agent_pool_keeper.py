@@ -18,8 +18,10 @@ TARGET_RUNNING = 8  # Buffer above the hard minimum for normal completions.
 INTERVAL = 10
 MIN_RESEARCH_RESTART_SECONDS = 240  # Avoid fast repeats of completed investigations.
 STALLED_OUTPUT_SECONDS = 30 * 60  # A silent managed agent is not productive capacity.
+PREFERRED_MODEL_QUIET_SECONDS = 5 * 60  # Resume preferred model after genuine quota reset.
 MAX_STALLED_STEERS_PER_TICK = 1  # Recover gradually without losing the agent floor.
 AGENTS_DIR = Path("/home/lubko/.local/state/antonina/agents")
+MODELS_CONFIG = Path("/home/lubko/.config/antonina/config.json")
 STATE = Path("/home/lubko/.local/state/soringp1/agent-pool.json")
 CURSORS = STATE.parent / "packet-cursors.json"
 PACKETS = Path(__file__).resolve().parent.parent / "docs/research-packets.json"
@@ -112,6 +114,34 @@ def save_history(history, cursors):
     pending.replace(CURSORS)
 
 
+def restored_preferred_model(agent_id, expected_cwd, now):
+    """The first configured model is eligible again after its prior cooldown.
+
+    Read only the local operator-configured model order. No model discovery,
+    provider probe or broad process kill. Never preempt fresh model output.
+    """
+    try:
+        meta = json.loads((AGENTS_DIR / agent_id / "meta.json").read_text())
+        config = json.loads(MODELS_CONFIG.read_text())
+        choices = config.get("models")
+        if not isinstance(choices, list) or not choices:
+            return False
+        preferred = choices[0].get("model")
+        if not isinstance(preferred, str) or not preferred:
+            return False
+        if meta.get("state") != "running" or meta.get("cwd") != expected_cwd:
+            return False
+        failover = meta.get("model_failover") or {}
+        if failover.get("selected_model") in (None, preferred):
+            return False
+        cooldowns = failover.get("cooldowns") or []
+        # Only undo a *recorded* exclusion when it has expired.
+        matching = [c for c in cooldowns if c.get("model") == preferred]
+        return bool(matching and all(float(c["until"]) <= now for c in matching))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def recover_stalled(live, history, cursors, plan, now):
     """Steer in place without temporarily lowering the agent count.
 
@@ -124,7 +154,14 @@ def recover_stalled(live, history, cursors, plan, now):
         if agent_id not in live or count >= MAX_STALLED_STEERS_PER_TICK:
             continue
         last = last_observed_output(agent_id, "/home/lubko/" + wd)
-        if last is None or now - max(last, history.get(agent_id, 0)) < STALLED_OUTPUT_SECONDS:
+        if last is None:
+            continue
+        quiet_for = now - max(last, history.get(agent_id, 0))
+        returning_primary = (
+            quiet_for >= PREFERRED_MODEL_QUIET_SECONDS and
+            restored_preferred_model(agent_id, "/home/lubko/" + wd, now)
+        )
+        if not returning_primary and quiet_for < STALLED_OUTPUT_SECONDS:
             continue
         prompt = select_packet(agent_id, fallback, cursors, plan)
         try:
@@ -135,7 +172,8 @@ def recover_stalled(live, history, cursors, plan, now):
                 history[agent_id] = now
                 cursors[agent_id] = int(cursors.get(agent_id, 0)) + 1
                 count += 1
-                print("steered stalled", agent_id, "packet", cursors[agent_id], flush=True)
+                print("steered", "returned-primary" if returning_primary else "stalled",
+                      agent_id, "packet", cursors[agent_id], flush=True)
             else:
                 print("stall recovery failed", agent_id, p.stderr[-250:], flush=True)
         except Exception as e:
