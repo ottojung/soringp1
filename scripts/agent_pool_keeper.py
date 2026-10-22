@@ -17,6 +17,8 @@ REQUIRED_RUNNING = 5
 TARGET_RUNNING = 8  # Buffer above the hard minimum for normal completions.
 INTERVAL = 10
 STATE = Path("/home/lubko/.local/state/soringp1/agent-pool.json")
+CURSORS = STATE.parent / "packet-cursors.json"
+PACKETS = Path(__file__).resolve().parent.parent / "docs/research-packets.json"
 ROSTER = [
     ("Dd1KMoCc1ghfSN3I0dq0fE-beast", "soring301-strategy-dag-20261021",
      "Seek an all-n polynomial framed optimal sorting strategy DAG certificate; independently test its completeness. Do not repeat finite data or formalize peripheral Lean. Post substantive findings on Antonina 301."),
@@ -48,7 +50,33 @@ def running():
             and (v.get("title", "").startswith("SoringP1")
                  or v.get("cwd", "").startswith("/home/lubko/soring301"))}
 
-def tick(history):
+def load_packet_plan():
+    """Source-controlled research packets can be changed without modifying the keeper."""
+    plan = json.loads(PACKETS.read_text())
+    if plan.get("version") != 1 or not isinstance(plan.get("common"), str):
+        raise ValueError("invalid research packet plan")
+    if not isinstance(plan.get("agents"), dict):
+        raise ValueError("missing per-agent research packets")
+    for agent_id, _, _ in ROSTER:
+        entries = plan["agents"].get(agent_id)
+        if (not isinstance(entries, list) or len(entries) < 2 or
+                any(not isinstance(q, str) or len(q.strip()) < 60 for q in entries) or
+                len(set(entries)) != len(entries)):
+            raise ValueError(f"missing or duplicate research packets for {agent_id}")
+    return plan
+
+
+def select_packet(agent_id, fallback, cursors, plan):
+    entries = plan["agents"].get(agent_id, [fallback])
+    seq = int(cursors.get(agent_id, 0))
+    current = entries[seq % len(entries)]
+    return (f"Research packet {seq + 1}, track position {seq % len(entries) + 1}/{len(entries)}. "
+            "This is NOT the same task as your preceding invocation. "
+            "Do not repeat an already posted negative result.\n\n" + current +
+            "\n\n" + plan["common"])
+
+
+def tick(history, cursors, plan):
     live = running()
     if len(live) >= TARGET_RUNNING:
         print(f"{time.strftime('%FT%T')} running={len(live)} minimum met", flush=True)
@@ -64,18 +92,23 @@ def tick(history):
             print("missing worktree", path, flush=True)
             continue
         try:
+            next_prompt = select_packet(agent_id, prompt, cursors, plan)
             p = execute([A, "agent", "run", "--id", agent_id, "--cwd", path,
-                         "--prompt", prompt, "--detach", "--json"], timeout=35)
+                         "--prompt", next_prompt, "--detach", "--json"], timeout=35)
             if p.returncode == 0 and json.loads(p.stdout).get("state") == "running":
                 live.add(agent_id)
                 history[agent_id] = time.time()
-                print("started", agent_id, flush=True)
+                cursors[agent_id] = int(cursors.get(agent_id, 0)) + 1
+                print("started", agent_id, "packet", cursors[agent_id], flush=True)
             else:
                 print("failed", agent_id, p.stderr[-250:], flush=True)
         except Exception as e:
             print("error", agent_id, str(e), flush=True)
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps(history))
+    pending = CURSORS.with_suffix(".tmp")
+    pending.write_text(json.dumps(cursors, sort_keys=True))
+    pending.replace(CURSORS)
 
 def main():
     import fcntl
@@ -95,9 +128,13 @@ def main():
         history = json.loads(STATE.read_text())
     except (FileNotFoundError, ValueError):
         history = {}
+    try:
+        cursors = json.loads(CURSORS.read_text())
+    except (FileNotFoundError, ValueError):
+        cursors = {}
     while True:
         try:
-            tick(history)
+            tick(history, cursors, load_packet_plan())
         except Exception as e:
             print("tick error", repr(e), flush=True)
         if args.once:
