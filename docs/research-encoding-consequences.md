@@ -342,6 +342,16 @@ constant and size remains polynomial, giving a nonuniform
 classical `PARITY ∉ nonuniform AC⁰` lower bound
 (Håstad, STOC 1986, https://doi.org/10.1145/12130.12132). ∎
 
+**Novelty calibration:** the class membership `SORT-BOUND-U ∈
+nonuniform AC⁰` is *not* a special sorting discovery. **Every sparse
+language** is in nonuniform `AC⁰`: on length-`L` inputs, OR the
+exact-match conjunctions for its `poly(L)` YES-strings.
+The extra sorting structure here is the explicit single-cutoff
+formula and its `O(L²)` size, not the `AC⁰` membership itself.
+Consequently Corollary 3.11 is likewise a generic sparse-language
+barrier and should not be counted as progress toward a uniform
+complexity classification.
+
 This does **not** forbid polynomial-time reductions, prove
 `SORT-BOUND-U ∈ P`, or yield a uniform construction of the
 circuits: their choice of cutoff `t_L` may itself be
