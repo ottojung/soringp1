@@ -16,7 +16,10 @@ A = "/home/lubko/.local/bin/antonina"
 REQUIRED_RUNNING = 5
 TARGET_RUNNING = 8  # Buffer above the hard minimum for normal completions.
 INTERVAL = 10
-MIN_RESEARCH_RESTART_SECONDS = 240  # Avoid relaunching stale sessions while >=5 are active.
+MIN_RESEARCH_RESTART_SECONDS = 240  # Avoid fast repeats of completed investigations.
+STALLED_OUTPUT_SECONDS = 30 * 60  # A silent managed agent is not productive capacity.
+MAX_STALLED_STEERS_PER_TICK = 1  # Recover gradually without losing the agent floor.
+AGENTS_DIR = Path("/home/lubko/.local/state/antonina/agents")
 STATE = Path("/home/lubko/.local/state/soringp1/agent-pool.json")
 CURSORS = STATE.parent / "packet-cursors.json"
 PACKETS = Path(__file__).resolve().parent.parent / "docs/research-packets.json"
@@ -80,10 +83,73 @@ def select_packet(agent_id, fallback, cursors, plan):
             "before ending.\n\n" + current + "\n\n" + plan["common"])
 
 
+def last_observed_output(agent_id, expected_cwd):
+    """Return recent output/start timestamp, not a mere running flag.
+
+    Last_activity_at can remain at invocation start while a model streams
+    substantive output; consult the managed log modification time as well.
+    Never steer a record whose declared worktree changed underneath us.
+    """
+    base = AGENTS_DIR / agent_id
+    try:
+        meta = json.loads((base / "meta.json").read_text())
+        if meta.get("state") != "running" or meta.get("cwd") != expected_cwd:
+            return None
+        observed = float(meta.get("started_at") or 0)
+        log = base / "output.log"
+        if log.exists():
+            observed = max(observed, log.stat().st_mtime)
+        return observed if observed > 0 else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def save_history(history, cursors):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(history))
+    pending = CURSORS.with_suffix(".tmp")
+    pending.write_text(json.dumps(cursors, sort_keys=True))
+    pending.replace(CURSORS)
+
+
+def recover_stalled(live, history, cursors, plan, now):
+    """Steer in place without temporarily lowering the agent count.
+
+    A running OpenCode child can wait indefinitely after provider rate limits.
+    On Billy, steering with --cwd while a front exists is refused, so steer
+    reuses the already-validated declared directory.
+    """
+    count = 0
+    for agent_id, wd, fallback in ROSTER:
+        if agent_id not in live or count >= MAX_STALLED_STEERS_PER_TICK:
+            continue
+        last = last_observed_output(agent_id, "/home/lubko/" + wd)
+        if last is None or now - max(last, history.get(agent_id, 0)) < STALLED_OUTPUT_SECONDS:
+            continue
+        prompt = select_packet(agent_id, fallback, cursors, plan)
+        try:
+            p = execute([A, "agent", "run", "--id", agent_id,
+                         "--prompt", prompt, "--steer", "--detach", "--json"],
+                        timeout=35)
+            if p.returncode == 0 and json.loads(p.stdout).get("state") == "running":
+                history[agent_id] = now
+                cursors[agent_id] = int(cursors.get(agent_id, 0)) + 1
+                count += 1
+                print("steered stalled", agent_id, "packet", cursors[agent_id], flush=True)
+            else:
+                print("stall recovery failed", agent_id, p.stderr[-250:], flush=True)
+        except Exception as e:
+            print("stall recovery error", agent_id, str(e), flush=True)
+    return count
+
+
 def tick(history, cursors, plan):
     live = running()
+    recovered = recover_stalled(live, history, cursors, plan, time.time())
     if len(live) >= TARGET_RUNNING:
-        print(f"{time.strftime('%FT%T')} running={len(live)} minimum met", flush=True)
+        if recovered:
+            save_history(history, cursors)
+        print(f"{time.strftime('%FT%T')} running={len(live)} minimum met; recovered={recovered}", flush=True)
         return
     print(f"{time.strftime('%FT%T')} running={len(live)} replenishing", flush=True)
     choices = sorted((r for r in ROSTER if r[0] not in live),
@@ -114,11 +180,7 @@ def tick(history, cursors, plan):
                 print("failed", agent_id, p.stderr[-250:], flush=True)
         except Exception as e:
             print("error", agent_id, str(e), flush=True)
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(history))
-    pending = CURSORS.with_suffix(".tmp")
-    pending.write_text(json.dumps(cursors, sort_keys=True))
-    pending.replace(CURSORS)
+    save_history(history, cursors)
 
 def main():
     import fcntl
