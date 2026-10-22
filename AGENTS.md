@@ -108,9 +108,9 @@ such a mature result or a critical model/cost correspondence.
 defend? Which hypothesis was ruled out? Did a bound, algorithm, or valid
 reduction change? What decisive question comes next? Counts of active
 agents, PRs, CI passes, solved local poset examples and Lean files do
-**not** measure mathematical progress. Replace completed agents only when another distinct,
-high-value mathematical question is ready. Document actual mathematical blockers without inventing
-filler tasks.
+**not** measure mathematical progress. Replace completed agents only when
+another distinct, high-value mathematical question is ready. Document actual
+mathematical blockers without inventing filler tasks.
 
 The current open PR backlog is archival research, not a research
 milestone. Triage once for correctness and relevance, then merge

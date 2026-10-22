@@ -38,8 +38,9 @@ The unary portfolio includes:
   sparse-language complexity barriers, and independent source audits.
 
 Do not let apparent binary completeness, binary-specific techniques,
-or old task assignments override this research scope. Do not launch binary fallback investigations merely to create activity.
-Broaden the unary frontier only where there is a distinct testable question.
+or old task assignments override this research scope. Do not launch binary
+fallback investigations merely to create activity. Broaden the unary frontier
+only where there is a distinct testable question.
 
 ## Parallelism follows the mathematical frontier
 

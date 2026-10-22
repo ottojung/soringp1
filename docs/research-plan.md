@@ -104,8 +104,8 @@ sharpest argument, disproof attempts and open obstacle. A polished PR,
 test file, research note, or increased agent count is **not itself mathematical
 progress**. Active research must have a distinct falsifiable question
 with a credible complexity consequence; there is no agent-count quota.
-Avoid repetitive paperwork or routine formalization. Do not turn every small poset observation
-into a follow-up research task.
+Avoid repetitive paperwork or routine formalization. Do not turn every
+small poset observation into a follow-up research task.
 
 ## Lean checkpoint, not Lean workstream
 
