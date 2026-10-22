@@ -46,9 +46,8 @@ only where there is a distinct testable question.
 
 Launch independent SoringP1 researchers only for concrete, falsifiable
 questions with a plausible bridge to the **uniform complexity of S(n)**.
-There is **no fixed target for concurrent agents**: zero or one is acceptable
-when other approaches are exhausted or duplicative, and many can be useful
-when genuinely distinct questions are ready. Do not spawn work just to
+The minimum is **five concurrently running agents, with no maximum**. Restore the minimum promptly after any completion or failure.
+Run additional agents whenever genuinely distinct research questions exist. Do not spawn work just to
 saturate an agent pool, and do not formalize routine intermediate results.
 
 Use Antonina on **billy-dev only**. Do not serialize genuinely independent

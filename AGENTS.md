@@ -40,14 +40,17 @@ of a defining formula by a capture theorem from constructing and
 validating an explicit formula for this specific language. Do not claim
 P/NP membership, hardness, or a separation without a proof.
 
-## Binding research efficiency directive (2026-10-21)
+## Binding research parallelism and efficiency directive (2026-10-22)
 
-**Only launch independent, mathematically justified investigations.** There is
-no fixed minimum or target number of active agents. Each proposed packet must
-identify a falsifiable conjecture, a precise implication for the uniform
-complexity of S(n) or its unary threshold language, and a stop condition.
-Use more agents when genuinely distinct questions exist, or fewer when they do
-not. Avoid duplicating prior negative findings, endless small-instance
+**Maintain a minimum of five concurrently running SoringP1 researchers on
+`billy-dev`, with no maximum quota.** Count only running SoringP1 agents,
+not idle agents or agents from other projects. Check live status regularly,
+restore the floor promptly after completions or failures, revive original IDs
+when possible, and spawn new independent research agents when necessary.
+Each packet needs a falsifiable question, an explicit implication for the
+uniform complexity of S(n), and a concrete stop condition.
+Maintain at least five running SoringP1 agents; launch more whenever
+there are additional worthwhile independent research questions. Avoid duplicating prior negative findings, endless small-instance
 enumeration, generic partial-order complexity without a root reduction, and
 routine Lean formalization without a mature all-n theorem.
 
@@ -63,7 +66,7 @@ research note, script, test, Lean proof, agent run, or PR per investigation.**
 The expected result of most investigations is **increased understanding**,
 including a falsified attractive conjecture, a precise obstruction, or an
 honest inconclusive finding. A clean worktree and no PR are normal outcomes.
-Do not keep agents active merely to fill a quota; pursue new threads only
+Maintain the five-agent floor without assigning filler work; pursue new threads only
 when a distinct and worthwhile mathematical question exists.
 
 The sole research objective is a significant theorem about the **uniform
