@@ -16,26 +16,19 @@ A = "/home/lubko/.local/bin/antonina"
 REQUIRED_RUNNING = 5
 TARGET_RUNNING = 8  # Buffer above the hard minimum for normal completions.
 INTERVAL = 10
+MIN_RESEARCH_RESTART_SECONDS = 240  # Avoid relaunching stale sessions while >=5 are active.
 STATE = Path("/home/lubko/.local/state/soringp1/agent-pool.json")
 CURSORS = STATE.parent / "packet-cursors.json"
 PACKETS = Path(__file__).resolve().parent.parent / "docs/research-packets.json"
 ROSTER = [
-    ("Dd1KMoCc1ghfSN3I0dq0fE-beast", "soring301-strategy-dag-20261021",
-     "Seek an all-n polynomial framed optimal sorting strategy DAG certificate; independently test its completeness. Do not repeat finite data or formalize peripheral Lean. Post substantive findings on Antonina 301."),
-    ("7Ql7xUk4Yn9io6Eb7hmKvf-ligament", "soring301-antichain-adversary-20261021",
-     "Seek a uniform exact root-antichain sorting recurrence, structural normal form, or counterexample to a root exchange theorem. Distinguish all-n conclusions from finite examples. No peripheral Lean. Report to Antonina 301."),
-    ("eJdn8EBCvUfWSmpcn8N8qO-reddened", "soring301-no-cert-invariant-20261020",
-     "Investigate polynomially checkable root sorting NO certificates beyond leaf counting, including tree-shape and comparison admissibility. Distinguish class membership from finite n12. No peripheral Lean. Report to Antonina 301."),
-    ("0KvemFXL8da1UGuKv4Aqsp-hippolyte", "soring301-qbf-interactive-20261021",
-     "Seek root-specific alternation compression reducing the known unary PSPACE game to NP or P. Give a formal uniformity bridge; avoid generic hardness and peripheral Lean. Report to Antonina 301."),
-    ("VVIiJ6xfC0mW2B8OQLKtWS-channels", "soring301-dual-potential-20261021",
-     "Find efficiently verifiable all-n comparison-tree shape lower-bound potentials. Avoid redoing finite n12 leaf count or peripheral Lean. Report to Antonina 301."),
-    ("yJYQ3Mb8YfuJWm4rVCUUfI-enemy", "soring301-adjacency-referee-20261020",
-     "Independently challenge leading proposed all-n root sorting certificate theorems and seek stronger structural lemmas. Validate logical and frame semantics. No routine Lean. Report to Antonina 301."),
-    ("T505bkfsHmYO7nFokDXCkP-scored", "soring301-two-value-increment-20261021",
-     "Find an all-n reduction from insertion or partial-order structure to uniform exact root S(n) computation. Test a precise theorem against counterexamples. Avoid isolated finite census and peripheral Lean. Report to Antonina 301."),
-    ("kC3bgR9UBfwO95MrxYc2yd-otherwise", "soring301-selfreducibility-20261021",
-     "Seek uniform self-reducibility or search-to-decision equivalence for unary S(n), with correct input and witness lengths. Distinguish P/poly from uniform membership. No peripheral Lean. Report to Antonina 301."),
+    ('sYIEgoMgv7GpA2M8IF6N55-race', 'soring301-new-optimal-policy-fj-20261022', 'Constructive YES certificate frontier; Ford-Johnson state quot'),
+    ('uocSY7i9UxaE71ujhhxl5t-strict', 'soring301-new-global-slack-20261022', 'Global vs local minimax quotient DAG theorem'),
+    ('kK0hfvyCDUbSg5chSWjR9H-friant', 'soring301-new-root-no-cert-20261022', 'Root-specific polynomial coNO certificate proof system'),
+    ('z8FIxKzTS8NklpFKEez6hS-equality', 'soring301-new-avgdepth-obstruction-20261022', 'External-path/average-depth obstruction to exact sorting'),
+    ('naVVa2aiGjj9EeQlYbAOTs-removing', 'soring301-new-surplus-parameter-20261022', 'Parameterised exact root threshold by information surplus'),
+    ('so7oeYESYOuat2aZ6bP0CY-hideous', 'soring301-new-alternation-witness-20261022', 'NP strategy witnesses and uniform verifier completeness'),
+    ('HS5LZJ7PvDr441nyS0bkje-dearest', 'soring301-new-partial-info-20261022', 'Exact consequences of 2025 partial-information sorting'),
+    ('grhT1CGQzErpmZ1DOIhoZY-mined', 'soring301-new-independent-referee-20261022', 'Mathematical referee and literature counterexample audit'),
 ]
 
 def execute(args, timeout=20):
@@ -53,7 +46,7 @@ def running():
 def load_packet_plan():
     """Source-controlled research packets can be changed without modifying the keeper."""
     plan = json.loads(PACKETS.read_text())
-    if plan.get("version") != 1 or not isinstance(plan.get("common"), str):
+    if plan.get("version") != 2 or not isinstance(plan.get("common"), str):
         raise ValueError("invalid research packet plan")
     if not isinstance(plan.get("agents"), dict):
         raise ValueError("missing per-agent research packets")
@@ -69,11 +62,22 @@ def load_packet_plan():
 def select_packet(agent_id, fallback, cursors, plan):
     entries = plan["agents"].get(agent_id, [fallback])
     seq = int(cursors.get(agent_id, 0))
-    current = entries[seq % len(entries)]
-    return (f"Research packet {seq + 1}, track position {seq % len(entries) + 1}/{len(entries)}. "
-            "This is NOT the same task as your preceding invocation. "
-            "Do not repeat an already posted negative result.\n\n" + current +
-            "\n\n" + plan["common"])
+    if seq < len(entries):
+        current = entries[seq]
+    else:
+        # Do not loop over already exhausted research packets indefinitely.
+        # Under the binding five-agent floor, instead task this role with
+        # developing a FRESH explicit conjecture after reading its history.
+        current = ("All curated packets for your track have been tried. "
+                   "Do not repeat any prior result or re-audit the same theorem. "
+                   "Find a distinct falsifiable all-n question by comparing "
+                   "original literature with specific open failures in #301; "
+                   "then investigate it. If no new information is established, "
+                   "end WITHOUT a board comment and report that your track "
+                   "requires new operator curation.")
+    return (f"Research packet {seq + 1}. New clean role; avoid repeating past work. "
+            "Make a substantive effort to prove or DISPROVE the given all-n conjecture "
+            "before ending.\n\n" + current + "\n\n" + plan["common"])
 
 
 def tick(history, cursors, plan):
@@ -87,6 +91,12 @@ def tick(history, cursors, plan):
     for agent_id, wd, prompt in choices:
         if len(live) >= TARGET_RUNNING:
             break
+        # The >=5 directive is hard; refill it immediately. Above the floor,
+        # allow an agent time to finish a substantive investigation before
+        # reopening its session. Rapid 10-second replays flooded board #301.
+        if (len(live) >= REQUIRED_RUNNING and
+                time.time() - history.get(agent_id, 0) < MIN_RESEARCH_RESTART_SECONDS):
+            continue
         path = "/home/lubko/" + wd
         if not os.path.isdir(path):
             print("missing worktree", path, flush=True)
