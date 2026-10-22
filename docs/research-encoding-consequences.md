@@ -506,9 +506,15 @@ uniformly polynomial-time decidable).** A unary language may be
 decidable but not in `P`, despite requiring only one bit of
 nonuniform advice per input length.
 
-Here is an explicit diagonal construction. Fix an effective enumeration
-`M_0, M_1, ...` of deterministic Turing machines in which each
-machine appears at arbitrarily large indices. For `n ≥ 1` let
+Here is an explicit diagonal construction. Fix a standard
+polynomial-time-decodable numbering `N_j` of deterministic
+Turing machines, with invalid program codes interpreted as
+a fixed rejecting machine. For each `i≥0`, uniquely write
+`i+1=2^r(2j+1)` and set `M_i=N_j`.
+This enumeration is computable in `poly(log(i+2))` time,
+every machine has arbitrarily large indices (vary `r`),
+and its description at index `i` has `O(log(i+2))` bits.
+For `n ≥ 1` let
 `i = v₂(n)` be the exponent of the largest power of two dividing
 `n`. On input `1^n`, simulate `M_i` on `1^n` for at most
 `n^(i+2)` steps and **accept iff `M_i` does not accept within
