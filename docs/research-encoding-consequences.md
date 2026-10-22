@@ -575,7 +575,10 @@ with `G(0)=G(1)=0`, such that, writing
    `0≤G(n)−G(n−1)≤ceil(log₂ n)`,
    the same elementary recurrence satisfied by
    comparison sorting (sort `n−1` keys, then insert the last
-   key by binary search).
+   key by binary search). It also satisfies the familiar
+   **merging recurrence**
+   `G(a+c) ≤ G(a)+G(c)+(a+c−1)` for all `a,c≥1`
+   (sort two blocks and merge them).
 3. Yet the canonical unary threshold language
    `U_G={1^n#1^k:G(n)≤k}` is **not in uniform `P`**,
    despite having the same nonuniform depth-two `AC⁰`
@@ -610,11 +613,20 @@ every sufficiently large dyadic block
 `ceil(log₂ j)-log₂ j` is at least
 `1-log₂(3/2)>0`. Taking a completed such block
 below `N` proves `sum d_j=Ω(N)`.
-Thus, writing `t_m` for the `m`-th element
-of `T` in increasing order, we have
-`t_m=O(m)`. We can find `t_m` in polynomial
-time given unary `m` by scanning integer arguments and
-computing the factorial bit length `I(j)`.
+We will exclude a fixed finite initial interval of indices.
+Choose a constant `N₀` so large that for every
+`N=a+c≥N₀` with `a,c≥1` we have
+`I(N) ≤ I(a)+I(c)+N−2`. Such an `N₀`
+exists: the central-binomial estimate
+`binom(N,a)≤binom(N,floor(N/2))=O(2^N/√N)`
+uniformly in `a` implies the displayed inequality
+by taking logarithms and ceilings.
+Now let `t_m` denote the `m`-th element
+of `T∩(N₀,∞)`. Removing finitely many indices
+preserves positive lower density, so `t_m=O(m)`.
+We can find `t_m` in polynomial time given
+unary `m` by scanning integer arguments and computing
+the factorial bit length `I(j)`.
 
 Now define `b_n` as follows: if `n=t_m`, set
 `b_n=1` iff `1^m∈H`; otherwise set
@@ -634,9 +646,21 @@ upper bound. If `n∉T` then `b_n=0`,
 so `G(n)−G(n−1)≤I(n)−I(n−1)≤ceil(log₂ n)`.
 For `n≥2`, `I(n)+1≤n ceil(log₂n)`
 follows from `n!≤n^(n−1)`.
-Computability follows by enumerating `T∩[2,n]`,
-then evaluating one quasipolynomial-time membership bit
-of `H` at its rank.
+For the merging recurrence, write `N=a+c`
+with `a,c≥1`. The baseline `I` satisfies
+`I(N)≤I(a)+I(c)+N−1`, because
+`binom(N,a)≤2^(N−1)` (Pascal's identity
+exhibits its two summands among the
+`2^(N−1)` subsets of an `(N−1)`-set).
+If `N≤N₀`, then `b_N=0`, and
+`G(N)≤I(a)+I(c)+N−1≤G(a)+G(c)+N−1`.
+If `N>N₀`, the chosen stronger
+one-comparison baseline slack absorbs the possible
+`b_N≤1`, again giving the claimed inequality.
+Computability follows by enumerating `T∩[2,n]`
+with indices above `N₀`, then evaluating one
+quasipolynomial-time membership bit of `H`
+at its rank.
 
 Suppose `U_G∈P`. On input `1^m` to
 `H`, compute `n=t_m=O(m)` and `I(n)`
@@ -654,9 +678,9 @@ so `U_G` is nevertheless in nonuniform depth-two
 `G` is an **artificial** function; this theorem
 is not a complexity lower bound for `S(n)`.
 It proves that the information bound, **a constant
-additive upper gap**, monotonicity, even the **exact
-standard binary-insertion recurrence**, and tiny
-nonuniform circuits **together cannot establish
+additive upper gap**, monotonicity, the **exact
+standard insertion and merging upper recurrences**,
+and tiny nonuniform circuits **together cannot establish
 uniform polynomial-time evaluation**. What matters
 is additional *sorting-specific* structure beyond
 these numerical inequalities, plausibly a complete,
