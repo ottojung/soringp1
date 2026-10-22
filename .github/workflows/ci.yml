@@ -29,7 +29,38 @@ jobs:
       LEAN_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
+      - name: Detect theorem-affecting changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          need_lean=true
+          # A manual workflow run always verifies the full Lean source.
+          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            base="$PUSH_BEFORE_SHA"
+            if [[ "$EVENT_NAME" == pull_request ]]; then
+              base="$PR_BASE_SHA"
+            fi
+            # Conservative fallback: unknown base/fetch failure => run Lean.
+            if [[ -n "$base" && ! "$base" =~ ^0+$ ]] &&
+               git fetch --no-tags --depth=1 origin "$base"; then
+              if changed="$(git diff --name-only "$base" HEAD)"; then
+                # Only Lean-relevant files require kernel replay. Python
+                # reference tests run unconditionally in the other job.
+                if ! grep -Eq '^(SoringP1/|SoringP1[.]lean$|lakefile[.](lean|toml)$|lake-manifest[.]json$|lean-toolchain$|[.]github/workflows/ci[.]yml$)' <<< "$changed"; then
+                  need_lean=false
+                fi
+              fi
+            fi
+          fi
+          echo "need_lean=$need_lean" >> "$GITHUB_OUTPUT"
+          echo "Lean verification required: $need_lean"
       - name: Install pinned Lean toolchain
+        if: steps.changes.outputs.need_lean == 'true'
         uses: leanprover/lean-action@v1
         with:
           auto-config: false
@@ -38,12 +69,16 @@ jobs:
           lint: false
           use-github-cache: true
       - name: Fetch pinned Mathlib cache
+        if: steps.changes.outputs.need_lean == 'true'
         run: lake exe cache get
       - name: Build all theorem modules, treating warnings as errors
+        if: steps.changes.outputs.need_lean == 'true'
         run: lake build --wfail
       - name: Kernel replay of proof objects
+        if: steps.changes.outputs.need_lean == 'true'
         run: lake env leanchecker SoringP1
       - name: Reject unfinished proofs and custom axioms
+        if: steps.changes.outputs.need_lean == 'true'
         shell: bash
         run: |
           set -euo pipefail
