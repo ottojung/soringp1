@@ -302,6 +302,64 @@ separate-input representation whose two lengths are not tied to a single total
 cutoff compression would not directly apply. The well-formedness check (one
 delimiter, unary blocks) is part of the `O(L)` verification.
 
+
+### 3.5 A nonuniform depth-two circuit upper bound
+
+`[deduction]` **Theorem 3.10 (`SORT-BOUND-U ∈ nonuniform AC⁰`).**
+For each fixed total input length `L`, membership in `SORT-BOUND-U`
+has a depth-two, polynomial-size Boolean circuit family (`O(L²)`
+literal occurrences). More precisely, let `t_L` be the cutoff from
+Theorem 3.7, and index the input symbols from `0` through `L−1`.
+For `L ≥ 1`, the circuit is
+
+```
+C_L(x) = OR_{0 ≤ i ≤ t_L} (
+              [x_i = #] AND
+              AND_{0 ≤ j < i} [x_j = 1] AND
+              AND_{i < j < L} [x_j = 1]
+         ).
+```
+
+Each term checks that the input consists of precisely `i` unary
+`1`s, one delimiter `#`, and then `L−i−1` unary `1`s. The circuit
+accepts exactly when the delimiter occurs at an index `i ≤ t_L`,
+equivalent to `S(i) ≤ L−1−i` by Theorem 3.7.
+There are at most `L` terms, each with at most `L` literals.
+For `L = 0`, use a rejecting constant circuit. Encoding each
+alphabet symbol with a fixed number of Boolean bits changes only
+a constant number of gates per equality test. Consequently this is
+a nonuniform `AC⁰` family: depth `O(1)` and size `poly(L)`. ∎
+
+`[deduction]` **Corollary 3.11 (a restricted unconditional
+hardness barrier).** `PARITY` cannot many-one reduce to
+`SORT-BOUND-U` by a polynomial-output-length `AC⁰` circuit
+reduction (in the standard fixed-output-length circuit model).
+
+*Proof.* Compose a putative `AC⁰` reduction circuit with the
+`AC⁰` decider of Theorem 3.10 at its output length. Depth remains
+constant and size remains polynomial, giving a nonuniform
+`AC⁰` circuit family for `PARITY`. This contradicts the
+classical `PARITY ∉ nonuniform AC⁰` lower bound
+(Håstad, STOC 1986, https://doi.org/10.1145/12130.12132). ∎
+
+**Novelty calibration:** the class membership `SORT-BOUND-U ∈
+nonuniform AC⁰` is *not* a special sorting discovery. **Every sparse
+language** is in nonuniform `AC⁰`: on length-`L` inputs, OR the
+exact-match conjunctions for its `poly(L)` YES-strings.
+The extra sorting structure here is the explicit single-cutoff
+formula and its `O(L²)` size, not the `AC⁰` membership itself.
+Consequently Corollary 3.11 is likewise a generic sparse-language
+barrier and should not be counted as progress toward a uniform
+complexity classification.
+
+This does **not** forbid polynomial-time reductions, prove
+`SORT-BOUND-U ∈ P`, or yield a uniform construction of the
+circuits: their choice of cutoff `t_L` may itself be
+computationally difficult. `AC⁰` circuit membership and
+`P/O(log L)` advice membership are two separate nonuniform
+descriptions of this particularly structured language, not
+a claim of a general containment between those two classes.
+
 ---
 
 ## 4. Reduction barriers: many-one, truth-table, Turing, and the binary version
@@ -452,14 +510,52 @@ exactly (Brightwell–Winkler) and is **not tight** (`S(12) = 30 > 29 =
 
 ## 6. Counterexamples and falsification attempts
 
-`[deduction]` **Counterexample 6.1 (`P/poly` does not imply `P`; sparse sets can
-be conditionally NP-hard).** Let `UNARY-SAT = { 1^{⟨φ⟩} : φ is a satisfiable
-propositional formula }`, where `⟨φ⟩` is a numeric code of `φ`. This language
-is sparse (at most one string per length) and NP-hard under polynomial-time
-many-one reductions (map `φ ↦ 1^{⟨φ⟩}`). By Lemma 3.2 it is in `P/poly`. By
-Mahaney (Theorem 4.1) it is in `P` iff `P = NP`. Thus `sparse ⊆ P/poly` does
-**not** imply `sparse ⊆ P`, and `SORT-BOUND-U ∈ P/poly` is not evidence for or
-against `SORT-BOUND-U ∈ P`.
+
+`[deduction]` **Counterexample 6.1 (sparse `P/poly` need not be
+uniformly polynomial-time decidable).** A unary language may be
+decidable but not in `P`, despite requiring only one bit of
+nonuniform advice per input length.
+
+Here is an explicit diagonal construction. Fix a standard
+polynomial-time-decodable numbering `N_j` of deterministic
+Turing machines, with invalid program codes interpreted as
+a fixed rejecting machine. For each `i≥0`, uniquely write
+`i+1=2^r(2j+1)` and set `M_i=N_j`.
+This enumeration is computable in `poly(log(i+2))` time,
+every machine has arbitrarily large indices (vary `r`),
+and its description at index `i` has `O(log(i+2))` bits.
+For `n ≥ 1` let
+`i = v₂(n)` be the exponent of the largest power of two dividing
+`n`. On input `1^n`, simulate `M_i` on `1^n` for at most
+`n^(i+2)` steps and **accept iff `M_i` does not accept within
+that many steps**. Call this tally language `TALLY-DIAG`.
+Because `i ≤ log₂ n`, its decider runs in
+`2^{O((log n)²)}` time (allowing polynomial simulation overhead).
+It is therefore decidable and sparse.
+
+If a deterministic polynomial-time machine `M` decided
+`TALLY-DIAG` in time `O(n^d)`, take any sufficiently large
+index `i ≥ d` at which `M_i = M`. There are arbitrarily large
+numbers `n = 2^i(2t+1)` with `v₂(n) = i`. On all sufficiently
+large such inputs `M_i` halts within the allowed cutoff;
+the diagonal decider gives the opposite answer, a contradiction.
+Thus `TALLY-DIAG ∉ P` unconditionally, yet
+`TALLY-DIAG ∈ P/1 ⊆ P/poly`: advice for length `n` is the
+single membership bit. This exhibits the required distinction
+without assuming an unproved class separation. ∎
+
+**Correction to an earlier erroneous unary-SAT example.**
+Mapping a binary SAT instance `φ` to a unary string
+`1^{⟨φ⟩}` is **not** a polynomial-time many-one reduction
+for a standard length-respecting numeric encoding `⟨φ⟩`:
+the output generally has exponential length in `|φ|`.
+Indeed, under a conventional binary Gödel coding, the unary
+language `{1^{⟨φ⟩} : φ is satisfiable}` is itself in `P`:
+decode the index and brute-force assignments to a formula of
+length `O(log n)` in time polynomial in the unary input
+length `n`. The previous claim that it was a sparse,
+polynomial-time many-one NP-hard language was false; it
+would have contradicted Mahaney's theorem unless `P=NP`.
 
 `[deduction]` **Counterexample 6.2 (the binary language is not sparse).**
 Theorem 4.6; the Mahaney barrier does not transfer to `SORT-BOUND-B`.
@@ -478,6 +574,141 @@ Moreover, since every poset is reachable (Lemma 1.3), the DP's runtime is
 advice?).** Suppose one claims `S_mono` lets us store only `O(L)` advice.
 Refuted: the upper bound on an increment is `Θ(n)`, so an increment may need
 `Θ(log n)` bits and the worst case is `Θ(L log L)` (Remark 3.5).
+
+
+
+
+`[deduction]` **Theorem 6.6 (even a one-comparison gap AND
+the exact insertion recurrence cannot imply uniform `P`).**
+There is a computable nondecreasing integer function `G(n)`,
+with `G(0)=G(1)=0`, such that, writing
+`I(n)=ceil(log₂(n!))`, for every `n≥2`:
+
+1. **One-bit numerical slack:** `I(n) ≤ G(n) ≤ I(n)+1`;
+   in particular `G(n)=log₂(n!)+O(1)`, and
+   `G(n)≤n ceil(log₂n)`.
+2. **The genuine insertion inequality:**
+   `0≤G(n)−G(n−1)≤ceil(log₂ n)`,
+   the same elementary recurrence satisfied by
+   comparison sorting (sort `n−1` keys, then insert the last
+   key by binary search). It also satisfies the familiar
+   **merging recurrence**
+   `G(a+c) ≤ G(a)+G(c)+(a+c−1)` for all `a,c≥1`
+   (sort two blocks and merge them).
+3. Yet the canonical unary threshold language
+   `U_G={1^n#1^k:G(n)≤k}` is **not in uniform `P`**,
+   despite having the same nonuniform depth-two `AC⁰`
+   circuits as `SORT-BOUND-U`.
+
+*Proof.* Take the explicit decidable but non-P tally language
+`H=TALLY-DIAG` from Counterexample 6.1. We first construct
+an efficiently enumerable set of places where the arithmetic
+information bound leaves one comparison of insertion slack.
+For `n≥2` let
+
+```
+d_n = ceil(log₂ n) - [I(n)-I(n-1)] ∈ {0,1},
+T = { n≥2 : d_n=1 }.
+```
+
+The inclusion follows because
+`I(n)−I(n−1)` is either `floor(log₂ n)` or
+`ceil(log₂ n)`. Importantly, `T` has
+**positive lower density**, not just infinitely many
+elements. Indeed, telescoping gives
+
+```
+sum_{j=2}^N d_j
+  = sum_{j=2}^N (ceil(log₂ j)-log₂ j)
+    + log₂(N!) - I(N).
+```
+
+The last term is in `(-1,0]`. On the first half of
+every sufficiently large dyadic block
+`(2^a, 3·2^(a−1)]`, each summand
+`ceil(log₂ j)-log₂ j` is at least
+`1-log₂(3/2)>0`. Taking a completed such block
+below `N` proves `sum d_j=Ω(N)`.
+We exclude the first eight indices and use the
+**explicit constant `N₀=8`**. For every `N=a+c≥9`
+with `a,c≥1`, we have
+`I(N) ≤ I(a)+I(c)+N−2`: the maximum binomial
+coefficient of row 9 is `binom(9,4)=126≤2^7`;
+moreover `max_a binom(N,a)/2^N` is nonincreasing
+in `N` by Pascal's identity, so
+`binom(N,a)≤2^(N−2)` for all `N≥9`.
+Finally `N!=a!c!binom(N,a)` and
+`ceil(x+y)≤ceil(x)+ceil(y)` give the claim.
+Thus no asymptotic central-binomial estimate or
+uncomputed threshold constant is needed.
+Now let `t_m` denote the `m`-th element
+of `T∩(N₀,∞)`. Removing finitely many indices
+preserves positive lower density, so `t_m=O(m)`.
+We can find `t_m` in polynomial time given
+unary `m` by scanning integer arguments and computing
+the factorial bit length `I(j)`.
+
+Now define `b_n` as follows: if `n=t_m`, set
+`b_n=1` iff `1^m∈H`; otherwise set
+`b_n=0`. Put
+
+```
+G(n) = I(n) + b_n.
+```
+
+Since `b_n∈{0,1}`, the one-comparison gap follows.
+As `I(n)−I(n−1)≥1` for `n≥2` and
+`b_n−b_(n−1)≥−1`, `G` is nondecreasing.
+To check the insertion recurrence, if `n∈T`
+then `I(n)−I(n−1)=ceil(log₂ n)−1`,
+so adding `b_n−b_(n−1)≤1` respects the
+upper bound. If `n∉T` then `b_n=0`,
+so `G(n)−G(n−1)≤I(n)−I(n−1)≤ceil(log₂ n)`.
+For `n≥2`, `I(n)+1≤n ceil(log₂n)`
+follows from `n!≤n^(n−1)`.
+For the merging recurrence, write `N=a+c`
+with `a,c≥1`. The baseline `I` satisfies
+`I(N)≤I(a)+I(c)+N−1`, because
+`binom(N,a)≤2^(N−1)` (Pascal's identity
+exhibits its two summands among the
+`2^(N−1)` subsets of an `(N−1)`-set).
+If `N≤N₀`, then `b_N=0`, and
+`G(N)≤I(a)+I(c)+N−1≤G(a)+G(c)+N−1`.
+If `N>N₀`, the chosen stronger
+one-comparison baseline slack absorbs the possible
+`b_N≤1`, again giving the claimed inequality.
+Computability follows by enumerating `T∩[2,n]`
+with indices above `N₀`, then evaluating one
+quasipolynomial-time membership bit of `H`
+at its rank.
+
+Suppose `U_G∈P`. On input `1^m` to
+`H`, compute `n=t_m=O(m)` and `I(n)`
+in polynomial time, then query the `P` decider
+on `1^n#1^{I(n)}`. This query is of length
+`O(n log n)=poly(m)` and is accepted
+**iff `b_n=0`**. Negating its answer decides
+`H` in polynomial time, contradiction.
+Thus `U_G∉P`. The cutoff proof of Theorem 3.10
+applies because `n+G(n)` is strictly increasing;
+so `U_G` is nevertheless in nonuniform depth-two
+`AC⁰`. ∎
+
+**Meaning for the actual sorting function.**
+`G` is an **artificial** function; this theorem
+is not a complexity lower bound for `S(n)`.
+It proves that the information bound, **a constant
+additive upper gap**, monotonicity, the **exact
+standard insertion and merging upper recurrences**,
+and tiny nonuniform circuits **together cannot establish
+uniform polynomial-time evaluation**. What matters
+is additional *sorting-specific* structure beyond
+these numerical inequalities, plausibly a complete,
+efficiently verifiable representation of optimal
+comparison play. The one-comparison gap is optimal for this type of counterexample:
+forcing `G(n)=I(n)` identically would give an ordinary polynomial-time
+computable function and hence a uniform P threshold language.
+This auxiliary diagonal example does not warrant Lean formalization.
 
 ---
 
