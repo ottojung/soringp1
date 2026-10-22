@@ -560,79 +560,82 @@ Refuted: the upper bound on an increment is `Θ(n)`, so an increment may need
 `Θ(log n)` bits and the worst case is `Θ(L log L)` (Remark 3.5).
 
 
-`[deduction]` **Theorem 6.6 (numerically sorting-like bounds do not
-force uniform polynomial-time evaluation).** There exists an
-explicit, computable, nondecreasing integer function `G(n)` such
-that, writing `I(n)=ceil(log₂(n!))`:
 
-1. `G(0)=G(1)=0` and for every `n`,
-   `I(n) ≤ G(n) ≤ I(n)+⌊√n⌋`; in particular,
-   `G(n)=log₂(n!)+o(n)` and for all sufficiently large `n`
-   it also obeys the standard merge-sort upper bound
-   `G(n) ≤ n ceil(log₂ n)`.
-2. For `n≥2`, the increment `G(n)−G(n−1)` lies between
-   `floor(log₂ n)` and `ceil(log₂ n)+1`.
-3. Nevertheless, the canonical **unary** threshold language
-   `{1^n#1^k : G(n)≤k}` is not in `P`, although it belongs
-   to nonuniform `AC⁰` by precisely the same single-cutoff
-   construction as Theorem 3.10.
+`[deduction]` **Theorem 6.6 (even a one-comparison numerical gap
+cannot imply uniform polynomial-time evaluation).** There
+exists a computable, nondecreasing integer function `G(n)`
+whose unary threshold language is **not in `P`**, despite
+being numerically indistinguishable from the information
+lower bound up to just **one comparison**.
+
+Precisely, let `I(n)=ceil(log₂(n!))`. The function satisfies
+
+1. `G(0)=G(1)=0` and `I(n) ≤ G(n) ≤ I(n)+1`
+   for every `n`. Hence `G(n)=log₂(n!)+O(1)`,
+   far sharper than even Sergeev's `o(n)` upper-gap bound
+   for the actual sorting numbers. It also satisfies the
+   standard comparison upper bound `G(n) ≤ n ceil(log₂n)`
+   for all `n≥2`.
+2. `G` is nondecreasing. Its one-step increments differ
+   from those of `I` by at most one:
+   `|[G(n)−G(n−1)]−[I(n)−I(n−1)]|≤1`.
+3. The language `U_G={1^n#1^k:G(n)≤k}` is
+   outside uniform `P`, yet (because `G` is
+   nondecreasing) `U_G` belongs to nonuniform
+   depth-two `AC⁰` exactly as in Theorem 3.10.
 
 *Proof.* Take the explicit decidable tally language
-`H=TALLY-DIAG∉P` constructed in Counterexample 6.1. Let
-`b_m=1` iff `1^m∈H` (for `m≥2`), and define
+`H=TALLY-DIAG∉P` constructed in Counterexample 6.1.
+Set `b_0=b_1=0`, and for `n≥2` set `b_n=1`
+iff `1^n∈H`. Define
 
 ```
-G(n) = I(n) + sum_{2 ≤ m ≤ floor(sqrt(n))} b_m.
+G(n) = I(n) + b_n.
 ```
 
-The summation is nondecreasing and between `0` and
-`floor(sqrt(n))`. Since `I(n)` is nondecreasing,
-so is `G(n)`. Moreover, `G(n)−G(n−1)` equals
-`I(n)−I(n−1)` except that it increases by one when
-`n=m²` with `m≥2` and `b_m=1`. The ceiling identity
+The numerical one-comparison bound is immediate.
+For `n≥2`, `I(n)−I(n−1)≥1`, since
+`log₂(n!)−log₂((n−1)!)=log₂ n≥1`.
+As `b_n−b_(n−1)≥−1`, `G` is nondecreasing.
+The claimed smooth-increment bound follows at once.
+The standard merge-sort numerical upper bound holds
+because for `n≥2`,
 
 ```
-I(n)-I(n-1) ∈ {floor(log₂ n), ceil(log₂ n)}
+I(n) ≤ (n−1)ceil(log₂n),
+I(n)+1 ≤ n ceil(log₂n),
 ```
 
-proves the increment claim. Stirling's estimate gives
-`I(n)=n log₂n−Θ(n)`, and adding at most `√n=o(n)`
-preserves the asserted numerical comparison bounds.
+using `n! ≤ n^(n−1)` and `ceil(log₂n)≥1`.
 
-Computing `I(n)` on unary input is polynomial-time integer
-arithmetic. `H` itself is decidable in
-`2^{O((log m)²)}` time, so evaluating the at most
-`floor(sqrt(n))` summands makes `G` computable
-in quasipolynomial time.
+Because `H` has a quasipolynomial-time unary decider,
+so does `G`: calculate `I(n)` by integer arithmetic
+and compute one bit `b_n` using the decider for `H`.
 
-To prove the threshold language is **not** in `P`,
-suppose it had a polynomial-time decider. On input
-`1^m` to `H`, set `n=m²`. Binary-search the
-polynomially bounded thresholds for `G(n)` and
-`G(n−1)`, using unary `1^n#1^k` queries of length
-`O(n log n) = poly(m)`. Then recover
+Now suppose `U_G` were in `P`. On input `1^n`,
+compute `I(n)` in polynomial time, construct the
+unary threshold query `1^n#1^{I(n)}` (its
+length is `O(n log n)`), and invoke the alleged
+`P` decider. It accepts **iff `b_n=0`**.
+Negating its answer would therefore decide `H`
+in polynomial time on all `n≥2`, a contradiction.
+Thus `U_G∉P`. The fixed-length single-cutoff
+construction applies because `n+G(n)` is strictly
+increasing, giving nonuniform depth-two `AC⁰`. ∎
 
-```
-b_m = [G(m²)-I(m²)] - [G(m²-1)-I(m²-1)].
-```
-
-This would decide `H` in deterministic polynomial
-time, contradicting Counterexample 6.1. Finally
-`n+G(n)` is strictly increasing, so the fixed-length
-threshold language has the same depth-two nonuniform
-`AC⁰` circuit construction as in Theorem 3.10. ∎
-
-**Meaning for `S(n)`.** This is a *different artificial
-function*, not a lower bound or hardness result for actual
-sorting numbers. It proves that monotonicity, a sublinear
-additive gap from `log₂(n!)`, nearly logarithmic
-one-step increments and even nonuniform depth-two
-circuits **together are insufficient** to imply uniform
-`P` membership. A positive algorithm for `S(n)`
-must exploit additional, sorting-specific structure:
-for example, a complete compression of optimal
-comparison strategies. No Lean formalization of
-this auxiliary diagonal example is indicated.
+**Meaning for `S(n)`.** The function `G` is
+**not** the actual sorting number; this theorem is not
+a hardness result for `S(n)`. Rather, even
+monotonicity, the information lower bound, a **constant**
+additive upper gap, smooth nearly logarithmic
+increments, and depth-two nonuniform circuits **all
+hold for a threshold language outside P**. Such
+numerical properties alone cannot resolve the uniform
+complexity of `S(n)`. A successful approach must use
+genuinely sorting-specific structure (for example,
+complete and checkable compression of optimal
+comparison strategies). No Lean formalization of
+this artificial diagonal example is warranted.
 
 ---
 
