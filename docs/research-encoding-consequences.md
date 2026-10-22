@@ -4,9 +4,8 @@
 **not** Lean-checked. Every item is labelled `[literature]`, `[deduction]`,
 `[experiment]`, `[conjecture]` or `[open]`. No unconditional separation is
 claimed, and no NP-hardness is claimed. This note is deliberately *distinct*
-from the Executive staging draft
-`/home/lubko/soring301-research/docs/research-certificates-barriers.md`
-(which the Executive will integrate); it focuses on the exact input encodings,
+from [`research-certificates-barriers.md`](research-certificates-barriers.md);
+it focuses on the exact input encodings,
 the elementary deterministic algorithm and its honest runtime, and the
 sparse/`P/poly` structure of the unary threshold language.
 
@@ -178,8 +177,8 @@ exponentially (`n ≤ 2^{L_B}`), so the same computation is doubly exponential i
 the input length. This is why `SORT-BOUND-U ∈ EXPTIME` does **not** imply
 `SORT-BOUND-B ∈ EXPTIME`.
 
-`[deduction]` **Remark 2.4 (relation to the game/ATM bounds).** The Executive
-draft derives the stronger bounds `SORT-BOUND-U ∈ PSPACE` and
+`[deduction]` **Remark 2.4 (relation to the game/ATM bounds).** The note
+[`research-certificates-barriers.md`](research-certificates-barriers.md) derives the stronger bounds `SORT-BOUND-U ∈ PSPACE` and
 `SORT-BOUND-B ∈ EXPSPACE` by a different algorithm (an alternating Turing
 machine playing the comparison game, using `APTIME = PSPACE` and
 `AEXPTIME = EXPSPACE`). That is a stronger *algorithmic* result. The present
@@ -456,7 +455,7 @@ the result is still optimal and now has exactly the `n!` reachable leaves and no
 unreachable leaves. A full binary tree with `n!` leaves has `2n! − 1` nodes. ∎
 
 `[experiment]` The repository's `scripts/evaluate.py`/`generate_optimal_tree.py`
-and the Executive draft confirm `nodes = 2n! − 1` and `leaves = n!` for the
+and `research-certificates-barriers.md` confirm `nodes = 2n! − 1` and `leaves = n!` for the
 optimal trees they construct, `n ≤ 6`.
 
 ### 5.2 The tree witness is not polynomial

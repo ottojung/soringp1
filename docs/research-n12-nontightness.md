@@ -2,7 +2,7 @@
 
 **Status:** research note. Separates literature facts, deductions, experiments
 and conjectures. No Lean files, no commits. Exploration front:
-"Explain non-tightness of information bounds" (`docs/exploration-agenda.md`).
+"Explain non-tightness of information bounds" (now in `docs/research-plan.md`).
 
 ## 1. Precise question
 
@@ -10,7 +10,7 @@ For the adaptive worst-case comparison-sorting number
 `S(n) = min { height(T) : T sorts all n! permutations }` and the
 information-theoretic lower bound `C(n) = ceil(log2 n!)`, the known exact
 values satisfy `S(n) = C(n)` for `n <= 11`, while `S(12) = 30 > C(12) = 29`
-(`docs/literature.md`, `docs/exploration-agenda.md`).
+(`docs/literature.md`, `docs/research-plan.md`).
 
 **Question.** Is there a *reusable* combinatorial invariant or obstruction,
 strictly stronger than the leaf count `n! <= 2^h`, that (a) explains the `+1`

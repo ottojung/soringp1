@@ -228,7 +228,7 @@ exactly at the known obstruction `[deduction]`.** For `n ≤ 11`,
 `d = 29` has `e = 12! ≤ 2^{29}` and the cutoff **does not fire** — the search
 must run. The `n = 12` gap (`S(12) = 30 > 29`) is therefore the canonical case
 where this pruning stops helping, which is precisely the structural obstruction
-tracked in `docs/research-n12-nontightness.md` and `docs/exploration-agenda.md`.
+tracked in `docs/research-n12-nontightness.md` and `docs/research-plan.md`.
 `[open]` Whether the *True*-search exponent `2^{O(n log² n)}` can be reduced
 remains open; these prunings do not reduce it.
 

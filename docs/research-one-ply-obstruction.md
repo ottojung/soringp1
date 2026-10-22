@@ -208,7 +208,7 @@ inequalities `L0 <= L1 <= F` have general proofs (§1), so no exhaustive `n = 5`
 3. Budgeted DFS worst case `2^{O(n log^2 n)}` that the §2 prune composes with:
    `docs/research-budgeted-dfs.md`.
 4. The information bound and the `n = 12` non-tightness baseline:
-   `docs/exploration-agenda.md`, `docs/literature.md`.
+   `docs/research-plan.md`, `docs/literature.md`.
 
 The one-ply definition, Theorems 1–2, the §2 pruning corollary, and the `n <= 4`
 + witness + sample checks are original to this note; the `e = 8`, `m = 4`

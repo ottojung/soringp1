@@ -437,7 +437,7 @@ No `n ≥ 6` full-value run (`CanSort(∅, S(6)=10)` would be `≥ 20^10` nodes)
 ## 12. What this does *not* establish `[deduction]`
 
 - No NP/coNP membership or hardness (the unary language is sparse; Mahaney
-  blocks many-one NP-hardness unless `P = NP` — `docs/exploration-agenda.md`).
+  blocks many-one NP-hardness unless `P = NP` — `docs/problem.md`).
 - No *class* improvement to the `PSPACE`/`EXPSPACE` space claims: the DFS was
   already polynomial-space unary, and §5.2 only lowers the polynomial degree
   (from `O(n³ log n)` to `O(n log² n)` bits); the sublinear-space `GEN-SORT`

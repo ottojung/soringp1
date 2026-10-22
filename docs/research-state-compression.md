@@ -26,7 +26,7 @@ measures the gain, and falsifies two stronger compression hopes.
 
 *Literature/index:* the exact values used as checks are
 `S(0..6)=0,0,1,3,5,7,10`, `S(7)=13`, `S(8)=16`, `S(9)=19`, `S(12)=30`, with
-`S(12) > ⌈log₂ 12!⌉ = 29`; see `docs/literature.md` and `docs/exploration-agenda.md`
+`S(12) > ⌈log₂ 12!⌉ = 29`; see `docs/literature.md` and `docs/research-plan.md`
 (Peczarski 2012; OEIS A036604 is only an index). The state-count sequences
 below are OEIS [A001035](https://oeis.org/A001035) (posets on `n` labelled
 points) and OEIS [A000112](https://oeis.org/A000112) (posets on `n` unlabelled

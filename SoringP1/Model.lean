@@ -9,9 +9,10 @@ as a permutation of the rank positions. An internal node tests whether
 the value at position `i` is smaller than the value at position `j`.
 
 The minimax number of comparisons is specified as an infimum of feasible
-worst-case heights. Proving the existence of a correct sorting tree for
-every n and identifying this specification with an executable evaluator
-are explicit future proof obligations; do not infer these from this file.
+worst-case heights. Existence of a correct tree for every n is proved in
+`SoringP1/Existence.lean` and attainment in `SoringP1/Attainment.lean`;
+the correspondence with the partial-order minimax evaluator is
+`S_eq_adv_univ` in `SoringP1/Minimax.lean`.
 -/
 
 namespace SoringP1
@@ -49,9 +50,9 @@ def HasBudget (n k : ℕ) : Prop :=
     Correct tree ∧ ComparisonTree.height tree ≤ k
 
 /--
-The sorting-number specification. `sInf ∅ = 0` for natural numbers,
-so a future theorem proving `∃ k, HasBudget n k` for every n is
-necessary before this is certified as the intended minimum.
+The sorting-number specification. `sInf ∅ = 0` for natural numbers, so
+this is the intended minimum only because `exists_hasBudget` proves
+`∃ k, HasBudget n k` for every n.
 -/
 noncomputable def S (n : ℕ) : ℕ :=
   sInf {k : ℕ | HasBudget n k}

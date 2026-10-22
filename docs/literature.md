@@ -11,6 +11,13 @@ about the **minimum worst-case number of adaptive pairwise comparisons**.
   Its introduction reports equality of optimal comparison counts with the
   information bound through n=11 and discusses the known S(12)=30 versus
   ceil(log₂(12!))=29, credited to Wells.
+- Florian Stober and Armin Weiß, *Lower Bounds for Sorting 16, 17, and 18
+  Elements*, ALENEX 2023, https://arxiv.org/abs/2206.05597 . Proves
+  S(16)=46, S(17)=50, S(18)=54 (refuting Knuth's conjecture S(16)=45) and
+  S(28)≥99 by exhaustive search with a pruned backward pass used as advice
+  for the forward pass. With these, exact values are known for all n≤22;
+  n=23 is open. Runs took about 11, 115 and 89 hours on a 48-thread,
+  768 GB machine.
 - L. R. Ford Jr. and Selmer M. Johnson, *A Tournament Problem* (1959):
   merge-insertion sorting; check bounds and optimality against the model.
 - Knuth, *The Art of Computer Programming*, Volume 3, §5.3.1:
@@ -29,7 +36,8 @@ about the **minimum worst-case number of adaptive pairwise comparisons**.
   [Author manuscript](https://ecommons.cornell.edu/entities/publication/02e42763-8a49-4dfe-9e73-59ccc016f74f).
   A sparse NP-hard language under polynomial-time many-one reductions would
   imply P=NP. The fixed unary threshold language in `problem.md` is sparse;
-  see `exploration-agenda.md` for the elementary counting argument.
+  see `problem.md` ("What is established") and
+  `research-encoding-consequences.md` for the elementary counting argument.
   This is a barrier to a routine proposed reduction, **not** a proof that
   the sorting-number evaluation problem belongs to P or NP.
 
