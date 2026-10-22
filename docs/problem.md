@@ -16,22 +16,16 @@ we investigate a procedure that *computes* S(n); the individual sorting tree
 being minimized over is not required to be described uniformly in n.
 
 The Lean model in `SoringP1/Model.lean` encodes comparison trees and the
-minimization specification. Correct sorting trees exist for every n, and the
-minimum is attained (`exists_hasBudget`, `hasBudget_S`, `S_le_iff`).
-The general minimax evaluator correspondence and the machine-cost model
-remain open; see `kernel-results.md`.
+minimization specification. Correct sorting trees exist for every n, the
+minimum is attained (`exists_hasBudget`, `hasBudget_S`, `S_le_iff`), and
+`S` equals the partial-order minimax value (`S_eq_adv_univ`). A
+machine-cost model for evaluating it is not formalized; see
+`kernel-results.md`.
 
 ## Encodings and exact questions
 
-**Research priority:** unary encoding exclusively until the unary
-complexity program has been completed. The binary function and
-threshold language below are specified to keep the mathematical
-distinction precise; they are **not active research targets**.
-All new algorithms, certificates, descriptive-logic formulae,
-reductions and formalization claims must use unary input lengths
-`n` or `n+k+1`, as appropriate. A binary research stream can
-resume only after the unary goal is completed and the founder
-explicitly changes scope. See `AGENTS.md`.
+Only the unary encoding is under active research (see `AGENTS.md`). The
+binary variants are defined so that the distinction stays precise.
 
 ### Function evaluation
 
@@ -91,21 +85,42 @@ relative to the input length.
 - Neither `SORT-BOUND-U ∈ NP` nor `SORT-BOUND-U ∉ NP` is being claimed.
   Similarly, no separation from P is established.
 
-## What would count as success?
+## Realistic outcomes
 
-A kernel-checked theorem connecting an explicitly encoded machine/resource
-model to the exact S or threshold language, with an ordinary mathematical
-correspondence argument relating the formal object to adaptive comparison
-sorting. Meaningful complete results include:
+The project's own upper bound `SORT-BOUND-U ∈ PSPACE` decides which results
+are within reach.
 
-- a polynomial-time exact evaluator, with a checked correctness and time bound;
-- a proved NP (or other complexity-class) upper bound under the fixed encoding;
-- an unconditional lower bound excluding P, NP, or a precisely named class;
-- a tighter deterministic upper bound, with a checked cost model.
+**Equivalent to known open problems (out of scope):**
 
-A statement `SORT-BOUND-U ∈ NP\P` would in particular imply P ≠ NP, and
-should not be presented as a routine route. Excluding NP is stronger still
-than merely showing an individual algorithm takes exponential time.
+- `SORT-BOUND-U ∉ P` would imply `P ≠ PSPACE`.
+- `SORT-BOUND-U ∉ NP` would imply `NP ≠ PSPACE`.
+- `SORT-BOUND-U ∈ NP \ P` would imply `P ≠ NP`.
 
-Open questions are hypotheses to investigate, not planned deliverables that
-can be guaranteed in advance.
+The language is also a tally language, so it is trivially in `P/poly`
+(even in nonuniform depth-two circuits): circuit lower-bound techniques
+cannot separate it from P. A uniform super-polynomial lower bound would
+need a method that does not exist for any natural problem in PSPACE.
+
+**Not blocked by an open separation, but with no known technique:**
+fixed-polynomial lower bounds such as `SORT-BOUND-U ∉ DTIME(N²)`. For the
+binary language, `SORT-BOUND-B ∉ P` would not contradict anything known
+(`P ⊊ EXPSPACE`), but a hardness proof for a single natural number
+sequence would be unprecedented.
+
+**Achievable in principle (the active frontier):**
+
+- a faster exact evaluator, e.g. `2^{O(n log n)}`, `2^{O(n)}` or
+  polynomial time, with correctness and cost arguments;
+- a smaller space bound;
+- membership in NP, coNP or another class below PSPACE via a succinct,
+  checkable certificate;
+- barrier theorems that rule out whole families of methods, like the
+  sparsity barrier and the winning-frontier bound;
+- structural theorems about the minimax game that change any of the above.
+
+A complete result is one with a paper proof and, when mature, a
+kernel-checked theorem connecting an explicit machine/resource model to
+`S` or the threshold language, together with a correspondence argument
+relating the formal object to adaptive comparison sorting.
+
+Open questions are hypotheses to investigate, not planned deliverables.

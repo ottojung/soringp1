@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Keep a minimum of five *running* SoringP1 research agents on billy-dev.
+"""Keep SoringP1 research agents running on billy-dev, one per curated packet.
 
-Reuses existing agent IDs and worktrees, respects a no-maximum rule, and
-never treats idle agents or unrelated Viche agents as research capacity.
+The keeper relaunches roster agents with their next curated research packet
+from docs/research-packets.json, up to a target count (default 5). An agent
+whose curated packets are all used is NOT relaunched with an invented task:
+it is reported as awaiting curation, so the running count can fall below the
+target when there are fewer open questions than agents. See docs/operations.md.
+
+Reuses existing agent IDs and worktrees and never treats idle agents or
+unrelated Viche agents as research capacity.
 """
 import argparse
 import json
@@ -13,13 +19,13 @@ import sys
 import time
 
 A = "/home/lubko/.local/bin/antonina"
-REQUIRED_RUNNING = 5
-TARGET_RUNNING = 8  # Buffer above the hard minimum for normal completions.
+HOME = "/home/lubko"
+DEFAULT_TARGET_RUNNING = 5  # Upper bound on relaunches; open packets may cap it lower.
 INTERVAL = 10
-MIN_RESEARCH_RESTART_SECONDS = 240  # Avoid fast repeats of completed investigations.
+MIN_RESEARCH_RESTART_SECONDS = 240  # Let a finished investigation settle before the next packet.
 STALLED_OUTPUT_SECONDS = 30 * 60  # A silent managed agent is not productive capacity.
 PREFERRED_MODEL_QUIET_SECONDS = 5 * 60  # Resume preferred model after genuine quota reset.
-MAX_STALLED_STEERS_PER_TICK = 1  # Recover gradually without losing the agent floor.
+MAX_STALLED_STEERS_PER_TICK = 1  # Recover stalled agents gradually.
 AGENTS_DIR = Path("/home/lubko/.local/state/antonina/agents")
 MODELS_CONFIG = Path("/home/lubko/.config/antonina/config.json")
 STATE = Path("/home/lubko/.local/state/soringp1/agent-pool.json")
@@ -46,7 +52,7 @@ def running():
     agents = json.loads(result.stdout)["agents"]
     return {v["id"] for v in agents if v.get("state") == "running"
             and (v.get("title", "").startswith("SoringP1")
-                 or v.get("cwd", "").startswith("/home/lubko/soring301"))}
+                 or v.get("cwd", "").startswith(HOME + "/soring301"))}
 
 def load_packet_plan():
     """Source-controlled research packets can be changed without modifying the keeper."""
@@ -57,7 +63,7 @@ def load_packet_plan():
         raise ValueError("missing per-agent research packets")
     for agent_id, _, _ in ROSTER:
         entries = plan["agents"].get(agent_id)
-        if (not isinstance(entries, list) or len(entries) < 2 or
+        if (not isinstance(entries, list) or not entries or
                 any(not isinstance(q, str) or len(q.strip()) < 60 for q in entries) or
                 len(set(entries)) != len(entries)):
             raise ValueError(f"missing or duplicate research packets for {agent_id}")
@@ -65,24 +71,23 @@ def load_packet_plan():
 
 
 def select_packet(agent_id, fallback, cursors, plan):
+    """Return the agent's next curated prompt, or None once its packets are used.
+
+    Exhausted tracks are not given invented work: new questions are added to
+    docs/research-packets.json by the operator (see docs/operations.md).
+    """
     entries = plan["agents"].get(agent_id, [fallback])
     seq = int(cursors.get(agent_id, 0))
-    if seq < len(entries):
-        current = entries[seq]
-    else:
-        # Do not loop over already exhausted research packets indefinitely.
-        # Under the binding five-agent floor, instead task this role with
-        # developing a FRESH explicit conjecture after reading its history.
-        current = ("All curated packets for your track have been tried. "
-                   "Do not repeat any prior result or re-audit the same theorem. "
-                   "Find a distinct falsifiable all-n question by comparing "
-                   "original literature with specific open failures in #301; "
-                   "then investigate it. If no new information is established, "
-                   "end WITHOUT a board comment and report that your track "
-                   "requires new operator curation.")
+    if seq >= len(entries):
+        return None
     return (f"Research packet {seq + 1}. New clean role; avoid repeating past work. "
             "Make a substantive effort to prove or DISPROVE the given all-n conjecture "
-            "before ending.\n\n" + current + "\n\n" + plan["common"])
+            "before ending.\n\n" + entries[seq] + "\n\n" + plan["common"])
+
+
+def awaiting_curation(cursors, plan):
+    return [agent_id for agent_id, _, fallback in ROSTER
+            if select_packet(agent_id, fallback, cursors, plan) is None]
 
 
 def agent_declares_cwd(agent_id, expected_cwd):
@@ -166,17 +171,19 @@ def recover_stalled(live, history, cursors, plan, now):
     for agent_id, wd, fallback in ROSTER:
         if agent_id not in live or count >= MAX_STALLED_STEERS_PER_TICK:
             continue
-        last = last_observed_output(agent_id, "/home/lubko/" + wd)
+        last = last_observed_output(agent_id, HOME + "/" + wd)
         if last is None:
             continue
         quiet_for = now - max(last, history.get(agent_id, 0))
         returning_primary = (
             quiet_for >= PREFERRED_MODEL_QUIET_SECONDS and
-            restored_preferred_model(agent_id, "/home/lubko/" + wd, now)
+            restored_preferred_model(agent_id, HOME + "/" + wd, now)
         )
         if not returning_primary and quiet_for < STALLED_OUTPUT_SECONDS:
             continue
         prompt = select_packet(agent_id, fallback, cursors, plan)
+        if prompt is None:
+            continue  # No curated packet left; do not steer into filler work.
         try:
             p = execute([A, "agent", "run", "--id", agent_id,
                          "--prompt", prompt, "--steer", "--detach", "--json"],
@@ -194,27 +201,28 @@ def recover_stalled(live, history, cursors, plan, now):
     return count
 
 
-def tick(history, cursors, plan):
+def tick(history, cursors, plan, target=DEFAULT_TARGET_RUNNING):
     live = running()
     recovered = recover_stalled(live, history, cursors, plan, time.time())
-    if len(live) >= TARGET_RUNNING:
+    waiting = awaiting_curation(cursors, plan)
+    stamp = time.strftime('%FT%T')
+    if len(live) >= target:
         if recovered:
             save_history(history, cursors)
-        print(f"{time.strftime('%FT%T')} running={len(live)} minimum met; recovered={recovered}", flush=True)
+        print(f"{stamp} running={len(live)} target={target} met; recovered={recovered}", flush=True)
         return
-    print(f"{time.strftime('%FT%T')} running={len(live)} replenishing", flush=True)
-    choices = sorted((r for r in ROSTER if r[0] not in live),
+    print(f"{stamp} running={len(live)} target={target}; "
+          f"awaiting curation={len(waiting)}", flush=True)
+    choices = sorted((r for r in ROSTER if r[0] not in live and r[0] not in waiting),
                      key=lambda r: history.get(r[0], 0))
     for agent_id, wd, prompt in choices:
-        if len(live) >= TARGET_RUNNING:
+        if len(live) >= target:
             break
-        # The >=5 directive is hard; refill it immediately. Above the floor,
-        # allow an agent time to finish a substantive investigation before
-        # reopening its session. Rapid 10-second replays flooded board #301.
-        if (len(live) >= REQUIRED_RUNNING and
-                time.time() - history.get(agent_id, 0) < MIN_RESEARCH_RESTART_SECONDS):
+        # Rapid relaunches of just-finished agents flooded board #301; give
+        # each investigation time to settle before its next packet.
+        if time.time() - history.get(agent_id, 0) < MIN_RESEARCH_RESTART_SECONDS:
             continue
-        path = "/home/lubko/" + wd
+        path = HOME + "/" + wd
         if not os.path.isdir(path):
             print("missing worktree", path, flush=True)
             continue
@@ -242,6 +250,9 @@ def main():
     import fcntl
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--target", type=int, default=DEFAULT_TARGET_RUNNING,
+                        help="maximum agents to keep running (default: %(default)s); "
+                             "fewer run when curated packets are exhausted")
     args = parser.parse_args()
     STATE.parent.mkdir(parents=True, exist_ok=True)
     lock = open(STATE.parent / "agent-pool.lock", "w")
@@ -262,7 +273,7 @@ def main():
         cursors = {}
     while True:
         try:
-            tick(history, cursors, load_packet_plan())
+            tick(history, cursors, load_packet_plan(), args.target)
         except Exception as e:
             print("tick error", repr(e), flush=True)
         if args.once:

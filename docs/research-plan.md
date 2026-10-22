@@ -1,136 +1,101 @@
-# Exploration-first research program
+# Research plan
 
-**Binding pivot (2026-10-18): pursue mathematical discovery about the
-complexity of `S(n)` before publishing any new artifacts.**
-The objective is to understand the complexity of *evaluating the optimal
-sorting number* S(n), not to collect Lean proofs about comparison sorting.
-Treat this document as research guidance, **not** a theorem/PR queue.
-**Binding 2026-10-19 scope: unary only until fully completed.** The only
-active encoding is `SORT-BOUND-U={1^n # 1^k:S(n)<=k}`, with
-`S_unary(1^n)` its function counterpart. All active
-agents must contribute to this unary research program. Binary encodings
-are definitions/background only and must not generate separate
-investigations before the unary goal is complete and the founder
-authorizes a scope transition. See `AGENTS.md` and
-[research orchestration](research-orchestration.md).
+What is known, what is realistically open, and how Lean fits in. This is
+guidance for choosing questions, not a task queue. The rules for doing the
+research are in [AGENTS.md](../AGENTS.md); the machinery is in
+[operations.md](operations.md).
 
-Do not produce a research note, script, test, or Lean statement merely
-because an agent completed a work session; a concise result or obstacle
-in Antonina issue #301 is the default.
+## Baseline: known values
 
-## What we already have
+`S(n)` has been studied extensively. For `1 ≤ n ≤ 11` the Ford–Johnson
+upper bound meets the information lower bound `C(n) = ⌈log₂ n!⌉`:
 
-The repository contains a faithful adaptive comparison-tree model, existence
-and attainment proofs, information-theoretic and insertion upper bounds,
-exact kernel-checked values through n=6, and the complete minimax correspondence
-`S_eq_adv_univ` in `SoringP1/Minimax.lean`. For exact provenance and current gaps, see
-`kernel-results.md`. The informal partial-order recurrence has a
-`2^{O(n²)}` state-enumeration bound measured in numeric n; this is not a
-kernel-checked machine-time theorem.
+| n    | 1 | 2 | 3 | 4 | 5 | 6  | 7  | 8  | 9  | 10 | 11 | 12 |
+|------|---|---|---|---|---|----|----|----|----|----|----|----|
+| S(n) | 0 | 1 | 3 | 5 | 7 | 10 | 13 | 16 | 19 | 22 | 26 | 30 |
 
-Exact values are already known in the literature through substantially
-larger n than our evaluator handles. In particular `S(7)=13`, `S(8)=16`,
-and `S(12)=30` are established; `ceil(log₂(12!))=29`. See
-`literature.md` and `exploration-agenda.md`. Avoid re-proving literature
-facts as the default research activity.
+At `n = 12`, `C(12) = 29` but `S(12) = 30` (Wells). Exact values are known
+for every `n ≤ 22`; the last three to be settled were `S(16) = 46`,
+`S(17) = 50`, `S(18) = 54` (Stober–Weiß 2023, by exhaustive bidirectional
+search taking days of computation each). `n = 23` is open. Asymptotically,
+`S(n) − log₂ n! = O(n / (log n)^{1/5})` (Sergeev). Sources and model notes
+are in [literature.md](literature.md). These are adaptive worst-case
+comparison counts, not sorting-network sizes. Do not re-derive them as
+research.
 
-## High-risk questions bearing directly on S(n)
+## Baseline: what this project has established
 
-**Priority is the one-parameter problem `S(n)`, not incremental bounds for
-arbitrary `F(P)`.** The latter matter only if they bridge to an asymptotic
-algorithm, valid reduction, succinct representation or substantial no-go
-theorem for the special input family.
+Upper bounds (numeric `n`; unary input length `N = n + k + 1`):
 
-Research should spend time on uncertain attempts, not merely polished
-corollaries. The binding repository-wide orchestration policy requires distinct,
-falsifiable, complexity-relevant investigations while maintaining a minimum of five running agents, with no maximum; subsections are not a mandatory task queue.
-See [research orchestration](research-orchestration.md).
+| Result | Status | Where |
+|---|---|---|
+| `S(n) ≤ k` decidable by memoized poset DP in `2^{O(n²)}` time | paper sketch | [upper-bound.md](upper-bound.md) |
+| `SORT-BOUND-U ∈ PSPACE`, `SORT-BOUND-B ∈ EXPSPACE` (game / alternating TM) | paper proof | [research-certificates-barriers.md](research-certificates-barriers.md) |
+| Budgeted DFS: `2^{O(n log² n)}` time, `O(n log² n)` bits; unary threshold in `2^{O(N log N)}` time, `O(N log N)` space | paper proof + code | [research-budgeted-dfs.md](research-budgeted-dfs.md) |
+| Sound pruning (information cutoff, Aut(P) move orbits); no exponent gain | experiment | [research-budget-pruning.md](research-budget-pruning.md) |
 
-### Structural characterization and state compression
+Barriers and structural facts:
 
-Search for exact recurrences with a smaller state space than labelled
-partial-order enumeration. Investigate symmetry quotients, canonical
-representatives, decomposition, unavoidable branching configurations, and
-obstructions to uniform representations. For each candidate, give a
-mathematical argument for exactness, and attempt to falsify it on known cases.
-Measure complexity in the *input encoding* rather than simply n.
+| Result | Status | Where |
+|---|---|---|
+| `SORT-BOUND-U` is sparse: many-one NP-hardness ⇒ P = NP; not many-one EXPTIME-hard | literature + deduction | [research-hardness-boundaries.md](research-hardness-boundaries.md), [research-encoding-consequences.md](research-encoding-consequences.md) |
+| `2^{(1/4−o(1)) n log² n}` nonisomorphic winning states at one depth: enumerating winning states cannot beat the DFS exponent by more than a constant factor | paper theorem | [research-winning-frontier-barrier.md](research-winning-frontier-barrier.md) |
+| An explicit sorting-tree witness has `2·n! − 1` nodes, so it is not an NP certificate | deduction | [research-certificates-barriers.md](research-certificates-barriers.md) |
+| `e(P)` (linear extensions) does not determine the minimax value; five scalar invariants falsified | experiment | [research-n12-nontightness.md](research-n12-nontightness.md), [research-hardness-boundaries.md](research-hardness-boundaries.md) |
+| Ordinal-sum decomposition is exact but does not shrink the state space | deduction + experiment | [research-series-decomposition.md](research-series-decomposition.md) |
 
-### Hardness, certificates and structural complexity
+Lean-checked results are listed in [kernel-results.md](kernel-results.md).
 
-Investigate what an efficiently checkable certificate of `S(n) ≤ k` or
-`S(n) > k` would require. Explicitly test whether a proposed witness is
-polynomial in the **unary** input length `N=n+k+1`. Separate unrestricted
-decision-tree optimisation from the fixed one-parameter family S(n).
-The unary threshold language is sparse: ordinary many-one NP-hardness
-would imply P=NP by Mahaney's theorem. Record limitations on proposed
-reductions *before* attempting a formal proof.
+## Realistic targets
 
-### Descriptive complexity of the unary threshold language
+See "Realistic outcomes" in [problem.md](problem.md). In short:
+unconditional super-polynomial lower bounds for the unary problem are
+equivalent to known open separations (`P ≠ PSPACE`, `NP ≠ PSPACE`), so they
+are out of scope. The open, plausibly reachable questions are on the
+upper-bound and barrier side.
 
-In addition to quantitative bounds, pursue **unary descriptive
-complexity**. On appropriately ordered finite input structures, test
-explicit logical definitions of `SORT-BOUND-U` in FO(PFP) (capturing
-PSPACE), in a logic capturing EXPTIME, and the genuinely open smaller
-descriptions FO(LFP) (P) and existential second-order logic (NP).
-The already established unary PSPACE upper bound implies existence
-of an FO(PFP) definition via the capture theorem; building an explicit
-faithful formula remains a separate research problem. Do not infer a
+## Open questions
+
+**Shrinking the exponent.** Is `S(n)` computable in `2^{O(n log n)}` time,
+or `2^{O(n)}`? The winning-frontier barrier says any such method must avoid
+enumerating transcripts or winning states. Decomposition, symmetry and
+duality notes (`research-compression-next.md`, `research-parallel-duality.md`,
+`research-orientation-modules.md`, `research-series-decomposition.md`) are
+starting points; each so far gives exactness without a state-count gain.
+
+**Certificates.** Is there a certificate for `S(n) ≤ k` or `S(n) > k`
+polynomial in `N`, other than an explicit tree? See
+`research-strategy-certificates.md` and the framed-DAG checker. Membership
+in NP or coNP would be a genuine upper-bound result.
+
+**Space.** Can the `O(N log N)` work space be reduced, for example to
+`O(N)` or polylogarithmic in `N`?
+
+**The bound gap.** Can an effective finite version of Sergeev's bound be
+extracted, narrowing the threshold window that an exact algorithm must
+search? Can the `n = 12` obstruction be explained by an invariant that
+generalizes? See `research-sergeev-asymptotic.md`,
+`research-one-ply-obstruction.md`, `research-structural-lower-bounds.md`.
+
+**Descriptive complexity.** The PSPACE bound implies an FO(PFP) definition
+of `SORT-BOUND-U` on ordered structures by the capture theorem; building
+and validating an explicit formula is separate work. An FO(LFP) (P) or
+ESO (NP) definition would be a new upper bound. Do not infer a
 smaller-class definition from a compact-looking informal recursion.
 
-### Insights from optimal comparison sorting
+For each candidate: give an argument for exactness, measure cost against
+the unary input length, and try to falsify it on known values.
 
-Read the primary literature, beginning with Ford–Johnson and proofs of
-small-n optimality. Explain why the information lower bound ceases to be
-tight at n=12, and test whether the known obstruction suggests a general
-invariant or more compact evaluator. Distinguish adaptive decision trees,
-sorting networks and partial-information sorting.
+## Lean
 
-### Executable investigations
+The library kernel-checks a faithful adaptive comparison-tree model,
+existence and attainment of `S`, the information bound, `S(n) ≤ n(n−1)/2`,
+monotonicity, exact values for `n ≤ 6`, and the minimax correspondence
+`S_eq_adv_univ` (see [kernel-results.md](kernel-results.md)). Routine
+expansion is paused. A new formalization needs the justification described
+in `AGENTS.md`. When a mature result is ready, prove the correctness and
+machine-cost bridges it needs; a Lean termination proof, a computable
+recurrence or finite tests are not a Turing-machine time bound.
 
-Use small Python or other transparent experiments as a falsification tool.
-Benchmarks should record state counts, time, memory, symmetry reductions and
-independent reference values. Do not claim a complexity class consequence
-from computing finitely many S(n).
-
-## What counts as progress
-
-Progress requires a **material update to what is known or plausibly
-possible about evaluating S(n)**: a new uniform bound/algorithm, a valid
-complexity reduction or barrier, a global structural theorem with a
-credible complexity consequence, or a serious falsification of a major
-route. Investigations may leave only a compact comment with sources, the
-sharpest argument, disproof attempts and open obstacle. A polished PR,
-test file, research note, or increased agent count is **not itself mathematical
-progress**. Active research must have a distinct falsifiable question
-with a credible complexity consequence; there is a minimum of five active agents and no maximum.
-Avoid repetitive paperwork or routine formalization. Do not turn every
-small poset observation into a follow-up research task.
-
-## Lean checkpoint, not Lean workstream
-
-Preserve and test the existing kernel-checked model. The earlier minimax height proof is now complete in the kernel-checked
-`minimaxTree_height` / `S_eq_adv_univ` results. Do not reopen it. A future Lean task needs an independent mathematical justification:
-a meaningful new theorem, a mature algorithm, a subtle correctness proof,
-or a necessary cost-model/correspondence bridge.
-
-The long-term objective still includes kernel checking a major result. We
-do **not** assume a P/NP separation exists or can be proved with the
-currently available techniques.
-
-## Parallel research discipline
-
-Run independent SoringP1 agents on `billy-dev` for distinct, promising
-mathematical questions. Replenish only when the next investigation has
-a falsifiable objective and potential complexity consequence. Do not use
-the number of open issues, host-load guesses, or absence of obvious new Lean
-work as a reason to serialize exploration. The orchestrator reconciles claims,
-reviews evidence and signs off on integrations; see
-[research orchestration](research-orchestration.md).
-
-## References and starting note
-
-- [Exploration agenda and complexity barriers](exploration-agenda.md)
-- [Primary literature and model checks](literature.md)
-- [Exact problem statement and encodings](problem.md)
-- [Formalization boundary](formalization-plan.md)
-- [Kernel-checked results inventory](kernel-results.md)
+Verification: `lake build --wfail`, `lake env leanchecker SoringP1`, and
+an axiom and correspondence review.

@@ -1,4 +1,4 @@
-"""Deterministic keeper contract: minimum five without a duplicate-task loop."""
+"""Deterministic keeper contract: curated packets only, up to a target count."""
 import importlib.util
 import json
 from pathlib import Path
@@ -14,7 +14,7 @@ SPEC.loader.exec_module(KEEPER)
 
 
 class KeeperTests(unittest.TestCase):
-    def test_v2_curated_frontier_and_nonrepeat_fallback(self):
+    def test_v2_curated_frontier_without_invented_fallback(self):
         plan = KEEPER.load_packet_plan()
         self.assertEqual(len(KEEPER.ROSTER), 8)
         self.assertEqual(len({id for id, _, _ in KEEPER.ROSTER}), 8)
@@ -23,21 +23,20 @@ class KeeperTests(unittest.TestCase):
         for agent_id, cwd, title in KEEPER.ROSTER:
             self.assertTrue(cwd.startswith("soring301-new-"))
             prompts = plan["agents"][agent_id]
-            self.assertEqual(len(prompts), 2)
+            self.assertGreaterEqual(len(prompts), 1)
             for prompt in prompts:
                 self.assertNotIn(prompt, seen)
                 seen.add(prompt)
-            delivered = [KEEPER.select_packet(agent_id, title, {agent_id: n}, plan) for n in range(3)]
-            self.assertEqual(len(set(delivered)), 3)
+            delivered = [KEEPER.select_packet(agent_id, title, {agent_id: n}, plan)
+                         for n in range(len(prompts))]
+            self.assertEqual(len(set(delivered)), len(prompts))
             self.assertTrue(all("no" in p.lower() and "lean" in p.lower() for p in delivered))
-            self.assertIn("WITHOUT a board comment", delivered[-1])
-        self.assertEqual(len(seen), 16)
+            # Once curated packets are used, the track waits for curation.
+            exhausted = {agent_id: len(prompts)}
+            self.assertIsNone(KEEPER.select_packet(agent_id, title, exhausted, plan))
+            self.assertIn(agent_id, KEEPER.awaiting_curation(exhausted, plan))
 
-    def test_below_five_bypasses_quality_cooldown(self):
-        plan = KEEPER.load_packet_plan()
-        now = time.time()
-        live = {aid for aid, _, _ in KEEPER.ROSTER[:4]}
-        history = {aid: now for aid, _, _ in KEEPER.ROSTER}
+    def _tick_with_launch_capture(self, live, history, cursors, plan, target=5):
         launched = []
         def fake_execute(args, timeout=20):
             self.assertEqual(args[:3], [KEEPER.A, "agent", "run"])
@@ -52,11 +51,38 @@ class KeeperTests(unittest.TestCase):
                   mock.patch.object(KEEPER.os.path, "isdir", return_value=True),
                   mock.patch.object(KEEPER, "agent_declares_cwd", return_value=True),
                   mock.patch.object(KEEPER, "execute", side_effect=fake_execute)):
-                cursors = {}
-                KEEPER.tick(history, cursors, plan)
-                self.assertEqual(len(launched), 1)
-                self.assertEqual(cursors[launched[0]], 1)
-                self.assertEqual(json.loads((Path(tmp) / "cursors.json").read_text()), cursors)
+                KEEPER.tick(history, cursors, plan, target)
+                if launched:
+                    self.assertEqual(json.loads((Path(tmp) / "cursors.json").read_text()), cursors)
+        return launched
+
+    def test_below_target_refills_with_next_curated_packet(self):
+        plan = KEEPER.load_packet_plan()
+        live = {aid for aid, _, _ in KEEPER.ROSTER[:4]}
+        history = {aid: time.time() - 3600 for aid, _, _ in KEEPER.ROSTER}
+        cursors = {}
+        launched = self._tick_with_launch_capture(live, history, cursors, plan)
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(cursors[launched[0]], 1)
+
+    def test_recently_finished_agent_waits_for_cooldown(self):
+        plan = KEEPER.load_packet_plan()
+        live = {aid for aid, _, _ in KEEPER.ROSTER[:4]}
+        history = {aid: time.time() for aid, _, _ in KEEPER.ROSTER}
+        self.assertEqual(self._tick_with_launch_capture(live, history, {}, plan), [])
+
+    def test_exhausted_tracks_are_not_relaunched_with_filler(self):
+        plan = KEEPER.load_packet_plan()
+        history = {aid: time.time() - 3600 for aid, _, _ in KEEPER.ROSTER}
+        cursors = {aid: len(plan["agents"][aid]) for aid, _, _ in KEEPER.ROSTER}
+        launched = self._tick_with_launch_capture(set(), history, cursors, plan)
+        self.assertEqual(launched, [])  # Running below target is acceptable.
+        # Curating one new packet makes exactly that track eligible again.
+        agent_id = KEEPER.ROSTER[2][0]
+        plan["agents"][agent_id] = plan["agents"][agent_id] + [
+            "A newly curated all-n research question with a stated complexity consequence."]
+        launched = self._tick_with_launch_capture(set(), history, cursors, plan)
+        self.assertEqual(launched, [agent_id])
 
     def test_relaunch_respects_persisted_worktree_authority(self):
         agent_id, wd, _ = KEEPER.ROSTER[0]

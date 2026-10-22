@@ -104,12 +104,11 @@ is the worst-case comparison count; `run ranking tree` returns the leaf reached;
   kernel-checked and CI-verified (A24, commit `379c4a14`). This is a
   mathematical equivalence, **not** a Turing-machine time bound.
 
-## Open fronts and active research mode (2026-10-17)
+## Open fronts
 
-**Routine Lean formalization is paused in favor of literature-led,
-paper-and-computation exploration.** This inventory records proofs, not a
-queue of mandatory next theorems. See `AGENTS.md`,
-`docs/exploration-agenda.md`, and `docs/formalization-plan.md`.
+Routine Lean formalization is paused in favor of literature-led,
+paper-and-computation research. This inventory records proofs, not a
+queue of next theorems. See `AGENTS.md` and `docs/research-plan.md`.
 
 1. **Machine-time complexity bridge:** the `2^{O(n²)}` partial-order dynamic
    programming argument is an **informal algorithm sketch**, not a

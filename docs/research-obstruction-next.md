@@ -5,9 +5,8 @@ experiment**, not a Lean file and not a complexity-class result. Every item is
 labelled `[literature]`, `[deduction]`, `[experiment]`, `[conjecture]` or
 `[open]`. Companion program: `scripts/obstruction_probe.py`; regression test:
 `tests/test_obstruction_audit.py`. This note is **distinct from** and does not
-modify the staging draft `soring301-research/docs/research-n12-nontightness.md`
-(owned by Executive for integration); it audits that draft and attacks the next
-mathematical question.
+modify [`research-n12-nontightness.md`](research-n12-nontightness.md); it audits
+that note and attacks the next mathematical question.
 
 ## 0. Model, notation and scope
 
