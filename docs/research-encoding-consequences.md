@@ -691,8 +691,10 @@ uniform polynomial-time evaluation**. What matters
 is additional *sorting-specific* structure beyond
 these numerical inequalities, plausibly a complete,
 efficiently verifiable representation of optimal
-comparison play. This auxiliary diagonal example
-does not warrant Lean formalization.
+comparison play. The one-comparison gap is optimal for this type of counterexample:
+forcing `G(n)=I(n)` identically would give an ordinary polynomial-time
+computable function and hence a uniform P threshold language.
+This auxiliary diagonal example does not warrant Lean formalization.
 
 ---
 
