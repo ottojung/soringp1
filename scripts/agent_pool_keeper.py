@@ -85,6 +85,19 @@ def select_packet(agent_id, fallback, cursors, plan):
             "before ending.\n\n" + current + "\n\n" + plan["common"])
 
 
+def agent_declares_cwd(agent_id, expected_cwd):
+    """Reuse a managed agent only in the directory it was created for.
+
+    Antonina deliberately rejects --cwd when an existing front owns work.
+    Read the durable declaration instead, and omit --cwd on resume/relaunch.
+    """
+    try:
+        data = json.loads((AGENTS_DIR / agent_id / "meta.json").read_text())
+        return data.get("id") == agent_id and data.get("cwd") == expected_cwd
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def last_observed_output(agent_id, expected_cwd):
     """Return recent output/start timestamp, not a mere running flag.
 
@@ -205,9 +218,14 @@ def tick(history, cursors, plan):
         if not os.path.isdir(path):
             print("missing worktree", path, flush=True)
             continue
+        if not agent_declares_cwd(agent_id, path):
+            print("refusing agent with missing or unexpected declared worktree", agent_id, flush=True)
+            continue
         try:
             next_prompt = select_packet(agent_id, prompt, cursors, plan)
-            p = execute([A, "agent", "run", "--id", agent_id, "--cwd", path,
+            # Existing agents retain an owned front even in state "failed".
+            # --cwd is rejected in that case; their declared path was checked.
+            p = execute([A, "agent", "run", "--id", agent_id,
                          "--prompt", next_prompt, "--detach", "--json"], timeout=35)
             if p.returncode == 0 and json.loads(p.stdout).get("state") == "running":
                 live.add(agent_id)

@@ -41,6 +41,7 @@ class KeeperTests(unittest.TestCase):
         launched = []
         def fake_execute(args, timeout=20):
             self.assertEqual(args[:3], [KEEPER.A, "agent", "run"])
+            self.assertNotIn("--cwd", args)
             launched.append(args[args.index("--id") + 1])
             return mock.Mock(returncode=0, stdout=json.dumps({"state": "running"}), stderr="")
         with tempfile.TemporaryDirectory() as tmp:
@@ -49,12 +50,28 @@ class KeeperTests(unittest.TestCase):
                   mock.patch.object(KEEPER, "AGENTS_DIR", Path(tmp) / "agents"),
                   mock.patch.object(KEEPER, "running", return_value=set(live)),
                   mock.patch.object(KEEPER.os.path, "isdir", return_value=True),
+                  mock.patch.object(KEEPER, "agent_declares_cwd", return_value=True),
                   mock.patch.object(KEEPER, "execute", side_effect=fake_execute)):
                 cursors = {}
                 KEEPER.tick(history, cursors, plan)
                 self.assertEqual(len(launched), 1)
                 self.assertEqual(cursors[launched[0]], 1)
                 self.assertEqual(json.loads((Path(tmp) / "cursors.json").read_text()), cursors)
+
+    def test_relaunch_respects_persisted_worktree_authority(self):
+        agent_id, wd, _ = KEEPER.ROSTER[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / agent_id
+            base.mkdir()
+            meta = base / "meta.json"
+            with mock.patch.object(KEEPER, "AGENTS_DIR", Path(tmp)):
+                self.assertFalse(KEEPER.agent_declares_cwd(agent_id, "/home/lubko/" + wd))
+                meta.write_text(json.dumps({
+                    "id": agent_id, "cwd": "/home/lubko/DIFFERENT"}))
+                self.assertFalse(KEEPER.agent_declares_cwd(agent_id, "/home/lubko/" + wd))
+                meta.write_text(json.dumps({
+                    "id": agent_id, "cwd": "/home/lubko/" + wd}))
+                self.assertTrue(KEEPER.agent_declares_cwd(agent_id, "/home/lubko/" + wd))
 
     def test_above_five_respects_quality_cooldown(self):
         plan = KEEPER.load_packet_plan()
