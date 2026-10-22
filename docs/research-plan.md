@@ -43,8 +43,7 @@ theorem for the special input family.
 
 Research should spend time on uncertain attempts, not merely polished
 corollaries. The binding repository-wide orchestration policy requires distinct,
-falsifiable, complexity-relevant investigations rather than a fixed agent
-count; subsections are not a mandatory task queue.
+falsifiable, complexity-relevant investigations while maintaining a minimum of five running agents, with no maximum; subsections are not a mandatory task queue.
 See [research orchestration](research-orchestration.md).
 
 ### Structural characterization and state compression
@@ -103,7 +102,7 @@ route. Investigations may leave only a compact comment with sources, the
 sharpest argument, disproof attempts and open obstacle. A polished PR,
 test file, research note, or increased agent count is **not itself mathematical
 progress**. Active research must have a distinct falsifiable question
-with a credible complexity consequence; there is no agent-count quota.
+with a credible complexity consequence; there is a minimum of five active agents and no maximum.
 Avoid repetitive paperwork or routine formalization. Do not turn every
 small poset observation into a follow-up research task.
 
