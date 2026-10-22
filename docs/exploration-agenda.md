@@ -59,9 +59,8 @@ https://ecommons.cornell.edu/entities/publication/02e42763-8a49-4dfe-9e73-59ccc0
 ## Independent exploration fronts
 
 The following fronts are illustrative, not a restrictive task queue. The
-binding [research orchestration policy](research-orchestration.md) requires
-a target of five concurrent independent SoringP1 agents on billy-dev;
-generate additional useful fronts rather than waiting for these to finish.
+binding [research orchestration policy](research-orchestration.md) requires independent, falsifiable investigations with a plausible bridge
+to the complexity of S(n), without an agent-count quota. Work on billy-dev only.
 
 These are **questions**, not a numbered queue of theorems to formalize.
 

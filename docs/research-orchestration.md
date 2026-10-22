@@ -38,28 +38,22 @@ The unary portfolio includes:
   sparse-language complexity barriers, and independent source audits.
 
 Do not let apparent binary completeness, binary-specific techniques,
-or old task assignments override this research scope. The obligation
-to maintain five active independent SoringP1 agents remains binding:
-broaden the **unary** question portfolio instead of launching binary
-fallback investigations.
+or old task assignments override this research scope. Do not launch binary fallback investigations merely to create activity.
+Broaden the unary frontier only where there is a distinct testable question.
 
-## Parallelism is the default
+## Parallelism follows the mathematical frontier
 
-Target **five simultaneously active SoringP1 research agents**
-repository-wide whenever the complexity of S(n) remains open and research is
-actionable. Five is the normal target, not a hard cap. Count live SoringP1 workers (not Viche
-or other-project agents), dispatch distinct independent packets to reach five,
-and replenish completions and failures during the same orchestration pass.
-Use Antonina on **billy-dev only**. Do not serialize independent questions,
-ration dispatches against guesses about RAM/CPU, or wait for a PR to merge
-before launching unrelated work. Runtime resource management and actual
-provider errors belong to the execution layer, not research prioritization.
+Launch independent SoringP1 researchers only for concrete, falsifiable
+questions with a plausible bridge to the **uniform complexity of S(n)**.
+There is **no fixed target for concurrent agents**: zero or one is acceptable
+when other approaches are exhausted or duplicative, and many can be useful
+when genuinely distinct questions are ready. Do not spawn work just to
+saturate an agent pool, and do not formalize routine intermediate results.
 
-If the apparent frontier has fewer than five entries, diversify it before
-accepting idle workers. Generate new representations, structural conjectures,
-adversarial constructions, algorithms, complexity reductions, certificate
-formalisms, source/model checks, cheap discriminating computations and scaffold
-problems. Avoid near-identical "solve S(n)" prompts and artificial deliverables.
+Use Antonina on **billy-dev only**. Do not serialize genuinely independent
+questions or invent arbitrary resource-based concurrency ceilings. Actual
+execution errors remain an execution concern, not a reason to degrade
+the mathematical research standard.
 
 ## Orchestrator's loop
 
@@ -67,16 +61,16 @@ problems. Avoid near-identical "solve S(n)" prompts and artificial deliverables.
    research, outstanding mathematical assumptions, and any failed approaches.
 2. Reconstruct the live portfolio of *materially different* approaches. A
    packet may exist without any corresponding GitHub issue or branch.
-3. Select and dispatch enough independent, high-value packets to maintain approximately
-   five concurrent SoringP1 research agents; retain separate worktrees
+3. Select and dispatch only packets with distinct, falsifiable goals and an
+   explicit consequence for the complexity problem; retain separate worktrees
    for agents that may write files.
 4. Every packet identifies a precise question, potential consequence for the
    **uniform computation of S(n)**, permitted assumptions, non-goals,
    falsification/evidence tasks and concise handoff conditions.
 5. Collect results without waiting for all workers. When one ends or fails,
-   reconcile its specific claims and replenish the portfolio and pool in the
-   same pass. Retry transient infrastructure failures without mistaking them
-   for mathematical refutations.
+   reconcile its specific claims and replace it only if a new, nonredundant
+   and well-motivated mathematical question is available. Retry transient
+   infrastructure failures without mistaking them for mathematical refutations.
 6. Compare conflicting claims proposition by proposition; an independent
    review or a bounded counterexample search is more useful than voting.
 7. Record meaningful source facts, counterexamples, conjectures, proofs and
@@ -98,14 +92,12 @@ a cap, an exclusive list or a compulsory fixed one-agent-per-topic mapping.
 
 ## Non-negotiable distinctions
 
-Five agents is an execution policy, not evidence of a theorem. Do not treat
+Agent count is never a substitute for a mathematical breakthrough. Do not treat
 bounded experiments or agreement among agents as a proof. Separate
 literature facts, conjectures, experiments, human proofs and Lean
 kernel-checked statements. Do not infer the hardness of fixed S(n) from
 hardness of arbitrary-poset optimization. The orchestrator retains final
 mathematical review and integration responsibility.
 
-This document and AGENTS.md supersede historical instructions that require
-more than five agents as the default target, forbid generating new frontier
-packets, require an issue before dispatch, or turn host-load guesses into
-research scheduling policy.
+This document and AGENTS.md supersede historical headcount targets and
+procedural requirements that create work without a plausible complexity payoff.

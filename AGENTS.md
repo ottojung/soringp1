@@ -30,8 +30,8 @@ requires completion of the unary agenda and explicit founder direction.
 This directive supersedes older wording presenting both encodings as
 equally active research priorities.
 
-Maintain five **independent unary-focused** research agents on
-`billy-dev` under the parallelism directive below. Diversify among
+Conduct mathematically justified independent unary-focused research on
+`billy-dev` under the efficiency directive below. Diversify when useful among
 unary exact threshold algorithms, near-tight bound-gap tests, structural
 obstructions and recurrences, sparse-language reductions and certificate
 barriers, and descriptive complexity (ordered FO(LFP)/ESO/FO(PFP) and
@@ -40,43 +40,21 @@ of a defining formula by a capture theorem from constructing and
 validating an explicit formula for this specific language. Do not claim
 P/NP membership, hardness, or a separation without a proof.
 
-## Binding research parallelism directive (2026-10-19)
+## Binding research efficiency directive (2026-10-21)
 
-**Target five simultaneously active SoringP1 research agents** while the
-problem remains open and actionable. This is a **repository-wide steady-state
-target, not a hard cap or a mandatory floor**. Check the current SoringP1 pool at
-the start of each orchestration pass; launch a topologically independent batch
-to reach a target of five, and replenish completed, failed or stalled agents in
-the same pass. Do not leave useful workers idle while the orchestrator
-personally pursues substantial research. Agents belonging to other projects
-do not count toward the SoringP1 target.
+**Only launch independent, mathematically justified investigations.** There is
+no fixed minimum or target number of active agents. Each proposed packet must
+identify a falsifiable conjecture, a precise implication for the uniform
+complexity of S(n) or its unary threshold language, and a stop condition.
+Use more agents when genuinely distinct questions exist, or fewer when they do
+not. Avoid duplicating prior negative findings, endless small-instance
+enumeration, generic partial-order complexity without a root reduction, and
+routine Lean formalization without a mature all-n theorem.
 
-**Explore a wide frontier.** If fewer than five obvious tasks exist, actively
-generate distinct high-value research packets: alternative algorithms and
-representations, complexity reductions, certificates, counterexample hunts,
-primary-source audits, independent mathematical checks, and scaffold problems
-whose implications for computing S(n) are explicit. Research packets need not
-have pre-existing GitHub issues, PRs, branches or deliverable quotas. Give each
-agent one falsifiable objective, non-goals, assumptions, evidence expectations,
-and a durable handoff. Use independent worktrees for any write-capable agents.
-Do not create duplicate prompts or fabricated milestones merely to fill slots.
-
-**Schedule by mathematical dependencies, not by guessed resource capacity.**
-Do not delay launches because of estimates of host load, memory, CPU, or model
-cost; runtime execution management is separate from research orchestration.
-Concrete provider failures, unavailable tools, and genuine dependency
-collisions are to be reported and recovered from, not converted into an
-unwritten concurrency cap. All SoringP1 agents and commands run on
-`billy-dev` only. The orchestrator retains independent verification and
-merging responsibility. Count of agents is an operational obligation, not
-mathematical evidence of progress.
-
-This directive **supersedes every earlier statement in this repository**
-that could discourage useful saturation, impose a smaller pool, turn agent
-availability into a reason to pause, or require work to originate in an issue.
-The complexity-first publication gate remains: broad parallel exploration
-does not mean producing PRs or Lean files for every investigation. Operational
-details: [research orchestration](docs/research-orchestration.md).
+Schedule independent work by mathematical dependencies, not guessed hardware
+capacity. Use Antonina and execute commands on **billy-dev only**. Preserve
+independent review, signed commits and the complexity-first publication gate.
+See [research orchestration](docs/research-orchestration.md).
 
 ## Binding reset: complexity-first research, not artifact production (2026-10-18)
 
@@ -85,8 +63,8 @@ research note, script, test, Lean proof, agent run, or PR per investigation.**
 The expected result of most investigations is **increased understanding**,
 including a falsified attractive conjecture, a precise obstruction, or an
 honest inconclusive finding. A clean worktree and no PR are normal outcomes.
-This does not suspend the five-agent research target or justify
-leaving the frontier idle.
+Do not keep agents active merely to fill a quota; pursue new threads only
+when a distinct and worthwhile mathematical question exists.
 
 The sole research objective is a significant theorem about the **uniform
 complexity of computing the special one-parameter function `S(n)`** or its
@@ -130,10 +108,8 @@ such a mature result or a critical model/cost correspondence.
 defend? Which hypothesis was ruled out? Did a bound, algorithm, or valid
 reduction change? What decisive question comes next? Counts of active
 agents, PRs, CI passes, solved local poset examples and Lean files do
-**not** measure mathematical progress. Nevertheless, maintain the binding
-five-agent target: broaden independent research directions when a particular
-route ends, rather than letting the pool drain or substituting routine
-formalization. Document actual mathematical blockers without inventing
+**not** measure mathematical progress. Replace completed agents only when another distinct,
+high-value mathematical question is ready. Document actual mathematical blockers without inventing
 filler tasks.
 
 The current open PR backlog is archival research, not a research

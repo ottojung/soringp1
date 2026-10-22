@@ -42,9 +42,9 @@ algorithm, valid reduction, succinct representation or substantial no-go
 theorem for the special input family.
 
 Research should spend time on uncertain attempts, not merely polished
-corollaries. The binding repository-wide orchestration policy requires
-**a target of five active SoringP1 research agents**, working on independent
-packets from the full live frontier; subsections are not a fixed task queue.
+corollaries. The binding repository-wide orchestration policy requires distinct,
+falsifiable, complexity-relevant investigations rather than a fixed agent
+count; subsections are not a mandatory task queue.
 See [research orchestration](research-orchestration.md).
 
 ### Structural characterization and state compression
@@ -102,9 +102,9 @@ credible complexity consequence, or a serious falsification of a major
 route. Investigations may leave only a compact comment with sources, the
 sharpest argument, disproof attempts and open obstacle. A polished PR,
 test file, research note, or increased agent count is **not itself mathematical
-progress**. Maintaining five agents is nevertheless an operational requirement;
-grow the frontier with distinct falsifiable approaches, not repetitive
-paperwork or routine formalization. Do not turn every small poset observation
+progress**. Active research must have a distinct falsifiable question
+with a credible complexity consequence; there is no agent-count quota.
+Avoid repetitive paperwork or routine formalization. Do not turn every small poset observation
 into a follow-up research task.
 
 ## Lean checkpoint, not Lean workstream
@@ -120,10 +120,9 @@ currently available techniques.
 
 ## Parallel research discipline
 
-Run a target of five independent SoringP1 agents on `billy-dev` while research
-is actionable. Replenish capacity promptly from the wider exploration
-portfolio, including novel algorithms, lower-bound mechanisms, certificate
-ideas, reductions, falsification attempts and literature audits. Do not use
+Run independent SoringP1 agents on `billy-dev` for distinct, promising
+mathematical questions. Replenish only when the next investigation has
+a falsifiable objective and potential complexity consequence. Do not use
 the number of open issues, host-load guesses, or absence of obvious new Lean
 work as a reason to serialize exploration. The orchestrator reconciles claims,
 reviews evidence and signs off on integrations; see
