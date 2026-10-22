@@ -47,6 +47,7 @@ class KeeperTests(unittest.TestCase):
             with (mock.patch.object(KEEPER, "STATE", Path(tmp) / "history.json"),
                   mock.patch.object(KEEPER, "CURSORS", Path(tmp) / "cursors.json"),
                   mock.patch.object(KEEPER, "running", return_value=set(live)),
+                  mock.patch.object(KEEPER.os.path, "isdir", return_value=True),
                   mock.patch.object(KEEPER, "execute", side_effect=fake_execute)):
                 cursors = {}
                 KEEPER.tick(history, cursors, plan)
