@@ -619,14 +619,18 @@ every sufficiently large dyadic block
 `ceil(log₂ j)-log₂ j` is at least
 `1-log₂(3/2)>0`. Taking a completed such block
 below `N` proves `sum d_j=Ω(N)`.
-We will exclude a fixed finite initial interval of indices.
-Choose a constant `N₀` so large that for every
-`N=a+c≥N₀` with `a,c≥1` we have
-`I(N) ≤ I(a)+I(c)+N−2`. Such an `N₀`
-exists: the central-binomial estimate
-`binom(N,a)≤binom(N,floor(N/2))=O(2^N/√N)`
-uniformly in `a` implies the displayed inequality
-by taking logarithms and ceilings.
+We exclude the first eight indices and use the
+**explicit constant `N₀=8`**. For every `N=a+c≥9`
+with `a,c≥1`, we have
+`I(N) ≤ I(a)+I(c)+N−2`: the maximum binomial
+coefficient of row 9 is `binom(9,4)=126≤2^7`;
+moreover `max_a binom(N,a)/2^N` is nonincreasing
+in `N` by Pascal's identity, so
+`binom(N,a)≤2^(N−2)` for all `N≥9`.
+Finally `N!=a!c!binom(N,a)` and
+`ceil(x+y)≤ceil(x)+ceil(y)` give the claim.
+Thus no asymptotic central-binomial estimate or
+uncomputed threshold constant is needed.
 Now let `t_m` denote the `m`-th element
 of `T∩(N₀,∞)`. Removing finitely many indices
 preserves positive lower density, so `t_m=O(m)`.
