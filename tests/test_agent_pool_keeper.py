@@ -108,6 +108,85 @@ class KeeperTests(unittest.TestCase):
                 KEEPER.tick(history, cursors, plan)
                 self.assertEqual(execute.call_count, 1)  # restarted agent cooldown
 
+    def test_return_to_primary_after_actual_cooldown_and_quiet_period(self):
+        plan = KEEPER.load_packet_plan()
+        now = time.time()
+        agent_id, wd, _ = KEEPER.ROSTER[0]
+        live = {a for a, _, _ in KEEPER.ROSTER}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "agents" / agent_id
+            path.mkdir(parents=True)
+            meta_file = path / "meta.json"
+            model_config = root / "model-config.json"
+            model_config.write_text(json.dumps({"models": [
+                {"model": "test/primary"}, {"model": "test/fallback"}]}))
+            meta = {
+                "state": "running", "cwd": "/home/lubko/" + wd,
+                "started_at": now - 650,
+                "model_failover": {
+                    "selected_model": "test/fallback",
+                    "cooldowns": [{"model": "test/primary",
+                                   "reason": "quota_exhausted",
+                                   "until": now + 15}],
+                },
+            }
+            meta_file.write_text(json.dumps(meta))
+            (path / "output.log").write_text("last response")
+            import os
+            os.utime(path / "output.log", (now - 650, now - 650))
+            history = {agent_id: now - 650}
+            cursors = {}
+            with (mock.patch.object(KEEPER, "STATE", root / "history.json"),
+                  mock.patch.object(KEEPER, "CURSORS", root / "cursors.json"),
+                  mock.patch.object(KEEPER, "AGENTS_DIR", root / "agents"),
+                  mock.patch.object(KEEPER, "MODELS_CONFIG", model_config),
+                  mock.patch.object(KEEPER, "running", return_value=live),
+                  mock.patch.object(KEEPER, "execute", return_value=mock.Mock(
+                      returncode=0, stdout='{"state":"running"}', stderr="")) as execute,
+                  mock.patch.object(KEEPER.time, "time", return_value=now)):
+                KEEPER.tick(history, cursors, plan)
+                execute.assert_not_called()  # Provider's reset has not passed.
+                meta["model_failover"]["cooldowns"][0]["until"] = now - 30
+                meta_file.write_text(json.dumps(meta))
+                KEEPER.tick(history, cursors, plan)
+                self.assertEqual(execute.call_count, 1)
+                self.assertIn("--steer", execute.call_args.args[0])
+                self.assertEqual(cursors[agent_id], 1)
+                KEEPER.tick(history, cursors, plan)
+                self.assertEqual(execute.call_count, 1)  # No rapid re-steer.
+
+    def test_primary_recovery_does_not_interrupt_recent_fallback_output(self):
+        plan = KEEPER.load_packet_plan()
+        now = time.time()
+        agent_id, wd, _ = KEEPER.ROSTER[0]
+        live = {a for a, _, _ in KEEPER.ROSTER}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "agents" / agent_id
+            path.mkdir(parents=True)
+            (path / "meta.json").write_text(json.dumps({
+                "state": "running", "cwd": "/home/lubko/" + wd,
+                "started_at": now - 650,
+                "model_failover": {
+                    "selected_model": "test/fallback",
+                    "cooldowns": [{"model": "test/primary",
+                                   "reason": "quota_exhausted",
+                                   "until": now - 1}],
+                },
+            }))
+            (path / "output.log").write_text("recent actual output")
+            cfg = root / "config.json"
+            cfg.write_text(json.dumps({"models": [
+                {"model": "test/primary"}, {"model": "test/fallback"}]}))
+            with (mock.patch.object(KEEPER, "AGENTS_DIR", root / "agents"),
+                  mock.patch.object(KEEPER, "MODELS_CONFIG", cfg),
+                  mock.patch.object(KEEPER, "running", return_value=live),
+                  mock.patch.object(KEEPER, "execute") as execute,
+                  mock.patch.object(KEEPER.time, "time", return_value=now)):
+                KEEPER.tick({agent_id: now - 650}, {}, plan)
+                execute.assert_not_called()
+
     def test_recent_output_protects_long_running_research(self):
         plan = KEEPER.load_packet_plan()
         now = time.time()
