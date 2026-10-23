@@ -1,0 +1,107 @@
+name: Prune integrated research branches
+
+# Run once on installation; subsequent cleanup is explicitly manual.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/prune-integrated-branches.yml
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview without deleting any branch
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    if: github.repository == 'ottojung/soringp1'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete only provably obsolete branch refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import subprocess
+          import urllib.parse
+
+          REPO = "ottojung/soringp1"
+          # These heads contain non-integrated experiments or host-specific state.
+          PRESERVE = {
+              "main",
+              "phoebe-dev",
+              "research/compositional-lookahead-20261018",  # closed unmerged #22
+              "research/lookahead-hierarchy-20261018",     # closed unmerged #23
+              "research/true-backward-toy-20261018",       # closed unmerged #25
+              "research/higher-composition-20261018",     # no merged PR
+              "research/review-composition-20261018",     # no merged PR
+          }
+
+          def gh(path, method=None):
+              command = ["gh", "api"]
+              if method:
+                  command += ["--method", method]
+              command.append(path)
+              proc = subprocess.run(command, capture_output=True, text=True)
+              if proc.returncode:
+                  raise RuntimeError(f"GitHub API {path}: {proc.stderr.strip()}")
+              return json.loads(proc.stdout) if proc.stdout.strip() else None
+
+          branches = gh(f"repos/{REPO}/branches?per_page=100")
+          # The repository has fewer than 100 branches; fail closed otherwise.
+          if len(branches) == 100:
+              raise RuntimeError("branch listing may be truncated; refuse cleanup")
+          prs = gh(f"repos/{REPO}/pulls?state=all&per_page=100")
+          if len(prs) == 100:
+              raise RuntimeError("PR listing may be truncated; refuse cleanup")
+          integrated = {}
+          for pr in prs:
+              if pr["merged_at"] and pr["head"]["repo"] and pr["head"]["repo"]["full_name"] == REPO:
+                  integrated.setdefault(pr["head"]["ref"], []).append(pr)
+
+          dry_run = os.environ.get("DRY_RUN", "").lower() == "true"
+          print(f"dry_run={dry_run}; branches={len(branches)}")
+          retired = []
+          preserved = []
+          for item in branches:
+              branch = item["name"]
+              if item.get("protected") or branch in PRESERVE or branch.startswith("maintenance/"):
+                  preserved.append((branch, "protected or explicitly retained"))
+                  continue
+              encoded = urllib.parse.quote(branch, safe="")
+              status = gh(f"repos/{REPO}/compare/main...{encoded}")
+              # Ancestors (including identical branches) cannot contain unique commits.
+              safe = status["ahead_by"] == 0
+              reason = "ancestor of main" if safe else None
+              if not safe:
+                  sha = item["commit"]["sha"]
+                  for pr in integrated.get(branch, []):
+                      if pr["head"]["sha"] != sha:
+                          continue  # Branch was updated since that PR was merged.
+                      commit = gh(f"repos/{REPO}/commits/{sha}")
+                      date = commit["commit"]["committer"]["date"]
+                      if datetime.datetime.fromisoformat(date.replace("Z", "+00:00")) <= datetime.datetime.fromisoformat(pr["merged_at"].replace("Z", "+00:00")):
+                          safe = True
+                          reason = f"merged PR #{pr['number']}, unchanged head"
+                          break
+              if safe:
+                  print(("WOULD DELETE" if dry_run else "DELETE"), branch, "-", reason)
+                  if not dry_run:
+                      # Contents write token. Do not touch main, PR heads with unmerged
+                      # work, or protected refs.
+                      gh(f"repos/{REPO}/git/refs/heads/{encoded}", method="DELETE")
+                  retired.append(branch)
+              else:
+                  preserved.append((branch, "unique commits without matching merged PR"))
+          print(f"retired_or_previewed={len(retired)} preserved={len(preserved)}")
+          for branch, reason in preserved:
+              print("PRESERVED", branch, reason)
+          PY
