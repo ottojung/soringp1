@@ -84,6 +84,9 @@ def new(path,title):
 def run(aid,path,prompt):
     r=call([CLI,'agent','run','--id',aid,'--cwd',path,'--prompt',prompt,'--detach','--json'],65)
     if r.returncode:raise RuntimeError(r.stderr[-300:])
+    data=json.loads(r.stdout)
+    if data.get('state') != 'running':
+        raise RuntimeError('agent launch was not confirmed running: '+str(data)[:200])
 def reconcile(d,active):
     for q in d['fronts']:
         if q['status'] not in ('running','launching') or q.get('agent_id') in active:continue
@@ -99,6 +102,11 @@ def curate_done(d,active):
     c=d.get('curator',{})
     if not c.get('agent_id') or c['agent_id'] in active:return
     s=status(c['agent_id'])
+    if s == 'idle':
+        # An interrupted curator launch must not reserve curation forever.
+        d['curator']={'last_finished_at':time.time(),'exit_state':'launch_interrupted'}
+        print('curator launch interrupted; will retry after cooldown',flush=True)
+        return
     if s not in ('succeeded','failed','stopped','killed'):return
     path=WORK/'curator'/'frontier-candidates.json'
     try:
@@ -162,9 +170,12 @@ def tick(d,dry=False):
             q['launch_error']=str(exc)[-300:]
             print('launch failed',q['id'],q['launch_error'],flush=True)
     save(d)
-    useful=any(q['status'] in ('ready','running','launching') for q in d['fronts'])
+    # Keep discovering a useful frontier while the current one is executing.
+    # No ready questions means curation is needed; existing research agents
+    # need not exit before an independent curator can prepare new hypotheses.
+    ready_remaining=any(q['status']=='ready' for q in d['fronts'])
     c=d.get('curator',{})
-    if not useful and not c.get('agent_id') and time.time()-c.get('last_finished_at',0)>=1800:
+    if not ready_remaining and not c.get('agent_id') and time.time()-c.get('last_finished_at',0)>=1800:
         try:curate(d)
         except Exception as exc:print('curation failed',str(exc)[-300:],flush=True)
     print('frontier ready',sum(q['status']=='ready' for q in d['fronts']),

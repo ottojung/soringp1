@@ -47,9 +47,11 @@ class FrontierTests(unittest.TestCase):
             seen.append(row['id']);row['status']='running'
         with (mock.patch.object(F,'live',return_value=set()),
               mock.patch.object(F,'dispatch',side_effect=fake),
+              mock.patch.object(F,'curate') as curator,
               mock.patch.object(F,'save')):
             F.tick(d)
         self.assertEqual(set(seen),{x['id'] for x in self.sample()})
+        curator.assert_called_once()
 
     def test_exhaustion_commissions_curator_not_filler(self):
         d={'version':1,'fronts':[dict(x,status='investigated') for x in self.sample()],
@@ -59,6 +61,22 @@ class FrontierTests(unittest.TestCase):
               mock.patch.object(F,'save')):
             F.tick(d)
             curator.assert_called_once()
+
+    def test_curator_starts_before_running_fronts_finish(self):
+        d={'version':1,'fronts':[dict(x,status='running') for x in self.sample()],
+           'curator':{}}
+        with (mock.patch.object(F,'live',return_value={'running-agent'}),
+              mock.patch.object(F,'curate') as curator,
+              mock.patch.object(F,'save')):
+            F.tick(d)
+            curator.assert_called_once()
+
+    def test_interrupted_curator_launch_can_be_retried(self):
+        d={'version':1,'fronts':[], 'curator':{'agent_id':'idle-curator'}}
+        with mock.patch.object(F,'status',return_value='idle'):
+            F.curate_done(d,set())
+        self.assertFalse(d['curator'].get('agent_id'))
+        self.assertEqual(d['curator']['exit_state'],'launch_interrupted')
 
     def test_interrupted_launch_returns_to_ready(self):
         d={'version':1,'fronts':[dict(self.sample()[0],status='launching',agent_id='reserved')],
