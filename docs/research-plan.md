@@ -39,7 +39,7 @@ Barriers and structural facts:
 | Result | Status | Where |
 |---|---|---|
 | `SORT-BOUND-U` is sparse: many-one NP-hardness ⇒ P = NP; not many-one EXPTIME-hard | literature + deduction | [research-hardness-boundaries.md](research-hardness-boundaries.md), [research-encoding-consequences.md](research-encoding-consequences.md) |
-| `2^{(1/4−o(1)) n log² n}` nonisomorphic winning states at one depth: enumerating winning states cannot beat the DFS exponent by more than a constant factor | paper theorem | [research-winning-frontier-barrier.md](research-winning-frontier-barrier.md) |
+| `2^{(1/4−o(1)) n log² n}` nonisomorphic winning states at one depth, including at budget `S(n)` via Sergeev's `S(n)−C(n)=o(n)`: full winning-frontier enumeration is ruled out even at the exact optimum | paper theorem | [research-winning-frontier-barrier.md](research-winning-frontier-barrier.md) |
 | An explicit sorting-tree witness has `2·n! − 1` nodes, so it is not an NP certificate | deduction | [research-certificates-barriers.md](research-certificates-barriers.md) |
 | `e(P)` (linear extensions) does not determine the minimax value; five scalar invariants falsified | experiment | [research-n12-nontightness.md](research-n12-nontightness.md), [research-hardness-boundaries.md](research-hardness-boundaries.md) |
 | Ordinal-sum decomposition is exact but does not shrink the state space | deduction + experiment | [research-series-decomposition.md](research-series-decomposition.md) |
