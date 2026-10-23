@@ -284,4 +284,8 @@ def main():
     return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Legacy finite-packet helpers are retained for existing tests and
+    # migration inspection. The live keeper now consumes the open, durable
+    # research frontier and automatically commissions independent curation.
+    from research_frontier import main as continuous_main
+    continuous_main()
