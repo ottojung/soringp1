@@ -78,6 +78,42 @@ class FrontierTests(unittest.TestCase):
         self.assertFalse(d['curator'].get('agent_id'))
         self.assertEqual(d['curator']['exit_state'],'launch_interrupted')
 
+    def test_transient_backend_failure_preserves_and_retries_same_front(self):
+        d={'version':1,'fronts':[dict(self.sample()[0],status='running',
+                agent_id='retry-agent')],'curator':{}}
+        with (mock.patch.object(F,'status',return_value='failed'),
+              mock.patch.object(F,'retryable_failure',return_value=True),
+              mock.patch.object(F,'excerpt',return_value='No final text')):
+            F.reconcile(d,set())
+        q=d['fronts'][0]
+        self.assertEqual(q['status'],'ready')
+        self.assertEqual(q['agent_id'],'retry-agent')
+        self.assertEqual(q['failure_kind'],'transient_backend_unavailable')
+        self.assertGreater(q['retry_after'],F.time.time())
+        seen=[]
+        with (mock.patch.object(F,'live',return_value=set()),
+              mock.patch.object(F,'dispatch',side_effect=lambda d,x:seen.append(x)),
+              mock.patch.object(F,'curate'),
+              mock.patch.object(F,'save')):
+            F.tick(d)
+        self.assertEqual(seen,[],'cooldown prevents immediate repeat-failure loop')
+
+    def test_preexisting_transient_block_is_reopened_without_research_loss(self):
+        d={'version':1,'fronts':[dict(self.sample()[0],status='blocked',
+                exit_state='failed',agent_id='stalled-agent')],'curator':{}}
+        with mock.patch.object(F,'retryable_failure',return_value=True):
+            F.reconcile(d,set())
+        self.assertEqual(d['fronts'][0]['status'],'ready')
+
+    def test_hard_failure_remains_blocked(self):
+        d={'version':1,'fronts':[dict(self.sample()[0],status='running',
+                agent_id='hard-agent')],'curator':{}}
+        with (mock.patch.object(F,'status',return_value='failed'),
+              mock.patch.object(F,'retryable_failure',return_value=False),
+              mock.patch.object(F,'excerpt',return_value='auth rejected')):
+            F.reconcile(d,set())
+        self.assertEqual(d['fronts'][0]['status'],'blocked')
+
     def test_interrupted_launch_returns_to_ready(self):
         d={'version':1,'fronts':[dict(self.sample()[0],status='launching',agent_id='reserved')],
            'curator':{}}

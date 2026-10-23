@@ -87,17 +87,49 @@ def run(aid,path,prompt):
     data=json.loads(r.stdout)
     if data.get('state') != 'running':
         raise RuntimeError('agent launch was not confirmed running: '+str(data)[:200])
+def retryable_failure(aid):
+    """Only measured transient backend failures, never a mathematical finding.
+    A new invocation continues the same owned research front, not a blind
+    replay of tool effects. Hard/unknown failures remain visible as blocked.
+    """
+    p=call([CLI,'agent','status','--id',aid,'--json'])
+    if p.returncode:return False
+    try:
+        meta=json.loads(p.stdout)
+        failure=meta.get('backend_error') or {}
+        return (meta.get('state')=='failed' and isinstance(failure,dict)
+                and failure.get('transient') is True)
+    except (ValueError,TypeError,AttributeError):
+        return False
+
+def queue_retry(q):
+    attempts=int(q.get('transient_failures',0))+1
+    q.update(status='ready',transient_failures=attempts,
+             retry_after=time.time()+min(3600,180*2**min(attempts,5)),
+             failure_kind='transient_backend_unavailable')
+    print('retry queued after provider cooldown',q['id'],'attempt',attempts,flush=True)
+
 def reconcile(d,active):
     for q in d['fronts']:
+        # Upgrade pre-fix ledgers: failed provider attempts must not permanently
+        # consume otherwise uninvestigated mathematical questions.
+        if (q['status']=='blocked' and q.get('exit_state')=='failed'
+                and q.get('agent_id') and retryable_failure(q['agent_id'])):
+            queue_retry(q)
+            continue
         if q['status'] not in ('running','launching') or q.get('agent_id') in active:continue
         s=status(q['agent_id']) if q.get('agent_id') else 'unavailable'
         if s=='idle' and q['status']=='launching':
             q['status']='ready'  # interrupted launch, reuse the reserved agent id
             continue
         if s not in ('succeeded','failed','stopped','killed'):continue
-        q.update(status='investigated' if s=='succeeded' else 'blocked',
-                 exit_state=s,finished_at=time.time(),finding_unverified=excerpt(q['agent_id']))
-        print('research result',q['id'],s,flush=True)
+        q.update(exit_state=s,finished_at=time.time(),
+                 finding_unverified=excerpt(q['agent_id']))
+        if s=='failed' and retryable_failure(q['agent_id']):
+            queue_retry(q)
+        else:
+            q['status']='investigated' if s=='succeeded' else 'blocked'
+            print('research result',q['id'],s,flush=True)
 def curate_done(d,active):
     c=d.get('curator',{})
     if not c.get('agent_id') or c['agent_id'] in active:return
@@ -132,7 +164,7 @@ def dispatch(d,q):
         save(d)
     prompt=(BASE+'\nFRONT: '+q['question']+'\nFALSIFIER: '+q['falsifier']+
             '\nCOMPLEXITY IMPLICATION: '+q['implication']+'\nEVIDENCE: '+q['basis']+
-            '\nOn completion report a mathematical finding, concrete failed '
+            '\nIf resuming after an infrastructure failure, inspect earlier work '            'and avoid repeating side effects or claims. '            '\nOn completion report a mathematical finding, concrete failed '
             'approach or exact obstruction; do not confuse process success with a proof.')
     run(q['agent_id'],path,prompt)
     q.update(status='running',started_at=time.time())
@@ -161,7 +193,8 @@ def tick(d,dry=False):
     active=live()
     reconcile(d,active)
     curate_done(d,active)
-    ready=[q for q in d['fronts'] if q['status']=='ready']
+    ready=[q for q in d['fronts'] if q['status']=='ready'
+           and q.get('retry_after',0)<=time.time()]
     if dry:
         print('dry-run ready',len(ready),'active',len(active));return
     for q in ready:
