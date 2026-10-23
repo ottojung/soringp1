@@ -63,10 +63,14 @@ duality notes (`research-compression-next.md`, `research-parallel-duality.md`,
 `research-orientation-modules.md`, `research-series-decomposition.md`) are
 starting points; each so far gives exactness without a state-count gain.
 
-**Certificates.** Is there a certificate for `S(n) ≤ k` or `S(n) > k`
-polynomial in `N`, other than an explicit tree? See
-`research-strategy-certificates.md` and the framed-DAG checker. Membership
-in NP or coNP would be a genuine upper-bound result.
+**Certificates.** Can a height-`S(n)` strategy always be encoded as a
+polynomial-size permutation-framed DAG? A polynomial-time verifier exists,
+and constructive polynomial graphs cover merge sort and rank-envelope
+insertion procedures, but **optimal-size completeness is open**. Read
+[the consolidated certificate frontier](research-framed-certificate-frontier.md)
+for proved boundaries and paper-level constructions awaiting audit;
+[older strategy experiments](research-strategy-certificates.md) are supporting
+history. Membership in NP or coNP would be a genuine upper-bound result.
 
 **Space.** Can the `O(N log N)` work space be reduced, for example to
 `O(N)` or polylogarithmic in `N`?
