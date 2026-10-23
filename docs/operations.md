@@ -24,104 +24,63 @@ Do not print the whole board into an agent's context; use the digest:
 When posting with `--json`, redirect the output to a file. Post only when
 something changed: a result, a falsification, or a precise obstacle.
 
-## How many agents to run
+## Continuous research frontier
 
-Run one agent per **distinct, curated research question**, up to a target
-of five. The number of questions decides the number of agents, not the
-other way round: if only three questions are worth asking, three agents
-run. Never invent work to fill a slot. Agent count is not a measure of
-progress.
+The production keeper is `scripts/research_frontier.py`, invoked through
+the existing `scripts/agent_pool_keeper.py` service entrypoint. The prior
+finite per-agent packet mechanism is retained for historical tests only.
 
-Each packet must state a precise all-`n` question, its consequence for the
-uniform complexity of `S(n)`, permitted assumptions, non-goals, how it
-could be falsified, and when to stop.
+The plan is a **durable claim-once ledger** at
+`~/.local/state/soringp1/frontier-ledger.json`, initially populated from
+[research-frontier.json](research-frontier.json). Each front has a stable
+ID, falsifiable all-n question, proposed falsifier, complexity implication,
+and concrete research basis. Entries move through `ready` ->
+`launching` -> `running` -> `investigated` or `blocked`.
 
-## The pool keeper
+The keeper launches **every independent ready question** in an isolated
+checkout under `~/soring-fronts/ID`, using an independently created
+Antonina agent. No numerical concurrency quota, old fixed roster, or
+arbitrary filler work. Each front is claimed durably before execution:
+restarts recover incomplete launches and never silently discard a result.
+A process exit is explicitly only a recorded investigation, not a proof
+or a verified final theorem.
 
-`scripts/agent_pool_keeper.py` runs on billy-dev (it refuses to run
-elsewhere) and enforces the rule above:
+When no fronts are ready or working, the keeper commissions one independent
+research **curator**. It studies recent results, the board #301, and the
+primary literature, and proposes precise nonredundant next fronts in
+`~/soring-fronts/curator/frontier-candidates.json`. The deterministic
+keeper checks the proposed schema, stable IDs, and exact textual duplicates
+before importing them as `ai_proposal_unverified`; this is **not** a
+mathematical novelty or quality guarantee. Weak or redundant fronts must
+be challenged by research agents and Viche, not inflated into success.
+If the curator cannot identify a useful front, an explicit empty outcome
+is recorded and the next curation attempt is delayed, rather than
+running repetitive work. Curators never create proofs by declaration.
 
-- Every 10 seconds it counts running SoringP1 agents (title prefix
-  `SoringP1` or a worktree under `/home/lubko/soring301`).
-- If fewer than the target (default 5, `--target N` to change) are
-  running, it relaunches roster agents with their **next curated packet**
-  from [`research-packets.json`](research-packets.json), oldest first.
-- An agent that finished in the last 4 minutes is not relaunched yet, so
-  quick completions do not flood the board.
-- An agent whose curated packets are all used is **awaiting curation**: it
-  is not relaunched and not given a made-up task. The keeper logs how many
-  tracks are waiting. The running count may stay below the target. **This
-  does not complete or pause Viche's standing SoringP1 research mandate.**
-- A running agent with no output for 30 minutes, or one that can return to
-  the preferred model after a quota cooldown, is steered in place with its
-  next curated packet (at most one per tick). Exhausted tracks are not
-  steered.
+The existing Viche Executive independently examines research quality and
+commissioning. The Legislature and Judiciary remain independent; they
+can read the ledger but do not need to authorize ordinary research.
 
-Agents are reused by ID in the worktree they were created for; the keeper
-refuses agents whose declared worktree is missing or different.
+## Operation
 
-State lives in `/home/lubko/.local/state/soringp1/` (`agent-pool.json`
-for last-launch times, `packet-cursors.json` for each agent's position in
-its packet list). A lock file prevents two keepers from running.
+The `soringp1-agent-pool` s6 service runs on **billy-dev only**.
+Its established entrypoint now invokes the continuous keeper. Restart
+the service after merging code changes; a running Python interpreter
+does not load updated code automatically.
 
-Merging a keeper change to `main` does not update the running process:
-pull on billy-dev and restart the keeper.
+    python3 scripts/research_frontier.py --once --dry-run
 
-## Continuous research mandate (Founder, 2026-10-22)
+The dry run shows how many independent fronts are ready without launching
+them. For actual operation use `python3 scripts/agent_pool_keeper.py`
+(or let s6 supervise it). The exclusive lock prevents duplicate keepers.
 
-Viche's Executive must continue work on SoringP1 until its final mathematical
-theorems are actually proved, independently checked and published, and all
-authorized SoringP1 work is genuinely resolved. A finished agent, exhausted
-packet list, or temporarily empty keeper pool is **never** evidence of project
-completion. The keeper is only an execution convenience for previously curated
-questions, not a definition of the research frontier or its end.
+The legacy `docs/research-packets.json` and finite-keeper helper functions
+remain readable for historical tests, but their exhausted cursors no longer
+constrain the live research frontier.
 
-The Executive shall regularly inspect the newest `main`, open issues,
-`#301`, mathematical gaps and research results. It must actively identify
-and commission nonredundant, falsifiable new mathematical approaches, including
-after the keeper exhausts its finite plan, using the current research plan and
-literature. Neither a fixed agent number nor adding duplicate packets is an
-acceptable substitute for substantive progress. Formalization follows mature,
-relevant theorems rather than becoming the main objective.
+## Continuous mandate
 
-The current Antonina CLI requires `agent run --cwd <declared-worktree>` on
-**every** run, including resuming an existing agent and `--steer`. The keeper
-uses the verified declaration to specify that directory explicitly.
-
-## Curating packets
-
-To give a track new work, append a question to that agent's list in
-`docs/research-packets.json` (format version 2: a shared `common`
-preamble plus a list of packets per agent ID; each packet at least 60
-characters, no duplicates). The keeper picks it up on its next tick
-without a restart. To add a new agent, add it to `ROSTER` in the keeper
-and give it packets.
-
-Good packet sources: open obstacles reported on #301, the open questions
-in [research-plan.md](research-plan.md), and independent review of a
-recent central claim. Examples of distinct question families:
-
-- tightness of the gap between computable lower and upper bounds;
-- algorithms that avoid enumerating winning partial-order states;
-- structural classification or compression without counting every
-  isomorphism class;
-- lower-bound mechanisms and the `n = 12` obstruction;
-- threshold certificates and the cost of verifying them;
-- encoding-faithful reductions for the fixed antichain `S(n)`;
-- recurrences and subproblem composition;
-- literature and model audits, and independent falsification of central
-  arguments.
-
-## Orchestrator's loop
-
-1. Check `main` and open PRs, board #301, the agent pool, and recent
-   results and failures.
-2. Reconstruct the set of materially different open questions.
-3. Curate packets only for questions that are distinct and falsifiable
-   and have an explicit consequence for computing `S(n)`.
-4. Collect results without waiting for every agent. Retry infrastructure
-   failures without treating them as mathematical refutations.
-5. Compare conflicting claims proposition by proposition; an independent
-   review or bounded counterexample search beats voting.
-6. Record durable findings on #301. Repository changes go through the
-   publication gate in `AGENTS.md`; the orchestrator does final review.
+Research continues until the actual founder-defined theorems have been
+proved, independently checked, published, and the issues closed.
+Neither an empty frontier nor a successful agent exit is completion.
+No routine Lean formalization without a mature relevant theorem.
