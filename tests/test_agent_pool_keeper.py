@@ -40,8 +40,11 @@ class KeeperTests(unittest.TestCase):
         launched = []
         def fake_execute(args, timeout=20):
             self.assertEqual(args[:3], [KEEPER.A, "agent", "run"])
-            self.assertNotIn("--cwd", args)
-            launched.append(args[args.index("--id") + 1])
+            self.assertIn("--cwd", args)
+            aid = args[args.index("--id") + 1]
+            wd = next(wd for roster_id, wd, _ in KEEPER.ROSTER if roster_id == aid)
+            self.assertEqual(args[args.index("--cwd") + 1], KEEPER.HOME + "/" + wd)
+            launched.append(aid)
             return mock.Mock(returncode=0, stdout=json.dumps({"state": "running"}), stderr="")
         with tempfile.TemporaryDirectory() as tmp:
             with (mock.patch.object(KEEPER, "STATE", Path(tmp) / "history.json"),
@@ -136,7 +139,7 @@ class KeeperTests(unittest.TestCase):
                 self.assertEqual(args[:3], [KEEPER.A, "agent", "run"])
                 self.assertEqual(args[args.index("--id") + 1], agent_id)
                 self.assertIn("--steer", args)
-                self.assertNotIn("--cwd", args)  # active-front API forbids --cwd
+                self.assertEqual(args[args.index("--cwd") + 1], KEEPER.HOME + "/" + wd)
                 self.assertIn("Research packet 1", args[args.index("--prompt") + 1])
                 return mock.Mock(returncode=0, stdout='{"state":"running"}', stderr="")
             with (mock.patch.object(KEEPER, "STATE", root / "history.json"),

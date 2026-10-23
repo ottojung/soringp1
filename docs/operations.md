@@ -50,7 +50,8 @@ elsewhere) and enforces the rule above:
   quick completions do not flood the board.
 - An agent whose curated packets are all used is **awaiting curation**: it
   is not relaunched and not given a made-up task. The keeper logs how many
-  tracks are waiting. The running count may stay below the target.
+  tracks are waiting. The running count may stay below the target. **This
+  does not complete or pause Viche's standing SoringP1 research mandate.**
 - A running agent with no output for 30 minutes, or one that can return to
   the preferred model after a quota cooldown, is steered in place with its
   next curated packet (at most one per tick). Exhausted tracks are not
@@ -65,6 +66,27 @@ its packet list). A lock file prevents two keepers from running.
 
 Merging a keeper change to `main` does not update the running process:
 pull on billy-dev and restart the keeper.
+
+## Continuous research mandate (Founder, 2026-10-22)
+
+Viche's Executive must continue work on SoringP1 until its final mathematical
+theorems are actually proved, independently checked and published, and all
+authorized SoringP1 work is genuinely resolved. A finished agent, exhausted
+packet list, or temporarily empty keeper pool is **never** evidence of project
+completion. The keeper is only an execution convenience for previously curated
+questions, not a definition of the research frontier or its end.
+
+The Executive shall regularly inspect the newest `main`, open issues,
+`#301`, mathematical gaps and research results. It must actively identify
+and commission nonredundant, falsifiable new mathematical approaches, including
+after the keeper exhausts its finite plan, using the current research plan and
+literature. Neither a fixed agent number nor adding duplicate packets is an
+acceptable substitute for substantive progress. Formalization follows mature,
+relevant theorems rather than becoming the main objective.
+
+The current Antonina CLI requires `agent run --cwd <declared-worktree>` on
+**every** run, including resuming an existing agent and `--steer`. The keeper
+uses the verified declaration to specify that directory explicitly.
 
 ## Curating packets
 

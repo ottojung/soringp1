@@ -164,8 +164,8 @@ def recover_stalled(live, history, cursors, plan, now):
     """Steer in place without temporarily lowering the agent count.
 
     A running OpenCode child can wait indefinitely after provider rate limits.
-    On Billy, steering with --cwd while a front exists is refused, so steer
-    reuses the already-validated declared directory.
+    Antonina requires an explicit invocation directory even when steering
+    an existing front; use its previously validated declared worktree.
     """
     count = 0
     for agent_id, wd, fallback in ROSTER:
@@ -186,6 +186,7 @@ def recover_stalled(live, history, cursors, plan, now):
             continue  # No curated packet left; do not steer into filler work.
         try:
             p = execute([A, "agent", "run", "--id", agent_id,
+                         "--cwd", HOME + "/" + wd,
                          "--prompt", prompt, "--steer", "--detach", "--json"],
                         timeout=35)
             if p.returncode == 0 and json.loads(p.stdout).get("state") == "running":
@@ -232,8 +233,9 @@ def tick(history, cursors, plan, target=DEFAULT_TARGET_RUNNING):
         try:
             next_prompt = select_packet(agent_id, prompt, cursors, plan)
             # Existing agents retain an owned front even in state "failed".
-            # --cwd is rejected in that case; their declared path was checked.
+            # --cwd is required even on continuation; the declared path was checked.
             p = execute([A, "agent", "run", "--id", agent_id,
+                         "--cwd", path,
                          "--prompt", next_prompt, "--detach", "--json"], timeout=35)
             if p.returncode == 0 and json.loads(p.stdout).get("state") == "running":
                 live.add(agent_id)
