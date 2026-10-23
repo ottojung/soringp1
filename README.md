@@ -54,6 +54,8 @@ is in [docs/research-plan.md](docs/research-plan.md).
 | [AGENTS.md](AGENTS.md) | Research contract: scope, method, publication gate, Lean policy, model fidelity |
 | [docs/problem.md](docs/problem.md) | Exact definitions, encodings, established facts, realistic outcomes |
 | [docs/research-plan.md](docs/research-plan.md) | Known values, results so far, open questions |
+| [docs/README.md](docs/README.md) | Short index of active vs historical research notes |
+| [docs/research-framed-certificate-frontier.md](docs/research-framed-certificate-frontier.md) | Current proof-carrying certificate results, caveats, exact-completeness problem |
 | [docs/kernel-results.md](docs/kernel-results.md) | Inventory of Lean-checked theorems |
 | [docs/literature.md](docs/literature.md) | Primary sources |
 | [docs/operations.md](docs/operations.md) | Execution host, research board, agent pool keeper |
