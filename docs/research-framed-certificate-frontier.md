@@ -193,7 +193,7 @@ verification rules.
    gives `S(n) <= log₂(n!) + O(n/(log n)^(1/5))`, but stores
    pending keys in coupled interval containers. Specify a
    polynomial-state rank-envelope or nested-subroutine grammar
-   with sound joins and an `o(n)) total comparison surplus, or
+   with sound joins and an `o(n)` total comparison surplus, or
    explicitly falsify one such proposed grammar. Short *local*
    insertion routines do not automatically yield polynomial
    *global* control states.
