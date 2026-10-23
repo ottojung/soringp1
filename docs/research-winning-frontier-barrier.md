@@ -29,6 +29,14 @@ This is NOT a time lower bound for computing S(n).
 A selective or symbolic algorithm need not enumerate every state;
 the root antichain may itself be losing at budget k.
 
+The same construction applies at the **exact optimal budget** `k=S(n)`.
+Sergeev's `S(n)=log₂(n!)+o(n)` bound implies `S(n)=C(n)+d(n)` for an
+integer `d(n)≥0` with `d(n)=o(n)`. The parameter calculation below is
+unchanged for every such sublinear nonnegative surplus. Thus the large
+frontier is not confined to the information budget, where the root can be
+losing: at the exact optimum these states are reachable, winning, and have
+the corresponding remaining budget `S(n)-t`.
+
 ## 1. The much simpler independent-edge construction
 
 Choose integers s>=2 (number of columns) and L>=2 (number
@@ -122,6 +130,36 @@ unpublished two-edge, rs-chain construction in two ways:
 the chain count is s rather than rs, and *one known edge*
 per column and level interface suffices, freeing a larger
 number of budgeted independent extra comparisons.
+
+### 3.1 Extension to sublinear budget surplus, including `S(n)`
+
+Let `k=C(n)+d(n)` where `d(n)` is a nonnegative integer and
+`d(n)=o(n)`, and continue to take `s=L=2^r` and `n=s^2`. Keep
+`t0=s(L-1)`, `B=(s-1)+(n-1)r`, and `M=(L-1)(s^2-s)`, but set
+`m=k-t0-B`. Stirling's estimate gives
+
+`m=nr-n log₂(e)-n+d(n)+O(s+r+log n)=nr-O(n)+o(n)=Θ(n log n)`.
+
+Consequently `0<m<M/2` for all sufficiently large r, since
+`M=Θ(n^(3/2))`. The same independent-edge family has
+`binom(M,m)` different labelled posets, each reachable at
+`t=t0+m=k-B` legal comparisons and sortable in at most
+`B=k-t` further comparisons. Distinct labelled posets differ on
+an adjacent-level relation, and each isomorphism class has at most
+`n!` labelings. Therefore
+
+`log₂[binom(M,m)/n!] ≥ m log₂(M/m)-log₂(n!)`
+`= (1/4-o(1)) n (log₂ n)^2`.
+
+The `d(n)=o(n)` increment changes only lower-order terms: here
+`log₂(M/m)=Θ(log n)`, so it contributes `o(n log n)`, below the
+leading `n(log n)^2` term. This specializes to `k=S(n)` because
+`C(n)≤S(n)` and Sergeev, *On the asymptotic complexity of sorting*,
+ECCC TR20-096 (2020), Theorem 3, gives
+`S(n)=log₂(n!)+O(n/(log n)^(1/5))`; hence `S(n)-C(n)=o(n)`.
+This use of Sergeev is asymptotic and supplies no effective finite
+threshold. The conclusion remains an enumeration barrier only, not a
+general running-time lower bound.
 
 ## 4. Exact finite witness with only 224 elements
 

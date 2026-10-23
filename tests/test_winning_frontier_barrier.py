@@ -2,11 +2,11 @@
 import math
 import unittest
 
-def params(columns, levels):
+def params(columns, levels, budget_surplus=0):
     s, L = columns, levels
     n=s*L
     factorial=math.factorial(n)
-    k=(factorial-1).bit_length()  # exact ceil(log2(n!))
+    k=(factorial-1).bit_length() + budget_surplus  # C(n) + surplus
     t0=s*(L-1)
     h=(s-1).bit_length()         # exact ceil(log2(s))
     B=(s-1)+(n-1)*h
@@ -26,6 +26,15 @@ class WinningFrontierTests(unittest.TestCase):
         self.assertEqual((k,t0,B,m,M),(1684,240,1035,409,3600))
         self.assertEqual(t0+m+B,k)
         self.assertGreater(math.comb(M,m),fac*(1<<148))
+
+    def test_sublinear_surplus_preserves_finite_frontier(self):
+        surplus=512
+        fac,k,t0,B,m,M=params(16,14,surplus)
+        self.assertEqual(k,1431+surplus)
+        self.assertEqual(t0+m+B,k)
+        self.assertGreater(m,0)
+        self.assertLess(2*m,M)
+        self.assertGreater(math.comb(M,m),fac*(1<<39))
 
     def test_edge_independence_on_small_rectangles(self):
         # Closure cannot infer any unselected adjacent-layer edge:
