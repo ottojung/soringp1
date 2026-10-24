@@ -124,7 +124,7 @@ acceptance implies `S(n)<=k`. Completeness (every `S(n)<=k` has such a
 program) remains OPEN; this does not establish unrestricted
 `SORT-BOUND-U` membership in `Sigma_2^P`.
 
-## Lemma B (PROVED barrier, paper proof + literature): the recurrence/table compiler is not polytime
+## Lemma B (PROVED, scoped barriers): explicit trees and two specified compiler methods
 
 **[paper proof]** B1 (explicit trees). A correct sorting tree must have
 at least `n!` leaves (distinct permutations force distinct answer paths;
@@ -132,28 +132,37 @@ two permutations reaching the same leaf would receive the same output
 order, wrong for at least one). Hence any compiler emitting the explicit
 optimal tree outputs `Omega(n!)` nodes: superpolynomial in `n+k`.
 
-**[literature + deduction]** B2 (optimal-next-comparison recurrence).
-The natural recurrence compiler picks the next comparison by solving the
-minimax remainder `F(P)` over reachable knowledge posets `P`. Exact
-evaluation of the information-theoretic recurrence needs the linear-
-extension count `e(P)`; counting linear extensions is **#P-complete**
-(Brightwell-Winkler, *Order* 8(3), 1991). So this recurrence cannot be
-evaluated in polynomial time unless `FP = #P`. Independently, the
-winning-frontier construction (`docs/research-winning-frontier-barrier.md`)
-exhibits `2^{(1/4-o(1)) n (log n)^2}` nonisomorphic winning posets at one
-depth, so a memoizing/table compiler over reachable states is
-superpolynomial in the worst case. Either way the recurrence route is
-ruled out as a *polytime exact* compiler. Per `AGENTS.md` this is a
-barrier for the *method* (which queries arbitrary posets), not a
-hardness claim for the sparse unary `SORT-BOUND-U` itself.
+**[literature + deduction, scoped]** B2 concerns two narrower methods.
+First, the greedy child-`e` selector chooses a comparison `{x,y}` by
+minimizing `max(e(P+xy),e(P+yx))`. Computing this selector by explicitly
+counting linear extensions uses the function `e(P)`, whose exact counting
+is #P-complete (Brightwell-Winkler, *Order* 8(3), 1991). This is a
+barrier to that particular implementation of the greedy selector; it
+does not show that the exact minimax recurrence
+`F(P)=1+min_{x,y} max(F(P+xy),F(P+yx))` needs `e(P)`, nor that exact
+minimax evaluation or optimal comparison selection is #P-hard.
+Second, the winning-frontier construction
+(`docs/research-winning-frontier-barrier.md`) exhibits
+`2^{(1/4-o(1)) n (log n)^2}` nonisomorphic winning posets at one depth.
+It therefore rules out methods whose work requires explicitly listing
+the entire frontier at that depth (even modulo isomorphism). It does not
+force every memoizing algorithm or compiler to enumerate those states.
+In particular, neither result rules out a polynomial exact recurrence
+evaluator, a selective compiler, state compression, or another method
+that avoids these specified steps. These are scoped method barriers,
+not a hardness claim about computing `S(n)` or about the sparse unary
+`SORT-BOUND-U`.
 
 ## Findings
 
 - **PROVED:** `FO(TC)_v` (fixed variables/arity) compiles to uniform
   polytime query programs with explicit `O(|phi| . N^{2v})` evaluation.
-- **PROVED (barrier):** explicit-tree and exact-recurrence compilers are
-  not polytime routes (leaf bound `Omega(n!)`; `#P`-hard extension
-  counting; superpolynomial winning frontier).
+- **PROVED (scoped barriers):** an explicit optimal sorting tree has
+  `Omega(n!)` leaves; explicitly counting `e(P)` for the greedy
+  child-`e` selector invokes a #P-complete function; and explicit full
+  winning-frontier enumeration has superpolynomial size for the stated
+  family. None rules out polynomial exact minimax evaluation or
+  selective compilation.
 - **CONDITIONAL:** all-`n` exact completeness of the fragment (every
   `S(n) <= k` realized by a poly-size fragment program at exact budget)
   would place that subclass of `SORT-BOUND-U` in `Sigma_2^P`.
@@ -200,7 +209,8 @@ completeness for the specified syntax, not finite enumeration.
 - Immerman, *Descriptive Complexity* (1999), ch. 7: FO(TC)/NL, fixed
   formulas only; combined bound here is proved directly.
 - Brightwell-Winkler, "Counting linear extensions," *Order* 8(3),
-  1991: #P-completeness used for B2.
+  1991: #P-completeness used only for the explicitly-counting greedy
+  child-`e` selector in B2.
 - Knuth, *TAOCP* vol. 3, section 5.3.1: decision-tree leaf lower bound.
 - SoringP1 `docs/problem.md`, `docs/research-winning-frontier-barrier.md`,
   issue #47: model, frontier barrier, framed-DAG context.
