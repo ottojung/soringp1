@@ -220,6 +220,20 @@ optimal sorter" encoding of the examples section made executable; it
 shows exact-budget representability at `n=5` but, as a single constant
 instance, proves no all-`n` completeness claim.
 
+**[experiment]** `scripts/fo_tc_n3_example.py` (+ test
+`tests/test_fo_tc_n3_example.py`) is the elementary worked example: a
+hand-readable `FO(TC)_v` program for `n=3` (5 constant-`Ask` internal
+labels, 6 leaves with explicit `Emit`/`Halt` rules, 29 labels total) run
+through a small interpreter that maintains the knowledge relation `H`,
+the charged query counter `q` and the output buffer, with rules seeing
+only `Ask` answers. The outer verifier checks a full permutation is
+emitted, sortedness under the hidden order, and `q <= 3` on all
+`3! = 6` hidden orders; worst-case is exactly 3 `= S(3)`. A strictness
+probe confirms a zero-query constant-output program is rejected on 5 of
+the 6 orders, i.e. the verifier demands genuine sorting, not mere
+consistency with queried comparisons. Like the `n=5` witness, this is a
+single constant-size instance and proves no all-`n` completeness claim.
+
 ## Next step
 
 No computational probe is claimed for the paper argument. The decisive
