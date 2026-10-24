@@ -38,6 +38,27 @@ knowledge structure (observed outcomes plus their closure); every rule
 evaluation is charged, and `QUERY` answers are the only hidden-order
 input (no free transitive-closure oracle over the unknown order).
 
+**[definition]** Operationally, a program has a control label, an output
+buffer of `n` labels, query history `H(i,j,b)`, and a query counter `q`.
+At a nonterminal label an FO(TC) rule over `H` and its derived closure
+returns one action: `Ask(i,j)`, `Emit(position,i)`, `Goto(label)`, or
+`Halt`. Rules are deterministic; malformed or non-singleton actions
+reject. `Ask` requires distinct labels, calls the comparison oracle,
+appends its answer to `H`, increments `q`, and branches to a successor
+according to the answer. `Emit` fills one previously unwritten position.
+`Halt` succeeds only if the buffer is a permutation consistent with all
+answers. There is no predicate on the hidden order other than a charged
+`Ask`. Rule evaluation and store updates are charged interpreter steps;
+the run must halt within the uniform polynomial clock `T` above and use
+at most `k` queries. This specifies mutable knowledge/state, branching,
+output and termination without granting a free order oracle.
+
+Program choice and adversarial verification have distinct quantifiers:
+`exists p, |p|<=b . forall total orders X, Verify(p,X,n,k)`. Under the
+uniform clock/interpreter this puts the representable subclass in
+`Sigma_2^P`; it does not place unrestricted `SORT-BOUND-U` there absent
+completeness.
+
 ## Lemma A (PROVED, paper proof): fixed-variable fragment has polynomial combined complexity
 
 **[paper proof]** Claim: for fixed `v`, any `phi in FO(TC)_v` over a
@@ -104,14 +125,41 @@ hardness claim for the sparse unary `SORT-BOUND-U` itself.
 - **OPEN:** prove or refute fragment completeness at exact optimal depth;
   or separate fragment-expressible strategies from general optimal trees.
 
+## Elementary strategy examples
+
+**[deduction from standard algorithms]** The interpreter can implement
+binary-insertion sort using midpoint `Ask` operations over each sorted
+prefix. It makes at most
+`sum_{i=1}^{n-1} ceil(log2(i+1))` queries and `O(n log n)` rule actions;
+the loop schema is fixed, with `O(log n)` bits for binary-encoded indices
+and `n` when passed as a parameter. Top-down merge sort uses `O(n log n)`
+queries and control actions, with a fixed recursive schema and logarithmic
+recursion depth; it observes only results of explicit `Ask` operations.
+For a fixed small optimal sorter, encode its finite decision tree as one
+control label per node: text size `Theta(tree nodes)`, with worst-case
+query count exactly its height. That representation is useful for
+sanity-checking semantics but is not a uniform polynomial compiler for
+all `n` (the leaf bound above applies). These are symbolic program-size
+and comparison/action counts, not wall-clock measurements; exact byte
+constants depend on bytecode encoding.
+
+**[conjecture, falsifiable]** For every `n`, some optimal adaptive sorter
+of depth `S(n)` has an FO(TC) strategy program of size polynomial in
+`n+S(n)` and the stipulated uniform polynomial clock. A proof would give
+exact completeness for this representation and the corresponding
+`Sigma_2^P` upper bound for `SORT-BOUND-U`; a refuting family would be
+optimal trees for which every program in the specified fragment exceeds
+every fixed polynomial size or clock. No completeness claim is proved.
+
 ## Next experiment
 
 Run `scripts/fo_tc_combined_probe.py`: checks the Lemma A cost formula
 against a naive evaluator's step counts on small instances and verifies
-the B1 leaf-bound arithmetic (`n!` vs polynomial budgets). Then attempt
-the completeness direction for small `n` only as a sanity check on the
-fragment encoding (insertion/merge sorters), without mistaking finite
-enumeration for an all-`n` theorem.
+the B1 leaf-bound arithmetic (`n!` vs polynomial budgets). Next implement
+the insertion and merge schemas in the bytecode and instrument action
+counts against the bounds above. This checks model fidelity only; the
+decisive remaining task is an all-`n` proof or refutation of exact-budget
+completeness, not finite enumeration.
 
 ### Sources
 
