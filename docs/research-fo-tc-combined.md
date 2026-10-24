@@ -209,6 +209,17 @@ soundness of the interpreter model but not exact-budget completeness.
 The pinned next case is therefore whether the height-7 optimal `n=5`
 tree has a poly-size `FO(TC)_v` program at exact budget.
 
+**[experiment]** `scripts/fo_tc_n5_optimal.py` (+ tree data
+`scripts/fo_tc_n5_optimal_tree.json`, test
+`tests/test_fo_tc_n5_optimal.py`) closes the pinned `n=5` case as a
+fixed-size witness: the minimax-optimal height-7 tree (119 internal
+control labels, one constant `Ask(i,j)` rule each, 120 leaves) is
+simulated with no online search and sorts all `5! = 120` hidden orders
+with worst-case exactly 7 queries `= S(5)`. This is the "fixed small
+optimal sorter" encoding of the examples section made executable; it
+shows exact-budget representability at `n=5` but, as a single constant
+instance, proves no all-`n` completeness claim.
+
 ## Next step
 
 No computational probe is claimed for the paper argument. The decisive
