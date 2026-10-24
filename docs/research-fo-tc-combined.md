@@ -18,73 +18,111 @@ unary language is claimed (cf. `AGENTS.md`).
 
 ## Definitions
 
-**[definition]** A *query program* is a finite byte string `p` run on a
-fixed deterministic machine `U` with mutable state. The only operation
-observing the hidden total order on `[n]` is `QUERY(i,j)` (distinct
-labels), returning the smaller label and incrementing the comparison
-counter. All other steps (control, arithmetic, memory, output) are
-ordinary charged machine steps. A run is clocked at
-`T = (n+k+|p|+2)^c` for a fixed constant `c`; it accepts iff it halts
-within `T`, outputs a permutation of `[n]` consistent with all answers,
-and used at most `k` queries.
+**[definition]** `FO(TC)_v` is the following globally fixed-variable
+syntax. Fix `v >= 2` once for the whole query-program fragment (not separately for
+each subformula). Atomic formulas use equality and the input/store
+relations; Boolean connectives and first-order quantifiers have their
+usual semantics. If `x=(x_1,...,x_m)` and `y=(y_1,...,y_m)` are disjoint
+tuples of distinct variable names and `theta` is a formula, then
+`[TC_{x,y} theta](s,t)` is allowed when `s,t` are m-tuples and its free
+variables other than the endpoint tuples form a context tuple `z` of
+length `a`, disjoint from `x,y`, with `a+2m <= v`. The relation tested
+for an edge is `theta` with `x,y` assigned to the source and target;
+closure is reflexive transitive reachability on the `N^m` endpoint
+tuples, separately for each fixed assignment to `z`. All bound and free
+variables, including those in nested TC formulas, are drawn from the
+same globally fixed set of at most `v` names. This explicit condition
+also applies when a formula has additional local bound variables: its
+syntax must permit their binding and the TC context without exceeding
+that global set. Formula text `|phi|` may grow. Input structures have
+domain size `N=Theta(n+k+1)`, a fixed relational vocabulary of arity at
+most `v`, and explicitly tabulated input/store relations. In particular,
+the vocabulary is not an oracle or a succinctly encoded relation.
 
-**[definition]** `FO(TC)_v`: first-order logic with transitive closure
-where every subformula uses at most `v` distinct variable names
-(`v` fixed, arity likewise bounded by `v`). Formula *text* `|phi|` may
-grow (it is the guessed part); the domain size is `n` (labels) plus
-`O(k)` history slots. A *fragment program* is a finite list of
-`FO(TC)_v` rules selecting the next comparison / output from the
-knowledge structure (observed outcomes plus their closure); every rule
-evaluation is charged, and `QUERY` answers are the only hidden-order
-input (no free transitive-closure oracle over the unknown order).
+**[definition]** A program is a finite byte string `p` interpreted by a
+fixed deterministic machine `U`, with a control label, an output buffer,
+binary query-history relation `H(i,j)` (meaning `i` was returned as
+smaller than `j`), and counter `q`. Repeated queries still increment `q`;
+`H` records their logical outcome. At a nonterminal label, its
+FO(TC)_v rule over the current store returns exactly one action:
+`Ask(i,j)`, `Emit(position,i)`, `Goto(label)`, or `Halt`; malformed or
+non-singleton actions reject. `Ask` requires distinct labels, invokes
+`QUERY(i,j)`, obtains only the smaller label as answer, appends that
+answer to `H`, increments `q`, and branches on that answer. The program
+has no other access to the hidden total order `X`. `Emit` fills one
+previously unwritten output position. `Halt` is a program action only;
+it succeeds at the verifier only if exactly a permutation of `[n]` has
+been emitted, `q<=k`, and the output is sorted according to `X`.
+In particular, consistency with the queried comparisons alone is not
+enough: for `n>=2`, a zero-query constant output fails for some
+permutation `X`.
 
-**[definition]** Operationally, a program has a control label, an output
-buffer of `n` labels, query history `H(i,j,b)`, and a query counter `q`.
-At a nonterminal label an FO(TC) rule over `H` and its derived closure
-returns one action: `Ask(i,j)`, `Emit(position,i)`, `Goto(label)`, or
-`Halt`. Rules are deterministic; malformed or non-singleton actions
-reject. `Ask` requires distinct labels, calls the comparison oracle,
-appends its answer to `H`, increments `q`, and branches to a successor
-according to the answer. `Emit` fills one previously unwritten position.
-`Halt` succeeds only if the buffer is a permutation consistent with all
-answers. There is no predicate on the hidden order other than a charged
-`Ask`. Rule evaluation and store updates are charged interpreter steps;
-the run must halt within the uniform polynomial clock `T` above and use
-at most `k` queries. This specifies mutable knowledge/state, branching,
-output and termination without granting a free order oracle.
-
-Program choice and adversarial verification have distinct quantifiers:
-`exists p, |p|<=b . forall total orders X, Verify(p,X,n,k)`. Under the
-uniform clock/interpreter this puts the representable subclass in
-`Sigma_2^P`; it does not place unrestricted `SORT-BOUND-U` there absent
-completeness.
+For fixed `c`, let `T=(n+k+|p|+2)^c`. The verifier, given an explicitly
+encoded permutation `X` of `[n]`, simulates `U` for at most `T` charged
+steps, answering each `QUERY` from `X` and rejecting if there are more
+than `k`; after a valid `Halt`, this *outer verifier* checks the full
+output is increasing in `X` (as well as being a permutation). The
+program sees only charged query answers; only the verifier sees `X`.
+The quantified predicate is
+`exists p (|p|<=b) . forall X in S_n, Verify(p,X,n,k)`.
+For polynomially bounded `b` and the fixed polynomial clock, this
+defines a restricted language in `Sigma_2^P`. Its soundness implies
+`S(n)<=k`; completeness for all of `SORT-BOUND-U` is not established.
+No membership or completeness claim for unrestricted `SORT-BOUND-U`
+follows.
 
 ## Lemma A (PROVED, paper proof): fixed-variable fragment has polynomial combined complexity
 
-**[paper proof]** Claim: for fixed `v`, any `phi in FO(TC)_v` over a
-domain of size `N` evaluates in `O(|phi| . N^{2v})` deterministic time
-by direct induction, hence polynomial in `|phi| + N` jointly.
+**[paper proof]** For the stated syntax and explicit relational encoding,
+each formula `phi in FO(TC)_v` evaluates in `O(|phi| N^(2v))` time using
+bottom-up truth tables. The tables are memoized by syntax occurrence and
+assignment to that subformula's free variables; no subformula is
+re-evaluated inside a parent loop. The bound assumes standard unit-cost
+table indexing for `O(log N)`-bit tuple indices, or a conventional
+deterministic implementation with the resulting polylogarithmic factor
+absorbed by a harmless `N^epsilon` exponent adjustment. To retain the
+stated exponent literally, count table accesses as unit-cost operations.
 
-*Proof.* Evaluate bottom-up. An atomic or Boolean step scans at most
-`N^v` assignments (one per variable binding). A quantifier step iterates
-over at most `N` values per bound variable: `O(N^{v+1}) <= O(N^{2v})`
-for `v >= 1`. A `TC` step over a `2m`-ary definable relation
-(`m <= v/2` given bounded arity) materializes a graph on at most `N^m`
-nodes and runs reachability in `O(N^{3m}) <= O(N^{2v})` (Floyd-Warshall;
-BFS per source gives the same polynomial). Summing over the `|phi|`
-subformula occurrences gives `O(|phi| . N^{2v})`. With `N = O(n+k)`
-(history-augmented knowledge structure) and fixed `v`, compiling each
-rule to `U` preserves this bound up to a fixed polynomial overhead, so
-the fragment interpreter is uniform-polytime in `(n, k, |p|)`.
-The `FO(TC) = NL` capture theorem (Immerman, *Descriptive Complexity*,
-ch. 7) is data complexity for each *fixed* formula and is NOT used as a
-combined-time claim; the bound above is proved directly. QED.
+*Proof.* A table for a subformula with `f<=v` free variables has at most
+`N^f` entries. Atomic tables are filled by scanning their assignments
+and looking up explicitly stored relation tuples. Boolean tables are
+formed by entrywise operations (including projections for any variable
+renaming), and a quantifier table is formed by scanning at most `N`
+values per assignment, for `O(N^(f+1)) <= O(N^(v+1)) <= O(N^(2v))`
+work. This accounts for each node once, even when a child occurs under
+many parent assignments, because its table is reused.
 
-Corollary: the subclass `QWIN_{v,c}` (fragment programs of size
-`<= b` passing all `n!` orders within clock `T`) is in `Sigma_2^P`:
-guess `p`, universally quantify an `O(n log n)`-bit permutation, run
-the fixed clocked verifier. Soundness: acceptance implies `S(n) <= k`.
-Completeness (every `S(n) <= k` has such a `p`) remains OPEN.
+At a TC node with endpoint width `m` and outside context width `a`,
+`a+2m<=v`. Its defining subformula's truth table supplies all edge
+answers for each context assignment and each source/target pair. For
+each of the `N^a` contexts, construct the graph on at most `N^m` nodes
+and compute its reflexive transitive closure by Floyd--Warshall, costing
+`O(N^(3m))`; edge-table construction/lookups cost at most
+`O(N^(a+2m))`. Thus the node costs
+`O(N^(a+3m) + N^(a+2m)) = O(N^(a+3m))`. Since
+`a+3m <= 2(a+2m) <= 2v`, this is `O(N^(2v))`, including nested TC:
+each nested closure has its own memoized table and is charged once in
+the same bottom-up sum. With at most `|phi|` syntax nodes this gives
+`O(|phi|N^(2v))`. For a fixed vocabulary of arity at most `v`, the
+explicit input/store tables and initial history have size and
+construction cost `O(N^v)` (plus `O(|p|)` to parse the program); these
+are absorbed for `v>=1`. The interpreter per rule evaluation has
+polynomial overhead in the syntax/table bound. Choose the fixed clock
+exponent `c` large enough to dominate that overhead: across at most `T`
+program steps/evaluations, total runtime is bounded by `T` times that
+per-evaluation polynomial, plus store updates and input construction,
+and hence by a fixed polynomial in `n+k+|p|`. This is a polynomial
+verifier clock, not a claim that the whole program costs just one
+formula-evaluation bound. The `FO(TC)=NL` capture theorem is not used.
+QED.
+
+Corollary: for any fixed polynomial bound `b(n+k)` and fixed verifier
+clock exponent as above, the restricted predicate `QWIN_{v,c}` is in
+`Sigma_2^P`: guess `p`, universally quantify an `O(n log n)`-bit
+permutation encoding, validate it, and run the verifier. Soundness:
+acceptance implies `S(n)<=k`. Completeness (every `S(n)<=k` has such a
+program) remains OPEN; this does not establish unrestricted
+`SORT-BOUND-U` membership in `Sigma_2^P`.
 
 ## Lemma B (PROVED barrier, paper proof + literature): the recurrence/table compiler is not polytime
 
@@ -151,15 +189,11 @@ exact completeness for this representation and the corresponding
 optimal trees for which every program in the specified fragment exceeds
 every fixed polynomial size or clock. No completeness claim is proved.
 
-## Next experiment
+## Next step
 
-Run `scripts/fo_tc_combined_probe.py`: checks the Lemma A cost formula
-against a naive evaluator's step counts on small instances and verifies
-the B1 leaf-bound arithmetic (`n!` vs polynomial budgets). Next implement
-the insertion and merge schemas in the bytecode and instrument action
-counts against the bounds above. This checks model fidelity only; the
-decisive remaining task is an all-`n` proof or refutation of exact-budget
-completeness, not finite enumeration.
+No computational probe is claimed for the paper argument. The decisive
+remaining task is an all-`n` proof or refutation of exact-budget
+completeness for the specified syntax, not finite enumeration.
 
 ### Sources
 
