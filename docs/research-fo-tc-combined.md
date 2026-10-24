@@ -198,6 +198,17 @@ exact completeness for this representation and the corresponding
 optimal trees for which every program in the specified fragment exceeds
 every fixed polynomial size or clock. No completeness claim is proved.
 
+**[experiment]** Exhaustive check over all `n!` hidden orders for
+`2 <= n <= 8` confirms the binary-insertion schema uses exactly
+`sum_{i=1}^{n-1} ceil(log2(i+1))` comparisons worst-case
+(`n=5: 8`, `n=8: 17`), and the same top-down merge implementation also
+uses `8` at `n=5` and `17` at `n=8` while always emitting the correctly
+sorted permutation. Since `S(5)=7` and `S(8)=16`, both uniform schemas
+miss the exact optimal budget by one comparison there: they witness
+soundness of the interpreter model but not exact-budget completeness.
+The pinned next case is therefore whether the height-7 optimal `n=5`
+tree has a poly-size `FO(TC)_v` program at exact budget.
+
 ## Next step
 
 No computational probe is claimed for the paper argument. The decisive
