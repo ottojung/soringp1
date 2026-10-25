@@ -55,9 +55,11 @@ and outer verifier. Run:
 python3 scripts/fo_tc_twophase_barrier.py
 ```
 
-Its `n=4` case is the requested tiny witness: it exhaustively checks all
-`4!` orders, output permutation and sortedness, with at most five queries;
-the information bound `ceil(log2(4!))=5` then gives `S(4)=5`. The script
-also records larger finite checks. These witnesses validate the operational
-accounting on those instances only; they provide no all-`n` program
-construction or complexity-class membership for unrestricted `S(n)`.
+The checked-in script exhaustively checks `n=5,6,7,8`; for each it
+validates all `n!` orders, output permutation and sortedness, and compares
+the worst query count with the stated budget. The `n=6,7,8` witnesses
+attain the information bound and self-certify their exact sorting numbers;
+`n=5` records the strict two-phase miss (8 queries versus `S(5)=7`).
+These witnesses validate the operational accounting on those instances
+only; they provide no all-`n` program construction or complexity-class
+membership for unrestricted `S(n)`.
