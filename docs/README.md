@@ -40,7 +40,7 @@ findings. They are not independent milestones to formalize in Lean.
 
 | Theme | Notes |
 |---|---|
-| Earlier certificate proposals | [strategy DAGs](research-strategy-certificates.md), [state compression](research-state-compression.md) |
+| Earlier certificate proposals | [strategy DAGs](research-strategy-certificates.md), [state compression](research-state-compression.md), [two-phase compositional barrier](research-fo-tc-twophase.md) |
 | Exact-state decomposition and quotient | [compression](research-compression-next.md), [series decomposition](research-series-decomposition.md), [orientation modules](research-orientation-modules.md), [parallel duality](research-parallel-duality.md) |
 | Research on search cost | [time exponent](research-time-exponent.md), [budget pruning](research-budget-pruning.md), [bidirectional advice](research-bidirectional-advice.md), [upper witnesses](research-upper-witnesses.md) |
 | Earlier input/certificate analysis | [decision encoding](research-decision-encoding.md), [n=12 non-tightness](research-n12-nontightness.md) |
