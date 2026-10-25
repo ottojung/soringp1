@@ -14,8 +14,11 @@ is non-monotone in n:
   * n=6: the two-phase program below achieves 10, and ceil(log2(6!)) = 10,
     so 10 = S(6) is self-certified.  Composition is exact again.
   * n=7: the compiled two-phase program achieves 13 = S(7) (known in
-    Stober--Weiß, cited in docs/literature.md); this is an attaining witness,
-    not a self-certificate because ceil(log2(7!)) = 13 does self-certify.
+    Stober--Weiß, cited in docs/literature.md); since ceil(log2(7!)) = 13,
+    this independently self-certifies the exact value.
+  * n=8: the compiled two-phase program achieves 16 over all 40,320 orders;
+    since ceil(log2(8!)) = 16, this self-certifies S(8) = 16 (consistent
+    with docs/problem.md).
 
 Lemma (paper proof, see docs/research-fo-tc-twophase.md): a deterministic
 adaptive program that first fully determines the order of n-1 fixed keys
@@ -273,7 +276,17 @@ def main():
     clock = (r7["n"] + r7["budget"] + r7["labels"]) ** 2
     assert r7["worst_steps"] <= clock, (r7, clock)
     print(f"n=7: worst_steps={r7['worst_steps']} <= clock={clock}")
-    print("OK: exact at n=4,6,7; misses n=5. This is finite evidence only.")
+    # n=8: two-phase bound S(7)+ceil(log2(8)) = 13+3 = 16; information bound
+    # ceil(log2(8!)) = ceil(log2(40320)) = 16, so the witness self-certifies
+    # S(8) = 16 (consistent with docs/problem.md).
+    assert 2 ** 15 < factorial(8) <= 2 ** 16
+    r8 = verify_program(8, 16)
+    print("n=8 two-phase:", r8)
+    assert r8["worst_queries"] == 16, r8
+    clock = (r8["n"] + r8["budget"] + r8["labels"]) ** 2
+    assert r8["worst_steps"] <= clock, (r8, clock)
+    print(f"n=8: worst_steps={r8['worst_steps']} <= clock={clock}")
+    print("OK: exact at n=4,6,7,8; misses n=5. This is finite evidence only.")
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ class TwoPhaseBarrier(unittest.TestCase):
 
     def test_runtime_performs_no_search(self) -> None:
         # Every internal label is a constant Ask pair fixed at compile time.
-        for n in (5, 6, 7):
+        for n in (5, 6, 7, 8):
             program, _, _ = compile_trie(n)
             for rule in program.values():
                 if rule[0] == "ask":
@@ -47,7 +47,7 @@ class TwoPhaseBarrier(unittest.TestCase):
                     self.assertNotEqual(rule[1], rule[2])
 
     def test_polynomial_clock(self) -> None:
-        for n, budget in ((5, 8), (6, 10), (7, 13)):
+        for n, budget in ((5, 8), (6, 10), (7, 13), (8, 16)):
             program, leaf_output, root = compile_trie(n)
             worst_steps = 0
             from itertools import permutations
@@ -65,6 +65,15 @@ class TwoPhaseBarrier(unittest.TestCase):
         self.assertEqual(result["total_orders"], 5040)
         self.assertEqual(result["ask_labels"], 5039)
         self.assertEqual(result["strictness_rejects"], 5039)
+
+    def test_n8_two_phase_self_certifies_exact_budget(self) -> None:
+        self.assertLess(2 ** 15, factorial(8))
+        self.assertLessEqual(factorial(8), 2 ** 16)  # C(8) = 16
+        result = verify_program(8, 16)
+        self.assertEqual(result["worst_queries"], 16)
+        self.assertEqual(result["total_orders"], 40320)
+        self.assertEqual(result["ask_labels"], 40319)
+        self.assertEqual(result["strictness_rejects"], 40319)
 
 
 if __name__ == "__main__":

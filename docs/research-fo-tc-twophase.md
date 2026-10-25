@@ -42,6 +42,7 @@ selective search, or state compression.
 | 5 | `S(4)+ceil(log2 5)=5+3=8` | 7 | **no** (misses by one) |
 | 6 | `S(5)+ceil(log2 6)=7+3=10` | 10 | yes (self-certified below) |
 | 7 | `S(6)+ceil(log2 7)=10+3=13` | 13 | yes (self-certified below) |
+| 8 | `S(7)+ceil(log2 8)=13+3=16` | 16 | yes (self-certified below) |
 
 So no single sort-then-insert schema is exact at all `n`: the shape that
 works at `n=4` already fails at `n=5` and returns at `n=6`. Any all-`n`
@@ -72,6 +73,10 @@ program on all non-identity orders.
   over all 5,040 orders; maximum interpreter path is 14 steps. Since
   `2^12 < 7! = 5,040 <= 2^13`, the information lower bound is 13, so this
   witness self-certifies `S(7)=13`.
+- `n=8`: 40,319 `Ask` labels, 40,320 leaves, worst-case exactly 16 queries
+  over all 40,320 orders; maximum interpreter path is 17 steps. Since
+  `2^15 < 8! = 40,320 <= 2^16`, the information lower bound is 16, so this
+  witness self-certifies `S(8)=16` (consistent with `docs/problem.md`).
 
 **[deduction]** Each rule is constant (`Ask` a fixed pair, `Emit`, `Halt`),
 so per-step interpreter work is `O(1)`; total runtime is linear in the
@@ -87,6 +92,8 @@ concerns only these finite witnesses, not all-`n` completeness.
 - **PROVED (finite):** `S(6) = 10` by self-certifying two-phase witness.
 - **PROVED (finite):** `S(7) = 13` by the analogous two-phase witness and
   information lower bound; verification covers every one of 5,040 orders.
+- **PROVED (finite):** `S(8) = 16` by the analogous two-phase witness and
+  information lower bound; verification covers every one of 40,320 orders.
 - **CONDITIONAL:** all-`n` exact completeness of FO(TC)-style programs, if
   true, requires shape-switching (compositional and global) families.
 - **NOT CLAIMED:** unrestricted `SORT-BOUND-U` membership, hardness of
@@ -94,8 +101,11 @@ concerns only these finite witnesses, not all-`n` completeness.
 
 ## Next step
 
-Test the next compositional joint at `n=8` (`13+3 = 16 = S(8)`, with the
-value established in `docs/problem.md`), then find the next miss after `n=5` and characterize
-for which `n` the recurrence `S(n-1)+ceil(log2(n))` meets `S(n)`. The
+Test the next compositional joint at `n=9` (`16+4 = 20 > 19 = S(9)` is the
+expected next miss: `ceil(log2(9)) = 4`, and `S(9) = 19` per the value table
+in `docs/research-plan.md`). The miss at `n=9` already follows from the
+proved lemma by pure bound arithmetic (no `9!`-order run needed), so the
+remaining task is to characterize for which `n` the recurrence
+`S(n-1)+ceil(log2(n))` meets `S(n)`. The
 decisive task remains an all-`n` completeness proof or refutation for the
 full fragment, not further finite witnesses.
