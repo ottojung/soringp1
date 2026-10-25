@@ -234,6 +234,22 @@ the 6 orders, i.e. the verifier demands genuine sorting, not mere
 consistency with queried comparisons. Like the `n=5` witness, this is a
 single constant-size instance and proves no all-`n` completeness claim.
 
+**[experiment]** `scripts/fo_tc_n4_example.py` (+ test
+`tests/test_fo_tc_n4_example.py`) is the compositional worked example for
+`n=4`: the optimal `n=3` skeleton (5 constant-`Ask` labels) followed, at
+each of the 6 identified sorted triples, by a binary-insertion subtree
+for key 3 (3 `Ask` labels, 4 `Emit`-chain leaves; 143 labels total, 23
+`Ask` rules). The interpreter/outer-verifier accounting is the same as
+the `n=3` example. Exhaustive check over all `4! = 24` hidden orders
+gives worst-case exactly 5 queries; the leaf bound gives
+`S(4) >= ceil(log2(24)) = 5`, so `5 = S(4)` is self-certifying with no
+external table, and max interpreter steps (10) sit far below the fixed
+polynomial clock. A strictness probe rejects the zero-query constant
+program on 23 of 24 orders. Unlike the explicit-tree witnesses, this
+program composes an optimal sub-sorter with an optimal insertion step --
+the shape an all-`n` completeness argument would need to scale -- but as
+a single constant-size instance it proves no all-`n` claim.
+
 ## Next step
 
 No computational probe is claimed for the paper argument. The decisive
