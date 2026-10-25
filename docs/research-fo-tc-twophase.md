@@ -41,6 +41,7 @@ selective search, or state compression.
 | 4 | `S(3)+ceil(log2 4)=3+2=5` | 5 | yes |
 | 5 | `S(4)+ceil(log2 5)=5+3=8` | 7 | **no** (misses by one) |
 | 6 | `S(5)+ceil(log2 6)=7+3=10` | 10 | yes (self-certified below) |
+| 7 | `S(6)+ceil(log2 7)=10+3=13` | 13 | yes (self-certified below) |
 
 So no single sort-then-insert schema is exact at all `n`: the shape that
 works at `n=4` already fails at `n=5` and returns at `n=6`. Any all-`n`
@@ -67,6 +68,10 @@ program on all non-identity orders.
   self-certifies `S(6) = 10` with no external table (consistent with the
   in-repo `tests/test_evaluate.py` pin and the Ford-Johnson exactness for
   `n <= 11` cited in `scripts/upper_witness.py`).
+- `n=7`: 5,039 `Ask` labels, 5,040 leaves, worst-case exactly 13 queries
+  over all 5,040 orders; maximum interpreter path is 14 steps. Since
+  `2^12 < 7! = 5,040 <= 2^13`, the information lower bound is 13, so this
+  witness self-certifies `S(7)=13`.
 
 **[deduction]** Each rule is constant (`Ask` a fixed pair, `Emit`, `Halt`),
 so per-step interpreter work is `O(1)`; total runtime is linear in the
@@ -80,6 +85,8 @@ concerns only these finite witnesses, not all-`n` completeness.
 - **REFUTED:** the single-schema compositional route to all-`n` exact
   budget (counterexample `n=5`: `8 > 7`).
 - **PROVED (finite):** `S(6) = 10` by self-certifying two-phase witness.
+- **PROVED (finite):** `S(7) = 13` by the analogous two-phase witness and
+  information lower bound; verification covers every one of 5,040 orders.
 - **CONDITIONAL:** all-`n` exact completeness of FO(TC)-style programs, if
   true, requires shape-switching (compositional and global) families.
 - **NOT CLAIMED:** unrestricted `SORT-BOUND-U` membership, hardness of
@@ -87,10 +94,8 @@ concerns only these finite witnesses, not all-`n` completeness.
 
 ## Next step
 
-Test the next compositional joints by attaining programs: `n=7`
-(`S(6)+ceil(log2 7) = 10+3 = 13 = S(7)`) and `n=8`
-(`13+3 = 16 = S(8)`; both `S` values are established in
-`docs/problem.md`), then find the next miss after `n=5` and characterize
+Test the next compositional joint at `n=8` (`13+3 = 16 = S(8)`, with the
+value established in `docs/problem.md`), then find the next miss after `n=5` and characterize
 for which `n` the recurrence `S(n-1)+ceil(log2(n))` meets `S(n)`. The
 decisive task remains an all-`n` completeness proof or refutation for the
 full fragment, not further finite witnesses.

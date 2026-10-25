@@ -13,6 +13,9 @@ is non-monotone in n:
     = 8 > 7 = S(5).  Composition provably misses the exact budget.
   * n=6: the two-phase program below achieves 10, and ceil(log2(6!)) = 10,
     so 10 = S(6) is self-certified.  Composition is exact again.
+  * n=7: the compiled two-phase program achieves 13 = S(7) (known in
+    Stober--Weiß, cited in docs/literature.md); this is an attaining witness,
+    not a self-certificate because ceil(log2(7!)) = 13 does self-certify.
 
 Lemma (paper proof, see docs/research-fo-tc-twophase.md): a deterministic
 adaptive program that first fully determines the order of n-1 fixed keys
@@ -260,7 +263,17 @@ def main():
         clock = (r["n"] + r["budget"] + r["labels"]) ** 2
         assert r["worst_steps"] <= clock, (r, clock)
         print(f"n={r['n']}: worst_steps={r['worst_steps']} <= clock={clock}")
-    print("OK: two-phase exactness is non-monotone (exact n=4, misses n=5, exact n=6).")
+    # n=7: known exact S(7)=13 (docs/problem.md, docs/literature.md).
+    # The information bound also equals 13, so this execution witness
+    # independently self-certifies the exact value.
+    assert 2 ** 12 < factorial(7) <= 2 ** 13
+    r7 = verify_program(7, 13)
+    print("n=7 two-phase:", r7)
+    assert r7["worst_queries"] == 13, r7
+    clock = (r7["n"] + r7["budget"] + r7["labels"]) ** 2
+    assert r7["worst_steps"] <= clock, (r7, clock)
+    print(f"n=7: worst_steps={r7['worst_steps']} <= clock={clock}")
+    print("OK: exact at n=4,6,7; misses n=5. This is finite evidence only.")
 
 
 if __name__ == "__main__":

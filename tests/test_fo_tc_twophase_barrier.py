@@ -2,8 +2,8 @@
 
 A strict sort-(n-1)-then-binary-insert program needs at least
 S(n-1) + ceil(log2(n)) worst-case comparisons.  At n=5 that is 5 + 3 = 8,
-which misses S(5) = 7; at n=6 the same shape achieves 10 = S(6),
-self-certified by the information bound ceil(log2(720)) = 10.
+which misses S(5) = 7; at n=6 and n=7 the same shape achieves the exact
+values 10 and 13, respectively, both self-certified by the information bound.
 
 Run with:  python3 -m unittest discover -s tests -v
 """
@@ -38,7 +38,7 @@ class TwoPhaseBarrier(unittest.TestCase):
 
     def test_runtime_performs_no_search(self) -> None:
         # Every internal label is a constant Ask pair fixed at compile time.
-        for n in (5, 6):
+        for n in (5, 6, 7):
             program, _, _ = compile_trie(n)
             for rule in program.values():
                 if rule[0] == "ask":
@@ -47,7 +47,7 @@ class TwoPhaseBarrier(unittest.TestCase):
                     self.assertNotEqual(rule[1], rule[2])
 
     def test_polynomial_clock(self) -> None:
-        for n, budget in ((5, 8), (6, 10)):
+        for n, budget in ((5, 8), (6, 10), (7, 13)):
             program, leaf_output, root = compile_trie(n)
             worst_steps = 0
             from itertools import permutations
@@ -56,6 +56,15 @@ class TwoPhaseBarrier(unittest.TestCase):
                 worst_steps = max(worst_steps, steps)
             clock = (n + budget + len(program)) ** 2
             self.assertLessEqual(worst_steps, clock)
+
+    def test_n7_two_phase_self_certifies_exact_budget(self) -> None:
+        self.assertLess(2 ** 12, factorial(7))
+        self.assertLessEqual(factorial(7), 2 ** 13)  # C(7) = 13
+        result = verify_program(7, 13)
+        self.assertEqual(result["worst_queries"], 13)
+        self.assertEqual(result["total_orders"], 5040)
+        self.assertEqual(result["ask_labels"], 5039)
+        self.assertEqual(result["strictness_rejects"], 5039)
 
 
 if __name__ == "__main__":
