@@ -103,6 +103,18 @@ class TwoPhaseBarrier(unittest.TestCase):
         self.assertEqual(exact, [2, 3, 4, 6, 7, 8, 11, 12])
         self.assertEqual(miss, [5, 9, 10])
 
+    def test_two_phase_lower_bound_is_tight_strategy_level(self) -> None:
+        # The decision procedure (Ford-Johnson on n-1 keys, then binary
+        # insertion) achieves exactly S(n-1) + ceil(log2(n)) for 2 <= n <= 8
+        # (n=9 pinned at 20 by test_n9... above), so the compiled budgets
+        # are optimal within the strict two-phase class, not just upper
+        # bounds. Ford-Johnson is optimal for n-1 <= 8 (exact for n <= 11
+        # per scripts/upper_witness.py), so phase 1 attains S(n-1).
+        known_s = {1: 0, 2: 1, 3: 3, 4: 5, 5: 7, 6: 10, 7: 13, 8: 16}
+        for n in range(2, 9):
+            worst, _ = strategy_worst_case(n)
+            self.assertEqual(worst, known_s[n - 1] + ceil(log2(n)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -112,6 +112,12 @@ concerns only these finite witnesses, not all-`n` completeness.
   information lower bound; verification covers every one of 5,040 orders.
 - **PROVED (finite):** `S(8) = 16` by the analogous two-phase witness and
   information lower bound; verification covers every one of 40,320 orders.
+- **PROVED (finite):** the two-phase lower bound `S(n-1)+ceil(log2(n))` is
+  tight at strategy level for every `2 <= n <= 9`: the Ford-Johnson +
+  binary-insertion decision procedure attains it exhaustively
+  (`tests/test_fo_tc_twophase_barrier.py::test_two_phase_lower_bound_is_tight_strategy_level`
+  for `n <= 8`; the `n=9` strategy run at 20 above). Hence each compiled
+  budget is optimal within the strict two-phase class.
 - **CONDITIONAL:** all-`n` exact completeness of FO(TC)-style programs, if
   true, requires shape-switching (compositional and global) families.
 - **NOT CLAIMED:** unrestricted `SORT-BOUND-U` membership, hardness of
