@@ -1,6 +1,6 @@
 # Exact-reset tree realizability: a branch divisibility obstruction
 
-**Date:** 2026-10-27  
+**Date:** 2026-10-27
 **Status:** paper proof; no Lean formalization or experiment needed.
 
 ## Exact stage model
