@@ -16,8 +16,11 @@ about the **minimum worst-case number of adaptive pairwise comparisons**.
   S(16)=46, S(17)=50, S(18)=54 (refuting Knuth's conjecture S(16)=45) and
   S(28)≥99 by exhaustive search with a pruned backward pass used as advice
   for the forward pass. With these, exact values are known for all n≤22;
-  n=23 is open. Runs took about 11, 115 and 89 hours on a 48-thread,
-  768 GB machine.
+  n=23 is open. (The values for n=19-22 follow from the pre-existing
+  Wells/Peczarski results the abstract credits; the full list
+  0,1,3,5,7,10,13,16,19,22,26,30,34,38,42,46,50,54,58,62,66,71 for
+  n=1..22 is indexed as OEIS A036604.) Runs took about 11, 115 and 89
+  hours on a 48-thread, 768 GB machine.
 - L. R. Ford Jr. and Selmer M. Johnson, *A Tournament Problem* (1959):
   merge-insertion sorting; check bounds and optimality against the model.
 - Knuth, *The Art of Computer Programming*, Volume 3, §5.3.1:
