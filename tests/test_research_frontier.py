@@ -33,7 +33,7 @@ class FrontierTests(unittest.TestCase):
                 dict(self.sample()[1],id='distinct-curated-front'),
             ]}))
             with (mock.patch.object(F,'STATE',p),mock.patch.object(F,'WORK',Path(temp)),
-                  mock.patch.object(F,'status',return_value='succeeded')):
+                  mock.patch.object(F,'status',return_value='clearexit')):
                 F.curate_done(d,set())
                 self.assertEqual(len(d['fronts']),2)
                 self.assertEqual(d['fronts'][1]['origin'],'ai_proposal_unverified')
@@ -124,7 +124,7 @@ class FrontierTests(unittest.TestCase):
     def test_successful_run_means_investigation_not_theorem(self):
         d={'version':1,'fronts':[dict(self.sample()[0],status='running',agent_id='agent123')],
            'curator':{}}
-        with (mock.patch.object(F,'status',return_value='succeeded'),
+        with (mock.patch.object(F,'status',return_value='clearexit'),
               mock.patch.object(F,'excerpt',return_value='no conclusive proof')):
             F.reconcile(d,set())
         row=d['fronts'][0]
