@@ -122,13 +122,13 @@ def reconcile(d,active):
         if s=='idle' and q['status']=='launching':
             q['status']='ready'  # interrupted launch, reuse the reserved agent id
             continue
-        if s not in ('succeeded','failed','stopped','killed'):continue
+        if s not in ('clearexit','failed','stopped','killed'):continue
         q.update(exit_state=s,finished_at=time.time(),
                  finding_unverified=excerpt(q['agent_id']))
         if s=='failed' and retryable_failure(q['agent_id']):
             queue_retry(q)
         else:
-            q['status']='investigated' if s=='succeeded' else 'blocked'
+            q['status']='investigated' if s=='clearexit' else 'blocked'
             print('research result',q['id'],s,flush=True)
 def curate_done(d,active):
     c=d.get('curator',{})
@@ -139,10 +139,10 @@ def curate_done(d,active):
         d['curator']={'last_finished_at':time.time(),'exit_state':'launch_interrupted'}
         print('curator launch interrupted; will retry after cooldown',flush=True)
         return
-    if s not in ('succeeded','failed','stopped','killed'):return
+    if s not in ('clearexit','failed','stopped','killed'):return
     path=WORK/'curator'/'frontier-candidates.json'
     try:
-        proposals=json.loads(path.read_text()).get('fronts',[]) if s=='succeeded' else []
+        proposals=json.loads(path.read_text()).get('fronts',[]) if s=='clearexit' else []
     except (OSError,ValueError):proposals=[]
     known={q['id'] for q in d['fronts']}
     questions={re.sub(r'\W+','',q['question'].lower()) for q in d['fronts']}
