@@ -173,7 +173,7 @@ def main():
                   f"{'exact' if b == s else 'miss'}")
     print()
     print("exact completion costs C(m,n) for small cells:")
-    for (m, n) in [(2, 4), (3, 5), (2, 5), (4, 6), (3, 6), (5, 7), (4, 7)]:
+    for (m, n) in [(2, 4), (3, 5), (2, 5), (4, 6), (3, 6), (5, 7), (4, 7), (5, 8), (6, 9)]:
         c, tree = min_completion(m, n)
         init = initial_state(m, n)
         worst = 0
