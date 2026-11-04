@@ -228,3 +228,17 @@ at `n = 23` is beyond current technique (Stober–Weiß scale per value).
   `info-bound-tightness-infinite`, `inf-eq-info-bound-alln`,
   `equality-set-infinite-alln` (status: investigated/open, no gating
   theorems previously recorded).
+
+
+## 8. Small-n verification (this session, exact integers)
+
+Computed exactly:
+- E = {n : g(n)=0} = {0,1,2,3,4,5,6,7,8,9,10,11,20,21} up to n≤22.
+- g(n)=1 for {12..19,22}.
+- n=23: S(23) open. Zone(23) expensive (Δ=5,M=5). Under Conjecture W, g(23)=0 iff beat at 23 (d(23)=4), else g(23)=1 (d(23)=5).
+- Zone lemma verified by formula for m≤4000; powers of two give expensive (Δ=M).
+- Move gates R1-R3 follow from arithmetic+two-phase bound; all match known data.
+
+Finiteness of E would require (a) no infinite run of equality and (b) no infinite beat∧expensive coincidences creating new equalities? Or more directly, if eventually no beats occur when in expensive zones and moves only up at cheap zones when tight, E becomes finite once you leave a final tight run. The rigidity: if d(n)=M(n) for all large n and g becomes >=1, it stays >=1. So finiteness of E is equivalent to: there is some N such that for all n>=N, either g(n)>=1 and it never drops to 0 (impossible to drop to 0 unless beat happens but beat needs d<M; but to become 0 again impossible once >=1 if d=M). So once g>=1 and we have d(n)=M(n) always, g is non-decreasing after N and was >=1, so never 0 again - hence E finite. Yes, matches Corollary §3.
+
+The obstruction would be to prove d(n)=M(n) for all sufficiently large n (beat extinction). The other direction is infinite beats occurring at right times. Neither proved.
