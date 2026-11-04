@@ -43,6 +43,7 @@ Barriers and structural facts:
 | An explicit sorting-tree witness has `2·n! − 1` nodes, so it is not an NP certificate | deduction | [research-certificates-barriers.md](research-certificates-barriers.md) |
 | `e(P)` (linear extensions) does not determine the minimax value; five scalar invariants falsified | experiment | [research-n12-nontightness.md](research-n12-nontightness.md), [research-hardness-boundaries.md](research-hardness-boundaries.md) |
 | Ordinal-sum decomposition is exact but does not shrink the state space | deduction + experiment | [research-series-decomposition.md](research-series-decomposition.md) |
+| Realizability window: every poset occurring at depth `d` of a height-`S(n)` play satisfies `covers(P) <= d <= S(n) - max(F(P), pi(P))` (star exclusion for all `n >= 4`); window sufficiency and `(e, covers)`-summary soundness verified at `n <= 6` | paper proof + experiment | [../notes/research-realizability-window.md](../notes/research-realizability-window.md) |
 
 Lean-checked results are listed in [kernel-results.md](kernel-results.md).
 
