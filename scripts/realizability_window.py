@@ -135,27 +135,24 @@ def build_stats(classes, n, F):
 
 
 def build_reach(n, S, F):
-    """reach[d] = classes occurring at depth d of some height<=S tree."""
+    """reach[d] = classes occurring at depth d of some height<=S tree.
+
+    A comparison contributes either child only when BOTH child subtrees fit
+    the remaining height budget. A wasted comparison leaves the state fixed
+    and is permitted only when that state itself fits the same budget.
+    """
     reach = [{(0,) * n}]
-    child_cache = {}
-
-    def children(succ):
-        c = child_cache.get(succ)
-        if c is None:
-            c = set()
-            for (i, j) in ipairs(succ, n):
-                c.add(canon(extend(succ, i, j, n), n))
-                c.add(canon(extend(succ, j, i, n), n))
-            child_cache[succ] = c
-        return c
-
     for d in range(S):
         nxt = set()
         for Q in reach[d]:
-            nxt |= children(Q)
-            if Q != (0,) * n:
+            for i, j in ipairs(Q, n):
+                C0 = canon(extend(Q, i, j, n), n)
+                C1 = canon(extend(Q, j, i, n), n)
+                if max(F[C0], F[C1]) <= S - (d + 1):
+                    nxt.update((C0, C1))
+            if Q != (0,) * n and F[Q] <= S - (d + 1):
                 nxt.add(Q)  # wasted comparison: state unchanged
-        reach.append({C for C in nxt if F[C] <= S - (d + 1)})
+        reach.append(nxt)
     return reach
 
 
@@ -181,22 +178,22 @@ def analyze(n, check=True, verbose=True):
                         and e <= 2 ** (S - d)):
                     viol += 1
         assert viol == 0, f"window-necessity violated at {viol} states"
-        mism = 0
+        sufficiency_mismatches = 0
         for succ in classes:
             e, cov, pi, fv = stat[succ]
             pred = [d for d in range(S + 1)
                     if cov <= d and fv <= S - d and pi <= S - d
                     and e <= 2 ** (S - d)]
-            if depths.get(succ, []) != pred:
-                mism += 1
-        assert mism == 0, f"window-sufficiency mismatched at {mism} classes"
+            sufficiency_mismatches += sum(
+                d not in depths.get(succ, []) for d in pred)
         star = [0] * n
         star[0] = ((1 << n) - 1) ^ 1
         st = canon(tuple(star), n)
         assert (st in depths) == (n <= 3), "star exclusion check failed"
         if verbose:
             print(f"  realizable classes: {len(depths)}/{len(classes)}; "
-                  f"window necessity and sufficiency exact; "
+                  f"window necessity holds; false-positive window "
+                  f"depth-state pairs: {sufficiency_mismatches}; "
                   f"star excluded for n>=4: {n > 3}")
     return S, classes, stat, depths, reach
 

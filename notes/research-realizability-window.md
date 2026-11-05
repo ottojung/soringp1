@@ -2,10 +2,10 @@
 
 **Date:** 2026-11-04
 **Front:** poset-class-reachability-restriction (issue #301)
-**Status:** Theorem 1 is a paper proof; the realizable-class computations are
-experiments (`scripts/realizability_window.py`,
-`tests/test_realizability_window.py`); Conjectures W and K are conjectures
-verified for every poset class at `n <= 6`.
+**Status:** Theorem 1 is a paper proof. Corrected finite reachability
+experiments are in `scripts/realizability_window.py` and
+`tests/test_realizability_window.py`. Window sufficiency is refuted at
+`n=5,6`; Conjecture K remains open beyond the finite corrected census.
 
 ## Question and payoff
 
@@ -35,21 +35,18 @@ allowed; the class without them is smaller, so necessary conditions below
 apply a fortiori to it. Let `R(P, d)` denote occurrence, and
 `R_n = { P : R(P, d) for some d }`.
 
-The exact criterion used in the experiment (and which the DP computes
-exactly):
+The exact occurrence criterion is:
 
-    R(P, d)  iff  exists a comparison chain A = P_0 (partial order inclusion)
-    from the antichain to P of length exactly d -- where steps add one
-    declared pair plus closure, or repeat (padding) -- such that
-    F(P_k) <= S(n) - k for every prefix state P_k.
+    R(P, d) iff there is a comparison chain from the antichain to P of
+    length d such that at each informative comparison from Q to children
+    C0,C1, max(F(C0),F(C1)) <= S(n)-k-1, where k is the current depth.
+    A wasted comparison at Q is permitted only when F(Q) <= S(n)-k-1.
 
-**[experiment]** The DP verifies `R(P, d)` exhaustively for `n <= 6`. Padding
-matters: at `n = 5`, 11 of the 29 realizable classes realize depths strictly
-beyond `covers(P)` (by 1-3 wasted comparisons; e.g. class `(0,1,3,7,15)`
-realizes every depth in `[4, 7]` from `covers = 4` up to `S - F = 7`), and
-at `n = 6`, 71 of 157 do. Window-size variation is real, so any all-`n`
-treatment must keep the padded (larger) class in view; Theorem 1 holds for
-the padded class and hence a fortiori for honest play.
+The previous implementation incorrectly filtered only the selected child
+after an informative comparison. This omits the sibling subtree, which is
+part of the same strategy and must fit the same height bound. The corrected
+experiment below uses the joint-child criterion. Wasted comparisons remain
+allowed when their unchanged continuation fits.
 
 ## Theorem 1 (window necessity; paper proof)
 
@@ -94,17 +91,17 @@ of the `n`-th key gives `S(n) <= S(n-1) + ceil(log2 n)`, and
 (and `S(3) - S(2) = 2 = n - 1` is fine there); `V_4, V_5, V_6` are
 unrealizable, matching the corollary.
 
-**Correction to a ledger note.** The frontier ledger entry
-`quantified-root-adversary-proof` recorded the claim that the ordinal sum
-`C_2 ⊕ A_3` (chain below a 3-element antichain, `n = 5`) "cannot occur on a
-height-7 sorting tree". **Refuted (experiment):** it occurs at depth
-exactly `4` (declared in order `b < a`, `a < x`, `a < y`, `a < z` with
-budget `3 = F`), and its window `[covers, S - max(F, pi)] = [4, 4]` is a
-singleton. Its sibling states all fit their budgets, so no root-quantifier
-argument excludes it; the ledger's example does not support the claimed
-root obstacle.
+**Correction to the prior correction.** The earlier version of this note
+claimed that `C_2 ⊕ A_3` (chain below a 3-element antichain, `n=5`) refuted
+the `quantified-root-adversary-proof` ledger claim. That was incorrect: the
+proposed declaration order `b<a, a<x, a<y, a<z` fails at its third
+comparison. At the state after `b<a, a<x`, comparing `b` with `x` has child
+continuation costs 4 and 5 with only 4 comparisons remaining. The corrected
+reachability census does not contain this poset at depth 4. Its necessary
+window is a singleton, which is not sufficient for occurrence. This finite
+check supports, but does not prove, the ledger's non-occurrence claim.
 
-## Theorem 2 (verified, `n <= 6`) and Conjecture W
+## Window sufficiency: finite counterexamples and open conjecture
 
 **Conjecture W (window sufficiency).** For all `n`, `P`:
 
@@ -114,8 +111,8 @@ If true, realizability is decided by `P` alone (via `F`): the reachable
 class is exactly the feasible-window class, realizability needs no game
 search, and "which posets can appear" collapses to a cheap interval test.
 
-**[experiment]** The window is exact — both directions, at every depth —
-for all poset classes at every `n <= 6`:
+The corrected exact reachability census confirms window necessity but
+refutes sufficiency at `n=5,6`:
 
 | n | classes | realizable | share |
 |---|---------|-----------|-------|
@@ -123,40 +120,35 @@ for all poset classes at every `n <= 6`:
 | 2 | 2   | 2   | 1.00 |
 | 3 | 5   | 5   | 1.00 |
 | 4 | 16  | 12  | 0.75 |
-| 5 | 63  | 29  | 0.46 |
-| 6 | 318 | 157 | 0.49 |
+| 5 | 63  | 19  | 0.30 |
+| 6 | 318 | 136 | 0.43 |
 
-At `n = 5, 6` about half of all poset classes are excluded, all excluded
-ones violate the window, and conversely.
+There are 24 feasible-window depth/state pairs not realized at `n=5` and 78
+at `n=6`. For example, canonical state `(0,0,0,1,9)` has
+`(e,covers,pi,F)=(20,2,2,5)` and satisfies the proposed window at depth 2,
+but is not reachable there. It is a child of `(0,0,0,0,1)` after comparing
+`(0,1)`; the two children have continuation costs 5 and 6 although only 5
+comparisons remain. Thus the comparison cannot occur in a height-7 strategy.
+Conjecture W's former finite sufficiency evidence is withdrawn; its
+algorithmic value does not follow.
 
-**Falsification attempts on W (not yet successful).**
-1. *Intermediate-budget obstruction (the serious one).* A naive
-   construction - declare the covers of `P` one by one - can fail because
-   prefix states `P_k` have larger `F` than `P`, and may violate
-   `F(P_k) <= S(n) - k`. Greedy cover-ordering is not a proof; the theorem,
-   if true, is a proper minimax fact. Counterexamples were not found at
-   `n <= 6`; the `n = 7` check (2045 classes; needs faster canonical
-   labelling) is the immediate next falsification step.
-2. *Divisibility obstruction.* The odd-order antichain-tree reset argument
-   (a single comparison splits the extension set exactly in half, leaf
-   classes have fixed sizes) does not transfer to occurrence: occurrence
-   asks only that both children fit, not that certificate classes have
-   equal sizes. No parity obstruction was found in the data (`n <= 6`).
+**Falsification of W.** The joint-child recurrence gives counterexamples
+already at `n=5,6` (above). The issue is not a subtle large-`n` minimax
+obstruction: the previous DP discarded the sibling-budget obligation at each
+step. Further work on interval sufficiency is not warranted in this form.
 
 ## Conjecture K (summary soundness inside `R_n`)
 
-**[experiment]** Within the realizable classes at `n <= 6`, the pair
+**[corrected experiment]** Within the corrected realizable classes at `n <= 6`, the pair
 `(e(P), covers(P))` determines `F(P)`:
 
-- `n = 5`: 29 realizable classes, 14 `e`-keys, 16 `(e, covers)`-keys, no
+- `n = 5`: 19 realizable classes, 10 `e`-keys, 11 `(e, covers)`-keys, no
   `F` split.
-- `n = 6`: 157 realizable classes, 35 `e`-keys (3 keys split, resolutions
-  below), 59 `(e, covers)`-keys, 75 `(e, covers, pi)`-keys, no `F` split.
+- `n = 6`: 136 realizable classes, 32 `e`-keys (1 key splits), 52
+  `(e, covers)`-keys, no `F` split.
 
-The three splitting `e`-keys at `n = 6`, all `e = 15`:
-`F = 4` with `covers = 5` (`(0,0,0,1,11,31)`, `(0,1,1,3,3,11)`) vs
-`F = 5` with `covers = 4` (`(0,0,1,2,5,21)`), plus two `F = 4, covers = 6`
-classes. Covers separates them.
+The single splitting `e`-key at `n=6` is `e=15`; adding `covers` separates
+the values in the corrected reachable census.
 
 Contrast with unrestricted posets (prior folklore, verified): the
 documented `n = 5` pair with `e = 8, F = 3` vs `4`
@@ -180,46 +172,35 @@ structure (needed by the recursion) is not a function of the key.
 1. **Yes, explicit all-n restrictions exist beyond "poset".** Theorem 1
    (window necessity) is proved for all `n`, is strictly stronger than all
 previously recorded necessary conditions, and yields a clean all-`n`
-exclusion family (stars, `Corollary 1`) plus an exact excluded-class
-census at `n <= 6` (excludees: 4 at `n = 4`, 34 at `n = 5`, 161 at
-`n = 6`; every excluded class violates the window, and vice versa).
-2. **The positive side is not yet closed.** Conjecture W would be a real
-   structural theorem about `S(n)` (feasibility = realizability), with
-   algorithmic value for bidding/bidirectional exact solvers.
+   exclusion family (stars, `Corollary 1`).
+2. **The positive side is refuted in its interval-only form.** Conjecture W
+   fails at `n=5,6`; interval feasibility does not decide realizability.
 3. **The transfer side (front's second half).** No known poly-time
    counting or certificate transfer is *enabled* by these restrictions:
    counting `e` stays #P-hard in general, `R_n`-membership itself is
    only characterized through the hypotheses being tested. Evidence
-   argues *against* the falsifier direction: `R_n` is a small (~49%),
-   information-tight, (e, covers)-rigid subfamily, with no #P-hardness
-   witness in it and none expected from the transfer tools. **The exact
-   evidence-backed blocker:** the two all-`n` questions on which the front
-   hinges — window sufficiency (Conjecture W) and summary soundness
-   (Conjecture K) — are verified only up to `n = 6`; the `n = 7, 8` data
-   (both cheap once canonical labelling is accelerated) should be the
-   next falsification pass before either conjecture is claimed as
-   risk-bearing.
+   argues *against* the falsifier direction: the corrected `R_n` is a
+   restricted subfamily and `(e,covers)` remains sound in the finite census.
+   Conjecture K is only a finite observation; no algorithmic transfer follows.
 
 ## Evidence labels
 
 - Theorem 1, Lemmas 1-3, Corollary 1: **paper proof (deduction)**; only
   the classical `S(n) <= S(n-1) + ceil(log2 n)` insertion bound is used
   (deduction from the model, also literature).
-- Star realizability at `n <= 6`, window-exactness table, `(e, covers)`
-  summary data, refutation of the ledger's `C_2 ⊕ A_3` claim:
+- Corrected reachability, star realizability and `(e, covers)` summary data,
+  plus the refutation of the ledger's `C_2 ⊕ A_3` claim:
   **experiment**, exact exhaustive DP over all poset classes
   (`scripts/realizability_window.py`, asserts in
   `tests/test_realizability_window.py`).
-- Conjectures W and K: **experiment + conjecture**, all-`n` status open.
+- Conjecture W: **refuted at `n=5,6`**; interval sufficiency is false.
+- Conjecture K: **corrected finite experiment + conjecture**, all-`n` status open.
 
 ## Reproduction
 
     python3 -m unittest discover -s tests        # n <= 5 checks
     python3 scripts/realizability_window.py -n 6  # full n <= 6 census (~1 min)
 
-Limitations: exact for `n <= 6` only; `n = 7` requires a faster
+Limitations: reachability census exact for `n <= 6` only; `n = 7` requires a faster
 canonicalizer than the `n!`-permutation one used here; no claim is made
-about optimality of the DP definition (padded/wasted comparisons are
-allowed, making the realizable class *larger*, which strictly strengthens
-Theorem 1 but weakens Conjecture W's usefulness if padding turns out to
-matter at larger `n`).
+about any all-`n` summary property of the corrected reachable class.
