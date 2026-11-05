@@ -10,17 +10,17 @@ Model (docs/problem.md, docs/upper-bound.md):
   sorting strategy of worst-case height <= S(n) rooted at the antichain
   (padded/wasted comparisons allowed; the class without them is smaller).
 
-Forward DP (exact):
+Forward DP (exact for the finite enumerated state space):
   reach[0] = {antichain}
-  reach[d+1] = { canonical children of states in reach[d] }
-             union reach[d] \\ {antichain}   (wasted comparison)
-  filtered to F(C) <= S(n) - (d+1).
+  for each incomparable pair at Q in reach[d], add BOTH canonical children
+      only if max(F(C0), F(C1)) <= S(n) - (d+1)
+  a wasted comparison adds Q again only if F(Q) <= S(n) - (d+1).
 
-Checks performed for each n <= bound (all empirically exact at n <= 6):
+Checks reported for each n <= bound:
   W1  every realizable (P,d) satisfies covers(P) <= d <= S - max(F(P), pi(P));
-  W2  the realizable depth set equals the full window at every depth
-      (window sufficiency, conjecture for all n);
-  W3  the star V_n is realizable iff n <= 3 (corollary: never for n >= 4).
+  W2  count feasible-window depth/state pairs absent from the exact reach DP;
+      these are finite counterexamples to window sufficiency at n=5,6;
+  W3  compare the star census with the all-n exclusion theorem (finite check only).
 
 This is an experiment, not a proof.  The companion note is
 notes/research-realizability-window.md.
