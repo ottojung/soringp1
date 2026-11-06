@@ -101,9 +101,12 @@ knowing `S(47)`.
 **The identity holds exactly on the known optimality range.** Since
 `S(n) = M(n)` is established for `1 <= n <= 22` (Wells; Kasai–Sawato–Iwata;
 Peczarski; Stober–Weiß), the identity `F(P_{n,t}) = S(n) - t` holds for all
-`0 <= t <= floor(n/2)` precisely for `1 <= n <= 22`. The pattern observed
-for `n <= 12` was therefore a verification of merge-insertion optimality, not
-evidence for a new all-`n` phenomenon.
+`0 <= t <= floor(n/2)` throughout `1 <= n <= 22`. For `23 <= n <= 46` the
+identity is *equivalent* to the open question whether merge-insertion is
+optimal there (no `n < 47` with `F(n) > S(n)` is known), and for `n = 47` and
+infinitely many larger `n` it is false. The pattern observed for `n <= 12` was
+therefore a verification of merge-insertion optimality, not evidence for a new
+all-`n` phenomenon.
 
 **No all-`n` conclusion about `S(n)` can be extracted from this front.** The
 prefix identity carries exactly the information "merge-insertion is optimal
