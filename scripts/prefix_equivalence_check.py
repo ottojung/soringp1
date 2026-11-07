@@ -53,10 +53,11 @@ def main():
     parser.add_argument("max_n", nargs="?", type=int, default=8)
     args = parser.parse_args()
 
-    # Exact S(n) for the optimality range (Wells through n=12 plus the
-    # established values used in docs/research-plan.md).
+    # Exact S(n) for the established range; values through 22 are recorded in
+    # docs/research-plan.md and docs/literature.md.
     known_s = {1: 0, 2: 1, 3: 3, 4: 5, 5: 7, 6: 10, 7: 13, 8: 16, 9: 19,
-               10: 22, 11: 26, 12: 30}
+               10: 22, 11: 26, 12: 30, 13: 34, 14: 38, 15: 42, 16: 46,
+               17: 50, 18: 54, 19: 58, 20: 62, 21: 66, 22: 71}
 
     failures = 0
     for n in range(2, args.max_n + 1):
@@ -66,11 +67,11 @@ def main():
             f = exact_f_for_prefix(n, t)
             elapsed = time.time() - start
             s = known_s.get(n)
-    # Both proved bounds must hold; report a failure if not.
+            # Unknown lower endpoint is reported as unknown, not as passing.
             ok_upper = f <= m - t
-            ok_lower = (s is None) or (f >= s - t)
+            ok_lower = None if s is None else (f >= s - t)
             tight = (s is not None) and f == m - t == s - t
-            if not (ok_upper and ok_lower):
+            if not ok_upper or ok_lower is False:
                 failures += 1
             print(
                 "n=%2d t=%2d F=%3d M-t=%3d S-t=%s upper=%s lower=%s tight=%s (%.1fs)"
@@ -81,7 +82,7 @@ def main():
                     m - t,
                     "-" if s is None else s - t,
                     ok_upper,
-                    ok_lower,
+                    "unknown" if ok_lower is None else ok_lower,
                     tight,
                     elapsed,
                 ),
