@@ -7,6 +7,7 @@ comparisons, and the decision procedure does report a shortfall when the
 budget is one too small.
 """
 
+import os
 import random
 import unittest
 
@@ -66,10 +67,29 @@ class CoreCensusTest(unittest.TestCase):
             enumerate_cores(5)
 
     def test_staircase_is_the_fibonacci_witness(self):
-        expected = [(2, 1), (3, 2), (5, 3), (8, 4), (13, 5), (21, 6), (34, 7), (55, 8)]
+        expected = [
+            (2, 1), (3, 2), (5, 3), (8, 4), (13, 5), (21, 6),
+            (34, 7), (55, 8), (89, 9),
+        ]
         for n, (fib, depth) in enumerate(expected, start=2):
             with self.subTest(n=n):
                 self.assertEqual(_min_budget(staircase(n)), (fib, depth))
+
+    @unittest.skipUnless(
+        os.environ.get("SORINGP1_SLOW_TESTS") == "1",
+        "set SORINGP1_SLOW_TESTS=1; the E=88 census takes several minutes",
+    )
+    def test_t8_boundary(self):
+        levels = enumerate_cores(88)
+        self.assertEqual(sum(len(v) for v in levels.values()), 22120)
+        failures = [
+            (n, len(exts))
+            for n, classes in levels.items()
+            for _, exts in classes.values()
+            if not sortable(tuple(sorted(exts)), 8)
+        ]
+        self.assertEqual(failures, [])
+        self.assertEqual(_min_budget(staircase(10)), (89, 9))
 
     def test_all_cores_with_e_at_most_33_sort_in_six(self):
         failures = [

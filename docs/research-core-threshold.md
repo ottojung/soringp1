@@ -41,8 +41,10 @@ whose position is known once the rest is sorted). Conversely, a strategy for
 `P` of height `h` becomes one for `P - x` after deleting comparisons with `x`.
 Hence `m(P) = m(P - x)`. ∎
 
-**Corollary.** Iterating Lemma 1 maps any finite poset `P` to a core `C` with
-`e(C) = e(P)`, `m(C) = m(P)` and `|C| <= |P|`. So a census of cores determines
+**Corollary.** Iterating Lemma 1 maps any finite poset `P` either to a
+nonempty core `C` with `e(C) = e(P)`, `m(C) = m(P)` and `|C| <= |P|`, or to the
+empty poset (`e = 1`, `m = 0`, which a total order reaches). The empty outcome
+never constrains `T(r)` for `r >= 1`. So a census of nonempty cores determines
 `T(r)` for every `r` in the range it covers.
 
 ## 2. Maximal deletions of cores
@@ -144,7 +146,7 @@ Known independent totals and cross-checks `[experiment]`:
 | core classes with `e <= 20` (independent full census) | 250 | 250 |
 | all 250 cores at `e <= 20` sortable in 5 comparisons | yes | yes |
 | cores with `e <= 33` for `n <= 8` from *all* unlabeled posets | — | equal sets |
-| staircase `W_n`: `e = F_{n+1}`, `m = n - 1` | `n = 2..11` | matches |
+| staircase `W_n`: `e = F_{n+1}`, `m = n - 1` | `n = 2..10` | matches |
 
 The `n <= 8` row is a genuine independent check: an all-poset enumerator
 (validated against the class counts `1, 2, 5, 16, 63, 318, 2045, 16999`), with
@@ -178,13 +180,14 @@ cases `r = 6, 7, 8` being new here.
 ## 6. Limits, and the open all-`r` statement
 
 The census is **conditional on implementation faithfulness**. The generator was
-audited against an independent all-poset enumeration only for `n <= 8` and
-against the two externally known totals at `E = 12, 20`; the ranges `n = 9..33`
-(for `E = 33`) and `n = 9..54` (for `E = 54`) rest on the generator alone. A
-second, dual generator (minimal insertion below proper filters, independent
-canonical form) is the natural check and is being run separately; until it
-agrees on the `E = 33` and `E = 54` sets, the two thresholds should be cited as
-*verified by one audited implementation*, not as independently replicated.
+audited against an independent all-poset enumeration only for `n <= 9` and
+against the known totals at `E = 12, 20`; the ranges `n = 10..33` (for
+`E = 33`), `n = 10..54` (for `E = 54`) and `n = 10..88` (for `E = 88`) rest on
+the generator alone. A second, dual generator (minimal insertion below proper
+filters, independent canonical form) is the natural check and is being run
+separately; until it agrees on those sets, `T(6) = 33`, `T(7) = 54` and
+`T(8) = 88` should be cited as *verified by one audited implementation*, not as
+independently replicated.
 
 The general statement behind all of this,
 
@@ -196,7 +199,8 @@ with `e <= F_{r+3} - 1` has `m <= r`. The matching upper half needs the
 staircase family `W_n` to have `e(W_n) = F_{n+1}` and `m(W_n) = n - 1` for
 every `n`, which yields `T(r) <= F_{r+3} - 1` via `W_{r+2}` (`e = F_{r+3}`,
 `m = r + 1`). Those staircase values are **verified computationally** for
-`n <= 11` (Section 4), not proved for all `n` here; so the two halves are not
+`n <= 10` (Section 4; `W_11 = (144, 10)` was checked with the same script), not
+proved for all `n` here; so the two halves are not
 interchangeable, and neither is claimed for all `r`. A sufficient route is the balancing statement (*Lemma A*):
 every `P` with `m(P) >= 2` has a comparison whose two children both have depth
 at least `m(P) - 2`. That is unproved; if it holds, the Fibonacci induction is
@@ -219,4 +223,6 @@ They therefore do not by themselves yield a better uniform bound for `S(n)`.
 python3 -m unittest tests.test_core_threshold -v
 python3 scripts/core_threshold_census.py --E 33 --h 6 --levels   # 1053 cores, 0 failures
 python3 scripts/core_threshold_census.py --E 54 --h 7            # 4829 cores, 0 failures
+python3 scripts/core_threshold_census.py --E 88 --h 8            # 22120 cores, 0 failures
+SORINGP1_SLOW_TESTS=1 python3 -m unittest tests.test_core_threshold -v  # adds the T(8) check
 ```

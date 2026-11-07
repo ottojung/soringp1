@@ -13,8 +13,9 @@ every poset with ``e(P) <= E`` has ``m(P) <= r``.
 Two structural facts make a finite census of *cores* sufficient:
 
 * deleting an element comparable with every other element does not change
-  ``e`` or ``m``, so every poset reduces to a **core** (no element comparable
-  with all others) with the same ``(e, m)``;
+  ``e`` or ``m``, so every poset reduces to a **nonempty core** (no element
+  comparable with all others) with the same ``(e, m)``, or to the empty poset
+  (``e = 1``, ``m = 0``, immaterial for ``T(r)`` with ``r >= 1``);
 * every core is built from the 2-antichain by (i) adjoining a new maximal
   element above a proper ideal and (ii) ordinal sums, and every core has
   ``e(P) >= |P|``.
