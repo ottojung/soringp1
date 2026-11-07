@@ -40,11 +40,6 @@ from itertools import permutations
 # The relation is transitively closed and irreflexive.
 # ---------------------------------------------------------------------------
 
-FIB = [0, 1, 1]
-while len(FIB) < 24:
-    FIB.append(FIB[-1] + FIB[-2])
-
-
 def predecessors(up):
     n = len(up)
     pre = [0] * n
@@ -58,8 +53,15 @@ def predecessors(up):
 
 
 def is_core(up):
-    """True when no element is comparable with every other element."""
+    """True when the poset is nonempty and no element is comparable with all.
+
+    The empty poset is excluded by convention: it vacuously has no universal
+    element, but ``e = 1`` and ``m = 0``, so it is immaterial for ``T(r)``,
+    ``r >= 1``.
+    """
     n = len(up)
+    if n == 0:
+        return False
     pre = predecessors(up)
     for a in range(n):
         if pre[a].bit_count() + up[a].bit_count() == n - 1:
@@ -126,7 +128,11 @@ def _canon(up, colors):
 
 @lru_cache(maxsize=None)
 def canonical(up):
-    """Isomorphism-canonical relabelling of ``up`` (validated on n <= 9)."""
+    """Isomorphism-canonical relabelling of ``up``.
+
+    Invariance under random relabellings is covered by the tests, and the whole
+    census agrees with an independent all-poset enumeration for ``n <= 9``.
+    """
     return _canon(up, tuple([0] * len(up)))
 
 
@@ -204,7 +210,12 @@ def ordinal_sum(left, right):
 
 
 def enumerate_cores(E):
-    """All core isomorphism classes with e <= E, keyed by level."""
+    """All core isomorphism classes with e <= E, keyed by level.
+
+    Requires ``E >= 6``: the 3-antichain base has ``e = 6``.
+    """
+    if E < 6:
+        raise ValueError("E must be at least 6 (the 3-antichain has e = 6)")
     levels = {2: {canonical(antichain2()[0]): antichain2()},
               3: {canonical(antichain3()[0]): antichain3()}}
     for ideal in ideals(antichain2()[0], (0, 1))[:-1]:

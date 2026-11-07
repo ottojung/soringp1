@@ -15,8 +15,11 @@ minimum worst-case number of further adaptive comparisons that sorts every
 linear extension of `P` (so `m` of a total order is `0`). `T(r)` is the largest
 `E` such that `e(P) <= E` implies `m(P) <= r`, when that maximum exists.
 
-An element is **universal** if it is comparable with every other element. A
-**core** is a finite poset with no universal element. An **ordinal sum** `A (+) B`
+Write `F_1 = F_2 = 1` for the Fibonacci numbers. An element is **universal**
+if it is comparable with every other element. A **core** is a *nonempty* finite
+poset with no universal element. (The empty poset vacuously has no universal
+element, but `e = 1` and `m = 0`, so it never affects `T(r)` for `r >= 1`; the
+census omits it deliberately.) An **ordinal sum** `A (+) B`
 puts every element of `A` below every element of `B` and adds no other
 relations; `P` is **ordinal-indecomposable** when it is not such a sum of two
 nonempty posets. A **proper ideal** of `A` is a down-set other than `A`.
@@ -92,7 +95,8 @@ already obtained, or (ii) forming an ordinal sum of two cores already obtained.
 
 *Proof.* Induct on `|P|`. For `|P| <= 3` the cores are the 2-antichain, the
 3-antichain `e = 6`, and the one-relation-plus-isolated-element poset `e = 3`;
-all are generated (the last two from the 2-antichain). If `P = A (+) B`, use
+all are generated (the last two from the 2-antichain). The empty poset is
+excluded by the definition of a core above. If `P = A (+) B`, use
 Lemma 3 and the induction hypothesis. Otherwise `P` is indecomposable, so
 Lemma 2 supplies a maximal `x` with `A = P - x` a core; by induction `A` is
 generated. Let `I = {a in A : a < x}`. This is a down-set, and it is proper,
@@ -140,12 +144,16 @@ Known independent totals and cross-checks `[experiment]`:
 | core classes with `e <= 20` (independent full census) | 250 | 250 |
 | all 250 cores at `e <= 20` sortable in 5 comparisons | yes | yes |
 | cores with `e <= 33` for `n <= 8` from *all* unlabeled posets | — | equal sets |
-| staircase `S_n`: `e = F_{n+1}`, `m = n - 1` | `n = 2..9` | matches |
+| staircase `W_n`: `e = F_{n+1}`, `m = n - 1` | `n = 2..11` | matches |
 
 The `n <= 8` row is a genuine independent check: an all-poset enumerator
 (validated against the class counts `1, 2, 5, 16, 63, 318, 2045, 16999`), with
 its own canonical form and extension counter, yields exactly the same 593 core
-classes with `e <= 33` as the generator, level by level. The counts `63` and
+classes with `e <= 33` as the generator, level by level. The same check has
+since been extended to `n = 9` (all `183,231` classes, class count validated):
+`765` classes on both sides, zero missing, zero extra, per-level counts equal.
+So the implementation is independently corroborated for `n <= 9`; the remaining
+unreplicated range is `n = 10..33` for `E = 33` and `n = 10..54` for `E = 54`. The counts `63` and
 `250` are the totals reported by the older direct census in this repository's
 research log, which uses a different enumeration order.
 
@@ -154,14 +162,18 @@ research log, which uses a different enumeration order.
 **Result** `[experiment, conditional on the implementation matching §4]`.
 
 * `T(6) = 33`: all 1,053 cores with `e <= 33` are sortable within 6
-  comparisons, and the staircase `S_8` has `e = 34`, `m = 7` (it fails at 6 and
+  comparisons, and the staircase `W_8` has `e = 34`, `m = 7` (it fails at 6 and
   succeeds at 7).
 * `T(7) = 54`: all 4,829 cores with `e <= 54` are sortable within 7
-  comparisons, and the staircase `S_9` has `e = 55`, `m = 8`.
+  comparisons, and the staircase `W_9` has `e = 55`, `m = 8`.
+* `T(8) = 88`: all 22,120 cores with `e <= 88` are sortable within 8
+  comparisons, and the staircase `W_10` has `e = 89`, `m = 9`, so no larger `E`
+  carries the same guarantee.
 
-Together with the previously established `T(2..5) = 4, 7, 12, 20`, this gives
-`T(r) = F_{r+3} - 1` for `2 <= r <= 7` (`4, 7, 12, 20, 33, 54`), the `r = 6`
-and `r = 7` cases being new here.
+Together with the previously established `T(2..5) = 4, 7, 12, 20` (see
+`docs/research-obstruction-next.md` and the SoringP1 #301 research record), this
+gives `T(r) = F_{r+3} - 1` for `2 <= r <= 8` (`4, 7, 12, 20, 33, 54, 88`), the
+cases `r = 6, 7, 8` being new here.
 
 ## 6. Limits, and the open all-`r` statement
 
@@ -176,9 +188,16 @@ agrees on the `E = 33` and `E = 54` sets, the two thresholds should be cited as
 
 The general statement behind all of this,
 
-    e(P) >= F_{m(P)+2} for every finite poset P,   equivalently T(r) = F_{r+3} - 1,
+    e(P) >= F_{m(P)+2} for every finite poset P,
 
-**remains open**. A sufficient route is the balancing statement (*Lemma A*):
+**remains open**. It is equivalent to the *lower* half of
+`T(r) = F_{r+3} - 1`, namely `T(r) >= F_{r+3} - 1` for every `r`: every poset
+with `e <= F_{r+3} - 1` has `m <= r`. The matching upper half needs the
+staircase family `W_n` to have `e(W_n) = F_{n+1}` and `m(W_n) = n - 1` for
+every `n`, which yields `T(r) <= F_{r+3} - 1` via `W_{r+2}` (`e = F_{r+3}`,
+`m = r + 1`). Those staircase values are **verified computationally** for
+`n <= 11` (Section 4), not proved for all `n` here; so the two halves are not
+interchangeable, and neither is claimed for all `r`. A sufficient route is the balancing statement (*Lemma A*):
 every `P` with `m(P) >= 2` has a comparison whose two children both have depth
 at least `m(P) - 2`. That is unproved; if it holds, the Fibonacci induction is
 straightforward, since both children of a needed comparison must be large.
