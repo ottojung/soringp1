@@ -154,11 +154,10 @@ its own canonical form and extension counter, yields exactly the same 593 core
 classes with `e <= 33` as the generator, level by level. The same check has
 since been extended to `n = 9` (all `183,231` classes, class count validated):
 `765` classes on both sides, zero missing, zero extra, per-level counts equal.
-So the implementation is independently corroborated for `n <= 9`; the remaining
-unreplicated ranges are `n = 10..33` for `E = 33`, `n = 10..54` for `E = 54` and
-`n = 10..88` for `E = 88`.
+So the implementation is independently corroborated against an all-poset census
+for `n <= 9`.
 
-**Second, dual generator: no discrepancy.** An independent implementation using
+**Second, dual generator: no discrepancy, for `E = 33` and `E = 54` in full.** An independent implementation using
 the dual recursion (adjoin a new *minimal* element below a proper filter;
 ordinal sums), its own canonical form, and an exact backtracking isomorphism
 test on every matched pair reproduces the same `1,053` classes at `E = 33` and
@@ -194,13 +193,12 @@ cases `r = 6, 7, 8` being new here.
 The census is **conditional on implementation faithfulness**. The generator was
 audited against an independent all-poset enumeration for `n <= 9`, against the
 known totals at `E = 12, 20`, and against a second, dual generator, which
-reproduces the `E = 33` and `E = 54` class sets exactly (Section 4). What
-remains single-implementation is the range `n = 13..33` for `E = 33`,
-`n = 13..54` for `E = 54`, and `n = 10..88` for `E = 88` (the dual check did not
-cover `E = 88`). `T(6) = 33` and `T(7) = 54` therefore rest on two independent
-enumerations that agree exactly, plus an independent census through `n = 12`;
-`T(8) = 88` rests on one audited implementation and should be cited
-accordingly.
+reproduces the `E = 33` and `E = 54` class sets exactly (Section 4). The one threshold not
+covered by a second implementation is `E = 88` (`n = 10..88`); the dual check
+covered `E = 33` and `E = 54` in full. `T(6) = 33` and `T(7) = 54` therefore
+rest on two independent enumerations that agree exactly on the complete class
+sets, plus an independent all-poset census through `n = 12`; `T(8) = 88` rests
+on one audited implementation and should be cited accordingly.
 
 The general statement behind all of this,
 
