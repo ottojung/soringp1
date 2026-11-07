@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Check F(t C_2 + A_{n-2t}) against M(n) - t and S(n) - t.
+"""Check F(t C_2 + A_{n-2t}) against the valid bounds M(n)-t and S(n)-t.
 
-See docs/research-prefix-equivalence.md. The theorem there says
+See docs/research-prefix-bounds.md. The theorem there proves
 
     S(n) - t <= F(P_{n,t}) <= M(n) - t,
 
-with both bounds equal exactly when merge-insertion is optimal on n keys.
-This script evaluates F(P_{n,t}) exactly (transcript DFS) for small n and all
-t, and prints the three quantities side by side. It is a finite read-out of
-the lemmas, not a proof.
+When S(n)=M(n), the bounds coincide. The converse is not established by those
+bounds: in particular t=0 gives F(A_n)=S(n) tautologically. This script
+evaluates F(P_{n,t}) exactly (transcript DFS) for small n and all t, and
+prints the quantities side by side. It is a finite check, not an all-n proof.
 
 Usage: python3 scripts/prefix_equivalence_check.py [max_n]
 """
@@ -66,7 +66,7 @@ def main():
             f = exact_f_for_prefix(n, t)
             elapsed = time.time() - start
             s = known_s.get(n)
-            # Both theorem bounds must hold; report a failure if not.
+    # Both proved bounds must hold; report a failure if not.
             ok_upper = f <= m - t
             ok_lower = (s is None) or (f >= s - t)
             tight = (s is not None) and f == m - t == s - t
@@ -87,7 +87,7 @@ def main():
                 ),
                 flush=True,
             )
-    print("FAILURES:", failures)
+    print("BOUND FAILURES:", failures)
     return 1 if failures else 0
 
 
