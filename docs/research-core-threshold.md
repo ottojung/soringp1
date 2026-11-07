@@ -155,7 +155,8 @@ classes with `e <= 33` as the generator, level by level. The same check has
 since been extended to `n = 9` (all `183,231` classes, class count validated):
 `765` classes on both sides, zero missing, zero extra, per-level counts equal.
 So the implementation is independently corroborated for `n <= 9`; the remaining
-unreplicated range is `n = 10..33` for `E = 33` and `n = 10..54` for `E = 54`. The counts `63` and
+unreplicated ranges are `n = 10..33` for `E = 33`, `n = 10..54` for `E = 54` and
+`n = 10..88` for `E = 88`. The counts `63` and
 `250` are the totals reported by the older direct census in this repository's
 research log, which uses a different enumeration order.
 
@@ -199,8 +200,7 @@ with `e <= F_{r+3} - 1` has `m <= r`. The matching upper half needs the
 staircase family `W_n` to have `e(W_n) = F_{n+1}` and `m(W_n) = n - 1` for
 every `n`, which yields `T(r) <= F_{r+3} - 1` via `W_{r+2}` (`e = F_{r+3}`,
 `m = r + 1`). Those staircase values are **verified computationally** for
-`n <= 10` (Section 4; `W_11 = (144, 10)` was checked with the same script), not
-proved for all `n` here; so the two halves are not
+`n <= 10` (Section 4), not proved for all `n` here; so the two halves are not
 interchangeable, and neither is claimed for all `r`. A sufficient route is the balancing statement (*Lemma A*):
 every `P` with `m(P) >= 2` has a comparison whose two children both have depth
 at least `m(P) - 2`. That is unproved; if it holds, the Fibonacci induction is
