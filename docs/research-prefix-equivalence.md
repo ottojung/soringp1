@@ -119,10 +119,13 @@ is the classical `n = 47` phenomenon reappearing.
 `scripts/prefix_equivalence_check.py` (in this worktree) computes `F(P_{n,t})`
 exactly with the repository's transcript DFS (`scripts/transcript_dfs.py`) for
 all `0 <= t <= floor(n/2)` and prints `F(P_{n,t})`, `M(n) - t` and
-`S(n) - t`. For `2 <= n <= 8` every value satisfies
-`F(P_{n,t}) = M(n) - t = S(n) - t`, as the theorem requires on the optimality
-range. This is a finite read-out of the two lemmas, not a proof of either;
-the proof above is the general argument.
+`S(n) - t`. A run over `2 <= n <= 5`, all `t`, reported no failure and every
+value satisfied `F(P_{n,t}) = M(n) - t = S(n) - t`, as the theorem requires on
+the optimality range. The unpruned DFS becomes expensive at `n = 6` (the
+antichain case), so this worktree does not extend that run further; the
+project's earlier exact computations already covered `n <= 12`, and those
+values are consistent with the theorem. This is a finite read-out of the two
+lemmas, not a proof of either; the proof above is the general argument.
 
 ## What would be new
 
