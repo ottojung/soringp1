@@ -154,9 +154,19 @@ its own canonical form and extension counter, yields exactly the same 593 core
 classes with `e <= 33` as the generator, level by level. The same check has
 since been extended to `n = 9` (all `183,231` classes, class count validated):
 `765` classes on both sides, zero missing, zero extra, per-level counts equal.
-So the implementation is independently corroborated for `n <= 9`; the remaining
-unreplicated ranges are `n = 10..33` for `E = 33`, `n = 10..54` for `E = 54` and
-`n = 10..88` for `E = 88`. The counts `63` and
+So the implementation is independently corroborated against an all-poset census
+for `n <= 9`.
+
+**Second, dual generator: no discrepancy, for `E = 33` and `E = 54` in full.** An independent implementation using
+the dual recursion (adjoin a new *minimal* element below a proper filter;
+ordinal sums), its own canonical form, and an exact backtracking isomorphism
+test on every matched pair reproduces the same `1,053` classes at `E = 33` and
+the same `4,829` at `E = 54`: zero classes only in either set, zero shared
+classes with different `e`, and zero isomorphism-test failures. It also
+reproduces the known totals `63` and `250` at `E = 12, 20`, matches an
+independent all-poset census for `n <= 8`, and matches an `e <= 33`-pruned
+census through `n = 12` (valid pruning, since adjoining an element cannot
+decrease `e`), giving no differences at `n = 9, 10, 11, 12`. The counts `63` and
 `250` are the totals reported by the older direct census in this repository's
 research log, which uses a different enumeration order.
 
@@ -181,14 +191,14 @@ cases `r = 6, 7, 8` being new here.
 ## 6. Limits, and the open all-`r` statement
 
 The census is **conditional on implementation faithfulness**. The generator was
-audited against an independent all-poset enumeration only for `n <= 9` and
-against the known totals at `E = 12, 20`; the ranges `n = 10..33` (for
-`E = 33`), `n = 10..54` (for `E = 54`) and `n = 10..88` (for `E = 88`) rest on
-the generator alone. A second, dual generator (minimal insertion below proper
-filters, independent canonical form) is the natural check and is being run
-separately; until it agrees on those sets, `T(6) = 33`, `T(7) = 54` and
-`T(8) = 88` should be cited as *verified by one audited implementation*, not as
-independently replicated.
+audited against an independent all-poset enumeration for `n <= 9`, against the
+known totals at `E = 12, 20`, and against a second, dual generator, which
+reproduces the `E = 33` and `E = 54` class sets exactly (Section 4). The one threshold not
+covered by a second implementation is `E = 88` (`n = 10..88`); the dual check
+covered `E = 33` and `E = 54` in full. `T(6) = 33` and `T(7) = 54` therefore
+rest on two independent enumerations that agree exactly on the complete class
+sets, plus an independent all-poset census through `n = 12`; `T(8) = 88` rests
+on one audited implementation and should be cited accordingly.
 
 The general statement behind all of this,
 
