@@ -12,7 +12,6 @@ from decimal import Decimal, getcontext
 from scripts.core_threshold_census import (
     enumerate_cores,
     extensions_by_permutation,
-    predecessors,
     sortable,
     staircase,
 )
@@ -91,7 +90,7 @@ class WidthTwoThresholdTest(unittest.TestCase):
                     self.assertGreaterEqual(len(exts), FIB[m + 2])
                 checked += 1
         # Anti-vacuity: the filter must actually select most small cores.
-        self.assertGreater(checked, 100)
+        self.assertEqual(checked, 146)
 
 
 if __name__ == "__main__":
