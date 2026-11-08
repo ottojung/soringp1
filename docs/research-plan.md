@@ -43,6 +43,7 @@ Barriers and structural facts:
 | An explicit sorting-tree witness has `2·n! − 1` nodes, so it is not an NP certificate | deduction | [research-certificates-barriers.md](research-certificates-barriers.md) |
 | `e(P)` (linear extensions) does not determine the minimax value; five scalar invariants falsified | experiment | [research-n12-nontightness.md](research-n12-nontightness.md), [research-hardness-boundaries.md](research-hardness-boundaries.md) |
 | Ordinal-sum decomposition is exact but does not shrink the state space | deduction + experiment | [research-series-decomposition.md](research-series-decomposition.md) |
+| `S` is not `k`-regular for any integer base `k ≥ 2`; the `k`-kernel is infinite-dimensional | paper proof (Sergeev + Lindemann) | [research-k-regular-nonregularity.md](research-k-regular-nonregularity.md) |
 
 Lean-checked results are listed in [kernel-results.md](kernel-results.md).
 

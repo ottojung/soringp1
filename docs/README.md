@@ -29,6 +29,9 @@ historical.
   — counting states is not a plausible exact polynomial evaluator.
 - [Sergeev's bound](research-sergeev-asymptotic.md) — the known
   `log₂(n!)+o(n)` sorting-comparison bound, not an exact evaluator.
+- [`S(n)` is not k-regular](research-k-regular-nonregularity.md) — the
+  second-order term `−n/ln 2` rules out every finite-dimensional base-`k`
+  digit representation for all `k ≥ 2`.
 - [Structural lower bounds](research-structural-lower-bounds.md),
   [one-ply obstructions](research-one-ply-obstruction.md), and
   [n=12 source audit](research-obstruction-next.md).
