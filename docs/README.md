@@ -27,6 +27,9 @@ historical.
   language, advice, and transfer limitations.
 - [Large winning-frontier barrier](research-winning-frontier-barrier.md)
   — counting states is not a plausible exact polynomial evaluator.
+- [Non-holonomy of `S`](research-nonholonomy.md) — no fixed-order
+  P-recursive recurrence (and no algebraic generating function) can
+  represent the exact sorting numbers.
 - [Sergeev's bound](research-sergeev-asymptotic.md) — the known
   `log₂(n!)+o(n)` sorting-comparison bound, not an exact evaluator.
 - [Structural lower bounds](research-structural-lower-bounds.md),
