@@ -70,6 +70,23 @@ class EncodedStrategyProgramTests(unittest.TestCase):
         # known non-optimality example: B(5)=8 > S(5)=7, while still a valid restricted witness.
         self.assertEqual(results[5]["budget"], 8)
 
+    def test_merge_sort_strategy_restricted_family(self):
+        # Standard top-down merge sort as an adaptive charged-oracle strategy.
+        # Sound and polynomial-step at budget M(n) (worst-case comparisons), not S(n) in general.
+        results = ESP.check_merge_sort_family(max_n=8)
+        expected = {1: 0, 2: 1, 3: 3, 4: 5, 5: 8, 6: 11, 7: 14, 8: 17}
+        self.assertEqual(set(results), set(expected))
+        for n, info in results.items():
+            with self.subTest(n=n):
+                self.assertTrue(info["ok"], info)
+                self.assertEqual(info["budget"], expected[n])
+                self.assertEqual(info["worst_q"], info["budget"])
+                # bookkeeping + comparisons are O(n log n) per run in this accounting
+                self.assertLessEqual(info["worst_steps"], 20 * max(n, 1) * (n.bit_length() + 1))
+        # non-optimality examples: M(5)=8 > S(5)=7, M(6)=11 > S(6)=10 (S values are literature/kernel facts).
+        self.assertEqual(results[5]["budget"], 8)
+        self.assertEqual(results[6]["budget"], 11)
+
     def test_transitive_closure_knowledge_suffices(self):
         # after 0<1 and 1<2, state becomes total for n=3 without third ASK
         p = ESP.Program(

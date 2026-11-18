@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -549,8 +550,12 @@ def binary_insertion_sort_explicit(n: int) -> Tuple[Program, int]:
     raise NotImplementedError("explicit unfolded ESP for general n not generated here")
 
 
+import math
+
+
 def binary_insertion_comparison_count(n: int) -> int:
-    return sum((i + 1).bit_length() - 1 if (i + 1) & i == 0 else (i + 1).bit_length() for i in range(1, n)) if False else sum((__import__('math').ceil(__import__('math').log2(i+1)) for i in range(1, n)))
+    """Worst-case charged comparisons B(n) = sum_{i=1}^{n-1} ceil(log2(i+1))."""
+    return sum(math.ceil(math.log2(i + 1)) for i in range(1, n))
 
 
 def run_binary_insertion_strategy(X_rank: Sequence[int]) -> Tuple[List[int], int, int]:
@@ -584,6 +589,79 @@ def run_binary_insertion_strategy(X_rank: Sequence[int]) -> Tuple[List[int], int
         order.insert(lo, v)
         steps += len(order)  # insertion bookkeeping
     return order, comps, steps
+
+
+def merge_sort_comparison_count(n: int) -> int:
+    """Worst-case comparisons M(n) for standard top-down merge sort.
+
+    Split: left = first floor(n/2), right = rest. Merge of p,q sorted lists
+    uses at most p+q-1 charged comparisons.
+    """
+    if n <= 1:
+        return 0
+    left = n // 2
+    right = n - left
+    return (
+        merge_sort_comparison_count(left)
+        + merge_sort_comparison_count(right)
+        + (n - 1)
+    )
+
+
+def run_merge_sort_strategy(X_rank: Sequence[int]) -> Tuple[List[int], int, int]:
+    """Run standard top-down merge sort as an adaptive charged-oracle strategy.
+
+    Returns (output permutation, comparisons, logical_steps). The program
+    observes the unknown order X only through charged ASK outcomes less(i,j);
+    recursive split points and merge-front choices depend only on previous
+    outcomes and the fixed label partition, never on X_rank values directly.
+    Split: indices[:n//2], indices[n//2:]. Steps are O(n log n) comparisons
+    plus O(n log n) bookkeeping in this accounting.
+    """
+    n = len(X_rank)
+    comps = 0
+    steps = 0
+
+    def less(i: int, j: int) -> bool:
+        nonlocal comps, steps
+        comps += 1
+        steps += 1
+        return X_rank[i] < X_rank[j]
+
+    def merge(left: List[int], right: List[int]) -> List[int]:
+        nonlocal steps
+        out: List[int] = []
+        i = 0
+        j = 0
+        while i < len(left) and j < len(right):
+            steps += 1
+            # charged oracle query: only outcome is observed
+            if less(left[i], right[j]):
+                out.append(left[i])
+                i += 1
+            else:
+                out.append(right[j])
+                j += 1
+        if i < len(left):
+            out.extend(left[i:])
+            steps += len(left) - i
+        if j < len(right):
+            out.extend(right[j:])
+            steps += len(right) - j
+        return out
+
+    def msort(indices: List[int]) -> List[int]:
+        nonlocal steps
+        steps += 1
+        if len(indices) <= 1:
+            return list(indices)
+        mid = len(indices) // 2
+        left = msort(indices[:mid])
+        right = msort(indices[mid:])
+        return merge(left, right)
+
+    out = msort(list(range(n)))
+    return out, comps, steps
 
 
 # --- verification helpers ---
@@ -639,10 +717,42 @@ def check_binary_insertion_family(max_n: int = 8) -> Dict:
     return results
 
 
+def check_merge_sort_family(max_n: int = 8) -> Dict:
+    """Exhaustively check standard top-down merge sort as a charged-oracle strategy.
+
+    For each n, runs on all n! total orders X (given as rank functions) and
+    records correctness, the exact worst-case charged comparison count, and
+    logical steps. The algorithm observes X only through ASK outcomes.
+    """
+    results = {}
+    for n in range(1, max_n + 1):
+        worst_q = -1
+        worst_steps = -1
+        ok = True
+        budget = merge_sort_comparison_count(n)
+        for rank in all_total_orders(n):
+            out, q, steps = run_merge_sort_strategy(rank)
+            if not _is_sorted_by_X(out, rank) or q > budget:
+                ok = False
+            worst_q = max(worst_q, q)
+            worst_steps = max(worst_steps, steps)
+        # worst case over all orders attains the standard merge-sort bound M(n)
+        if worst_q != budget:
+            ok = False
+        results[n] = {
+            "ok": ok,
+            "budget": budget,
+            "worst_q": worst_q,
+            "worst_steps": worst_steps,
+        }
+    return results
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check-small", action="store_true")
     ap.add_argument("--check-insertion", type=int, default=0)
+    ap.add_argument("--check-merge", type=int, default=0)
     args = ap.parse_args()
     if args.check_small:
         for ctor in [optimal_program_n1, optimal_program_n2, optimal_program_n3, optimal_program_n4]:
@@ -651,6 +761,8 @@ def main() -> None:
             print(p.name, p.encoding_size_bits(), r)
     if args.check_insertion:
         print(json.dumps(check_binary_insertion_family(args.check_insertion), indent=2, sort_keys=True))
+    if args.check_merge:
+        print(json.dumps(check_merge_sort_family(args.check_merge), indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

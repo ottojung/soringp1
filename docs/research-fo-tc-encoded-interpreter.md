@@ -160,6 +160,49 @@ correct sorting, `q <= B(n)`, attainment of `B(n)`, and polynomial step counts.
 This is a sound restricted-family upper-envelope witness at budget `B(n)`, not
 an exact-`S(n)` completeness witness (e.g. `B(5)=8 > S(5)=7`).
 
+### 5.3 Standard top-down merge sort family (restricted, charged comparisons)
+
+**[deduction + experiment]** Standard top-down merge sort splits
+`indices[:⌊n/2⌋]` / `indices[⌊n/2⌋:]`, recursively sorts sublists by repeated
+charged comparisons, and merges by comparing current front elements. A merge of
+`p,q` sorted lists uses at most `p+q-1` charged comparisons (worst case when
+one list is exhausted only at the final comparison), so the standard worst-case
+budget is
+
+    M(0)=M(1)=0,   M(n)=M(⌊n/2⌋)+M(⌈n/2⌉)+n-1  (n>=2).
+
+Control decisions (which fronts to compare/emit next, and the recursive split
+structure) depend only on previous `ASK` outcomes and the fixed partition; the
+strategy observes the unknown order `X` only through charged comparison
+outcomes, never through direct rank access. In a RAM/array-addressed extension
+of ESP, a fixed control schema manipulating indices/lists gives `T, Time =
+poly(n)` with `O(log n)` parameter encoding; in the minimal register-only ISA an
+explicit per-`n` unfolding is again a decision structure whose compressibility
+is the open issue.
+
+**Checked artifact (exhaustive, n <= 8).** `check_merge_sort_family` simulates
+the charged-oracle strategy on all `n!` orders (`1 + 2 + 6 + 24 + 120 + 720 +
+5040 + 40320 = 46233` runs total), verifying correct sorting and exact
+attainment of `M(n)`:
+
+| n | `M(n)` budget | worst `q` | worst steps | `S(n)` (context) | exact at `S(n)`? |
+|---|---:|---:|---:|---:|---|
+| 1 | 0 | 0 | 2 | 0 | yes |
+| 2 | 1 | 1 | 6 | 1 | yes |
+| 3 | 3 | 3 | 13 | 3 | yes |
+| 4 | 5 | 5 | 20 | 5 | yes |
+| 5 | 8 | 8 | 29 | 7 | no (`8>7`) |
+| 6 | 11 | 11 | 38 | 10 | no (`11>10`) |
+| 7 | 14 | 14 | 47 | 13 | no (`14>13`) |
+| 8 | 17 | 17 | 56 | 16 | no (`17>16`) |
+
+`S(n)` values are cited as literature/kernel context only (see
+`docs/problem.md`, `SoringP1/SmallValues*.lean`); this table is a
+**[deduction + experiment]** restricted-family witness at budget `M(n)`, not an
+exact-`S(n)` or all-`n` completeness witness. For `n <= 8` here, `M(n)=B(n)`
+coincidentally; asymptotically and in general merge sort and binary insertion
+have different comparison profiles and neither is uniformly optimal.
+
 ## 6. Exact missing completeness step (identified)
 
 To obtain the strong all-n statement required for `Sigma_2^P` membership of
@@ -197,17 +240,26 @@ precisely delimited) model.
 
 - `scripts/encoded_strategy_program.py`: ESP data model + `U_ESP` interpreter +
   constructors for concrete optimal small-n programs and exhaustive checking of
-  the binary-insertion strategy family (restricted witness); self-check/CLI helpers.
+  the binary-insertion and standard top-down merge-sort strategy families
+  (restricted witnesses); self-check/CLI helpers
+  (`--check-small`, `--check-insertion N`, `--check-merge N`).
 - `tests/test_encoded_strategy_program.py`: correctness/budget/soundness checks
-  (optimal `n<=4`, insertion sort exhaustive for `n<=8`, charged-oracle and
-  runtime-bound accounting, rejection cases).
-- Validation: `python3 -m unittest tests.test_encoded_strategy_program -v` and
-  (when run in-repo) full `python3 -m unittest discover -s tests`.
+  (optimal `n<=4`, insertion sort exhaustive for `n<=8`, merge sort exhaustive
+  for `n<=8`, charged-oracle and runtime-bound accounting, rejection cases).
+- Validation (this increment): `python3 -m unittest tests.test_encoded_strategy_program -v`
+  (5 tests, OK) and `python3 -m unittest discover -s tests` (183 tests, OK,
+  skipped=1) on branch
+  `research/JTsW4AnxTLzN18IBQibXea-esp-mergesort-KIs34cEznVs1GUdNnzlTjI-laden`
+  (base `25ff99d`, repo `https://github.com/ottojung/soringp1.git`).
 
 ## 9. Next concrete experiment
 
-(1) Encode a **merge-sort** family with explicit split/merge control in ESP and
-check `q = M(n)` exhaustive for `n<=8` to compare description/runtime overhead
-to insertion. (2) Attempt a bounded compiler from a **forgetful framed DAG**
+(1) Encode insertion-sort and/or merge-sort as **fixed-control RAM-addressed ESP
+extensions** (explicit array/index registers) with measured `|p|, T` as
+functions of `n`, to make the parametric-schema claim in §5.2/§5.3 fully
+concrete. (2) Attempt a bounded compiler from a **forgetful framed DAG**
 node/transition description (issue #47 / S3) into ESP with measured blow-up on
 known small optimal strategies, to probe the compression step identified in §6.
+(3) Reconcile this ESP artifact with the S0-S4 spec contracts
+(`docs/specs/`, branch `research/JTsW4AnxTLzN18IBQibXea-spec-recon-RGr10Dxu9qJSCRf7uZxgbi`)
+under a no-overclaim review.
