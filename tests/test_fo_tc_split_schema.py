@@ -108,3 +108,20 @@ def test_new_barriers():
     assert S_KNOWN[4] + 9 == 14 > S_KNOWN[7] == 13
     # Positive contrast: split-(2,3) hits S(5) where strict two-phase misses.
     assert S_KNOWN[2] + 6 == 7 == S_KNOWN[5]
+
+
+def test_witness_build_regression():
+    """Regression: witness-tree build() must work on non-committed cells.
+
+    The earlier single-path greedy_ub UNDERESTIMATED the worst case, so
+    solve() pruned the true optimum and build() raised
+    'AssertionError: no optimal query found' on cells such as (2,6).
+    These values were independently re-derived by a separate minimax
+    solver; check_cell also replays the tree and confirms its worst case.
+    """
+    check_cell(2, 6, 9)
+    check_cell(2, 7, 12)
+    check_cell(3, 7, 10)
+    check_cell(5, 9, 12)
+    check_cell(6, 8, 6)
+    check_cell(7, 8, 3)

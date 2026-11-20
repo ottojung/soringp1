@@ -76,25 +76,38 @@ def _split(state, a, b):
     return less, state - less
 
 
-def greedy_ub(state, pairs, memo):
-    """Feasible completion cost via most-balanced-first descent (upper bound)."""
-    s = state
-    cost = 0
-    while len(s) > 1:
-        best, best_key = None, None
+def greedy_ub(state, pairs):
+    """Cost of the most-balanced-first *binary* decision tree (a valid UB).
+
+    This recurses into BOTH children of the chosen query. A single-path
+    descent (the earlier version) followed only the larger child and so
+    UNDERESTIMATED the worst-case cost; using it as the initial upper bound
+    made exact solve()/witness-tree build() fail on cells where that path is
+    not optimal (e.g. (2,6)). The recursion uses its own memo, never the
+    exact-value memo, so it cannot pollute solve()'s results.
+    """
+    ub_memo = {}
+
+    def go(s):
+        if len(s) <= 1:
+            return 0
+        if s in ub_memo:
+            return ub_memo[s]
+        best, best_r = None, None
         for (a, b) in pairs:
             r = _split(s, a, b)
             if r is None:
                 continue
             imbalance = abs(len(r[0]) - len(r[1]))
             if best is None or imbalance < best:
-                best, best_key = imbalance, ((a, b), r)
-        if best_key is None:  # pragma: no cover - cannot happen for m < n
+                best, best_r = imbalance, r
+        if best_r is None:  # pragma: no cover - cannot happen for m < n
             raise AssertionError("no splitting query but state not singleton")
-        (_, r) = best_key
-        s = r[0] if len(r[0]) >= len(r[1]) else r[1]
-        cost += 1
-    return cost
+        v = 1 + max(go(best_r[0]), go(best_r[1]))
+        ub_memo[s] = v
+        return v
+
+    return go(state)
 
 
 def min_completion(m, n):
@@ -112,7 +125,7 @@ def min_completion(m, n):
         if state in memo:
             return memo[state]
         lb = _lb(state)
-        ub = greedy_ub(state, pairs, memo)
+        ub = greedy_ub(state, pairs)
         best = ub
         queries = []
         for (a, b) in pairs:

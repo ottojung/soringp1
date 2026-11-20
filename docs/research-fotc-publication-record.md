@@ -92,3 +92,31 @@ Conjecture C (polynomial-size exact programs for every yes-instance) is open;
 no unconditional lower bound for the sparse unary language is claimed; and the
 final theorems for `S(n)`/`SORT-BOUND-U` are **not** resolved by this artifact.
 A passing CI run and this record do not convert any open problem into a result.
+
+## Addendum — witness-tree builder defect found and repaired (2026-11-20)
+
+**New evidence.** After publication, the running SoringP1 frontier curator (agent
+`b4eO8fEB3oKqlM6iTzelXh-down`) observed, in its own scratch probing, that the
+shipped `scripts/fo_tc_split_schema.py` raises
+`AssertionError: no optimal query found` on the cell `(2,6)`. I independently
+confirmed this against the exact published commit `9018729`: all nine originally
+committed cells succeed, but `min_completion(2,6)` fails. This means the shipped
+script's claim to emit a witness tree "per cell" was **not** valid in general —
+the CI suite passed only because it covered those nine cells.
+
+**Root cause (confirmed by reading the exact code).** `greedy_ub` followed only
+the larger child of each query (a single path), so it returned an underestimate
+of the worst-case cost rather than a valid upper bound. `solve()` seeded its
+upper bound from that value and pruned with `>= best`; on cells where the greedy
+path is not optimal this discarded the true optimum, so `build()` could not find
+a query whose exact child values matched the claimed cost.
+
+**Repair (this addendum's commit).** `greedy_ub` now recurses into **both**
+children with its own memo (never the exact-value memo), making it a sound upper
+bound; a regression test (`test_witness_build_regression`) covers `(2,6)`,
+`(2,7)`, `(3,7)`, `(5,9)`, `(6,8)`, `(7,8)`. Verified: all 15 checked cells now
+return the independently known `C(m,n)` and their witness trees replay with
+worst case exactly `C`; the full unit suite passes. **No mathematical `C` value,
+lemma, note text or theorem changed** — this is a software-fidelity fix only.
+The two research notes remain byte-identical to their refereed/verified sources;
+the SHA-256 hashes above still describe those unchanged files.
