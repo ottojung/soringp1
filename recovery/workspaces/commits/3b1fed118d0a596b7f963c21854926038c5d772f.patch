@@ -1,0 +1,114 @@
+commit 3b1fed118d0a596b7f963c21854926038c5d772f
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Nov 7 01:07:57 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Nov 7 01:07:57 2026 +0000
+
+    Require distinct fresh health snapshots for institutional case closure
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 75104b3c..e4490b3f 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -50,6 +50,11 @@ def collect():
+                        else "legislature/innovation-centre/health.json")
+     innovation = read(ROOT / innovation_path)
+     now = int(os.environ.get("VICHE_CASE_NOW", time.time()))
++    # An invocation of the collector is not a new health observation.
++    # In particular, a stale or absent incident file cannot establish recovery.
++    observed_at = incident.get("observed_at")
++    if type(observed_at) is not int or not 0 <= now - observed_at <= 1800:
++        observed_at = None
+     if innovation and now - innovation.get("observed_at", 0) > 1800:
+         signals.add("innovation_stale")
+     # A failed office may be masked by a stale or missing branch-health probe;
+@@ -67,7 +72,7 @@ def collect():
+                 and bool(verified["evidence_ref"].strip()))
+             if not valid:
+                 signals.add("continuity_unverified_" + office)
+-    return now, signals
++    return now, signals, observed_at
+ 
+ 
+ def owner(signal):
+@@ -83,7 +88,7 @@ def owner(signal):
+ 
+ 
+ def reconcile():
+-    now, signals = collect()
++    now, signals, health_observation = collect()
+     STORE.mkdir(parents=True, exist_ok=True)
+     existing = sorted(STORE.glob("*.json"))
+     names = set(signals) | {p.stem for p in existing}
+@@ -107,15 +112,22 @@ def reconcile():
+             case["last_seen"] = now
+             case["observations"] = case.get("observations", 0) + 1
+             case["clear_observations"] = 0
++            case.pop("last_clear_observed_at", None)
+         elif case.get("state") == "open":
+-            # Never resolve from agent success, a comment or a merge alone.
+-            # This confirmation observes the SAME underlying signal cleared
+-            # in two subsequent independent cycles.
++            # Consecutive collector invocations are not independent evidence.
++            # Only a fresh, strictly newer branch-health observation can clear
++            # a case; an absent/stale incident snapshot proves nothing.
++            previous = case.get("last_clear_observed_at")
++            if health_observation is None or (
++                type(previous) is int and health_observation <= previous
++            ):
++                continue
++            case["last_clear_observed_at"] = health_observation
+             case["clear_observations"] = case.get("clear_observations", 0) + 1
+             if case["clear_observations"] >= 2:
+                 case["state"] = "verified_closed"
+                 case["verified_at"] = now
+-                case["verification"] = "two successive deterministic health checks without signal"
++                case["verification"] = "two distinct fresh health observations without the signal"
+         elif not case:
+             continue
+         atomic(path, case)
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index eadf8d69..b6496e66 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -33,6 +33,7 @@ MOCK
+ chmod +x "$d/bin/antonina" "$d/town/government/appointments.sh"
+ cp "$repo/government/EXECUTIVE-INNOVATION.md" "$d/town/government/EXECUTIVE-INNOVATION.md"
+ printf '# Historic Act 14 — Legislative Centre\n' > "$d/town/government/LAWS.md"
++printf 'Mandatory reporting policy fixture.\n' > "$d/town/government/AGENT-REPORTING-POLICY.md"
+ printf 'Founder-controlled fixture Constitution\n' > "$d/charter"
+ export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock"
+ export VICHE_TOWN_ROOT="$d/town" VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state" VICHE_CONSTITUTION="$d/charter"
+@@ -62,17 +63,26 @@ python3 "$repo/government/institutional-cases.py" reconcile > "$d/cases"
+ jq -e '.open_cases | length==2' "$d/cases" >/dev/null
+ jq -e '.state=="open" and .owner=="executive"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ jq -e '.state=="open" and .owner=="executive" and .first_seen==1000' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+-rm "$d/state/branches/incident.json"
++printf '{"signals":[],"observed_at":1100}\n' > "$d/state/branches/incident.json"
+ VICHE_CASE_NOW=1100 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+-VICHE_CASE_NOW=1200 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="verified_closed" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++# Repeated readings of one snapshot do not constitute independent evidence.
++VICHE_CASE_NOW=1150 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++# Even a different invocation after the evidence has gone stale cannot clear it.
++VICHE_CASE_NOW=3001 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++printf '{"signals":[],"observed_at":3100}\n' > "$d/state/branches/incident.json"
++VICHE_CASE_NOW=3100 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="verified_closed" and .clear_observations==2 and .last_clear_observed_at==3100' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ jq -e '.state=="open"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ # Only a matching independent Judiciary verification can discharge the
+ # uncertain-effects reconciliation case.
+ printf '{"previous_agent":"old-agent","successor_agent":"new-agent","verified_by":"judiciary","verification_scope":"external_effect_reconciled","evidence_ref":"fixture:independent-reviewed-effects"}\n' > "$d/state/continuity/verified-innovation-centre.json"
+-VICHE_CASE_NOW=1300 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-VICHE_CASE_NOW=1400 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++printf '{"signals":[],"observed_at":3200}\n' > "$d/state/branches/incident.json"
++VICHE_CASE_NOW=3200 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++printf '{"signals":[],"observed_at":3300}\n' > "$d/state/branches/incident.json"
++VICHE_CASE_NOW=3300 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="verified_closed"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ 
+ # After a real enactment, Executive unit runs on preserved worktree, not a

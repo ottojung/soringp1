@@ -1,0 +1,90 @@
+commit 3db75ef021b4de0c24d7c07813bdca3c406bfd33
+Author:     Viche operational maintenance <operator@viche.local>
+AuthorDate: Tue Nov 24 20:18:21 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 20:18:23 2026 +0000
+
+    Bind test runtime to the source checkout and canonical wrapper
+
+diff --git a/AGENTS.md b/AGENTS.md
+index e2e789e4..72c70c48 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -10,7 +10,9 @@ The authoritative constitutional mount is `/var/lib/lubko/from-host/viche-consti
+ 
+ Every Viche shell script, including parliament-authored amendments to boot, sitting or voting scripts, must run under POSIX-compliant `/bin/sh`; do not introduce Bash-specific syntax, builtins or dependencies.
+ 
+-Parliament controls the ordinary `government/` directory, including laws, seat roster, boot reconciliation, agenda hook, voting rules and tallying code; changes need the legally valid recorded legislative process. Seat worktrees are independent; commit changes on branches and land them with `government/propose-delivery.sh --office YOU SLUG`, which hands them to the Act 31 integration queue (see `government/DELIVERY.md`). The founder boot fast-forwards the canonical town checkout; never edit its worktree irresponsibly or mistake a PR for enacted law.
++Parliament controls the ordinary `government/` directory, including laws, seat roster, boot reconciliation, agenda hook, voting rules and tallying code; changes need the legally valid recorded legislative process. Seat worktrees are independent; commit changes on branches and land them with `/bin/sh /var/lib/lubko/wd/viche/government/propose-delivery.sh --office YOU SLUG`, which hands them to the Act 31 integration queue (see `government/DELIVERY.md`). The founder boot fast-forwards the canonical town checkout; never edit its worktree irresponsibly or mistake a PR for enacted law.
++
++**Hermetic source verification:** run tests from your source worktree through `/bin/sh /var/lib/lubko/wd/viche/government/suite-env.sh /bin/sh tests/YOUR-TEST.sh` (or the canonical exact-candidate verifier). Do not execute stale branch copies of the delivery wrapper or unisolated historical tests against live model configuration. Code proposals defer the authoritative full suite to the exact merge candidate; targeted local tests remain useful, and optional `--verify` performs an isolated full source preflight.
+ 
+ Every Viche agent must run through managed Antonina. Antonina selects and changes models under its own configuration; Viche must not hardcode or audit a preferred provider or model.
+ 
+diff --git a/government/DELIVERY.md b/government/DELIVERY.md
+index 576ac51c..22a9fccb 100644
+--- a/government/DELIVERY.md
++++ b/government/DELIVERY.md
+@@ -63,3 +63,8 @@ conflict) and propose again. The whole queue: `integrator.py status`.
+   candidate (and it is reviewed). No script impersonates a parliamentarian.
+ - A delivery marked `Act25-Phase:` (Act 26 governs those; land it by hand with
+   `reviewed-merge.sh`, kept for that purpose).
++
++For manual source tests, run from the source worktree using the canonical
++`/bin/sh /var/lib/lubko/wd/viche/government/suite-env.sh /bin/sh tests/YOUR-TEST.sh`.
++This disposable runtime protects normal tests from inherited live configuration;
++it is not a security sandbox for arbitrary same-user code.
+diff --git a/government/suite-env.sh b/government/suite-env.sh
+index a646f449..6bd190b1 100755
+--- a/government/suite-env.sh
++++ b/government/suite-env.sh
+@@ -3,6 +3,8 @@
+ # This is an accidental-side-effect barrier, not an OS security sandbox.
+ set -eu
+ [ "$#" -gt 0 ] || exit 2
++# The tested worktree, not an inherited production root, owns source paths.
++root=$(git rev-parse --show-toplevel) || exit 2
+ scratch=$(mktemp -d "${TMPDIR:-/tmp}/viche-test-env.XXXXXXXX")
+ trap 'rm -rf "$scratch"' 0
+ trap 'exit 130' 1 2 3 15
+@@ -18,12 +20,17 @@ XDG_CONFIG_HOME=$scratch/config
+ XDG_STATE_HOME=$scratch/state
+ XDG_DATA_HOME=$scratch/data
+ XDG_CACHE_HOME=$scratch/cache
++VICHE_TOWN_ROOT=$root
+ VICHE_STATE_ROOT=$scratch/town-state
+ VICHE_SEATS_ROOT=$scratch/seats
+ PATH=$scratch/bin:$PATH
+ export HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME
+-export VICHE_STATE_ROOT VICHE_SEATS_ROOT PATH
++export VICHE_TOWN_ROOT VICHE_STATE_ROOT VICHE_SEATS_ROOT PATH
+ unset ANTONINA_HOST_XDG_CONFIG_HOME ANTONINA_HOST_XDG_STATE_HOME ANTONINA_HOST_XDG_DATA_HOME
+ unset ANTONINA_OPENCODE_XDG_CONFIG_HOME ANTONINA_OPENCODE_XDG_STATE_HOME ANTONINA_OPENCODE_XDG_DATA_HOME
+ unset VICHE_ANTONINA_CONFIG VICHE_ANTONINA_COOLDOWNS VICHE_ANTONINA_MODEL_HEALTH VICHE_OPENCODE_MODELS
++unset ANTONINA_OPENCODE_BIN ANTONINA_HOST_XDG_CACHE_HOME ANTONINA_OPENCODE_XDG_CACHE_HOME
++unset VICHE_BUDGET_CONFIG VICHE_BUDGET_DB VICHE_BUDGET_STATE VICHE_BUDGET_TOOL
++unset VICHE_DISPATCH_GATE VICHE_SENTINEL_STATE VICHE_PREDICT_LEDGER
++unset VICHE_SPYING_ALLOWLIST VICHE_SPYING_BOARD_JSON VICHE_SPYING_BUNDLE
+ "$@"
+diff --git a/tests/suite-status-smoke.sh b/tests/suite-status-smoke.sh
+index c1ef4c71..adb4fa3b 100644
+--- a/tests/suite-status-smoke.sh
++++ b/tests/suite-status-smoke.sh
+@@ -20,6 +20,8 @@ cat > "$town/tests/isolation.sh" <<'EOF'
+ #!/bin/sh
+ set -eu
+ [ "$HOME" != "$ORIGINAL_HOME" ]
++[ "$VICHE_TOWN_ROOT" = "$(pwd -P)" ]
++[ -z "${VICHE_BUDGET_STATE:-}" ]
+ [ "$XDG_CONFIG_HOME" != "$ORIGINAL_HOME/config" ]
+ [ "$VICHE_STATE_ROOT" != "$ORIGINAL_HOME/state" ]
+ [ -z "${ANTONINA_HOST_XDG_CONFIG_HOME:-}" ]
+@@ -53,7 +55,7 @@ check_result() {
+ 
+ export ORIGINAL_HOME="$HOME"
+ ANTONINA_HOST_XDG_CONFIG_HOME="$HOME/config" VICHE_ANTONINA_CONFIG="$HOME/config/antonina.json" \
+-  VICHE_STATE_ROOT="$HOME/state" run --suite tests/isolation.sh >/dev/null
++  VICHE_STATE_ROOT="$HOME/state" VICHE_BUDGET_STATE="$HOME/budget" run --suite tests/isolation.sh >/dev/null
+ check_result green
+ run --suite tests/green.sh >/dev/null
+ check_result green

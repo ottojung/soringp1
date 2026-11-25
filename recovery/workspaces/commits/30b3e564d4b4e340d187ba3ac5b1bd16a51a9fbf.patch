@@ -1,0 +1,211 @@
+commit 30b3e564d4b4e340d187ba3ac5b1bd16a51a9fbf
+Author:     Viche Executive <executive@viche.local>
+AuthorDate: Sun Nov 8 10:05:10 2026 +0000
+Commit:     Viche Executive <executive@viche.local>
+CommitDate: Sun Nov 8 10:05:10 2026 +0000
+
+    appointments+branch-liveness: bounded re-probe for transient 'unknown'
+    
+    Companion to 9be9652, which fixes only executive-cycle.sh. In the real call path
+    executive-cycle.sh calls 'appointments.sh ensure executive' BEFORE its own status
+    case, so a single transient 'unknown' sample from Antonina still exits 1 there
+    first; the branch supervisor's readiness probe also writes 'unhealthy' from one
+    sample. Verified: the new smoke fails on 9be9652 alone ('unknown status unknown',
+    no dispatch).
+    
+    This commit adds the same bounded (3x1s) re-probe to the appointments.sh mutation
+    path and to both branch-liveness.sh probes. Persistent unknown still fails closed
+    - mutations need a positively identified terminal state, and the branch stays
+    unhealthy - but now reports the agent, state and re-probe count instead of an
+    anonymous failure. No health is inferred from an unresolved sample.
+    
+    tests/unknown-status-transient-smoke.sh fails on origin/main and on 9be9652
+    alone, and passes here: a one-sample unknown still dispatches and yields
+    readiness 'ready'; a persistent unknown dispatches nothing and exits 1.
+
+diff --git a/government/appointments.sh b/government/appointments.sh
+index c6b85f5f..34a0fcf1 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -69,6 +69,19 @@ if [ -n "$old" ]; then
+     exit 1
+   fi
+   status=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
++  # One "unknown" sample is a transient runtime observation, not a terminal
++  # state: re-probe a bounded number of times before deciding. A persistent
++  # unknown still fails closed for mutations below.
++  probe=0
++  while [ "$status" = unknown ] && [ "$probe" -lt 3 ]; do
++    probe=$((probe + 1))
++    sleep 1
++    if meta=$(antonina agent status --id "$old" --json 2>/dev/null); then
++      status=$(printf '%s\n' "$meta" | jq -er '.state' 2>/dev/null) || status=unknown
++    else
++      status=unknown
++    fi
++  done
+   case "$status" in
+     running|idle|clearexit) live=true;;
+     failed|stopped|killed) :;;
+@@ -79,7 +92,7 @@ if [ -n "$old" ]; then
+       # sample breaks every caller (sitting, liveness, oversight). Mutations
+       # still require a positively identified terminal state.
+       if [ "$action" = resolve ]; then live=unknown
+-      else echo "unknown status $status" >&2; exit 1
++      else echo "Viche: appointed agent $old still reports '$status' after $probe re-probe(s); refuse $action until a terminal state is proven" >&2; exit 1
+       fi;;
+   esac
+ fi
+diff --git a/government/branch-liveness.sh b/government/branch-liveness.sh
+index 4f85dabb..fe6e4cef 100755
+--- a/government/branch-liveness.sh
++++ b/government/branch-liveness.sh
+@@ -42,6 +42,16 @@ fi
+ if [ -z "$id" ]; then bootstrap_ok=false; fi
+ if [ "$bootstrap_ok" = true ] && [ -n "$id" ] && [ -s "$town/government/$program" ]; then
+   current=$(antonina agent status --id "$id" --json 2>/dev/null | jq -r '.state // "unknown"') || current=unknown
++  # "unknown" is a transient runtime sample, not positive evidence of death
++  # (see appointments.sh resolve). Re-probe briefly before withholding the
++  # cycle; a persistent unknown still withholds it, but was not declared on one
++  # arbitrary sample.
++  root_probe=0
++  while [ "$current" = unknown ] && [ "$root_probe" -lt 3 ]; do
++    root_probe=$((root_probe + 1))
++    sleep 1
++    current=$(antonina agent status --id "$id" --json 2>/dev/null | jq -r '.state // "unknown"' 2>/dev/null) || current=unknown
++  done
+   case "$current" in
+     stopped|killed|unknown) bootstrap_ok=false ;;
+     failed)
+@@ -64,11 +74,28 @@ readable=false
+ agent_state=unknown
+ model=unknown
+ variant=unknown
+-if [ -n "$id" ] && meta=$(antonina agent status --id "$id" --json 2>/dev/null); then
+-  if agent_state=$(printf '%s\n' "$meta" | jq -er '.state' 2>/dev/null); then
+-    readable=true
+-    model=$(printf '%s\n' "$meta" | jq -r '.model // "unknown"')
+-    variant=$(printf '%s\n' "$meta" | jq -r '.variant // "unknown"')
++if [ -n "$id" ]; then
++  meta=$(antonina agent status --id "$id" --json 2>/dev/null) || meta=
++  # Same transient-unknown rule: do not report "unhealthy" on one unreadable or
++  # transitional sample. Re-probe a bounded number of times.
++  meta_probe=0
++  while [ "$meta_probe" -lt 3 ]; do
++    if [ -n "$meta" ]; then
++      probe_state=$(printf '%s\n' "$meta" | jq -r '.state // "unknown"' 2>/dev/null) || probe_state=unknown
++    else
++      probe_state=unknown
++    fi
++    [ "$probe_state" = unknown ] || break
++    meta_probe=$((meta_probe + 1))
++    sleep 1
++    meta=$(antonina agent status --id "$id" --json 2>/dev/null) || meta=
++  done
++  if [ -n "$meta" ]; then
++    if agent_state=$(printf '%s\n' "$meta" | jq -er '.state' 2>/dev/null); then
++      readable=true
++      model=$(printf '%s\n' "$meta" | jq -r '.model // "unknown"')
++      variant=$(printf '%s\n' "$meta" | jq -r '.variant // "unknown"')
++    fi
+   fi
+ fi
+ readiness=unhealthy
+diff --git a/tests/unknown-status-transient-smoke.sh b/tests/unknown-status-transient-smoke.sh
+new file mode 100755
+index 00000000..c26b5f56
+--- /dev/null
++++ b/tests/unknown-status-transient-smoke.sh
+@@ -0,0 +1,92 @@
++#!/bin/sh
++# A transient Antonina "unknown" status sample must not abort the Executive
++# cycle or mark the branch unhealthy; a persistent unknown still fails closed
++# with an actionable message and performs no dispatch.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++mkdir -p "$d/bin" "$d/town/government" "$d/town/records/handoffs" \
++  "$d/seats/branches/executive" "$d/state" "$d/mock"
++printf 'c1a00001\tClerk\tintake\n' > "$d/town/government/seats.tsv"
++printf 'Founder charter fixture\n' > "$d/charter"
++cp "$repo/government/appointments.sh" "$repo/government/branch-bootstrap.sh" \
++  "$repo/government/branch-liveness.sh" "$repo/government/executive-cycle.sh" \
++  "$repo/government/office-continuity.sh" "$repo/government/handoff-queue.sh" \
++  "$repo/government/predict-scorer.py" "$repo/government/eligible-work.py" \
++  "$repo/government/research-frontier-status.py" \
++  "$repo/government/delivery-candidates.py" "$repo/government/AGENT-REPORTING-POLICY.md" \
++  "$d/town/government/"
++git -C "$d/town" init -q
++git -C "$d/town" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm town
++git -C "$d/town" update-ref refs/remotes/origin/main HEAD
++git -C "$d/seats/branches/executive" init -q
++git -C "$d/seats/branches/executive" -c user.name=test -c user.email=test@example.test \
++  commit --allow-empty -qm baseline
++mkdir -p "$d/state/appointments"
++printf 'executive\tid-exec\n' > "$d/state/appointments/appointments.tsv"
++printf '{"fronts":[],"curator":{"exit_state":"clearexit","added":0,"last_finished_at":1000}}\n' \
++  > "$d/frontier.json"
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  "board list") echo '[{"number":"301","title":"SoringP1"}]' ;;
++  "board show") echo '{"body":"x","messages":[]}' ;;
++  "agent status")
++    n=$(cat "$MOCK_ROOT/unknown_left" 2>/dev/null || echo 0)
++    if [ "$n" -gt 0 ]; then
++      printf '%s\n' $((n - 1)) > "$MOCK_ROOT/unknown_left"
++      printf '{"state":"unknown","model":"m","variant":"low"}\n'
++    else
++      printf '{"state":"%s","model":"m","variant":"low"}\n' "$(cat "$MOCK_ROOT/mode")"
++    fi ;;
++  "agent run") printf 'run\n' >> "$MOCK_ROOT/runs" ;;
++  *) echo "unexpected Antonina call: $*" >&2; exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock" VICHE_TOWN_ROOT="$d/town" \
++  VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state" \
++  VICHE_CONSTITUTION="$d/charter" SORING_FRONTIER_STATE="$d/frontier.json"
++mode_executive() { printf '%s\n' "$1" > "$d/mock/mode"; }
++unknown_samples() { printf '%s\n' "$1" > "$d/mock/unknown_left"; }
++runs() { wc -l < "$d/mock/runs" 2>/dev/null || echo 0; }
++touch "$d/state/inaugurated"
++cycle=$d/town/government/executive-cycle.sh
++
++# 1. One transient unknown sample: the cycle must still dispatch, not abort.
++mode_executive idle
++unknown_samples 1
++/bin/sh "$cycle"
++test "$(runs)" -eq 1
++
++# 2. Persistent unknown: fail closed, no dispatch, actionable message.
++unknown_samples 99
++if /bin/sh "$cycle" 2>"$d/err"; then
++  echo "persistent unknown must not be treated as healthy" >&2
++  exit 1
++fi
++test "$(runs)" -eq 1
++grep -Fq "re-probe" "$d/err"
++
++# 3. Transient unknown in the supervisor: readiness must not be unhealthy.
++unknown_samples 1
++out=$(/bin/sh "$d/town/government/branch-liveness.sh" executive 2>&1) || {
++  echo "$out" >&2
++  echo "transient unknown marked the executive branch unhealthy" >&2
++  exit 1
++}
++jq -e '.readiness=="ready" and .cycle_accepted==true' \
++  "$d/state/branches/executive.json" >/dev/null
++
++# 4. Persistent unknown in the supervisor: still unhealthy and no dispatch.
++before=$(runs)
++unknown_samples 99
++if /bin/sh "$d/town/government/branch-liveness.sh" executive >/dev/null 2>&1; then
++  echo "persistent unknown must surface as unhealthy" >&2
++  exit 1
++fi
++test "$(runs)" -eq "$before"
++jq -e '.readiness=="unhealthy"' "$d/state/branches/executive.json" >/dev/null
++echo 'Transient-versus-persistent unknown-status smoke passed'

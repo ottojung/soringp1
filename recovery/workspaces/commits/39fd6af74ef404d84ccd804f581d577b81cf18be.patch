@@ -1,0 +1,243 @@
+commit 39fd6af74ef404d84ccd804f581d577b81cf18be
+Merge: b86c61af 235d3961
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Wed Oct 28 02:35:55 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Wed Oct 28 02:35:55 2026 +0000
+
+    Integrate reviewed delivery delivery/clearexit-supervisor-recovery
+
+diff --git a/government/antonina-interface.md b/government/antonina-interface.md
+index 711ab482..018a72fd 100644
+--- a/government/antonina-interface.md
++++ b/government/antonina-interface.md
+@@ -45,7 +45,7 @@ antonina board list --state open --page 1 --json |
+   `state`, `title`, `cwd`, `prompts`, `last_activity_at` etc.
+   Here `--limit` **is** supported. Page numbers start at 1; continue while
+   a full page is returned, or otherwise if the response indicates more data.
+-  Filters: `--running`, `--finished`, `--succeeded`,
++  Filters: `--running`, `--finished`, `--clearexit`,
+   `--failed`, `--stopped`, `--killed`. Inspect `unreadable`:
+   do not interpret an unreadable registry as zero work.
+ - `antonina agent status --id <ID> --json` → object with `state`,
+diff --git a/government/appointments.sh b/government/appointments.sh
+index aaa1b011..a54f63d2 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -69,7 +69,7 @@ if [ -n "$old" ]; then
+     exit 1
+   fi
+   status=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
+-  case "$status" in running|idle|succeeded) live=true;; failed|stopped|killed) :;; *) echo "unknown status $status" >&2; exit 1;; esac
++  case "$status" in running|idle|clearexit) live=true;; failed|stopped|killed) :;; *) echo "unknown status $status" >&2; exit 1;; esac
+ fi
+ if [ "$action" = replace ] && [ -n "$expected" ] && [ "$old" != "$expected" ]; then
+   echo "Viche: stale recovery appointment $expected for $key; actual is $old" >&2
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+index b0aacb3f..4ad29b17 100644
+--- a/government/audit-accountability.py
++++ b/government/audit-accountability.py
+@@ -384,7 +384,7 @@ def check(args):
+             metadata = json.loads(p.stdout)
+             # Model choice belongs to Antonina. An idle agent with no model
+             # history is normal; avoid inventing a compliance incident.
+-            if metadata.get("state") not in ("idle", "running", "succeeded", "failed", "stopped", "killed"):
++            if metadata.get("state") not in ("idle", "running", "clearexit", "failed", "stopped", "killed"):
+                 signals.append({"type": "agent_state_unrecognized", "agent_id": agent_id})
+     except Exception as e:
+         signals.append({"type": "agent_inventory_unavailable", "detail": str(e)[:180]})
+diff --git a/government/audit-cycle.sh b/government/audit-cycle.sh
+index 5384e851..ae3ef033 100644
+--- a/government/audit-cycle.sh
++++ b/government/audit-cycle.sh
+@@ -16,7 +16,7 @@ id=$(/bin/sh "$town/government/appointments.sh" ensure judiciary)
+ # The Judiciary has its own durable officer; parliamentary summons never gate it.
+ meta=$(antonina agent status --id "$id" --json)
+ kind=$(printf '%s\n' "$meta" | jq -r '.state')
+-case "$kind" in running) exit 0;; failed) echo 'Judiciary: failed agent, independent recovery required' >&2; exit 1;; idle|succeeded) :;; *) exit 1;; esac
++case "$kind" in running) exit 0;; failed) echo 'Judiciary: failed agent, independent recovery required' >&2; exit 1;; idle|clearexit) :;; *) exit 1;; esac
+ 
+ # Investigate an incident at least every half hour; also run independent
+ # broad audits at least once every six hours when there is no incident.
+diff --git a/government/branch-liveness.sh b/government/branch-liveness.sh
+index e5b509ae..4f85dabb 100755
+--- a/government/branch-liveness.sh
++++ b/government/branch-liveness.sh
+@@ -75,7 +75,7 @@ readiness=unhealthy
+ if [ "$cycle_ok" = true ] && [ "$readable" = true ]; then
+   case "$agent_state" in
+     running) readiness=running ;;
+-    idle|succeeded) readiness=ready ;;
++    idle|clearexit) readiness=ready ;;
+     *) readiness=unhealthy ;;
+   esac
+ fi
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index d5be7f0e..f7355515 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -35,7 +35,7 @@ case "$current" in
+     retry_safe=$(printf '%s\n' "$status" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+     [ "$retry_safe" = yes ] || { echo "Viche: failed Executive not provably retry-safe" >&2; exit 1; }
+     ;;
+-  idle|succeeded) : ;;
++  idle|clearexit) : ;;
+   *) echo "Viche: unexpected executive state $current" >&2; exit 1 ;;
+ esac
+ cwd=$seats/branches/executive
+diff --git a/government/executive-innovation-cycle.sh b/government/executive-innovation-cycle.sh
+index aeec564c..a3fe0c57 100644
+--- a/government/executive-innovation-cycle.sh
++++ b/government/executive-innovation-cycle.sh
+@@ -21,7 +21,7 @@ last=0
+ case "$last" in ''|*[!0-9]*) exit 1;; esac
+ case "$mode" in
+   running) readiness=running;;
+-  idle|succeeded)
++  idle|clearexit)
+     readiness=ready
+     if [ "$last" -eq 0 ] || [ $((now-last)) -ge 21600 ]; then
+       orders='No specific Executive order: research high-return Viche improvements.'
+diff --git a/government/innovation-centre-cycle.sh b/government/innovation-centre-cycle.sh
+index 8ec3ce14..7e0d085d 100755
+--- a/government/innovation-centre-cycle.sh
++++ b/government/innovation-centre-cycle.sh
+@@ -29,7 +29,7 @@ case "$last" in ''|*[!0-9]*) echo 'Invalid Innovation Centre timestamp' >&2; exi
+ dispatched=false
+ case "$mode" in
+   running) readiness=running ;;
+-  idle|succeeded)
++  idle|clearexit)
+     readiness=ready
+     if [ "$last" -eq 0 ] || [ "$now" -lt "$last" ] || [ $((now-last)) -ge "$interval" ]; then
+       prompt=$(cat <<EOF
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index b871f1a8..09fdb204 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -88,7 +88,7 @@ oc_quiesce_for_reset() {
+       done
+       echo "Viche: $oc_reset_id did not quiesce; keeping current appointment" >&2
+       return 1 ;;
+-    idle|succeeded|stopped|killed|failed) return 0 ;;
++    idle|clearexit|stopped|killed|failed) return 0 ;;
+     *) return 1 ;;
+   esac
+ }
+diff --git a/government/recovery-steward-cycle.sh b/government/recovery-steward-cycle.sh
+index bf12a562..e1817e16 100644
+--- a/government/recovery-steward-cycle.sh
++++ b/government/recovery-steward-cycle.sh
+@@ -26,7 +26,7 @@ case "$mode" in
+       { echo 'Cannot duplicate active runner' >&2; exit 1; }
+     id=$(/bin/sh "$town/government/appointments.sh" replace recovery-steward "$id" recovery-steward terminal_new_session 'Fresh recovery investigator after terminal failure; no prompt or tool replay')
+     fresh=yes ;;
+-  idle|succeeded) : ;;
++  idle|clearexit) : ;;
+   *) echo "Unrecognized recovery runner state: $mode" >&2; exit 1 ;;
+ esac
+ now=$(date +%s)
+diff --git a/government/research-frontier-status.py b/government/research-frontier-status.py
+index 4af5354c..61af9507 100644
+--- a/government/research-frontier-status.py
++++ b/government/research-frontier-status.py
+@@ -35,7 +35,10 @@ def snapshot(path, now=None):
+         curator = {}
+     remaining = counts["ready"] + counts["running"] + counts["launching"]
+     curating = bool(curator.get("agent_id"))
+-    empty_curation = (curator.get("exit_state") == "succeeded"
++    # The research ledger may retain historical exit_state values recorded
++    # before Antonina renamed succeeded to clearexit. Only the ledger needs
++    # historical interpretation; current Antonina statuses use clearexit.
++    empty_curation = (curator.get("exit_state") in ("clearexit", "succeeded")
+                       and curator.get("added") == 0)
+     incomplete = [
+         f["id"] for f in fronts
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+index ccecc42c..9a76b876 100644
+--- a/tests/appointments-smoke.sh
++++ b/tests/appointments-smoke.sh
+@@ -54,6 +54,11 @@ b=$(/bin/sh "$script" ensure a1)
+ [ "$a" = "$b" ] || exit 1
+ r=$(/bin/sh "$script" resolve a1)
+ [ "$r" = "$a" ] || exit 1
++# A clean exit is reusable, not an unknown state or a failed appointment.
++printf clearexit > "$MOCK/$a"
++[ "$(/bin/sh "$script" ensure a1)" = "$a" ]
++[ "$(/bin/sh "$script" resolve a1)" = "$a" ]
++test "$(cat "$MOCK/counter")" -eq 1
+ rm "$MOCK/$a"
+ if /bin/sh "$script" resolve a1 >/dev/null 2>&1; then echo 'resolve invented missing agent' >&2; exit 1; fi
+ if /bin/sh "$script" ensure a1 >/dev/null 2>&1; then echo 'unreadable agent was replaced' >&2; exit 1; fi
+diff --git a/tests/executive-cycle-smoke.sh b/tests/executive-cycle-smoke.sh
+index acaceaac..72b3adac 100755
+--- a/tests/executive-cycle-smoke.sh
++++ b/tests/executive-cycle-smoke.sh
+@@ -10,7 +10,7 @@ printf 'Founder charter fixture\n' > "$scratch/charter"
+ printf '%s\n' c1a00002 > "$scratch/town/records/SUMMONED.txt"
+ cp "$repo/government/eligible-work.py" "$scratch/town/government/eligible-work.py"
+ cp "$repo/government/research-frontier-status.py" "$scratch/town/government/research-frontier-status.py"
+-printf '{"fronts":[{"id":"completed-front","status":"investigated"}],"curator":{"exit_state":"succeeded","added":0,"last_finished_at":1000}}\n' > "$scratch/frontier.json"
++printf '{"fronts":[{"id":"completed-front","status":"investigated"}],"curator":{"exit_state":"clearexit","added":0,"last_finished_at":1000}}\n' > "$scratch/frontier.json"
+ cp "$repo/government/handoff-queue.sh" "$scratch/town/government/handoff-queue.sh"
+ cp "$repo/government/predict-scorer.py" "$scratch/town/government/predict-scorer.py"
+ cat > "$scratch/bin/antonina" <<'MOCK'
+diff --git a/tests/outcome-metrics-smoke.sh b/tests/outcome-metrics-smoke.sh
+index 6fdfcd2a..b5afe5f9 100755
+--- a/tests/outcome-metrics-smoke.sh
++++ b/tests/outcome-metrics-smoke.sh
+@@ -8,7 +8,7 @@ cat > "$tmp/bin/antonina" <<'EOF'
+ #!/bin/sh
+ case "$*" in
+   "agent list --finished --page 1 --limit 500 --json")
+-    printf '%s\n' '{"agents":[{"title":"Viche: Clerk","state":"succeeded","finished_at":1792774800},{"title":"SoringP1 proof attempt","state":"failed","finished_at":1792774800}],"unreadable":[]}' ;;
++    printf '%s\n' '{"agents":[{"title":"Viche: Clerk","state":"clearexit","finished_at":1792774800},{"title":"SoringP1 proof attempt","state":"failed","finished_at":1792774800}],"unreadable":[]}' ;;
+   "board list --state open --page 1 --json")
+     printf '%s\n' '[{"title":"Viche: unfinished mandate"},{"title":"SoringP1: theorem remains open"}]' ;;
+   *) echo "unexpected test call: $*" >&2; exit 2 ;;
+@@ -25,7 +25,7 @@ python3 - "$tmp/state/institutional-outcomes/latest.json" <<'PY'
+ import json,sys
+ x=json.load(open(sys.argv[1]))
+ assert x['agents']['total']==2,x['agents']
+-assert x['agents']['by_process_outcome']=={'failed':1,'succeeded':1}
++assert x['agents']['by_process_outcome']=={'failed':1,'clearexit':1}
+ assert x['agents']['caveat'].find('NOT prove')>=0
+ assert x['board']['open_by_project']=={'Viche':1,'SoringP1':1}
+ assert x['branches']['legislature']['readiness']=='running'
+diff --git a/tests/recovery-steward-smoke.sh b/tests/recovery-steward-smoke.sh
+index 6915428f..e10b1dfb 100644
+--- a/tests/recovery-steward-smoke.sh
++++ b/tests/recovery-steward-smoke.sh
+@@ -30,7 +30,7 @@ case "$1 $2" in
+   'agent status')
+     case "$4" in
+       old-agent) echo '{"state":"failed","alive":false,"backend_error":{"classification":"unknown","transient":false,"automatic_retry_safe":false}}' ;;
+-      new-agent) echo '{"state":"idle","alive":false}' ;;
++      new-agent) echo '{"state":"clearexit","alive":false}' ;;
+       *) exit 2 ;;
+     esac ;;
+   'agent run') printf '%s\n' "$@" >>"$MOCK_ROOT/runs" ;;
+@@ -68,4 +68,10 @@ test -d "$d/seats/branches/recovery-steward"
+ sh "$repo/government/recovery-steward-cycle.sh"
+ test "$(wc -l < "$d/mock/replacements")" -eq 1
+ test "$(grep -cx 'agent' "$d/mock/runs")" -eq 1
++# Finished healthy session gets the next independent recovery cycle without
++# replacing the appointment or replaying a prior invocation.
++rm "$d/state/recovery-steward/last-dispatch"
++sh "$repo/government/recovery-steward-cycle.sh"
++test "$(wc -l < "$d/mock/replacements")" -eq 1
++test "$(grep -cx 'agent' "$d/mock/runs")" -eq 2
+ echo 'Recovery steward fresh-session and non-replay smoke passed'
+diff --git a/tests/research-frontier-status-smoke.sh b/tests/research-frontier-status-smoke.sh
+index 439e1aa3..dcf4023f 100644
+--- a/tests/research-frontier-status-smoke.sh
++++ b/tests/research-frontier-status-smoke.sh
+@@ -11,7 +11,7 @@ printf 'not-json\n' > "$d/frontier.json"
+ SORING_FRONTIER_STATE=$d/frontier.json python3 "$script" |
+   jq -e '.status=="unavailable"' >/dev/null
+ cat > "$d/frontier.json" <<'JSON'
+-{"version":1,"curator":{"exit_state":"succeeded","added":0,"last_finished_at":1000},
++{"version":1,"curator":{"exit_state":"clearexit","added":0,"last_finished_at":1000},
+  "fronts":[
+  {"id":"first","status":"investigated","finding_unverified":"No new theorem"},
+  {"id":"second","status":"blocked","finding_unverified":"No final text; audit needed"}

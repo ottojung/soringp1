@@ -1,0 +1,424 @@
+commit 37568fd7a58bf85f26b3bfa2827e35a35d540af6
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Mon Nov 23 21:53:54 2026 -0700
+Commit:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+CommitDate: Mon Nov 23 21:53:54 2026 -0700
+
+    PnP: surface live frontier and cooperative stale-work checkpoints
+
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+old mode 100644
+new mode 100755
+index 17541a74..8d42591a
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -20,9 +20,9 @@ if __package__ in (None, ""):
+     sys.path.insert(0, os.path.abspath(os.path.join(
+         os.path.dirname(__file__), "..", "..")))
+     from missions.pnp import (config, desk as desk_mod, publish,
+-                                reconcile, state, jobs)
++                                reconcile, state, jobs, frontier)
+ else:
+-    from . import config, desk as desk_mod, publish, reconcile, state, jobs
++    from . import config, desk as desk_mod, publish, reconcile, state, jobs, frontier
+ 
+ 
+ def _printer(data):
+@@ -184,6 +184,10 @@ def main(argv=None):
+     subp.add_argument("gap")
+     subp.add_argument("candidate")
+     subp.set_defaults(fn=cmd_submit)
++    guard = sub.add_parser("guard")
++    guard.add_argument("gap")
++    guard.add_argument("--lease")
++    guard.set_defaults(fn=lambda args: (_printer(frontier.checkpoint(args.gap, args.lease)) or 0))
+     sub.add_parser("reconcile").set_defaults(fn=cmd_reconcile)
+     args = parser.parse_args(argv)
+     return args.fn(args)
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index b140a902..87e3b290 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -7,5 +7,6 @@ export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-
+ [ -r "$town/missions/pnp/cli.py" ] || exit 0
+ cd "$town"
+ # Renew leases and recover queued publications before the optional score poll.
++python3 -m missions.pnp.frontier || :
+ python3 missions/pnp/cli.py reconcile
+ python3 missions/pnp/leaderboard.py update || echo "PnP public leaderboard unavailable; retry next cycle" >&2
+diff --git a/missions/pnp/frontier.py b/missions/pnp/frontier.py
+new file mode 100644
+index 00000000..a0c4be77
+--- /dev/null
++++ b/missions/pnp/frontier.py
+@@ -0,0 +1,106 @@
++"""Cheap desk observations and cooperative work checkpoints.
++
++A failed or incomplete observation is unknown, never a stop instruction.
++Only a recorded terminal state or a superseded lease tells a worker to stop.
++No agent commands or desk mutations are performed here.
++"""
++import json
++import os
++import subprocess
++import time
++from urllib.parse import urlencode
++
++from . import config, state
++
++MAX_AGE = 300
++ACTIVE = ("LEASED", "RESEARCHING", "CANDIDATE_READY", "LOCAL_CHECKED")
++STOPPED = ("STALE", "RELEASED", "ACCEPTED", "PR_OPEN")
++
++
++def cache_path():
++    return os.path.join(config.STATE_ROOT, "frontier.json")
++
++
++def count(x):
++    return x if type(x) is int and x >= 0 else None
++
++
++def normalize(raw, now):
++    if not isinstance(raw, dict) or not isinstance(raw.get("gaps"), list):
++        raise ValueError("unreadable frontier")
++    rows = {}
++    for item in raw["gaps"]:
++        if not isinstance(item, dict):
++            raise ValueError("unreadable gap")
++        gid = item.get("id")
++        if not isinstance(gid, str) or not config.GAP_ID_RE.fullmatch(gid):
++            raise ValueError("invalid gap id")
++        if gid in rows:
++            raise ValueError("duplicate gap")
++        rows[gid] = {"held": count(item.get("held")),
++                     "parallel": count(item.get("parallel"))}
++    total = count(raw.get("open_gaps"))
++    return {"observed": now, "complete": total == len(rows),
++            "open_gaps": total, "offerable": count(raw.get("offerable_now")),
++            "ordinary": count(raw.get("offerable_now_ordinary")),
++            "held": count(raw.get("held_now")), "gaps": rows}
++
++
++def refresh():
++    url = config.DESK_BASE + "/status?" + urlencode({"handle": config.GH_USER})
++    result = subprocess.run(["curl", "-fsS", "--max-time", "8", url],
++                            capture_output=True, text=True, timeout=10, check=True)
++    snapshot = normalize(json.loads(result.stdout), time.time())
++    state.atomic_write(cache_path(), json.dumps(snapshot) + "\n")
++    return snapshot
++
++
++def load(now=None):
++    now = time.time() if now is None else now
++    try:
++        with open(cache_path(), encoding="utf-8") as f:
++            data = json.load(f)
++        age = now - data["observed"]
++        if 0 <= age <= MAX_AGE and isinstance(data["gaps"], dict):
++            return data
++    except (OSError, ValueError, TypeError, KeyError):
++        pass
++    return {}
++
++
++def missing(snapshot, gap):
++    return (snapshot.get("complete") is True and
++            isinstance(snapshot.get("gaps"), dict) and gap not in snapshot["gaps"])
++
++
++def checkpoint(gap, lease=None, now=None):
++    """Read-only, constant-time decision. No network, no agent termination."""
++    now = time.time() if now is None else now
++    try:
++        rec = state.load(gap)
++    except (OSError, ValueError, TypeError):
++        rec = None
++    if not isinstance(rec, dict):
++        return {"decision": "wait", "reason": "assignment unavailable"}
++    status = rec.get("state")
++    if lease and rec.get("lease") != lease:
++        return {"decision": "stop", "reason": "assignment superseded"}
++    if status in STOPPED:
++        return {"decision": "stop", "reason": status}
++    if status == "REJECTED" and rec.get("pr_number"):
++        return {"decision": "continue", "reason": "correct existing PR"}
++    if status not in ACTIVE:
++        return {"decision": "wait", "reason": status or "unknown"}
++    expiry = rec.get("lease_expires_at")
++    if type(expiry) not in (float, int) or expiry <= now:
++        return {"decision": "wait", "reason": "lease needs confirmation"}
++    if status in ("CANDIDATE_READY", "LOCAL_CHECKED") and rec.get("queued_lease"):
++        return {"decision": "wait", "reason": "publisher owns candidate"}
++    return {"decision": "continue", "reason": "live local assignment"}
++
++
++if __name__ == "__main__":
++    try:
++        refresh()
++    except (OSError, ValueError, subprocess.SubprocessError) as exc:
++        print("frontier temporarily unavailable:", exc)
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 2f68fec3..e5bc2c8b 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -90,3 +90,35 @@ the local build, signs and submits. Resume or correct failures promptly.
+ Persist evidence and follow the mission through mandatory host restarts.
+ Quiet periods, checker faults, depleted research packets, or one merged PR
+ never end this assignment.
++
++## Race-critical work (Founder priority)
++
++Choose expected accepted steps per resource-hour. Ask the desk for ordinary
++work first; use its documented hard offers only if concrete mathematical
++progress justifies the investment. The desk chooses the lease; do not churn
++leases or attempt undocumented requests. Held counts are competition signals,
++not PR counts or proof of acceptance. A rival PR alone does not invalidate a
++promising proof. Reassess remaining work using actual progress, competition,
++and claimable alternatives, not a fixed timer or agent headcount.
++
++Before lengthy work, and between bounded computation or proof-development
++steps, each worker runs the cheap local command:
++  python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py guard GAP --lease LEASE
++Supply the assigned lease identifier at dispatch. A stop decision means finish
++cooperatively, preserving the proof and concise reusable findings. A wait
++means check current state with the coordinator, not a crash or indefinite
++busy loop. Never start another expensive search on a terminal lease. An
++unknown snapshot never authorizes cancelling a live worker. Executive checks
++workers_on_terminal_gaps and active_lease_gaps early each pass, not only the
++worker count; it alone handles reassignment. Do not wait for PR verdicts to
++replenish research.
++
++Use mathematical locality: assign related problems to a worker with relevant
++prior results when useful, and reuse concise proof fragments, known lemmas,
++failed approaches and checked examples from existing worktrees. Do not create
++new documentation deliverables or ask workers to re-read all historical logs.
++Start with the gap's own sketch and exact statement. Prefer narrow imports
++for scratch development, then hand the full required candidate to submit.
++Avoid full local checker runs and redundant full Mathlib loads. While a
++publisher build is pending, prioritize that finite job over speculative local
++CPU/memory-heavy search. Keep independent model-bound reasoning productive.
+diff --git a/missions/pnp/reconcile.py b/missions/pnp/reconcile.py
+index 113480e7..852889ca 100644
+--- a/missions/pnp/reconcile.py
++++ b/missions/pnp/reconcile.py
+@@ -7,30 +7,30 @@ import os
+ import re
+ import time
+ 
+-from . import config, desk as desk_mod, gitctl, github, state
++from . import config, desk as desk_mod, gitctl, github, state, frontier
+ 
+ VERDICT = re.compile(r"\b(ACCEPTED|REJECTED|FAULT)\b")
+ 
+ 
+-def _heartbeat(gap_id, rec, desk):
++def _heartbeat(gap_id, rec, desk, force=False):
+     if not rec.get("lease") or rec["state"] not in (
+             "LEASED", "RESEARCHING", "CANDIDATE_READY", "LOCAL_CHECKED"):
+         return
+     now = time.time()
+     last = rec.get("lease_expires_at") or 0
+-    if now < last - config.LEASE_TTL_SECONDS + config.BEAT_INTERVAL_SECONDS:
++    if not force and now < last - config.LEASE_TTL_SECONDS + config.BEAT_INTERVAL_SECONDS:
+         return
+     try:
+         status = desk.beat(rec["lease"])
+     except Exception:
+         return
+     if status == 410:
+-        state.transition(gap_id, "STALE", failure_reason="lease returned 410")
++        state.stale_lease(gap_id, rec["lease"], "lease returned 410")
+     else:
+         state.update(gap_id, lease_expires_at=now + config.LEASE_TTL_SECONDS)
+ 
+ 
+-def reconcile_gap(gap_id, desk=None, gh=None, git=None):
++def reconcile_gap(gap_id, desk=None, gh=None, git=None, observed=None):
+     """Return a short summary; never raise for one bad gap."""
+     desk = desk or desk_mod.Desk()
+     gh = gh or github
+@@ -42,7 +42,8 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None):
+             rec["state"] == "REJECTED" and not rec.get("queued_lease")):
+         return {"gap": gap_id, "result": "terminal", "state": rec["state"]}
+ 
+-    _heartbeat(gap_id, rec, desk)
++    # Missing from a complete fresh frontier is a reason to confirm, not a verdict.
++    _heartbeat(gap_id, rec, desk, force=frontier.missing(observed or {}, gap_id))
+     rec = state.load(gap_id)
+     if rec["state"] in ("ACCEPTED", "RELEASED", "STALE") or (
+             rec["state"] == "REJECTED" and not rec.get("queued_lease")):
+@@ -113,18 +114,6 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None):
+             else:
+                 state.update(gap_id, external_verdict="FAULT",
+                              failure_reason="upstream checker FAULT; will recheck")
+-    else:
+-        # If the desk no longer lists the gap and nothing was submitted, it
+-        # is genuinely gone; keep the research record.
+-        if rec["state"] == "LEASED" or rec["state"] == "RESEARCHING":
+-            try:
+-                open_ids = {g.get("id") for g in desk.status().get("gaps", [])
+-                            if isinstance(g, dict)}
+-            except Exception:
+-                open_ids = None
+-            if open_ids is not None and gap_id not in open_ids:
+-                state.transition(gap_id, "STALE",
+-                                 failure_reason="gap no longer posted")
+     rec = state.load(gap_id)
+     state.update(gap_id, last_reconcile=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                       time.gmtime()))
+@@ -134,9 +123,11 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None):
+ 
+ def reconcile_all(desk=None, gh=None, git=None):
+     results = []
++    observed = frontier.load()
++    desk = desk or desk_mod.Desk()
+     for gap_id in state.all_gaps():
+         try:
+-            results.append(reconcile_gap(gap_id, desk=desk, gh=gh, git=git))
++            results.append(reconcile_gap(gap_id, desk=desk, gh=gh, git=git, observed=observed))
+         except Exception as e:                       # nonfatal by construction
+             try:
+                 rec = state.load(gap_id)
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index cda95283..0e310c2c 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -183,6 +183,18 @@ def reacquire(gap_id, **fields):
+     return rec
+ 
+ 
++def stale_lease(gap_id, lease, reason):
++    """Do not invalidate a reacquired or already-published gap on an old reply."""
++    with lock(gap_id):
++        rec = load(gap_id)
++        if not rec or rec.get("lease") != lease or "STALE" not in config.ALLOWED.get(rec["state"], set()):
++            return False
++        rec.update(state="STALE", failure_reason=reason)
++        save(rec)
++        event(gap_id, "state", {"to": "STALE", "fields": {"failure_reason": reason}})
++        return True
++
++
+ def update(gap_id, **fields):
+     with lock(gap_id):
+         rec = load(gap_id)
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+old mode 100644
+new mode 100755
+index 68519b42..d376a212
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -4,15 +4,17 @@ import collections
+ import datetime
+ import json
+ import os
++import re
++import time
+ from pathlib import Path
+ import subprocess
+ import sys
+ 
+ if __package__ in (None, ""):
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from missions.pnp import leaderboard
++    from missions.pnp import leaderboard, frontier
+ else:
+-    from . import leaderboard
++    from . import leaderboard, frontier
+ 
+ STATE = Path(os.environ.get("VICHE_STATE_ROOT",
+                             "/var/lib/lubko/wd/viche-state"))
+@@ -50,6 +52,7 @@ def snapshot():
+         rows.append({"gap": item.get("gap_id"),
+                      "state": item.get("state"),
+                      "pr_url": item.get("pr_url"),
++                     "lease_expires_at": item.get("lease_expires_at"),
+                      "failure_reason": item.get("failure_reason")})
+     lb = leaderboard.load()
+     stale = True
+@@ -62,6 +65,19 @@ def snapshot():
+         except (KeyError, ValueError):
+             stale = True
+     w = workers()
++    observed = frontier.load()
++    by_gap = {r["gap"]: r for r in rows}
++    for worker in w["agents"]:
++        match = re.search(r"\bL-[a-z0-9]+(?:-[a-z0-9]+)+\b", worker.get("title") or "")
++        gid = match.group(0) if match else None
++        worker["gap"] = gid
++        worker["gap_state"] = by_gap.get(gid, {}).get("state")
++        worker["competition"] = observed.get("gaps", {}).get(gid)
++    stale_workers = [a["id"] for a in w["agents"]
++                     if a["gap_state"] in frontier.STOPPED]
++    active = [r["gap"] for r in rows if r["state"] in frontier.ACTIVE
++              and type(r["lease_expires_at"]) in (int, float)
++              and r["lease_expires_at"] > time.time() and isinstance(r["gap"], str)]
+     score = {k: lb.get(k) for k in ("rank", "our_steps", "leader",
+                                    "runner_up", "lead_over_second",
+                                    "our_margin_vs_best_competitor",
+@@ -74,8 +90,13 @@ def snapshot():
+     return {
+         "observed": len(rows), "by_state": by_state, "recent": rows[-12:],
+         "leaderboard": score, "workers": w,
++        "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
++        "frontier_fresh": bool(observed), "active_lease_gaps": active,
++        "workers_on_terminal_gaps": stale_workers,
+         "owned_by": "Viche Executive; other operators do not launch agents",
+         "action": (
++            "Executive: finish or reassign confirmed terminal-gap workers cooperatively; preserve their proof work. Acquire ordinary gaps promptly when offered."
++            if stale_workers else
+             "Executive must restore multiple independent P vs NP researchers "
+             "and coordinate desk acquisition and submissions."
+             if w["count"] == 0 else
+@@ -96,7 +117,9 @@ def snapshot():
+                             (score.get("leader") or {}).get("steps"),
+                             (score.get("runner_up") or {}).get("steps")],
+             "workers": w["count"], "coverage": w["coverage"],
+-            "gaps": by_state},
++            "gaps": by_state, "active": sorted(active),
++            "assignments": sorted((str(a["id"]), a["gap"] or "", a["gap_state"] or "") for a in w["agents"]),
++            "ordinary_available": (observed.get("ordinary") or 0) > 0 if observed else None},
+         "caveat": "Only public checked steps count; local activity is not proof."}
+ 
+ 
+diff --git a/tests/pnp-leaderboard-smoke.sh b/tests/pnp-leaderboard-smoke.sh
+old mode 100644
+new mode 100755
+index ed2e7e96..5be06f74
+--- a/tests/pnp-leaderboard-smoke.sh
++++ b/tests/pnp-leaderboard-smoke.sh
+@@ -9,7 +9,7 @@ from pathlib import Path
+ import subprocess
+ import tempfile
+ from unittest.mock import patch
+-from missions.pnp import leaderboard, status
++from missions.pnp import leaderboard, status, frontier
+ 
+ def people(*pairs):
+     return [{"github": name, "steps": steps, "first_proof_at":
+@@ -82,6 +82,24 @@ with tempfile.TemporaryDirectory() as tmp:
+     assert unknown["workers"]["count"] is None
+     assert unknown["workers"]["coverage"] == "unavailable"
+     assert unknown["dispatch_signal"] != empty["dispatch_signal"]
++# A malformed or partial response cannot signal that a lease has ended.
++raw = {"open_gaps": 2, "offerable_now": 1, "offerable_now_ordinary": 1,
++       "gaps": [{"id": "L-meta-1662", "held": 3, "parallel": 4}]}
++part = frontier.normalize(raw, 100)
++assert not part["complete"] and not frontier.missing(part, "L-meta-651")
++full = frontier.normalize(dict(raw, open_gaps=1), 100)
++assert frontier.missing(full, "L-meta-651")
++for rec, expected in [
++    ({"state": "LEASED", "lease": "a", "lease_expires_at": 200}, "continue"),
++    ({"state": "LEASED", "lease": "a", "lease_expires_at": 50}, "wait"),
++    ({"state": "STALE", "lease": "a"}, "stop"),
++    ({"state": "LEASED", "lease": "b", "lease_expires_at": 200}, "stop"),
++    ({"state": "CANDIDATE_READY", "lease": "a", "lease_expires_at": 200,
++      "queued_lease": "a"}, "wait"),
++    (None, "wait"),
++]:
++    with patch.object(frontier.state, "load", return_value=rec):
++        assert frontier.checkpoint("L-meta-1662", "a", now=100)["decision"] == expected
+ gov = Path("government/executive-cycle.sh").read_text()
+ assert "mission_dispatch_signature=" in gov
+ assert "mission_dispatch_signature" in gov.split("# Founder directive 2026-11-16 (item 4):")[-1]

@@ -1,0 +1,65 @@
+commit 3a4280fcbd3802c4833e42c7e27a9522f8e82aaf
+Author:     Viche Judiciary <judiciary@viche.local>
+AuthorDate: Wed Nov 25 16:54:12 2026 +0000
+Commit:     Viche Judiciary <judiciary@viche.local>
+CommitDate: Wed Nov 25 16:54:12 2026 +0000
+
+    Avoid redundant delta archives and reserve disk space for verification
+
+diff --git a/missions/pnp/retention.py b/missions/pnp/retention.py
+index 7635105d..f782eb42 100644
+--- a/missions/pnp/retention.py
++++ b/missions/pnp/retention.py
+@@ -6,6 +6,7 @@ import fcntl
+ import hashlib
+ import json
+ import os
++import shutil
+ from pathlib import Path
+ import subprocess
+ import tarfile
+@@ -166,22 +167,39 @@ def compact(path):
+         git(path, "cat-file", "-e", base + "^{commit}")
+         before = size_kib(path)
+         old = signature(path)
+-        backup(path, path.parent / "storage-delta.tar.gz", old[1])
+-        if not idle(path):
+-            return "in_use"
++        removable = [name[2:] for name in names(flags)
++                     if name.startswith("H ") and name[2:] not in old[1]
++                     and (path / name[2:]).is_file()]
+         ref = "refs/viche/storage-archive/" + hashlib.sha256(str(path).encode()).hexdigest()
+         git(path, "update-ref", ref, base)
++        if not removable:
++            # New sparse workspaces normally need no duplicate delta archive.
++            state.atomic_write(str(marker), json.dumps(
++                {"base": base, "ref": ref, "status_sha256": old[0],
++                 "unique_excluded_files": old[1], "before_kib": before, "after_kib": before,
++                 "already_sparse": True, "at": time.time()}, sort_keys=True) + "\n")
++            return "already_sparse"
++        # Do not exhaust the filesystem by copying a large unique artifact.
++        archive_limit = sum((path / n).stat().st_size for n, x in old[1].items()
++                            if x[0] == "file")
++        if archive_limit + 512 * 1024**2 > shutil.disk_usage(path).free:
++            return "insufficient_archive_space"
++        archive = path.parent / "storage-delta.tar.gz"
++        backup(path, archive, old[1])
++        if not idle(path):
++            return "in_use"
+         git(path, "sparse-checkout", "set", "--no-cone", "/*", "!/" + OUT + "/")
+         if signature(path) != old:
+             git(path, "sparse-checkout", "disable")
+             raise ValueError("status/content changed; restored full materialization")
+         after = size_kib(path)
++        archive_kib = size_kib(archive) if archive.exists() else 0
+         state.atomic_write(str(marker), json.dumps(
+             {"base": base, "ref": ref, "status_sha256": old[0],
+              "unique_excluded_files": old[1], "before_kib": before, "after_kib": after,
+-             "restore": "git sparse-checkout disable", "at": time.time()},
++             "archive_kib": archive_kib, "restore": "git sparse-checkout disable", "at": time.time()},
+             sort_keys=True, indent=2) + "\n")
+-        return before - after
++        return before - after - archive_kib
+ 
+ 
+ def sweep(limit=3):

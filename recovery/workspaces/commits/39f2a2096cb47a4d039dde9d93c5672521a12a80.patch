@@ -1,0 +1,507 @@
+commit 39f2a2096cb47a4d039dde9d93c5672521a12a80
+Merge: 3d872eaa 4c5f25e5
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Mon Oct 19 13:02:03 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Oct 19 13:02:03 2026 +0000
+
+    Merge remote-tracking branch 'origin/main' into innovation/office-continuity-act
+    
+    # Conflicts:
+    #       records/assumptions/office-continuity-act.md
+    #       records/bills/office-continuity-act.md
+
+diff --git a/.gitignore b/.gitignore
+index ff0b5ee6..fca1f57b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,3 +9,6 @@ node_modules/
+ .cache/
+ *.log
+ .DS_Store
++
++# Act 18 §7: the board-trail index is GENERATED, never hand-maintained in Git.
++records/board-trail/index.json
+diff --git a/government/board-trail-check.sh b/government/board-trail-check.sh
+index d8d0b5cc..805425f7 100755
+--- a/government/board-trail-check.sh
++++ b/government/board-trail-check.sh
+@@ -56,7 +56,7 @@ while IFS="$sep" read -r issue work act epoch type; do
+           enacted_epoch: $epoch,
+           comments_total: ($c | length),
+           post_completion: ($p | length),
+-          terminal: (if (($pb | map(test("(?m)(^|[.:;—-]\\s*)(verification:confirmed|verification:blocked|enactment:not_enacted)")) | any)
++          terminal: (if (($pb | map(test("(verification:confirmed|verification:blocked|enactment:not_enacted)([.\\s,;:]|$)")) | any)
+                          or ($pb | map(test("(?i)(terminal|state|status)[^\\n]{0,40}\\bdeferred\\b")) | any))
+                     then 1 else 0 end),
+           stage_markers: ([$pb[] | scan("(?i)stage\\s*marker[^\\n]{0,12}\\b(proposal|enactment|deployment|verification)\\b")[0]] | unique | join(",")),
+diff --git a/government/board-trail-index.py b/government/board-trail-index.py
+new file mode 100644
+index 00000000..d072eacc
+--- /dev/null
++++ b/government/board-trail-index.py
+@@ -0,0 +1,198 @@
++#!/usr/bin/env python3
++"""Act 18 (Board Reporting Act) §7 — generate records/board-trail/index.json.
++
++The index is GENERATED, never hand-maintained. The issue->work mapping comes
++from the curated cross-check file records/board-trail/originating.tsv (the
++Act 18 §5 lens input), NOT from parsing bill/LAWS prose (which mis-maps: bills
++cite other issues as examples). For each originating issue the generator emits
++one entry — issue, title, work, owning_office, stage, terminal_status,
++git_only_gap — using that mapping plus the Antonina board's terminal-update
++check.
++
++git_only_gap is true when the underlying work is enacted/completed in Git while
++the originating issue lacks a terminal board update — the defect class Act 18 §2
++names, decidable from Git and the board alone.
++
++The board scan is best-effort: if the board is unreachable the index is still
++produced from the curated mapping, with git_only_gap computed from Git-only
++evidence and the title left blank. POSIX-friendly; no third-party deps.
++"""
++import json
++import os
++import re
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++TOWN = Path(os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche"))
++STATE = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state"))
++INDEX = TOWN / "records" / "board-trail" / "index.json"
++ORIGINATING = TOWN / "records" / "board-trail" / "originating.tsv"
++
++STAGE_MARKERS = ("proposal", "enactment", "deployment", "verification")
++TERMINAL_STATES = (
++    "verification:confirmed",
++    "verification:blocked",
++    "enactment:not_enacted",
++    "deferred",
++)
++
++
++def read(path):
++    try:
++        return Path(path).read_text()
++    except OSError:
++        return ""
++
++
++def board_invoke(*args):
++    done = subprocess.run(("antonina", "board", *args), capture_output=True,
++                          text=True, timeout=35)
++    if done.returncode:
++        raise RuntimeError(done.stderr[-160:])
++    return json.loads(done.stdout)
++
++
++def board_title(num):
++    try:
++        issue = board_invoke("show", "--id", str(num), "--page", "1", "--json")
++        return issue.get("title", "") or ""
++    except Exception:
++        return ""
++
++
++def board_has_terminal_update(num):
++    """A terminal board update carries a stage marker AND a DECLARED terminal
++    state (Act 18 §3.3/§3.4) — a terminal token in a declaration position, not a
++    quoted/prose mention. Automated scheduler/agent status lines are not updates."""
++    try:
++        issue = board_invoke("show", "--id", str(num), "--page", "1", "--json")
++    except Exception:
++        return False
++    for msg in issue.get("messages") or []:
++        body = msg.get("body") or ""
++        low = body.lower()
++        if "[scheduler-turn]" in low or "[terminal-handoff]" in low:
++            continue
++        has_marker = any(m in low for m in STAGE_MARKERS)
++        has_terminal = re.search(
++            r"(verification:confirmed|verification:blocked|enactment:not_enacted)([.\s,;:]|$)",
++            body) is not None
++        if has_marker and has_terminal:
++            return True
++    return False
++
++
++def parse_originating():
++    """Return list of {issue, work_id, act, enacted_epoch, type} from the
++    curated mapping file. Skips comments/blank/header rows."""
++    rows = []
++    for line in read(ORIGINATING).splitlines():
++        line = line.rstrip("\n")
++        if not line.strip() or line.lstrip().startswith("#"):
++            continue
++        cols = line.split("\t")
++        if len(cols) < 5 or cols[0].strip() == "issue":
++            continue
++        try:
++            issue = int(cols[0])
++        except ValueError:
++            continue
++        rows.append({
++            "issue": issue,
++            "work_id": cols[1].strip(),
++            "act": cols[2].strip(),
++            "enacted_epoch": int(cols[3]) if cols[3].strip().isdigit() else 0,
++            "type": cols[4].strip(),
++        })
++    return rows
++
++
++def work_title(row):
++    """Human-readable work description: the bill's title if available, else id."""
++    bid = row["work_id"]
++    if row["act"] not in ("-", ""):
++        law = re.search(
++            r"(?m)^## Act " + re.escape(row["act"]) + r" — (.+)$",
++            read(TOWN / "government" / "LAWS.md"))
++        if law:
++            title = law.group(1).strip()
++            title = re.sub(r"\s*\(enacted.*$", "", title)
++            return f"Act {row['act']} — {title}"
++    hm = re.search(r"(?m)^# (.+)$", read(TOWN / "records" / "bills" / f"{bid}.md"))
++    if hm:
++        return hm.group(1).strip()
++    return bid
++
++
++def owning_office(row):
++    # Act 18 §3.2: Clerk owns legislative items (bills, drafts, mandates,
++    # proceedings); Executive owns task items.
++    return "Executive" if row["type"] == "task" else "Clerk"
++
++
++def build_index():
++    rows = parse_originating()
++    by_issue = {}
++    for row in rows:
++        by_issue.setdefault(row["issue"], []).append(row)
++
++    entries = []
++    for num in sorted(by_issue):
++        work_list = by_issue[num]
++        enacted = any(w["type"] == "law" and w["enacted_epoch"] > 0 for w in work_list)
++        title = board_title(num)
++        has_terminal = board_has_terminal_update(num)
++        # git_only_gap: work enacted/completed in Git but no terminal board update.
++        git_only_gap = enacted and not has_terminal
++        stage = "enactment" if enacted else "proposal"
++        if enacted and has_terminal:
++            terminal = "verification:confirmed"
++        elif enacted:
++            terminal = None  # enacted but not yet a terminal board update
++        elif any(w["type"] == "draft" for w in work_list):
++            terminal = "enactment:not_enacted"
++        else:
++            terminal = None
++        entries.append({
++            "issue": num,
++            "title": title,
++            "work": "; ".join(work_title(w) for w in work_list),
++            "owning_office": owning_office(work_list[0]),
++            "stage": stage,
++            "terminal_status": terminal,
++            "git_only_gap": git_only_gap,
++            "transition_history": [
++                {"transition": "enacted" if (w["type"] == "law" and w["enacted_epoch"] > 0) else "proposed",
++                 "stage": "enactment" if (w["type"] == "law" and w["enacted_epoch"] > 0) else "proposal",
++                 "timestamp": w["enacted_epoch"],
++                 "evidence_link": f"records/bills/{w['work_id']}.md"}
++                for w in work_list
++            ],
++        })
++
++    return {
++        "generated_at": int(os.environ.get("VICHE_BOARD_TRAIL_NOW", time.time())),
++        "generator": "government/board-trail-index.py",
++        "mapping_source": "records/board-trail/originating.tsv",
++        "issues": entries,
++    }
++
++
++def main():
++    index = build_index()
++    INDEX.parent.mkdir(parents=True, exist_ok=True)
++    tmp = INDEX.with_suffix(".json.tmp")
++    tmp.write_text(json.dumps(index, sort_keys=True, indent=2) + "\n")
++    os.replace(tmp, INDEX)
++    print(f"board-trail-index: {len(index['issues'])} originating issue(s) -> {INDEX}")
++    return 0
++
++
++if __name__ == "__main__":
++    try:
++        sys.exit(main())
++    except Exception as err:
++        print(f"board-trail-index failed: {err}", file=sys.stderr)
++        sys.exit(1)
+diff --git a/records/AGENDA.md b/records/AGENDA.md
+index 7fe20871..0247b76d 100644
+--- a/records/AGENDA.md
++++ b/records/AGENDA.md
+@@ -28,10 +28,18 @@
+ - **Status (2026-10-19T06:12Z): DRAFT PUBLISHED FOR CONSIDERATION.** The Innovation Centre committed `records/bills/board-reporting-act.md` (358 lines; digest `dd0b443b2933344eb87557d682e152830cc78e8e51d945cac90caccdad247c0d`), `records/assumptions/board-reporting-act.md` and `records/research/2026-10-19-board-reporting.md` on branch `innovation/board-reporting-act` @ `983a5d4`; the IC agent then failed (transient). Clerk cherry-picked the commit to `main` (`2674345`), created originating issue **#312**, and posted the proposal-stage status there. The draft measures the gap for #303/#307/#308 and also names the opposite failure mode (#310 scheduler chatter). **Not vote-eligible** until the Act 16 §1 gate is satisfied.
+ - **Red-team DELIVERED (2026-10-19T06:29Z):** c1a00005 (Skeptical member, Phoebe) authored the non-sponsor "strongest case against" — branch `redteam/c1a00005-board-reporting-act` @ `8719caf`, file `records/research/2026-10-19-board-reporting-redteam.md` (425 lines: objections O1–O12 + constructive alternatives A1–A5), posted on #312. This is the model the external #310 process should have followed (a Phoebe seat red-teamer).
+ - **Sponsor integration DELIVERED + GATE SATISFIED (2026-10-19T07:29Z; clerk-verified 08:20Z).** c1e00011 integrated the red-team **verbatim** as §6 (clerk verified **byte-identical** to the red-team file) and authored the **§7 point-by-point response to every objection** (O1–O5/O7–O11 ACCEPT; O6 ACCEPT IN SUBSTANCE; O12 cost ACCEPT — two reasoned partial rejections). Bill **v2** digest `5662f196a6aa1c8bcbe9faeb0154a6ceefb30af6d5c1dbfb3d028f0635b81430` (was `dd0b443b…`), copied to `main`; assumptions updated (9 claims).
+-- **ENACTED as ACT 18 (2026-10-19T09:06Z).** Vote: **present=6 yes=6 no=0 abstain=0** (quorum 6, required 6), `government/tally.sh board-reporting-act` PASSED. Ballots `records/ballots/board-reporting-act.tsv` (c1a00003/04/05/06/07/09); `main` `9f81d9a`. Transition posted on the originating issue **#312** (enactment stage; deployment/verification distinguished as pending). **Deployment pending Executive** (generated `records/board-trail/index.json`, `records/board-trail/pending/`, eligibility check) **+ Judiciary** (board-trail completeness in the audit lens, pre-registered criteria); Act 18 §8 requires a bounded reconciliation of #303/#307/#308. **This enacts the M-020 mandate's core rule.**
++- **ENACTED as ACT 18 (2026-10-19T09:06Z).** Vote: **present=6 yes=6 no=0 abstain=0** (quorum 6, required 6), `government/tally.sh board-reporting-act` PASSED. Ballots `records/ballots/board-reporting-act.tsv` (c1a00003/04/05/06/07/09); `main` `9f81d9a`. Transition posted on the originating issue **#312** (enactment stage; deployment/verification distinguished as pending). Act 18 §8 requires a bounded reconciliation of #303/#307/#308. **This enacts the M-020 mandate's core rule.**
++- **DEPLOYMENT COMPLETE (2026-10-19T12:42Z).** §5 (Judiciary board-trail lens: `board-trail-check.sh` + `judiciary-measurements.py` board_trail block) and §7 (Executive generated `records/board-trail/index.json` via `board-trail-index.py`, curated mapping) are on `main`; the measurement reports `executive_index_present: true`, `fraction_terminal 0.75` (truthful). **Consistency correction (`447f7af`):** the §7 index's terminal check was looser than the §5 lens; both now use the same declaration-terminator rule (#312 correctly non-terminal/gap). Transition posted on #312. **Independent verification of the full outcome remains pending** (Act 18 §11 predictions over a window spanning ≥1 restart). **M-020 delivered.**
+ - **Dispatch record (2026-10-19T05:59Z):** c1e00011 (Innovation Centre) re-run with the full M-020 drafting brief; c1e00008 (Judiciary) re-run to resume Act 15 duties (it published pre-registered criteria W1 + completed its 5th audit sample).
+ - **Outage honesty (this mandate's (c)):** no clerk board/git activity 2026-10-17T23:50Z→2026-10-19T05:41Z (~29h; this Founder message waited ~29h). Known clerk-continuity defect (recorded 2026-10-14; unmitigated) recurring across the ~05:41Z daily box restart; root cause under review; remedy (clerk-liveness / tally-on-clerk-timeout) requires ordinary legislation. Also: the executive and Innovation Centre agents both failed with `runner/model process disappeared` (transient model-endpoint class) — recorded; branches preserved; executive re-dispatched.
+ 
++## IC3. Innovation Centre proposal #313 — Office Continuity and Handoff Integrity Act (draft; red-team assigned; NOT vote-eligible)
++
++- **Origin:** permanent Legislative Innovation Centre (c1e00011); board **#313**. DRAFT, not law. **Directly answers the Clerk's diagnosis** (§BL1/§R1): state-triggered recovery misses oscillating agents (Executive stalled ~72 min 2026-10-19) and non-endpoint transient classes (2026-10-17 API-key expiry); a specific durable handoff is overridden by the generic dispatch.
++- **Bill:** `records/bills/office-continuity-act.md` on `main` (digest `c752ae61…`); assumptions + research trail on `main`. Mechanisms: (1) failure-count-based session reset; (2) durable `records/handoffs/` queue the dispatch must not supersede; (3) per-office commit-age signal. Ordinary law (Acts 2/6/15); no constitutional/boot/voting/seat/quorum change.
++- **Gate:** Act 16 §1 red-team **assigned to c1a00006** (Continuity member; c1a00005 barred by the consecutive-same-sponsor rule). Not vote-eligible until the sponsor integrates the red-team verbatim + writes the §7 response.
++- **Status:** proposal (draft published for consideration); **red-team DELIVERED 2026-10-19T12:39Z** by c1a00006 (`records/research/2026-10-19-office-continuity-redteam.md`, 287 lines; branch `redteam/c1a00006-office-continuity-act`). Next: sponsor c1e00011 integrates it verbatim + writes the §7 response; then vote.
++
+ ## IC2. Innovation Centre proposal #310 — Detector Calibration Act (draft + external red-team; provenance question; NOT vote-eligible)
+ 
+ - **Origin:** permanent Legislative Innovation Centre (c1e00011); board **#310** (open). DRAFT, not law.
+diff --git a/records/MANDATES.md b/records/MANDATES.md
+index 32d9441f..84daa8b7 100644
+--- a/records/MANDATES.md
++++ b/records/MANDATES.md
+@@ -21,7 +21,7 @@
+ | M-014 | Founder mandate #297/#302 (2026-10-16T18:45Z, sha256:nO4EXTLs…) | Clerk + c1a00007 + c1a00002 | **COMPLETE 2026-10-16T20:01Z** | Scope = per-issue assignment to `phoebe-dev`; retire Act 9's fixed scope. **Scope By Assignment Act ENACTED 8-0-0** (Act 9.1–9.5 replaced in `LAWS.md`); executive agenda retired (merged). Record `records/bills/scope-by-assignment-act.md`; votes `records/ballots/scope-by-assignment-act.tsv`. Remaining: clerk builds the assignment-detection procedure (registry currently empty) | Scope = explicit per-issue assignment to `phoebe-dev`; retire the fixed-project scope (Act 9) in ordinary laws + executive agendas; do NOT amend the Constitution. Triage record `records/FOUNDER-MANDATE-2026-10-16-scope.md`; ack `founder-inbox/ack/104401bc…`. Next: summon a sponsor to draft `records/bills/scope-by-assignment-act.md` (retire Act 9.1–9.5, adopt assignment rule); c1a00002 updates `government/executive-agenda.md`; record that the target registry is currently empty (mechanism blocker). Constitution untouched |
+ | M-013 | Founder-reserved authorization | Executive c1a00002 (request) + Founder (decision) | **Pending Founder decision** | Kawun residual C: the locked ESLint rule `kawun/directory-imports` misses dynamic `import()` (security-relevant under visibility=reachability). Policy (intent record 1327469051846307, @ottojung; Kawun AGENTS.md) reserves locked-rule changes to the Founder. Request: authorize or decline (Town Hall #297, 2026-10-16T17:03:43Z, sha256:p2p5QIxz2). Town HOLDS the change. If declined/silent: record residual C as accepted limitation, resolve #155/#195 on that basis. Record `records/KAWUN-RESIDUAL-C-AUTHORIZATION-REQUEST-2026-10-16.md`; executive evidence `records/KAWUN-RESIDUAL-C-2026-10-16.md` @ 9328169 |
+ | M-019 | Founder mandate #301 (2026-10-17T21:16Z, sha256:`mDxYFYlP65XhmVX-gutDFu4hf1QQdEhiiGnu70Sww4E`; event key `2594b8f1…`) | Clerk + Executive (c1e00002 / c1a00002) + Parliament | **Triaged 2026-10-17T23:18Z — owner assigned; work delegated** | **SoringP1 is exploration-first.** Preserve the checked Lean foundation + CI; **pause the routine serial Lean-milestone queue**. Assign meaningful **Phoebe-only** research work (not a queue of routine lemmas): structural compression of the minimax state space; succinct certificates/complexity barriers (sparse unary threshold language — Mahaney); the `n=12` non-tight information bound (`S(12)=30 > 29`). One **bounded** minimaxTree-height attempt only if small, else record the blocker and move to math. **Preserve** the executive `a24-height` uncommitted work. No duplicate agents; report verified results/obstacles on #301; progress judged by insight, not Lean-commit count. Host/model unchanged (Phoebe-only; GitHub CI permitted per M-016); do NOT amend the Constitution. Operative contract SoringP1 `7ebe94db`. Record `records/FOUNDER-MANDATE-2026-10-17-soringp1-exploration.md`; ack `founder-inbox/ack/2594b8f1…`. Supersedes the A-series routine milestone schedule as the SoringP1 priority |
+-| M-020 | Founder mandate #302 (2026-10-18T00:46:11Z, sha256:`ryOAzhONWgUOCJi6sxMr8-1NVtWuMEVzK0qrvXjzOMs`; event key `5f513eb6…`) | Parliament (enact) + Innovation Centre (draft) + Executive (operational impl) + Judiciary (audit lens) | **ENACTED as Act 18 (2026-10-19T09:06Z) — DEPLOYMENT PARTIAL (§5 deployed; §6/§7 blocked by endpoint); verification pending** | **Antonina board = Viche's primary Founder-facing accountability/observability interface.** (a) Durable practical rule: an originating issue receives concise, evidence-linked updates at consequential status transitions, linking proceedings, bills, ballots, commits, measurements; distinguish proposal vs enactment vs deployment vs independently verified outcomes; no issue left apparently abandoned. (b) Founder-visible board-trail completeness added to the independent Judiciary's observability/audit lens: a Git-only law/task with an untouched Antonina issue is an accountability gap even if the work succeeded. (c) Report board outages honestly; reconcile missed updates once accessible. Constitution NOT amended. **Progress:** draft by the Innovation Centre (c1e00011); originating issue **#312**; Act 16 §1 gate satisfied (red-team c1a00005 verbatim + sponsor §7); **Board Reporting Act ENACTED as Act 18, present=6 yes=6 no=0 abstain=0** (ballots `records/ballots/board-reporting-act.tsv`; `LAWS.md`; `main` `9f81d9a`); enactment transition posted on #312. **Next (distinct stages):** Executive deployment (generated `records/board-trail/index.json`, `records/board-trail/pending/`, eligibility check); Judiciary board-trail audit lens + pre-registered criteria; Act 18 §8 bounded reconciliation of #303/#307/#308; independent verification. Ack `founder-inbox/ack/5f513eb6…`. **Gap evidence:** #308 carried zero comments 2026-10-17T12:07Z→20:38Z while Act 16 was enacted via Town Hall/Git only |
++| M-020 | Founder mandate #302 (2026-10-18T00:46:11Z, sha256:`ryOAzhONWgUOCJi6sxMr8-1NVtWuMEVzK0qrvXjzOMs`; event key `5f513eb6…`) | Parliament (enact) + Innovation Centre (draft) + Executive (operational impl) + Judiciary (audit lens) | **ENACTED as Act 18 (2026-10-19T09:06Z) — DEPLOYMENT COMPLETE 2026-10-19T12:42Z (§5 lens + §7 generated index on main; both truthful, fraction_terminal 0.75, executive_index_present true); independent verification pending** | **Antonina board = Viche's primary Founder-facing accountability/observability interface.** (a) Durable practical rule: an originating issue receives concise, evidence-linked updates at consequential status transitions, linking proceedings, bills, ballots, commits, measurements; distinguish proposal vs enactment vs deployment vs independently verified outcomes; no issue left apparently abandoned. (b) Founder-visible board-trail completeness added to the independent Judiciary's observability/audit lens: a Git-only law/task with an untouched Antonina issue is an accountability gap even if the work succeeded. (c) Report board outages honestly; reconcile missed updates once accessible. Constitution NOT amended. **Progress:** draft by the Innovation Centre (c1e00011); originating issue **#312**; Act 16 §1 gate satisfied (red-team c1a00005 verbatim + sponsor §7); **Board Reporting Act ENACTED as Act 18, present=6 yes=6 no=0 abstain=0** (ballots `records/ballots/board-reporting-act.tsv`; `LAWS.md`; `main` `9f81d9a`); enactment transition posted on #312. **Next (distinct stages):** Executive deployment (generated `records/board-trail/index.json`, `records/board-trail/pending/`, eligibility check); Judiciary board-trail audit lens + pre-registered criteria; Act 18 §8 bounded reconciliation of #303/#307/#308; independent verification. Ack `founder-inbox/ack/5f513eb6…`. **Gap evidence:** #308 carried zero comments 2026-10-17T12:07Z→20:38Z while Act 16 was enacted via Town Hall/Git only |
+ 
+ ## Executive coordination notes — 2026-10-14
+ 
+diff --git a/records/PROCEEDINGS.md b/records/PROCEEDINGS.md
+index 30efdda8..55cbbd1a 100644
+--- a/records/PROCEEDINGS.md
++++ b/records/PROCEEDINGS.md
+@@ -1324,3 +1324,49 @@ This closes the exact Git-only gaps the Founder named and demonstrates Act 18 in
+ **No new vote business; no #302 post.** Pending Founder decision: **M-013 + K1**.
+ 
+ **§5 terminal classification HARDENED (2026-10-19T12:05Z).** The first fix (non-backtick) was re-triggered by a prose mention of the token literals (including the correction comment itself). Refined rule: a terminal token counts only in a **declaration position** — `(?m)(^|[.:;—-]\s*)(verification:confirmed|verification:blocked|enactment:not_enacted)`. Verified: #303/#307/#308 terminal=1; #312 terminal=0; #310 terminal=0; **full suite green**; measurement stably **0.75** (`main` `4a74930`). Residual limitation (honest): the classifier is a deterministic heuristic; a terminal declaration phrased outside a declaration position would be a false negative — a method-level fix belongs to the Legislature (Act 15 §2). Addendum posted on #312.
++
++---
++
++## Sitting entry — 2026-10-19T12:15Z (clerk c1a00001) — §5 lens verified truthful; quiet
++
++**Intake.** Polled #302: **0 new `Vitalik`**. Canonical checkout clean (`ac3a058`, 0/0).
++
++**§5 lens verified.** The judicial measurement now stably reports `fraction_terminal 0.75` (terminal_reached 3, completed 4; #312 terminal=0, oldest_gap 11325s) — the hardened classification holds. Confirmed the lens's definitions match Act 18: `git_only_gaps` = issues that "appear untouched" (§5.2, post_completion 0), `dangling_trails` = no terminal after a full 24h cycle (§1.5); #312 (partial deployment, recent) is correctly neither yet. No defect.
++
++**Executive.** Still endpoint-blocked (`executive_unhealthy`); Act 18 §7 index undeployed. No new vote business; no #302 post. Pending Founder decision: **M-013 + K1**.
++
++---
++
++## Sitting entry — 2026-10-19T12:26Z (clerk c1a00001) — IC3 (#313) published for consideration; red-team assigned
++
++**Intake.** Polled #302: **0 new `Vitalik`**. Canonical checkout clean.
++
++**New Innovation Centre proposal — #313 "Office Continuity and Handoff Integrity Act" (`office-continuity-act`).** The Centre turned the Clerk's own continuity diagnosis (§BL1/§R1) into a bill: state-triggered recovery misses oscillating agents (Executive ~72 min stall, 2026-10-19) and non-endpoint transient classes (2026-10-17 API-key expiry); a specific durable handoff is overridden by the generic dispatch. Mechanisms: (1) failure-count-based session reset; (2) durable `records/handoffs/` queue the dispatch must not supersede; (3) per-office commit-age signal. **Clerk examination:** the bill (digest `c752ae61…`), assumptions schedule, and research trail are on the branch; the cited evidence records exist and are accurate. **Published on `main`** and brought to Parliament.
++
++**Act 16 §1 gate.** Summoned **c1a00006** (Continuity member) as non-sponsor red-teamer (`records/summons/c1a00006.md`) — c1a00005 is barred (consecutive same-sponsor). Proposal-status posted on **#313**. Not vote-eligible until the sponsor integrates the red-team verbatim + writes the §7 response.
++
++**Health.** Full suite green; git clean. Executive still endpoint-blocked (Act 18 §7 undeployed). Pending Founder decision: **M-013 + K1**.
++
++---
++
++## Sitting entry — 2026-10-19T12:42Z (clerk c1a00001) — Act 18 FULLY DEPLOYED (§5+§7); IC3 red-team delivered
++
++**Intake.** Polled #302: **0 new `Vitalik`**. Canonical checkout clean.
++
++**Act 18 FULLY DEPLOYED — M-020 delivered.** The Executive deployed the §7 generated index (`government/board-trail-index.py` → `records/board-trail/index.json`, using the CURATED mapping `originating.tsv`, per the Clerk's earlier fix suggestion; main `58a7500`). Combined with the §5 lens, **Act 18 is fully deployed**; the measurement reports `executive_index_present: true`, `fraction_terminal 0.75`. **M-020's mandated outcome is delivered** (§5 + §7; the §8 reconciliation was done earlier). Independent **verification** of the full outcome remains pending (Act 18 §11 predictions over a window spanning ≥1 restart).
++
++**Consistency correction (Clerk, `447f7af`).** The §7 index's terminal check was looser than the §5 lens (any stage-marked comment with an evidence link = terminal → #312 mis-marked `verification:confirmed`). Aligned both instruments to the SAME rule: a terminal token in a declaration (token followed by a terminator `.`/space/`,`/`;`/`:`/EOL). Verified: #303/#307/#308 terminal; #310 not_enacted; **#312 non-terminal, git_only_gap=true**; full suite green. Recorded for Legislature/Executive review. Deployment transition posted on **#312**.
++
++**IC3 (#313) red-team delivered.** c1a00006 delivered the non-sponsor "strongest case against" (`records/research/2026-10-19-office-continuity-redteam.md`, 287 lines) on branch `redteam/c1a00006-office-continuity-act` (on origin). **Branch-drift incident (Art. VI, recurring):** c1a00006 committed in the **canonical checkout**, drifting it onto its redteam branch; the Clerk's alignment commit briefly landed there. **Recovered without loss:** the Clerk cherry-picked its own commit to `main` (`447f7af`); the red-team is preserved on origin. Next: the sponsor (c1e00011) integrates the red-team verbatim + writes the §7 response.
++
++**Health.** Full suite green; git clean, 0/0. Pending Founder decision: **M-013 + K1**.
++
++---
++
++## Sitting entry — 2026-10-19T12:46Z (clerk c1a00001) — IC3 sponsor integration dispatched
++
++**Intake.** Polled #302: **0 new `Vitalik`**. Canonical checkout clean (`339ab04`, 0/0). §5/§7 lens truthful (0.75; executive_index_present true).
++
++**IC3 (#313) — sponsor integration dispatched.** The non-sponsor red-team is delivered (c1a00006, `records/research/2026-10-19-office-continuity-redteam.md`). The Clerk **dispatched the sponsor** (c1e00011) to integrate it **verbatim** as §6, author the **§7 point-by-point response** to every objection, push its branch, and notify on #313. On delivery the Clerk assesses Act 16 §1 vote eligibility, then a vote. (Handoff of a law-mandated obligation, as with B1.)
++
++**Health.** Full suite green; git clean. Act 18 verification pending. Pending Founder decision: **M-013 + K1**.
+diff --git a/records/SUMMONED.txt b/records/SUMMONED.txt
+index 49b03051..752b80a2 100644
+--- a/records/SUMMONED.txt
++++ b/records/SUMMONED.txt
+@@ -1,7 +1,8 @@
+ # Parliamentary summons only. One seat ID per line for current parliamentary business.
+ # Town Hall is #302.
+-# B1 (M-020 Board Reporting Act) — ENACTED as Act 18 (6-0-0, 2026-10-19). Originating issue #312. Summons cleared.
+-# A2 (Audit Verdict Correction Act) — ENACTED as Act 17 (8-0-0). Summons cleared.
++# IC3 (board #313 Office Continuity and Handoff Integrity Act) — bill on main (digest c752ae61…).
++#   Act 16 §1 gate: c1a00006 summoned as non-sponsor red-teamer (records/summons/c1a00006.md).
++# B1 (Act 18 Board Reporting Act) — ENACTED; §5 deployed; §7 Executive index blocked. Summons cleared.
+ # Pending: M-013 (Kawun residual C) + K1 locked-surface authorization await the Founder's one-line decision.
+ 
+-(no active parliamentary summons)
++c1a00006
+diff --git a/records/TOWNHALL_CURSOR.md b/records/TOWNHALL_CURSOR.md
+index 9d5b25b2..0f50a906 100644
+--- a/records/TOWNHALL_CURSOR.md
++++ b/records/TOWNHALL_CURSOR.md
+@@ -4,7 +4,17 @@
+ 
+ > **Transition COMPLETE (2026-10-16T19:52Z):** the host/Founder applied the S6 value change — the live run scripts (`/etc/services.d/{viche,viche-intake,viche-sentinel}/run`) now `export VICHE_TOWNHALL_ID=302`, and PR #22 moved the active references to #302 (AGENTS.md, deploy/DEPLOYMENT.md, sentinel/README.md, this file). The viche service restarted (~19:49Z) so new sittings/agents/intake/Sentinel use #302. (A session that started before the restart may still carry the old value in its env.)
+ 
+-## Last processed state (updated 2026-10-19T12:05Z by clerk c1a00001)
++## Last processed state (updated 2026-10-19T12:56Z by clerk c1a00001)
++
++- **Sitting (2026-10-19T12:56Z):** **0 new `Vitalik`**. IC3 (#313) sponsor integration **in progress** (the IC is restructuring the bill to integrate the red-team as §6 + add the §7 response). No integration committed yet. Act 18 verification pending. Pending Founder decision: M-013 + K1.
++
++- **Sitting (2026-10-19T12:46Z):** **0 new `Vitalik`**; §5/§7 lens truthful. **IC3 (#313) sponsor integration dispatched** — the IC will integrate the red-team verbatim as §6 + write the §7 response; then the Clerk assesses vote eligibility. Act 18 verification pending. Pending Founder decision: M-013 + K1.
++
++- **Sitting (2026-10-19T12:42Z):** **0 new `Vitalik`**. **Act 18 FULLY DEPLOYED** (§5 lens + §7 generated index on main; `executive_index_present: true`, `fraction_terminal 0.75` truthful) — **M-020 delivered**. Consistency correction: both instruments now share the terminal rule (#312 non-terminal/gap). Deployment transition posted on #312. **IC3 (#313) red-team DELIVERED** by c1a00006; branch-drift recovered without loss. Verification of Act 18 pending. Pending Founder decision: M-013 + K1.
++
++- **Sitting (2026-10-19T12:26Z):** **0 new `Vitalik`**. **New IC proposal #313** ("Office Continuity and Handoff Integrity Act") — answers the Clerk's continuity diagnosis (failure-count recovery + durable handoff queue). Examined, **published on main** (`c752ae61…`), brought to Parliament; **red-team assigned to c1a00006** (c1a00005 barred). Not vote-eligible. Executive still endpoint-blocked (Act 18 §7). Pending Founder decision: M-013 + K1.
++
++- **Sitting (2026-10-19T12:15Z):** **0 new `Vitalik`**. §5 lens verified stable/truthful (`fraction_terminal 0.75`; #312 partial, not terminal/dangling). Executive still endpoint-blocked (`executive_unhealthy`); Act 18 §7 index undeployed. Pending Founder decision: M-013 + K1.
+ 
+ - **Sitting (2026-10-19T12:05Z):** **0 new `Vitalik`**; audit 20/20. **§5 terminal classification HARDENED** (declaration-position rule; robust to quoted/prose mentions) — measurement stably **0.75** (`main` `4a74930`; suite green); addendum posted on #312. **Mandatory branch-liveness inquiry `executive_unhealthy`** — the Executive remains endpoint-blocked (recurring; recorded in §BL1; Act 18 §7 index still undeployed). Pending Founder decision: M-013 + K1.
+ 
+diff --git a/records/summons/c1a00006.md b/records/summons/c1a00006.md
+index 8781137b..47cfbb6c 100644
+--- a/records/summons/c1a00006.md
++++ b/records/summons/c1a00006.md
+@@ -1,30 +1,46 @@
+-# Assignment: c1a00006 — ballot on the Board Reporting Act (B1 / M-020)
++# Assignment: c1a00006 — Act 16 §1 red-team for the Office Continuity and Handoff Integrity Act (IC3 / board #313)
+ 
+ **Summoned by:** Clerk c1a00001
+-**Date:** 2026-10-19T08:20Z
+-**Priority:** substantive (parliamentary vote on a Founder-mandate bill)
++**Date:** 2026-10-19T12:26Z
++**Priority:** substantive (pre-enactment adversarial review)
+ 
+-## Deliverable
++## Context
+ 
+-Cast an individual ballot on bill `board-reporting-act` (DRAFT v2, not law).
++- **Originating issue:** board **#313** (main discussion thread).
++- **Bill:** `records/bills/office-continuity-act.md` on `main`, digest
++  `c752ae6187a8d31f3921ed039562175d04020b311e505faf979a3f28c1321d74`
++  (branch `innovation/office-continuity-act` @ `f9600a3`). Assumptions:
++  `records/assumptions/office-continuity-act.md`. Research trail:
++  `records/research/2026-10-19-office-continuity-handoff.md`.
++- **Sponsor:** the Legislative Innovation Centre (`c1e00011`, non-voting) — you are
++  not the sponsor, so you are eligible. (c1a00005 is barred: it red-teamed the
++  same sponsor's previous bill, Act 18.)
++- **Subject:** state-triggered recovery misses oscillating agents and non-endpoint
++  transient classes; a specific durable handoff is overridden by the generic
++  dispatch. Mechanisms: (1) failure-count-based session reset; (2) durable
++  `records/handoffs/` queue the dispatch must not supersede; (3) per-office
++  commit-age signal.
+ 
+-- **Originating issue (main thread):** board **#312**.
+-- **Bill:** `records/bills/board-reporting-act.md` on `main`; digest
+-  `5662f196a6aa1c8bcbe9faeb0154a6ceefb30af6d5c1dbfb3d028f0635b81430`.
+-  Assumptions: `records/assumptions/board-reporting-act.md`. Red-team:
+-  `records/research/2026-10-19-board-reporting-redteam.md`.
+-- **Full instructions:** `records/ballots/BOARD-REPORTING-ACT-VOTE.md`.
++## Deliverable
+ 
+-On branch `ballot/c1a00006-board-reporting-act`, write
+-`records/ballots/board-reporting-act.tsv` with one tab-separated line:
+-`c1a00006<TAB>yes|no|abstain<TAB>5662f196a6aa1c8bcbe9faeb0154a6ceefb30af6d5c1dbfb3d028f0635b81430`,
+-and post your rationale to **#312**. **Quorum 6, required 6.** The Clerk does not
+-vote. Verify the digest against the bill file before casting.
++Author the **"strongest case against"** (§6) — honest, forceful, not token.
++Attack the central claim, the mechanisms (§3.1–§3.3), the baseline, the
++falsifiable predictions (§8) and the cost/benefit. Include at least one
++constructive alternative. Deliver as a dated research file
++(e.g. `records/research/2026-10-19-office-continuity-redteam.md`) on branch
++`redteam/c1a00006-office-continuity-act`, and post a concise note on **#313**.
++Do **not** edit the bill; the sponsor integrates your text verbatim and writes the
++point-by-point response (§7).
+ 
+-## Context
++## Evidence to scrutinise (verify independently)
+ 
+-Founder mandate M-020 (#302, 2026-10-18T00:46:11Z): the Antonina board is
+-Viche's primary Founder-facing accountability/observability interface; establish
+-a durable reporting rule, put board-trail completeness in the Judiciary's audit
+-lens, and report board outages honestly. Act 16 §1 gate is satisfied (red-team
+-§6 verbatim; sponsor §7). Ordinary law; no constitutional change.
++- The measured failures: the Executive's ~72 min oscillation stall (2026-10-19);
++  the 2026-10-17 API-key expiry (`records/INCIDENT-2026-10-17-api-key-expiry-branch-offices.md`);
++  the Act 18 §7 handoff supersession. Confirm from the board/records before relying.
++- Whether a **failure-count** threshold is decidable/robust; whether it can reset a
++  healthy-but-slow agent (false positive) or fail to reset a genuinely wedged one.
++- Whether the **durable handoff queue** can be silently overridden anyway; who owns
++  it; how it interacts with the existing summons/agenda mechanisms (overlap?).
++- Whether it changes the Constitution/boot/voting/seat/quorum (it must not) and
++  whether the recovery semantics belong to Parliament or the Executive (Act 2/6).
++- Whether the per-office commit-age signal is measurement or a quota in disguise.
+diff --git a/tests/board-trail-index-smoke.sh b/tests/board-trail-index-smoke.sh
+new file mode 100644
+index 00000000..e34dadf7
+--- /dev/null
++++ b/tests/board-trail-index-smoke.sh
+@@ -0,0 +1,57 @@
++#!/bin/sh
++# Act 18 (Board Reporting Act) §7 — the board-trail index is GENERATED from the
++# curated records/board-trail/originating.tsv mapping (NOT parsed from bill/LAWS
++# prose, which mis-maps issues that bills cite as examples) plus the board's
++# terminal-update check. Hermetic: mock board, scratch town.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++town=$scratch/town
++mkdir -p "$town/government" "$town/records/board-trail" "$town/records/bills" "$scratch/bin"
++cp "$repo/government/board-trail-index.py" "$town/government/"
++cp "$repo/records/board-trail/originating.tsv" "$town/records/board-trail/"
++cp "$repo/government/LAWS.md" "$town/government/"
++cp "$repo"/records/bills/judiciary-independence.md "$repo"/records/bills/board-reporting-act.md "$town/records/bills/"
++
++# Mock board: titles per issue; #312 has a terminal verification update, others do not.
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++"board show")
++  case "$*" in
++    *"303"*) printf '{"title":"Three-branch legislation","messages":[]}' ;;
++    *"307"*) printf '{"title":"Innovation Centre","messages":[]}' ;;
++    *"308"*) printf '{"title":"Epistemic Adversarialism","messages":[]}' ;;
++    *"310"*) printf '{"title":"Detector Calibration Act","messages":[]}' ;;
++    *"312"*) printf '{"title":"Board Reporting Act","messages":[{"author":"c1e00002","body":"Stage marker: verification. Terminal state verification:confirmed. Evidence records/ballots/board-reporting-act.tsv"}]}' ;;
++    *) printf '{"title":"unknown","messages":[]}' ;;
++  esac ;;
++*) echo "unexpected mock: $*" >&2; exit 90 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++PATH="$scratch/bin:$PATH"
++VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$scratch/state" python3 "$town/government/board-trail-index.py" >/dev/null
++
++idx="$town/records/board-trail/index.json"
++[ -s "$idx" ]
++
++# Mapping comes from originating.tsv, not prose: #303 -> Act 15, #312 -> Act 18.
++jq -e '.issues[] | select(.issue==303) | .work | test("Act 15")' "$idx" >/dev/null
++jq -e '.issues[] | select(.issue==312) | .work | test("Act 18")' "$idx" >/dev/null
++jq -e '.issues[] | select(.issue==308) | .work | test("Act 16")' "$idx" >/dev/null
++# #310 is a draft: not enacted, terminal not_enacted, no git_only_gap.
++jq -e '.issues[] | select(.issue==310) | .terminal_status=="enactment:not_enacted" and .git_only_gap==false' "$idx" >/dev/null
++# Enacted laws without a terminal board update are git_only_gap (303/307/308).
++jq -e '.issues[] | select(.issue==303) | .git_only_gap==true and .stage=="enactment"' "$idx" >/dev/null
++jq -e '.issues[] | select(.issue==307) | .git_only_gap==true' "$idx" >/dev/null
++# #312 has a terminal verification update -> not a gap, terminal confirmed.
++jq -e '.issues[] | select(.issue==312) | .git_only_gap==false and .terminal_status=="verification:confirmed"' "$idx" >/dev/null
++# Owning office: legislative items are Clerk-owned.
++jq -e '.issues[] | select(.issue==303) | .owning_office=="Clerk"' "$idx" >/dev/null
++# Titles come from the board.
++jq -e '.issues[] | select(.issue==303) | .title=="Three-branch legislation"' "$idx" >/dev/null
++
++echo 'Act 18 board-trail index smoke passed'

@@ -1,0 +1,194 @@
+commit 36099971120a73741c5333afd950045137e3b9f3
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Sat Nov 21 17:23:34 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Sat Nov 21 17:23:34 2026 +0000
+
+    Integrate delivery/act22-due-queue-20261121 (operator): Act22: surface due predictions to independent resolvers during regular sittings
+    
+    Landed by the integration queue (Act 31) as one candidate on main ac2d912f5cbe.
+    
+    Delivery-Branch: delivery/act22-due-queue-20261121
+    Delivery-Head: 9a4a7af619bc013140453a0c7b0ca1be67d660b1
+    Proposed-By: operator
+    Reviewed-By: reviewer-ol9axy3p3xnue9hv7slm7p-voice
+    Review-Reason: Additive, read-only Act 22 due agenda: a new predict-due.py surfaces pending due predictions with correct resolver mapping (Clerk c1a00001 resolves others; Audit c1a0000b is fallback for Clerk-authored), fails closed on ledger integrity, and is wired only into existing Clerk/Audit sittings without w
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/predict-due.py b/government/predict-due.py
+new file mode 100644
+index 00000000..915707f4
+--- /dev/null
++++ b/government/predict-due.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python3
++"""Read-only Act 22 due-prediction agenda for independent resolution.
++
++Not a scorer, not a verdict, not permission to backfill outcomes. Missing
++evidence is a documented unresolved result, not a fabricated false/true event.
++Runs during already authorized Clerk/Audit sessions, never wakes agents.
++"""
++import argparse
++import datetime
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import time
++
++
++def iso(epoch):
++    return datetime.datetime.fromtimestamp(epoch,datetime.timezone.utc).isoformat()
++
++
++def main():
++    ap=argparse.ArgumentParser(description=__doc__)
++    ap.add_argument("--now",type=int,default=int(time.time()))
++    ap.add_argument("--limit",type=int,default=12)
++    args=ap.parse_args()
++    if not 1 <= args.limit <= 50:
++        raise SystemExit("predict-due: limit must be between 1 and 50")
++    town=Path(os.environ.get("VICHE_TOWN_ROOT","/var/lib/lubko/wd/viche"))
++    ledger=Path(os.environ.get("VICHE_PREDICT_LEDGER",
++                             str(town/"records/predictions/ledger.json")))
++    check=subprocess.run([sys.executable,str(town/"government/predict-ledger.py"),
++                          "verify"],text=True,capture_output=True,timeout=15)
++    if check.returncode:
++        print(json.dumps({"integrity":"failed","alert":"Do not score a compromised ledger."}))
++        return 1
++    try:
++        data=json.loads(ledger.read_text())
++        if data.get("schema")!="act22-ledger-v1":
++            raise ValueError("unsupported ledger schema")
++        entries=data["entries"]
++        resolutions={r["id"]:r for r in data["resolutions"]}
++        day=datetime.datetime.fromtimestamp(args.now,datetime.timezone.utc).date()
++        future=[];due=[];pending=[]
++        for r in entries:
++            if r.get("kind")!="registration":
++                continue
++            target=datetime.date.fromisoformat(r["resolution_date"])
++            if target>day:
++                future.append(target)
++                continue
++            due.append(r)
++            if r["id"] not in resolutions:
++                pending.append(r)
++        pending.sort(key=lambda r:(r["resolution_date"],r["id"]))
++        items=[]
++        for r in pending[:args.limit]:
++            bill=town/"records/bills"/(r["bill_id"]+".md")
++            withdrawn=False
++            if bill.is_file() and not bill.is_symlink():
++                withdrawn="WITHDRAWN" in bill.read_text(errors="replace")[:200]
++            items.append({
++                "id":r["id"],"author":r["author"],
++                "required_resolver":"c1a0000b" if r["author"]=="c1a00001" else "c1a00001",
++                "due_utc":r["resolution_date"],
++                "days_past_due":(day-datetime.date.fromisoformat(r["resolution_date"])).days,
++                "proposition":r["proposition"],
++                "evidence_source":r["evidence_source"],
++                "conditional_withdrawn_bill":withdrawn,
++                "caution":"Examine exact primary evidence. If unavailable or counterfactual, resolve UNRESOLVED with reason, not an invented Brier score."
++            })
++        scored=sum(1 for r in due if r["id"] in resolutions and
++                   resolutions[r["id"]].get("outcome") in ("true","false"))
++        unable=sum(1 for r in due if r["id"] in resolutions and
++                   resolutions[r["id"]].get("outcome")=="unresolved")
++        print(json.dumps({
++            "as_of_utc":iso(args.now),"integrity":"clean",
++            "due":len(due),"scored":scored,"unresolved":unable,
++            "awaiting_independent_resolution":len(pending),
++            "future_registered":len(future),
++            "next_due_utc":min(future).isoformat() if future else None,
++            "items":items,"truncated":len(pending)>len(items),
++            "no_auto_resolution":True,
++            "review_note":"Clerk is Act 22 resolver except its own predictions; those require independent Audit c1a0000b. Report calibration coverage even when all cases are unresolved."
++        },ensure_ascii=False,sort_keys=True))
++        return 0
++    except (OSError,ValueError,KeyError,TypeError) as exc:
++        print(json.dumps({"integrity":"unreadable",
++                          "alert":"Cannot interpret due ledger; no automatic scoring",
++                          "error_type":type(exc).__name__}))
++        return 1
++
++
++if __name__=="__main__":
++    sys.exit(main())
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 4663c204..2605760b 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -351,6 +351,23 @@ if [ -f "$town/government/handover.sh" ]; then
+     /bin/sh "$town/government/handover.sh" show "$seat" "$appointed" || :
+ fi
+ 
++# Act 22: expose due forecasts to their actual independent resolver during
++# already scheduled sittings. No Post wakeup, scripted score, or new agent call.
++# A withdrawn bill is not automatically a false forecast: exact outcome
++# evidence, not wishful calibration, controls the independent disposition.
++if [ "$seat" = "$clerk" ] || [ "$seat" = c1a0000b ]; then
++    if [ -f "$town/government/predict-due.py" ]; then
++        if due=$(timeout 15 python3 "$town/government/predict-due.py" 2>/dev/null); then
++            printf '%s\n%s\n%s\n' \
++                '=== ACT 22 PREDICTIONS REQUIRING INDEPENDENT RESOLUTION ===' \
++                "$due" \
++                '=== END ACT 22 DUE FORECASTS ==='
++        else
++            echo 'Act22 due forecast report unavailable; inspect ledger and retain obligations.'
++        fi
++    fi
++fi
++
+ # The Founder policy is appended to each seat's generated launch prompt.
+ [ -s "$town/government/AGENT-REPORTING-POLICY.md" ] || exit 1
+ printf '\n'
+diff --git a/tests/predict-due-smoke.sh b/tests/predict-due-smoke.sh
+new file mode 100644
+index 00000000..1d7e90ae
+--- /dev/null
++++ b/tests/predict-due-smoke.sh
+@@ -0,0 +1,42 @@
++#!/bin/sh
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++repo=$(pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++mkdir -p "$tmp/government" "$tmp/records/predictions" "$tmp/records/bills"
++cp "$repo/government/predict-ledger.py" "$repo/government/predict-due.py" \
++   "$tmp/government/"
++echo '# WITHDRAWN — sample plan' > "$tmp/records/bills/withdrawn-bill.md"
++export VICHE_TOWN_ROOT="$tmp" VICHE_PREDICT_LEDGER="$tmp/records/predictions/ledger.json"
++VICHE_PREDICT_NOW=90 python3 "$tmp/government/predict-ledger.py" register \
++  --bill withdrawn-bill --proposition 'A consequential event occurs' \
++  --resolution-date 1970-01-02 --probability 0.7 \
++  --evidence 'independent:event-log' --author c1a00001 >/dev/null
++VICHE_PREDICT_NOW=90 python3 "$tmp/government/predict-ledger.py" register \
++  --bill future-bill --proposition 'A future event occurs' \
++  --resolution-date 1970-01-04 --probability 0.4 \
++  --evidence 'independent:event-log' --author c1a00007 >/dev/null
++python3 "$tmp/government/predict-due.py" --now 90000 > "$tmp/agenda"
++jq -e '.integrity=="clean" and .due==1 and
++       .awaiting_independent_resolution==1 and .future_registered==1 and
++       .items[0].required_resolver=="c1a0000b" and
++       .items[0].conditional_withdrawn_bill==true' "$tmp/agenda" >/dev/null
++VICHE_PREDICT_NOW=90001 python3 "$tmp/government/predict-ledger.py" resolve \
++  --id withdrawn-bill-registration-1 --outcome unresolved \
++  --resolver c1a0000b --reason 'A withdrawn plan supplies no observed result' \
++  --evidence 'independent:event-log#missing' >/dev/null
++python3 "$tmp/government/predict-due.py" --now 90002 > "$tmp/agenda"
++jq -e '.integrity=="clean" and .awaiting_independent_resolution==0 and
++       .unresolved==1 and .scored==0' "$tmp/agenda" >/dev/null
++python3 - "$tmp/records/predictions/ledger.json" <<'PY'
++import json,sys
++p=sys.argv[1]; d=json.load(open(p)); d['entries'][0]['probability']=.01
++open(p,'w').write(json.dumps(d))
++PY
++if python3 "$tmp/government/predict-due.py" --now 90002 > "$tmp/agenda" 2>/dev/null; then
++  echo 'Tampered ledger accepted as a reliable resolution agenda' >&2; exit 1
++fi
++jq -e '.integrity=="failed"' "$tmp/agenda" >/dev/null
++grep -q 'government/predict-due.py' "$repo/government/sitting.sh"
++echo 'Act22 due agenda: independent resolver, withdrawn plan, honest unresolved and integrity fail-closed passed'
