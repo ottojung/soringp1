@@ -1,0 +1,184 @@
+commit ba4fdbcde2b7a2b5017e6f565bc12ccebd59c554
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 19:36:00 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 19:36:00 2026 +0000
+
+    Publish the archive lock atomically to remove the ownership race
+    
+    Review found a window where the lock directory existed before its PID was
+    written, so a contender could misread it as dead and enter the critical
+    section, and two contenders could both reclaim the same dead lock.
+    
+    Replace the directory lock with a pid FILE published by an atomic hard link:
+    it never exists without a holder, so there is no empty-PID window. Reclaim a
+    dead holder by renaming the stale lock to a unique name; only the contender
+    whose rename succeeds deletes it, so concurrent reclaimers cannot both win.
+    A live holder is always respected. Add a two-contender regression that
+    archives two different agents from one hold file and asserts neither line is
+    lost.
+
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index 1ea65db2..efecdc73 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -155,41 +155,49 @@ oc_archive_hold() {
+   [ -n "$oc_hold_id" ] || return 0
+   oc_hold_dir=$1/archived-unsafe-holds
+   oc_lock=$1/unsafe-holds/.archive-lock
+-  # Serialize the whole read-archive-rewrite sequence. The holder records its
+-  # PID so a lock left by a crash is distinguished from a live holder; never
+-  # steal a live holder's lock. Bounded wait so a wedged lock cannot spin.
++  # Serialize the whole read-archive-rewrite sequence. The lock is a FILE
++  # published atomically with a hard link, so it never exists without its
++  # holder PID. A dead holder's lock is reclaimed by atomic rename, so only one
++  # contender can win reclamation. Never steal a live holder's lock.
+   oc_wait=0
+-  while ! mkdir "$oc_lock" 2>/dev/null; do
++  while :; do
++    oc_tmp=$oc_lock.$$
++    if printf '%s\n' "$$" > "$oc_tmp" 2>/dev/null && ln "$oc_tmp" "$oc_lock" 2>/dev/null; then
++      rm -f "$oc_tmp" 2>/dev/null || :
++      break
++    fi
++    rm -f "$oc_tmp" 2>/dev/null || :
+     oc_wait=$((oc_wait + 1))
+     if [ "$oc_wait" -ge 100 ]; then
+       echo "Viche: unsafe-hold archive busy for $2; leaving the hold in place" >&2
+       return 0
+     fi
+-    oc_holder=
+-    [ ! -s "$oc_lock/pid" ] || oc_holder=$(cat "$oc_lock/pid" 2>/dev/null || :)
++    oc_holder=$(cat "$oc_lock" 2>/dev/null || :)
+     if [ -z "$oc_holder" ] || ! kill -0 "$oc_holder" 2>/dev/null; then
+-      rm -rf "$oc_lock" 2>/dev/null || :
++      oc_stale=$oc_lock.stale.$$
++      if mv "$oc_lock" "$oc_stale" 2>/dev/null; then
++        rm -f "$oc_stale" 2>/dev/null || :
++      fi
+       continue
+     fi
+     sleep 0.1 2>/dev/null || sleep 1
+   done
+-  printf '%s\n' "$$" > "$oc_lock/pid" 2>/dev/null || :
+   oc_hold_file=$1/unsafe-holds/$2
+   if [ ! -s "$oc_hold_file" ]; then
+-    rm -rf "$oc_lock" 2>/dev/null || :
++    rm -f "$oc_lock" 2>/dev/null || :
+     return 0
+   fi
+   oc_extract=$oc_hold_file.extract.$$
+   if ! awk -F '\t' -v id="$oc_hold_id" '$2==id' "$oc_hold_file" > "$oc_extract"; then
+-    rm -f "$oc_extract" 2>/dev/null || :; rm -rf "$oc_lock" 2>/dev/null || :
++    rm -f "$oc_extract" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
+     return 1
+   fi
+   if [ ! -s "$oc_extract" ]; then
+-    rm -f "$oc_extract" 2>/dev/null || :; rm -rf "$oc_lock" 2>/dev/null || :
++    rm -f "$oc_extract" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
+     return 0
+   fi
+   mkdir -p "$oc_hold_dir" || {
+-    rm -f "$oc_extract" 2>/dev/null || :; rm -rf "$oc_lock" 2>/dev/null || :; return 1; }
++    rm -f "$oc_extract" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :; return 1; }
+   oc_hold_backup=$oc_hold_dir/$2-$oc_hold_id
+   if [ -s "$oc_hold_backup" ]; then
+     # A previous attempt may have archived these lines but been interrupted
+@@ -199,11 +207,11 @@ oc_archive_hold() {
+     oc_new=$oc_hold_file.new.$$
+     if ! awk 'FILENAME==ARGV[1] {seen[$0]=1; next} !seen[$0]' \
+          "$oc_hold_backup" "$oc_extract" > "$oc_new"; then
+-      rm -f "$oc_extract" "$oc_new" 2>/dev/null || :; rm -rf "$oc_lock" 2>/dev/null || :
++      rm -f "$oc_extract" "$oc_new" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
+       return 1
+     fi
+     if [ -s "$oc_new" ] && ! cat "$oc_new" >> "$oc_hold_backup"; then
+-      rm -f "$oc_extract" "$oc_new" 2>/dev/null || :; rm -rf "$oc_lock" 2>/dev/null || :
++      rm -f "$oc_extract" "$oc_new" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
+       return 1
+     fi
+     rm -f "$oc_new" 2>/dev/null || :
+@@ -214,7 +222,7 @@ oc_archive_hold() {
+     if ! ln "$oc_extract" "$oc_hold_backup" 2>/dev/null; then
+       oc_cp=$oc_hold_backup.tmp.$$
+       if ! cp "$oc_extract" "$oc_cp" || ! mv -f "$oc_cp" "$oc_hold_backup"; then
+-        rm -f "$oc_extract" "$oc_cp" 2>/dev/null || :; rm -rf "$oc_lock" 2>/dev/null || :
++        rm -f "$oc_extract" "$oc_cp" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
+         return 1
+       fi
+     fi
+@@ -222,18 +230,18 @@ oc_archive_hold() {
+   rm -f "$oc_extract" 2>/dev/null || :
+   oc_hold_tmp=$oc_hold_file.tmp.$$
+   if ! awk -F '\t' -v id="$oc_hold_id" '$2!=id' "$oc_hold_file" > "$oc_hold_tmp"; then
+-    rm -f "$oc_hold_tmp" 2>/dev/null || :; rm -rf "$oc_lock" 2>/dev/null || :
++    rm -f "$oc_hold_tmp" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
+     return 1
+   fi
+   if [ -s "$oc_hold_tmp" ]; then
+     if ! mv -f "$oc_hold_tmp" "$oc_hold_file"; then
+-      rm -f "$oc_hold_tmp" 2>/dev/null || :; rm -rf "$oc_lock" 2>/dev/null || :
++      rm -f "$oc_hold_tmp" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
+       return 1
+     fi
+   else
+     rm -f "$oc_hold_tmp" "$oc_hold_file" 2>/dev/null || :
+   fi
+-  rm -rf "$oc_lock" 2>/dev/null || :
++  rm -f "$oc_lock" 2>/dev/null || :
+   return 0
+ }
+ 
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index 648c535f..cb51406e 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -167,25 +167,39 @@ oc_archive_hold "$holdtest" executive old-e
+ test "$(grep -c 'run-e' "$holdtest/archived-unsafe-holds/executive-old-e")" -eq 1 ||
+   { echo 'Empty archive swallowed the extracted hold' >&2; exit 1; }
+ test ! -e "$holdtest/unsafe-holds/executive"
+-# A lock whose recorded holder is dead (crash) must be stolen; a lock whose
+-# recorded holder is alive must be respected and left in place.
++# A lock is a pid file published atomically. A dead holder is reclaimed; a
++# live holder is respected and left intact.
+ printf 'executive\told-f\trun-f\n' > "$holdtest/unsafe-holds/executive"
+-mkdir "$holdtest/unsafe-holds/.archive-lock"
+-printf '999999\n' > "$holdtest/unsafe-holds/.archive-lock/pid"
++printf '999999\n' > "$holdtest/unsafe-holds/.archive-lock"
+ oc_archive_hold "$holdtest" executive old-f
+ test -s "$holdtest/archived-unsafe-holds/executive-old-f" ||
+   { echo 'Dead-holder lock blocked archiving' >&2; exit 1; }
+-test ! -e "$holdtest/unsafe-holds/.archive-lock"
++test ! -e "$holdtest/unsafe-holds/.archive-lock" ||
++  { echo 'Reclaimed lock was not removed' >&2; exit 1; }
+ printf 'executive\told-g\trun-g\n' > "$holdtest/unsafe-holds/executive"
+-mkdir "$holdtest/unsafe-holds/.archive-lock"
+-printf '%s\n' "$$" > "$holdtest/unsafe-holds/.archive-lock/pid"
++printf '%s\n' "$$" > "$holdtest/unsafe-holds/.archive-lock"
+ oc_archive_hold "$holdtest" executive old-g
+ test -s "$holdtest/unsafe-holds/executive" &&
+   grep -Fq old-g "$holdtest/unsafe-holds/executive" ||
+   { echo 'Live lock holder was not respected' >&2; exit 1; }
+-test -s "$holdtest/unsafe-holds/.archive-lock/pid" ||
++grep -Fq "$$" "$holdtest/unsafe-holds/.archive-lock" ||
+   { echo 'Live lock was stolen' >&2; exit 1; }
+-rm -rf "$holdtest/unsafe-holds/.archive-lock"
++rm -f "$holdtest/unsafe-holds/.archive-lock"
++# Two contenders archiving different agents from one hold file must both
++# succeed without losing either line or deadlocking.
++printf 'executive\told-h\trun-h\n' > "$holdtest/unsafe-holds/executive"
++printf 'executive\told-i\trun-i\n' >> "$holdtest/unsafe-holds/executive"
++oc_archive_hold "$holdtest" executive old-h &
++oc_h_pid=$!
++oc_archive_hold "$holdtest" executive old-i &
++oc_i_pid=$!
++wait "$oc_h_pid"
++wait "$oc_i_pid"
++test -s "$holdtest/archived-unsafe-holds/executive-old-h" &&
++  test -s "$holdtest/archived-unsafe-holds/executive-old-i" ||
++  { echo 'Concurrent archiving lost a hold' >&2; exit 1; }
++test ! -e "$holdtest/unsafe-holds/executive" ||
++  { echo 'Concurrent archiving left the hold file behind' >&2; exit 1; }
+ if MOCK_STOP_FAIL=yes oc_quiesce_for_reset "$oc_quiesce_for_reset_test_id"; then
+   echo 'Failed quiescence incorrectly reported success' >&2; exit 1
+ fi

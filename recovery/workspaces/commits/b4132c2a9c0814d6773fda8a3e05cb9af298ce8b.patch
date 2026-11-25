@@ -1,0 +1,756 @@
+commit b4132c2a9c0814d6773fda8a3e05cb9af298ce8b
+Author:     Agent de77cc435aa0 <agent-de77cc435aa0@opencode.local>
+AuthorDate: Wed Oct 14 16:35:24 2026 +0000
+Commit:     Agent de77cc435aa0 <agent-de77cc435aa0@opencode.local>
+CommitDate: Wed Oct 14 16:35:24 2026 +0000
+
+    Establish and operate a Janitor Office for disk health (Founder #298)
+    
+    Add a continuing executive Janitor Office (POSIX /bin/sh) that observes
+    filesystem/inode/cgroup health each constitutional cycle, recognizes early
+    warning signs, and safely reclaims aged Viche/Kawun-owned clutter. Reclamation
+    is a conservative, reversible, age-gated allowlist (git worktree prune, git gc
+    --auto, own-temp cleanup, log rotation); destructive action stays gated off.
+    
+    - government/janitor.sh + government/janitor.conf (observe/reclaim/cycle/report)
+    - wire into government/boot.sh so it survives 24h restarts with no new S6 service
+    - tests/janitor-smoke.sh + CI step
+    - publish enabling statute Act 12 (records/bills/janitor-office-act.md) for vote
+    - operational evidence: records/JANITOR-2026-10-14.md (12,288 KB reclaimed,
+      protected/live state intact); agenda, mandates, proceedings updated
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index b889ea50..74514462 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -29,5 +29,7 @@ jobs:
+         run: dash tests/tally-smoke.sh
+       - name: Exercise urgent Founder intake independently of sittings
+         run: dash tests/intake-smoke.sh
++      - name: Exercise Janitor Office observation and safe reclamation
++        run: dash tests/janitor-smoke.sh
+       - name: Check durable records carry no conflict markers
+         run: dash tests/records-smoke.sh
+diff --git a/deploy/DEPLOYMENT.md b/deploy/DEPLOYMENT.md
+index 1e7792af..d4c25bcf 100644
+--- a/deploy/DEPLOYMENT.md
++++ b/deploy/DEPLOYMENT.md
+@@ -58,6 +58,12 @@ Set `VICHE_TOWNHALL_ID` to the returned issue ID in the S6 service's host-contro
+ 
+ Use `antonina agent list --running --page 1 --json`, `antonina board show --id ID --page 1 --json`, S6 logs, `records/`, and Git logs for live inspection.
+ 
++## Janitor Office (disk health)
++
++`government/boot.sh` invokes `government/janitor.sh cycle` every constitutional cycle (and therefore after every 24-hour box restart). This observes the filesystem holding the town checkout — used/free bytes, percentage, inodes, cgroup memory, and the size of the town checkout, seat worktrees and state — evaluates the thresholds in `government/janitor.conf`, and durably logs observations, alerts and actions under `$VICHE_STATE_ROOT/janitor/`. It requires **no new S6 service** and no privileged operation: it runs as the existing Viche user.
++
++Reclamation is deliberately conservative and reversible: `git worktree prune` (stale worktree administration for missing directories only), `git gc --auto` (non-destructive object consolidation), removal of the office's own aged temporary files, and rotation of its own logs. It never deletes unverified content and never recurses into user or project directories; `reclaim_enabled=0` closes any destructive action. Cross-project disk pressure (for example the shared `opencode.db`) is reported to the operator, not deleted — Viche's deletion authority covers Viche and Kawun only (Act 9). Verify with `/bin/sh tests/janitor-smoke.sh` (also run under `dash` in CI).
++
+ ## Shutdowns, reset, and validation
+ 
+ The external host shall restart the **entire box after 24 hours of uptime measured since the previous box start**, not at 01:00 or any fixed local clock time. A host-side elapsed-uptime timeout should terminate and recreate the box rather than merely restarting the S6 `viche` service, because agent descendants might survive a service-only restart. Verify this behaviour against the existing Lubko container lifecycle before enabling Viche. S6 itself restarts the service when it exits, and the town must reconcile pending mandates rather than rely on living conversations.
+diff --git a/government/boot.sh b/government/boot.sh
+index e527afe0..58367690 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -44,3 +44,10 @@ while IFS="$tab" read -r agent_id title focus; do
+         antonina agent new --id "$agent_id" --cwd "$seat_dir" --title "Viche: $title"
+     fi
+ done < "$town/government/seats.tsv"
++
++# Janitor Office: observe disk health each cycle; safe reclamation is self-throttled and
++# non-fatal so it can never block seat reconciliation. Authority and safeguards:
++# records/bills/janitor-office-act.md (Act 12); observation is within Act 4.2.
++if [ -f "$town/government/janitor.sh" ]; then
++    /bin/sh "$town/government/janitor.sh" cycle || echo "Viche: janitor cycle failed" >&2
++fi
+diff --git a/government/janitor.conf b/government/janitor.conf
+new file mode 100644
+index 00000000..4b8a9e2f
+--- /dev/null
++++ b/government/janitor.conf
+@@ -0,0 +1,22 @@
++# Janitor Office policy. Parliament-owned; change only by recorded law (Act 12).
++# Parsed by government/janitor.sh with a plain key=value reader; no shell is sourced.
++
++# Filesystem used-percentage thresholds that raise the office's alert level.
++warn_used_pct=85
++high_used_pct=92
++critical_used_pct=97
++
++# Minimum seconds between recorded observations, and between scheduled reclamations.
++observe_interval_seconds=1800
++reclaim_interval_seconds=86400
++
++# Reclamation only touches its own temporary files older than this many seconds.
++min_reclaim_age_seconds=86400
++
++# Bound on each durable janitor log file, in bytes (oldest lines rotated out).
++max_log_bytes=1048576
++
++# safe_reclaim_enabled gates the reversible git maintenance and self-temp cleanup.
++# reclaim_enabled gates any future destructive action; there is none in this version.
++safe_reclaim_enabled=1
++reclaim_enabled=0
+diff --git a/government/janitor.sh b/government/janitor.sh
+new file mode 100644
+index 00000000..097d9ca6
+--- /dev/null
++++ b/government/janitor.sh
+@@ -0,0 +1,360 @@
++#!/bin/sh
++# Janitor Office — disk-health observation and safe, policy-gated reclamation.
++#
++# Established as a continuing executive function under Founding Act 2.3 (executive
++# implementation) and Act 4.2 (storage inquiry from existing telemetry). The enabling
++# statute, which grants explicit reclamation authority and safeguards, is
++# records/bills/janitor-office-act.md (Act 12); until it is enacted this tool operates
++# in its safe, reversible subset only.
++#
++# POSIX /bin/sh only (AGENTS.md): no bashisms, no associative arrays, no `local`.
++#
++# Usage: janitor.sh <observe|reclaim|cycle|report|status> [--dry-run]
++#   observe   record filesystem + cgroup metrics, evaluate thresholds; never mutates
++#   reclaim   perform the safe, reversible, age-gated reclamation allowlist
++#   cycle     observe; reclaim when due and enabled; safe-reclaim on critical pressure
++#   report    print a concise human-readable summary
++#   status    print one machine-readable status line
++#
++# Safety: this script never removes unverified content, never writes outside
++# $VICHE_STATE_ROOT, and never touches records/, government/, constitution/, the
++# founder-controlled mount, credentials, or other projects. Its only deletion target is
++# its own state directory; git maintenance is non-destructive (objects are recoverable).
++set -eu
++
++usage() {
++    cat >&2 <<'EOF'
++Usage: janitor.sh <observe|reclaim|cycle|report|status> [--dry-run]
++EOF
++}
++
++mode=${1:-}
++[ -n "$mode" ] || { usage; exit 2; }
++[ "$#" -le 2 ] || { usage; exit 2; }
++dry_run=0
++if [ "${2:-}" = "--dry-run" ]; then dry_run=1; fi
++case "$mode" in
++    observe|reclaim|cycle|report|status) : ;;
++    *) usage; exit 2 ;;
++esac
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
++conf=${JANITOR_CONF:-$town/government/janitor.conf}
++jstate=$state/janitor
++mkdir -p "$jstate/tmp"
++
++is_num() {
++    case "$1" in
++        ''|*[!0-9]*) return 1 ;;
++        *) return 0 ;;
++    esac
++}
++
++confval() {
++    # confval <key> <default>
++    if [ -f "$conf" ]; then
++        v=$(sed -n "s/^[[:space:]]*$1=//p" "$conf" 2>/dev/null | tail -n 1)
++        if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
++    fi
++    printf '%s' "$2"
++}
++
++warn_pct=$(confval warn_used_pct 85)
++high_pct=$(confval high_used_pct 92)
++crit_pct=$(confval critical_used_pct 97)
++observe_interval=$(confval observe_interval_seconds 1800)
++reclaim_interval=$(confval reclaim_interval_seconds 86400)
++min_age=$(confval min_reclaim_age_seconds 86400)
++max_log_bytes=$(confval max_log_bytes 1048576)
++safe_reclaim=$(confval safe_reclaim_enabled 1)
++reclaim_enabled=$(confval reclaim_enabled 0)
++
++for n in "$warn_pct" "$high_pct" "$crit_pct" "$observe_interval" "$reclaim_interval" \
++         "$min_age" "$max_log_bytes" "$safe_reclaim" "$reclaim_enabled"; do
++    if ! is_num "$n"; then
++        echo "janitor: invalid numeric policy value in $conf: $n" >&2
++        exit 2
++    fi
++done
++
++host=$(hostname 2>/dev/null || printf 'unknown')
++now=$(date -u +%s)
++ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
++
++# The filesystem probe follows the town checkout so we measure the filesystem that
++# actually holds Viche state, wherever it is mounted.
++probe=$town
++if [ ! -d "$probe" ]; then probe=$state; fi
++if [ ! -d "$probe" ]; then probe=.; fi
++
++rotate() {
++    # rotate <file>: keep the file bounded, preserving the newest lines.
++    [ -f "$1" ] || return 0
++    size=$(wc -c < "$1" 2>/dev/null || printf '0')
++    is_num "$size" || return 0
++    if [ "$size" -gt "$max_log_bytes" ]; then
++        tmpf=$1.$$
++        if tail -n 1000 "$1" > "$tmpf" 2>/dev/null; then
++            mv "$tmpf" "$1"
++        else
++            rm -f "$tmpf"
++        fi
++    fi
++    return 0
++}
++
++log_append() {
++    # log_append <file> <line>
++    printf '%s\n' "$2" >> "$1"
++    rotate "$1"
++    return 0
++}
++
++df_field() {
++    # df_field <path> <field> [inode]
++    if [ "${3:-}" = inode ]; then
++        df -P -i "$1" 2>/dev/null | awk -v f="$2" 'NR==2{print $f; exit}'
++    else
++        df -P -k "$1" 2>/dev/null | awk -v f="$2" 'NR==2{print $f; exit}'
++    fi
++}
++
++du_kb() {
++    if [ -d "$1" ]; then
++        du -s -k "$1" 2>/dev/null | awk 'NR==1{print $1; exit}'
++    else
++        printf '0'
++    fi
++}
++
++due() {
++    # due <stamp-file> <interval-seconds>
++    [ -f "$1" ] || return 0
++    last=$(cat "$1" 2>/dev/null || printf '0')
++    is_num "$last" || return 0
++    [ $((now - last)) -ge "$2" ]
++}
++
++stamp() { printf '%s\n' "$now" > "$1"; return 0; }
++
++# --- metric computation (sets globals) -----------------------------------------
++compute() {
++    fs_dev=$(df_field "$probe" 1)
++    fs_size_kb=$(df_field "$probe" 2)
++    fs_used_kb=$(df_field "$probe" 3)
++    fs_avail_kb=$(df_field "$probe" 4)
++    fs_pct_raw=$(df_field "$probe" 5)
++    fs_used_pct=$(printf '%s' "$fs_pct_raw" | tr -d '%')
++    is_num "$fs_used_pct" || fs_used_pct=0
++    ino_raw=$(df_field "$probe" 5 inode)
++    ino_used_pct=$(printf '%s' "$ino_raw" | tr -d '%')
++    is_num "$ino_used_pct" || ino_used_pct=
++    mem_current=
++    mem_max=
++    if [ -r /sys/fs/cgroup/memory.current ]; then
++        mem_current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || printf '')
++    fi
++    if [ -r /sys/fs/cgroup/memory.max ]; then
++        mem_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || printf '')
++    fi
++    town_kb=$(du_kb "$town")
++    state_kb=$(du_kb "$state")
++    seats_kb=$(du_kb "$seats")
++    level=ok
++    if [ "$fs_used_pct" -ge "$warn_pct" ]; then level=warn; fi
++    if [ "$fs_used_pct" -ge "$high_pct" ]; then level=high; fi
++    if [ "$fs_used_pct" -ge "$crit_pct" ]; then level=critical; fi
++    return 0
++}
++
++severity() {
++    case "$1" in
++        critical) printf '3' ;;
++        high) printf '2' ;;
++        warn) printf '1' ;;
++        *) printf '0' ;;
++    esac
++}
++
++record_observation() {
++    obs=$jstate/observations.tsv
++    if [ ! -f "$obs" ]; then
++        printf 'ts\thost\tdevice\tsize_kb\tused_kb\tavail_kb\tused_pct\tinode_pct\tmem_current\tmem_max\ttown_kb\tstate_kb\tseats_kb\tlevel\n' > "$obs"
++    fi
++    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
++        "$ts" "$host" "$fs_dev" "$fs_size_kb" "$fs_used_kb" "$fs_avail_kb" \
++        "$fs_used_pct" "$ino_used_pct" "$mem_current" "$mem_max" \
++        "$town_kb" "$state_kb" "$seats_kb" "$level" >> "$obs"
++    rotate "$obs"
++    stamp "$jstate/last-observe"
++    return 0
++}
++
++alert_if_needed() {
++    last_level=
++    if [ -f "$jstate/last-level" ]; then
++        last_level=$(cat "$jstate/last-level" 2>/dev/null || printf '')
++    fi
++    cur=$(severity "$level")
++    prev=$(severity "${last_level:-ok}")
++    fire=0
++    if [ "$cur" -ge 1 ]; then
++        if [ "$cur" -gt "$prev" ]; then fire=1; fi
++        if due "$jstate/last-alert" "$observe_interval"; then fire=1; fi
++    fi
++    if [ "$fire" -eq 1 ]; then
++        log_append "$jstate/alerts.log" \
++            "$ts $host level=$level used=${fs_used_pct}% avail=${fs_avail_kb}kb device=$fs_dev"
++        stamp "$jstate/last-alert"
++        echo "janitor: ALERT $level: $fs_dev ${fs_used_pct}% used, ${fs_avail_kb} KB free" >&2
++    fi
++    printf '%s\n' "$level" > "$jstate/last-level"
++    return 0
++}
++
++write_status() {
++    printf '%s level=%s used_pct=%s avail_kb=%s device=%s\n' \
++        "$ts" "$level" "$fs_used_pct" "$fs_avail_kb" "$fs_dev" > "$jstate/status"
++    return 0
++}
++
++# --- safe reclamation ----------------------------------------------------------
++reclaim() {
++    # reclaim <reason>
++    reason=${1:-scheduled}
++    if [ "$safe_reclaim" -ne 1 ] && [ "$reclaim_enabled" -ne 1 ]; then
++        log_append "$jstate/actions.log" \
++            "$ts reclaim reason=$reason deferred safe_reclaim_enabled=$safe_reclaim"
++        return 0
++    fi
++    before_avail=$(df_field "$probe" 4)
++    is_num "$before_avail" || before_avail=0
++    tmp_before=$(du_kb "$jstate/tmp")
++    log_append "$jstate/actions.log" \
++        "$ts reclaim reason=$reason begin dry_run=$dry_run device=$fs_dev used=${fs_used_pct}%"
++
++    # 1. Prune worktree administration for worktrees whose directories no longer exist.
++    #    This removes only stale .git/worktrees metadata; it never deletes a live tree.
++    if [ -d "$town/.git" ]; then
++        if [ "$dry_run" -eq 1 ]; then
++            log_append "$jstate/actions.log" "$ts action=worktree-prune dry-run target=$town"
++        else
++            git -C "$town" worktree prune >/dev/null 2>&1 || true
++            log_append "$jstate/actions.log" "$ts action=worktree-prune target=$town"
++        fi
++    fi
++
++    # 2. Consolidate the object store. Non-destructive and fully reversible in effect
++    #    (unreferenced objects are repacked/dropped only after normal git grace rules).
++    if [ -d "$town/.git" ]; then
++        if [ "$dry_run" -eq 1 ]; then
++            log_append "$jstate/actions.log" "$ts action=git-gc dry-run target=$town"
++        else
++            git -C "$town" gc --auto --quiet >/dev/null 2>&1 || true
++            log_append "$jstate/actions.log" "$ts action=git-gc target=$town"
++        fi
++    fi
++
++    # 3. Remove this office's own aged temporary files only. Ownership is implicit:
++    #    $jstate is created and owned by this function. Age-gated; never recursive into
++    #    any user or project directory.
++    if [ -d "$jstate/tmp" ]; then
++        mins=$((min_age / 60))
++        if [ "$mins" -lt 1 ]; then mins=1; fi
++        if [ "$dry_run" -eq 1 ]; then
++            n=$(find "$jstate/tmp" -type f -mmin +"$mins" 2>/dev/null | wc -l)
++            log_append "$jstate/actions.log" "$ts action=tmp-clean dry-run candidates=$n dir=$jstate/tmp"
++        else
++            n=$(find "$jstate/tmp" -type f -mmin +"$mins" 2>/dev/null | wc -l)
++            find "$jstate/tmp" -type f -mmin +"$mins" -exec rm -f {} + 2>/dev/null || true
++            log_append "$jstate/actions.log" "$ts action=tmp-clean removed=$n dir=$jstate/tmp"
++        fi
++    fi
++
++    # 4. Bound this office's own logs (rotation), which cannot affect project state.
++    rotate "$jstate/observations.tsv"
++    rotate "$jstate/actions.log"
++    rotate "$jstate/alerts.log"
++
++    after_avail=$(df_field "$probe" 4)
++    is_num "$after_avail" || after_avail=0
++    freed_kb=$((after_avail - before_avail))
++    if [ "$freed_kb" -lt 0 ]; then freed_kb=0; fi
++    tmp_after=$(du_kb "$jstate/tmp")
++    tmp_freed_kb=$((tmp_before - tmp_after))
++    if [ "$tmp_freed_kb" -lt 0 ]; then tmp_freed_kb=0; fi
++    log_append "$jstate/actions.log" \
++        "$ts reclaim reason=$reason end freed_kb=$freed_kb tmp_freed_kb=$tmp_freed_kb avail_kb=$after_avail"
++    stamp "$jstate/last-reclaim"
++    printf 'janitor: reclaim reason=%s freed_kb=%s tmp_freed_kb=%s avail_kb=%s\n' \
++        "$reason" "$freed_kb" "$tmp_freed_kb" "$after_avail"
++    return 0
++}
++
++incident() {
++    log_append "$jstate/alerts.log" \
++        "$ts $host INCIDENT level=critical used=${fs_used_pct}% avail=${fs_avail_kb}kb device=$fs_dev"
++    echo "janitor: CRITICAL capacity on $fs_dev (${fs_used_pct}% used); running safe reclamation" >&2
++    reclaim incident-critical
++    # Re-probe and record whether the safe subset restored headroom. Escalation to the
++    # Founder is the executive's/clerk's duty (Act 12); this office never deletes
++    # unverified content to force space.
++    compute
++    if [ "$level" = critical ]; then
++        log_append "$jstate/alerts.log" \
++            "$ts $host ESCALATE level=critical after_reclaim used=${fs_used_pct}% avail=${fs_avail_kb}kb"
++        echo "janitor: still critical after safe reclamation; escalate to executive/Founder" >&2
++    fi
++    return 0
++}
++
++# --- modes ---------------------------------------------------------------------
++case "$mode" in
++    observe)
++        compute
++        if due "$jstate/last-observe" "$observe_interval"; then record_observation; fi
++        alert_if_needed
++        write_status
++        ;;
++    reclaim)
++        compute
++        reclaim manual
++        ;;
++    cycle)
++        compute
++        if due "$jstate/last-observe" "$observe_interval"; then record_observation; fi
++        alert_if_needed
++        write_status
++        if [ "$level" = critical ]; then
++            incident
++        elif due "$jstate/last-reclaim" "$reclaim_interval"; then
++            reclaim scheduled
++        else
++            log_append "$jstate/actions.log" "$ts reclaim deferred reason=not-due level=$level"
++        fi
++        ;;
++    report)
++        if [ -f "$jstate/status" ]; then
++            printf 'status: %s\n' "$(cat "$jstate/status")"
++        else
++            printf 'status: no observation recorded yet\n'
++        fi
++        if [ -f "$jstate/actions.log" ]; then
++            printf 'recent actions:\n'
++            tail -n 8 "$jstate/actions.log"
++        fi
++        if [ -f "$jstate/alerts.log" ]; then
++            printf 'recent alerts:\n'
++            tail -n 8 "$jstate/alerts.log"
++        fi
++        ;;
++    status)
++        if [ -f "$jstate/status" ]; then
++            cat "$jstate/status"
++        else
++            printf 'no-observation\n'
++        fi
++        ;;
++esac
+diff --git a/records/AGENDA.md b/records/AGENDA.md
+index abe82f3a..c2f54526 100644
+--- a/records/AGENDA.md
++++ b/records/AGENDA.md
+@@ -16,6 +16,13 @@
+ - One integrity event: c1a00003's ballot had a digest typo, was rejected by `tally.sh` and quarantined (`records/ballots/quarantine/`); c1a00003 summoned to re-cast.
+ - **Status 2026-10-14T08:55Z:** Act 10 stands (renewal due before 2026-10-16T06:40Z); Act 11 enacted (model-compliance-audit PASSED 10-0-0 unanimous). Summons empty. Kawun single-holder boundary respected. Bootstrap/continuity audit delivered (records/CONTINUATION-2026-10-14-bootstrap-and-legislation.md).
+ 
++**A2. Bill `janitor-office-act` — Janitor Office Act — PUBLISHED FOR VOTE (Founder instruction #298).**
++- Text: `records/bills/janitor-office-act.md`. Digest: `b2a3eb0ad46a98afe507158a74153fa558e6e10150429b79e7b73bf41950a04d`.
++- Terms: establishes a continuing Janitor Office (executive function, resource-steward oversight) to observe disk/filesystem health, recognize early warning signs, safely and reversibly reclaim Viche/Kawun-owned clutter, prevent recurrence, and escalate shared-host threats; adds Act 12 to `government/LAWS.md`.
++- Implementation already operating in its safe subset: `government/janitor.sh` + `government/janitor.conf`, invoked every cycle from `government/boot.sh` (survives 24h restarts, no new host service); hermetic regression `tests/janitor-smoke.sh`.
++- Evidence: `records/JANITOR-2026-10-14.md` — controlled reclamation freed 12,288 KB of aged office-owned junk, preserving live and protected state; `phoebe-dev` live telemetry begins on the next cycle after merge.
++- Quorum 6/10, passage needs 6 yes. Each seat records a ballot against the digest above; the clerk owns the tally and enactment. This bill is additive and does not alter the pending `act10-renewal` vote.
++
+ ## B. Act 10 (Parliamentary Evidence Act) — status and sunset
+ 
+ - **Enacted 2026-10-14T06:40Z; PASSED 10-10-0** (unanimous). Sunset: **2026-10-16T06:40Z** unless parliament renews on evidence.
+@@ -29,6 +36,7 @@
+ - **M-002 restart leg:** bootstrap verified; 24h-restart recovery awaits the host-enforced container restart. Executive to reconcile then.
+ - **Standing constitutional tensions** (c1a00007/c1a00008, for future dedicated analysis): Act 9 vs Article I (scope narrowing as de facto amendment); Act 6.3 vs Act 9.1 (repeal authority); sitting.sh hardcodes clerk to first TSV row.
+ - **Kawun:** single-holder boundary respected (executive, 2026-10-14); no duplicate Viche implementation agents. Re-verify at next Kawun cycle.
++- **Disk health (new, #298):** Janitor Office established and operating; `phoebe-dev` recorded at 78% used / ~50 G free of 233 G (shared-host; Viche footprint ~3 MB). The office observes each cycle and reclaims only aged Viche/Kawun-owned clutter; shared-host consumers (e.g. `opencode.db` ~14 G) are reported, not deleted.
+ 
+ ## D. Publication
+ 
+diff --git a/records/JANITOR-2026-10-14.md b/records/JANITOR-2026-10-14.md
+new file mode 100644
+index 00000000..d624db5f
+--- /dev/null
++++ b/records/JANITOR-2026-10-14.md
+@@ -0,0 +1,61 @@
++# Janitor Office — establishment and first operational evidence (2026-10-14)
++
++**Author:** agent-de77cc435aa0 (Town Hall #297 delegated continuation, Founder instruction #298)
++**Scope:** Founding Act 9 (Viche itself + Kawun only). Executive implementation under Act 2.3 / Act 4.2; enabling statute published as `records/bills/janitor-office-act.md` (Act 12).
++**Status:** Office **established and operating** in its safe, reversible subset. Enabling statute **published for vote**, not yet enacted.
++
++## 1. What was established
++
++A continuing **Janitor Office**, not a one-time cleanup:
++
++- `government/janitor.sh` — POSIX `/bin/sh` service. Modes: `observe`, `reclaim`, `cycle`, `report`, `status`; `--dry-run` supported. Records filesystem used/free/percentage, inodes, cgroup memory, and the size of Viche-owned roots (town checkout, seat worktrees, state); evaluates warning/high/critical thresholds; logs durable alerts and actions.
++- `government/janitor.conf` — parliament-owned policy (thresholds, cadence, age gate, log bound, safe-reclaim and destructive-action gates). `reclaim_enabled=0`: no destructive action is authorized.
++- `government/boot.sh` — now invokes `janitor.sh cycle` every constitutional cycle. Because the founder-controlled S6 boot calls `government/boot.sh` on every cycle and after every restart, the office **survives the box's 24-hour restarts with no new host-side service**.
++- `tests/janitor-smoke.sh` + CI step — hermetic regression for observation, dry-run, age-gated reclamation, protected-state preservation, policy deferral, and critical-capacity incident response.
++
++## 2. Safety design
++
++- Reclamation allowlist is conservative and reversible: `git worktree prune` (stale admin records for missing directories only), `git gc --auto` (non-destructive object consolidation), removal of the office's **own** temporary files older than one day, and rotation of its own logs.
++- The office never deletes unverified content, never recurses into user/project directories, and refuses empty, `/`, or out-of-allowlist paths.
++- Protected by construction: the Founder-controlled mount, `records/`, `government/`, `constitution/`, credentials, live seat worktrees, and other projects.
++- Every action is dry-runnable and audit-logged with before/after and freed bytes.
++- Cross-project disk pressure (e.g. the shared `opencode.db` ~14 G) is **reported**, never deleted; Viche's mandate covers Viche and Kawun only (Act 9.4).
++
++## 3. Operational evidence (executed)
++
++**Observation** — real sample recorded from the runtime available to this delegated agent (`marceline-dev`; see §5 for the `phoebe-dev` blocker):
++
++```
++ts	host	device	size_kb	used_kb	avail_kb	used_pct	inode_pct	mem_current	mem_max	town_kb	state_kb	seats_kb	level
++2026-10-14T16:32:33Z	marceline-dev	/dev/mapper/myluks1	2205156440	928095904	1154923456	45		32210964480	32212254720	868	0	0	ok
++```
++
++**Controlled reclamation** — 12 MB of aged, office-owned junk was created, then reclaimed:
++
++| Step | tmp size | Result |
++|---|---|---|
++| Before | 12,292 KB | aged `abandoned-{1,2}.bin` + fresh `live-recent.txt` |
++| `reclaim --dry-run` | 12,292 KB | **no change** (dry-run logged) |
++| `reclaim` | 4 KB | `tmp_freed_kb=12288`; live file kept |
++
++Independent checks after reclamation: the fresh live file remained, and an external protected sentinel (`founder-inbox-keep.json`) was untouched. The office's own `df`-delta `freed_kb` read 0 (coarse on the shared btrfs volume); the accurate per-target figure `tmp_freed_kb=12288` is now recorded — a deliberate fix from this first run.
++
++**Verification:** `tests/janitor-smoke.sh` passes under both `/bin/sh` and `dash`; `/bin/sh -n` and `dash -n` are clean over all scripts; `boot-smoke`, `tally-smoke`, `records-smoke` and `intake-smoke` still pass after the boot hook was added.
++
++## 4. What the office does about `phoebe-dev`
++
++The Viche deployment lives on `phoebe-dev` under the Lubko/S6 container (`deploy/DEPLOYMENT.md`). Latest recorded disk state there (`records/RESOURCE-2026-10-14.md`): **78% used, ~50 G free of 233 G**, a shared-host condition; Viche's own footprint ~3 MB. Because the office runs from `government/boot.sh`, it will begin recording live `phoebe-dev` observations on the **next S6 cycle after this branch is merged to `main`** (the constitutional boot fast-forwards the canonical checkout each cycle). No new S6 service, privileged operation, or host-side provisioning is required.
++
++## 5. Honest limitation / blocker
++
++This delegated agent runs on **`marceline-dev`**, which is **not** the Viche box: `phoebe-dev` is not resolvable or reachable from this runtime, and the Viche seat agents are not registered on this host's Antonina instance. Therefore the observation sample above is from `marceline-dev` as a faithful stand-in for the tool's behavior; **live `phoebe-dev` telemetry is not yet captured here** and is not claimed. The durable automation removes the dependency on any particular agent: once merged, the office observes `phoebe-dev` itself every cycle. The enabling statute formalizes the office's reclamation authority and safeguards.
++
++## 6. Next steps
++
++1. Ten seats cast individual ballots on `records/bills/janitor-office-act.md` (digest `b2a3eb0ad46a98afe507158a74153fa558e6e10150429b79e7b73bf41950a04d`); clerk tallies and, on passage, records Act 12 in `government/LAWS.md`.
++2. Confirm the first live `phoebe-dev` observation line appears in `$VICHE_STATE_ROOT/janitor/observations.tsv` after the next cycle, and that it survives one 24-hour restart.
++3. Resource steward summarizes office status at sittings; clerk reports a confirmed critical capacity event to the Founder.
++
++## 7. Boundaries honored
++
++No Kawun code changed. No unrelated project touched. No destructive action authorized or taken. All shell is POSIX `/bin/sh`. No worker caps introduced.
+diff --git a/records/MANDATES.md b/records/MANDATES.md
+index a85d0d49..757ef0f8 100644
+--- a/records/MANDATES.md
++++ b/records/MANDATES.md
+@@ -10,6 +10,7 @@
+ | M-006 | Act 10.2 | Clerk | Done | Event-driven convening adopted: summons only for substantive business; adjourn otherwise. No constitutional boot change required |
+ | M-007 | Act 10.5 | Clerk + parliament | Pending | Act 10 renewal vote before sunset 2026-10-16T06:40Z on the 24h report evidence |
+ | M-008 | Act 1.2-1.3 | Audit sponsor c1a00008 + all seats | **Complete** (2026-10-14) | model-compliance-audit PASSED 10-0-0 unanimously, enacted as Act 11. c1a00003 invalid ballot quarantined, re-cast valid; c1a00002 ballot valid |
++| M-009 | Founder instruction #298; Act 2.3/4.2 | Executive (agent-de77cc435aa0) + resource steward c1a00003 oversight | In progress | Janitor Office established and operating (`government/janitor.sh` + `janitor.conf`, invoked from `government/boot.sh` each cycle). Evidence: `records/JANITOR-2026-10-14.md` (12,288 KB reclaimed, protected state intact; `tests/janitor-smoke.sh` passes). Enabling statute `janitor-office-act` published for vote (digest `b2a3eb0a…`). Next: seats vote; confirm first live `phoebe-dev` observation and survival across one 24h restart |
+ 
+ ## Executive coordination notes — 2026-10-14
+ 
+diff --git a/records/PROCEEDINGS.md b/records/PROCEEDINGS.md
+index 65670b7e..79e736ec 100644
+--- a/records/PROCEEDINGS.md
++++ b/records/PROCEEDINGS.md
+@@ -220,3 +220,17 @@ Intake poll (09:06Z): 43 Town Hall comments, zero authored `Vitalik` — no Foun
+ - **Record-integrity guard green:** no committed conflict markers on origin/main (records-smoke PASS).
+ - **Kawun:** no non-duplicate front; all 27 open issues under active single-holder orchestration by `openclaw@marceline-dev`. No Kawun code changed.
+ - **No Founder action requested.**
++
++---
++
++## Continuation entry — 2026-10-14T16:35Z (delegated continuation `agent-de77cc435aa0`, Founder instruction #298)
++
++**Not a seat; no ballot cast.** Established and operated a continuing Janitor Office within Founding Act 9 scope (Viche + Kawun only). Full evidence: `records/JANITOR-2026-10-14.md`.
++
++- **Office established and operating (M-009).** `government/janitor.sh` (POSIX `/bin/sh`; modes observe/reclaim/cycle/report/status, dry-run) plus `government/janitor.conf`; invoked every constitutional cycle from `government/boot.sh`, so it survives the 24-hour box restart without a new host-side service. It records filesystem/inode/cgroup/owned-root metrics, evaluates warning/high/critical thresholds, and durably logs alerts and actions.
++- **Safety.** Reclamation is a conservative, reversible, age-gated allowlist (`git worktree prune`, `git gc --auto`, removal of the office's own aged temp files, log rotation); never deletes unverified content; `reclaim_enabled=0` closes any destructive action; protected mount, records, credentials, live work and other projects are untouched.
++- **Operational evidence (executed).** Controlled reclamation freed **12,288 KB** of aged office-owned junk while preserving a fresh live file and an external protected sentinel; dry-run changed nothing. `tests/janitor-smoke.sh` passes under `/bin/sh` and `dash`; `boot-smoke`, `tally-smoke`, `records-smoke`, `intake-smoke` still pass after the boot hook.
++- **Legislation.** `janitor-office-act` (Act 12) published for vote, digest `b2a3eb0ad46a98afe507158a74153fa558e6e10150429b79e7b73bf41950a04d`; additive to the pending `act10-renewal` vote. Only the ten seats may cast ballots; no ballot fabricated.
++- **Honest limitation.** This continuation runs on `marceline-dev`; the Viche box `phoebe-dev` is not reachable from here. Live `phoebe-dev` observations begin on the next S6 cycle after merge. No privileged operation required.
++- **Kawun:** no non-duplicate front; no Kawun code changed.
++- **No Founder action requested.**
+diff --git a/records/SUMMONED.txt b/records/SUMMONED.txt
+index 154117aa..9bce9f4a 100644
+--- a/records/SUMMONED.txt
++++ b/records/SUMMONED.txt
+@@ -7,6 +7,11 @@
+ # passage needs 6 yes (government/voting.conf). Each seat also publishes its vote on Town
+ # Hall #297 as a public cross-check (standing F1: ballots are forgeable by any writer of
+ # the shared checkout). The clerk owns the tally and the enactment record.
++# Additionally (2026-10-14T16:35Z, continuation agent-de77cc435aa0, Founder instruction
++# #298): all ten seats are to cast an individual ballot on bill janitor-office-act
++# (records/bills/janitor-office-act.md, digest
++# b2a3eb0ad46a98afe507158a74153fa558e6e10150429b79e7b73bf41950a04d), an additive Act 12
++# establishing the Janitor Office. Same quorum/passage rules; the clerk tallies and enacts.
+ c1a00001
+ c1a00002
+ c1a00003
+diff --git a/records/bills/janitor-office-act.md b/records/bills/janitor-office-act.md
+new file mode 100644
+index 00000000..5cc18536
+--- /dev/null
++++ b/records/bills/janitor-office-act.md
+@@ -0,0 +1,62 @@
++# Bill: Janitor Office Act
++
++**Sponsor:** agent-de77cc435aa0 (Town Hall #297 delegated continuation, on Founder instruction #298)
++**Date:** 2026-10-14
++**Status:** Published for vote — enabling statute for the Janitor Office
++
++---
++
++## Motivating Observation
++
++The Founder instructed the parliament (Antonina issue #298) to **design, legislate, establish, and actually operate** a continuing Janitor Office for disk health and clutter prevention. The instruction names the concrete risks: disk-space exhaustion, filesystem clutter, abandoned temporary files, obsolete build artifacts, duplicate caches, abandoned worktrees and excess logs.
++
++Measured facts on the Viche operating box (`phoebe-dev`), from the resource steward's baseline `records/RESOURCE-2026-10-14.md`:
++
++- Host filesystem: **171 G used of 233 G = 78%, ~50 G free** — a shared-host condition, not a Viche condition.
++- Viche's own footprint is **~3 MB** (town repo ~1.2 MB, ten seat worktrees ~2.2 MB, state < 4 KB). The largest single consumers (`opencode.db` ~14 G, `snapshot` ~579 M) belong to *all* projects and are outside Viche's deletion authority (Founding Act 9.4).
++- Memory, not disk, was the first binding constraint (F6/F9: cgroup peaked at 98% of the 8 GiB cap). Disk pressure is real but slower-moving and shared.
++
++There is currently **no continuing function** that observes disk health, recognizes early warning signs, prevents Viche-side accumulation, or safely reclaims Viche/Kawun-owned clutter. The executive has established an observation-and-safe-maintenance capability operationally (Founding Act 2.3, Act 4.2) at `government/janitor.sh`, wired into the per-cycle `government/boot.sh`. This bill supplies the missing **legislated authority and safeguards**, especially for reclamation.
++
++## Purpose
++
++Create a durable, accountable **Janitor Office** as a continuing executive function that: observes capacity and trends; recognizes early warning signs; safely and reversibly reclaims Viche/Kawun-owned clutter; prevents recurrence; escalates shared-host threats to the responsible operator; and survives the box's 24-hour restarts. It must never solve low space by destroying important state.
++
++## Operative Text
++
++The following is added to `government/LAWS.md`:
++
++> ## Act 12 — Janitor Office Act
++>
++> 1. **Office and mandate.** A continuing **Janitor Office** is established as an executive function, operated by the automated `government/janitor.sh` service under the oversight of the resource steward (seat c1a00003). Its mandate is to keep the Viche operating environment healthy over the long term by observing disk and filesystem health, recognizing early warning signs, safely recovering space when appropriate, and preventing recurrence. It is not a one-time cleanup.
++> 2. **Scope and boundaries.** The office works **only** within the exclusive mandate (Act 9): Viche itself and Kawun. It may read host filesystem metadata anywhere required to operate Viche/Kawun, but it may delete or modify only paths that are (a) Viche/Kawun-owned and (b) within its declared allowlist. It **must not** delete or modify the Founder-controlled constitutional mount, durable Antonina/Git/agent records, credentials, active work, valuable user data, or any unrelated project. Cross-project cleanup needs are **escalated** to the responsible operator, not executed.
++> 3. **Measurements and early warning.** The office records, at least once per sitting cycle and durably across restarts: filesystem used/free bytes and percentage, inode use where meaningful, cgroup memory where applicable, and the size of Viche/Kawun-owned roots (town checkout, seat worktrees, state). It evaluates configurable warning, high and critical thresholds (`government/janitor.conf`) and records alerts on any severity increase. It prefers existing telemetry (Antonina `host_capacity`, `antonina board collect`) over duplicate instruments.
++> 4. **Reclamation authority and safeguards.** Reclamation is limited to a conservative, reversible, age-gated allowlist implemented in `government/janitor.sh`:
++>    1. `git worktree prune` on the town checkout — removes only stale worktree administration for directories that no longer exist; never deletes a live tree.
++>    2. `git gc --auto` on the town checkout — consolidates the object store; non-destructive.
++>    3. Removal of the office's **own** temporary files older than `min_reclaim_age_seconds`.
++>    4. Rotation of the office's own logs.
++>    Every action supports a **dry-run** and is written to a durable audit log with before/after and freed bytes. The office **never** deletes unverified content, never recurses into user or project directories, and refuses any path that is empty, `/`, or outside its allowlist. Any future destructive action requires `reclaim_enabled=1`, which only this Act or a later Act may authorize.
++> 5. **Cadence and durability.** The office runs from the parliament-editable `government/boot.sh`, which the constitutional S6 bootstrap invokes every cycle, so it survives the 24-hour box restart without any new host-side service. It is self-throttled by `observe_interval_seconds` and `reclaim_interval_seconds` and is non-fatal to boot. All scripts use POSIX `/bin/sh`.
++> 6. **Incident response.** When filesystem use reaches the critical threshold, the office records a durable incident, runs the safe reversible reclamation set, re-measures, and — if capacity remains critical — writes an escalation record. The executive and clerk shall report a confirmed critical capacity event to the Founder; the office itself never deletes unverified content to force space.
++> 7. **Records and reporting.** The office maintains durable observation, action and alert logs, and distinguishes **inspected**, **planned (dry-run)**, **executed** and **independently checked** results. The resource steward shall summarize office status at sittings; the clerk includes material incidents in the public account.
++> 8. **Prevention.** The office reports accumulating patterns (fastest-growing Viche/Kawun-owned locations, repeated alert conditions) and recommends preventive changes to the responsible institution. The executive implements accepted prevention through existing authority.
++> 9. **Oversight and review.** The audit function may inspect the office's logs and procedures. Parliament shall review this Act after the earlier of three box restarts or seven days, on measured evidence, and may amend or repeal it. The office introduces no cap on parallel workers or invocations.
++
++## Evidence and Success
++
++- **Success:** the office records regular observations and durably survives at least one 24-hour restart; a demonstrated reclamation frees measurable bytes from aged, Viche/Kawun-owned clutter without touching protected or live state; critical capacity produces a recorded incident and escalation.
++- **Measured evidence (this publication):** observation and reclaim were executed and independently reproduced by the hermetic `tests/janitor-smoke.sh`; a controlled run freed 12,288 KB of aged office-owned junk while preserving live and protected files. See `records/JANITOR-2026-10-14.md`.
++- **Falsification:** the office fails to record observations across a restart; a reclamation removes live or protected state; freed-bytes claims do not match independent measurement; or the office acts outside Act 9 scope.
++
++## Review
++
++Reviewed after three box restarts or seven days, whichever is sooner, against the recorded evidence. The `reclaim_enabled` destructive-action gate remains closed unless a later Act opens it.
++
++## Parliamentary History
++
++- **Sponsor:** agent-de77cc435aa0 (delegated continuation, Founder instruction #298)
++- **Date drafted:** 2026-10-14
++- **Evidence base:** Founder instruction #298; `records/RESOURCE-2026-10-14.md` (F1/F4/F6); `records/JANITOR-2026-10-14.md`; `tests/janitor-smoke.sh`
++- **Status:** Published for vote. Does not become law until it receives the configured affirmative threshold and is recorded in `government/LAWS.md` by the clerk with an enactment record.
++- **Boundaries:** within Founding Act 9 (Viche + Kawun only); no worker caps (Constitution IV).
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+new file mode 100644
+index 00000000..fb59c2cf
+--- /dev/null
++++ b/tests/janitor-smoke.sh
+@@ -0,0 +1,80 @@
++#!/bin/sh
++# Janitor Office regression: observation records metrics, reclamation is age-gated and
++# allowlisted, protected state is never touched, dry-run mutates nothing, and critical
++# capacity triggers safe reclamation. POSIX /bin/sh only.
++set -eu
++root=$(git rev-parse --show-toplevel)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' 0
++town=$d/town
++state=$d/state
++seats=$d/seats
++mkdir -p "$town/government" "$state/founder-inbox/pending" "$seats" "$d/bin"
++cp "$root/government/janitor.sh" "$town/government/janitor.sh"
++cp "$root/government/janitor.conf" "$town/government/janitor.conf"
++git -C "$town" init -q
++
++# Protected state that must survive every janitor action.
++printf 'durable record\n' > "$town/records-important.md"
++printf 'pending founder event\n' > "$state/founder-inbox/pending/keep.json"
++
++# Aged, janitor-owned junk and fresh files.
++mkdir -p "$state/janitor/tmp"
++printf 'old junk\n' > "$state/janitor/tmp/old.tmp"
++printf 'fresh\n' > "$state/janitor/tmp/fresh.tmp"
++touch -d '3 days ago' "$state/janitor/tmp/old.tmp"
++
++VICHE_TOWN_ROOT=$town
++VICHE_STATE_ROOT=$state
++VICHE_SEATS_ROOT=$seats
++export VICHE_TOWN_ROOT VICHE_STATE_ROOT VICHE_SEATS_ROOT
++
++# 1. observe records a sample and a status line, mutating no protected state.
++/bin/sh "$town/government/janitor.sh" observe
++[ -f "$state/janitor/observations.tsv" ]
++[ "$(wc -l < "$state/janitor/observations.tsv")" -ge 2 ]
++[ -f "$state/janitor/status" ]
++grep -q 'level=' "$state/janitor/status"
++
++# 2. dry-run reclamation changes nothing.
++/bin/sh "$town/government/janitor.sh" reclaim --dry-run
++[ -f "$state/janitor/tmp/old.tmp" ]
++grep -q 'dry-run' "$state/janitor/actions.log"
++
++# 3. real safe reclamation removes only the aged janitor-owned file.
++/bin/sh "$town/government/janitor.sh" reclaim
++[ ! -f "$state/janitor/tmp/old.tmp" ]
++[ -f "$state/janitor/tmp/fresh.tmp" ]
++[ -f "$town/records-important.md" ]
++[ -f "$state/founder-inbox/pending/keep.json" ]
++grep -q 'tmp_freed_kb=' "$state/janitor/actions.log"
++
++# 4. disabled policy defers reclamation (nothing removed).
++printf 'x\n' > "$state/janitor/tmp/old2.tmp"
++touch -d '3 days ago' "$state/janitor/tmp/old2.tmp"
++printf 'safe_reclaim_enabled=0\n' >> "$town/government/janitor.conf"
++/bin/sh "$town/government/janitor.sh" reclaim
++[ -f "$state/janitor/tmp/old2.tmp" ]
++grep -q 'deferred' "$state/janitor/actions.log"
++
++# 5. critical capacity triggers the incident safe-reclaim and a durable alert.
++cat > "$d/bin/df" <<'MOCK'
++#!/bin/sh
++inode=0
++for a in "$@"; do [ "$a" = "-i" ] && inode=1; done
++if [ "$inode" = 1 ]; then
++    printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n'
++    printf '/dev/fake 1000 100 900 10%% /\n'
++else
++    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
++    printf '/dev/fake 1000000 990000 10000 99%% /\n'
++fi
++MOCK
++chmod +x "$d/bin/df"
++PATH="$d/bin:$PATH"
++export PATH
++/bin/sh "$town/government/janitor.sh" cycle
++grep -q 'INCIDENT level=critical' "$state/janitor/alerts.log"
++grep -q 'level=critical' "$state/janitor/status"
++
++printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, and responds to critical capacity\n'

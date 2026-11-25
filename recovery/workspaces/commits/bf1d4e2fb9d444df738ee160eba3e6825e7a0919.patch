@@ -1,0 +1,130 @@
+commit bf1d4e2fb9d444df738ee160eba3e6825e7a0919
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Sun Nov 22 10:01:33 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Sun Nov 22 10:01:33 2026 +0000
+
+    Executive: Act32 single-request token cap is stop-on-detection, not strict hard cap (Founder 09:40Z question)
+
+diff --git a/records/knowledge/2026-11-22-executive-act32-single-request-cap-finding.md b/records/knowledge/2026-11-22-executive-act32-single-request-cap-finding.md
+new file mode 100644
+index 00000000..4730642a
+--- /dev/null
++++ b/records/knowledge/2026-11-22-executive-act32-single-request-cap-finding.md
+@@ -0,0 +1,116 @@
++# Executive finding — can knowledge-budget.sh bound a SINGLE in-flight model request?
++
++**Date:** 2026-11-22T09:5xZ. **Office:** executive (independent, billy-dev; NOT a
++parliamentary sitting). **Class:** Executive source-level technical input answering a
++material Founder safety question. NOT an independent Judiciary/Economy verification,
++NOT a law, ballot, gate approval, office activation, or Act 22 order.
++
++## The Founder question (issue SvMHxlO6F1R6u3cQcr3lKA-repeated, 2026-11-22T09:40:07Z)
++
++Before approving the Statistics first-trial budget gate, verify whether
++`government/knowledge-budget.sh`'s 20-second polling, reservation of capped liability,
++and kill-on-detected-overrun actually bound the tokens billed by a **single in-flight
++model request**; give the exact negative acceptance test and maximum possible overrun,
++or mark the cap **stop-on-detection (not a strict hard cap)** and HOLD the launch.
++
++## Answer (source-level, independently checkable)
++
++**The cap is stop-on-detection, NOT a strict hard cap on tokens billed by one in-flight
++request.** The reservation of 400000 tokens is an *accounting liability* charged to the
++aggregate ledger; it is not a provider-enforced ceiling on actual billing. Mark it
++accordingly and HOLD the Act 32 Statistics launch until a lawful strict bound is
++implemented and independently verified. Do not weaken the cumulative whole-host CPU
++`UPPER_BOUND` safety cap to solve this (Founder 09:14Z).
++
++## Evidence (exact source references inspected this pass)
++
++1. **Detection is a 20-second poll loop.** `knowledge-budget.conf`:
++   `monitor_interval_seconds: 20`. `knowledge-budget.sh` `monitor()` (lines 363-412)
++   `sleep "$_mo_interval"` first, then reads the reservation, calls `agent_status`,
++   takes a meter `snapshot`, calls `overrun`, and only *then* kills. Between polls there
++   is no check. Nothing gates a model request before it is issued.
++
++2. **The meter is a retrospective cumulative DB row, not an inline counter.**
++   `knowledge-budget-tool.py` `snapshot()` (lines 228-259) reads `session_v2`
++   columns `tokens_input/output/reasoning/cache_read/cache_write`, `cost`,
++   `time_updated` from the Antonina-managed OpenCode SQLite DB. Tokens are summed
++   from those stored columns. The budget engine never writes the meter and has no
++   per-request callback: it can only observe what an external process has already
++   flushed into the row.
++
++3. **What is compared to the cap is a lagging *absolute session total*.**
++   `cpu_delta()` (lines 212-224) sets `tokens.delta_total = tokens.total` (the whole
++   session cumulative total), labelled `absolute-session-total-upper-bound`.
++   `overrun()` (lines 330-347) fires when `delta_total >= caps.tokens_total`
++   (400000). So detection occurs only after the DB reflects >= 400000 — i.e. after
++   the billing has already happened. The engine charges pessimistically on hold
++   (`hold_locked`, lines 151-166) but cannot unbill tokens already spent at the provider.
++
++4. **Kill is acknowledged in code as not stopping the backend.**
++   `finalize_locked()` (lines 189-202) states explicitly: "A kill request is NOT proof
++   that a detached backend session stopped." `stop_or_kill()` (lines 136-140) is
++   fire-and-forget: `antonina agent kill ... >/dev/null 2>&1 || :`. If `agent_status`
++   still shows `running|starting|recovering|unknown`, the reservation is held at full
++   cap — the work may continue consuming. Model continuation after kill is therefore
++   an admitted, unhandled case.
++
++5. **No provider-enforced per-request output limit is wired to the budget.**
++   `knowledge-budget.conf` has no `max_output_tokens`/per-request field; the budget
++   engine sets no `maxOutputTokens`. Any provider/model output cap is whatever
++   OpenCode defaults happen to be, unbound to the 400000 reservation headroom. A single
++   request can bill up to the model's own max output (plus input) regardless of the
++   remaining reservation.
++
++## Maximum possible overrun
++
++No strict numeric maximum can be asserted from current evidence, because none of the
++three contributors is bounded by the engine:
++
++    actual_billed - 400000  <=  (tokens one in-flight request bills before the
++                                 session_v2 counter is flushed)
++                             + (tokens billed during up-to-20s poll blind window,
++                                including any concurrent requests in the session)
++                             + (tokens billed after kill before the backend stops)
++
++Each term can be positive; the engine bounds none of them. With, e.g., a 128k-output
++model and a poll interval of 20s, a request starting just under the cap can bill
++roughly `remaining + 128k` before the next poll observes >= 400000, and a kill cannot
++reverse it. The only guaranteed bound is the *accounting* one: the full 400000 is
++charged to the aggregate and further dispatch is stopped — not that billing stopped
++at 400000. This is precisely the failure mode the Founder identified.
++
++## Exact negative acceptance test (for the independent verifiers)
++
++- Bring an active Statistics reservation to a measured `session_v2` total just below
++  the cap (e.g. 399000 tokens), with the monitor armed on its 20s interval.
++- Have the agent issue ONE provider request with a large max output M (e.g. 128000)
++  that streams for longer than one poll interval.
++- At poll N (before request completion) record `session_v2` tokens; after the request
++  completes, record actual provider-billed tokens.
++- **Falsifier of a strict cap:** provider billing reaches approximately `399000 + M`
++  and the monitor only observes >= 400000 after the request is billed; the subsequent
++  kill cannot unbill. Any observed `actual_billed > 400000` refutes "strict hard cap".
++- Second arm: kill the agent mid-stream; verify whether billing continues to request
++  completion. Continued billing further confirms stop-on-detection.
++- The strict-cap claim would be *supported* only if an inline gate (or provider-enforced
++  per-request limit <= remaining headroom) is shown to prevent any request from
++  pushing actual billing past the reservation. No such mechanism exists in the code
++  inspected.
++
++## Role boundaries observed
++
++- Did NOT activate Statistics or any office; all four remain `enabled: false`.
++- Did NOT approve or alter the Act 32 budget gate; recommend HOLD pending Economy +
++  independent Judiciary verification with the test above.
++- Did NOT weaken or reset the cumulative whole-host CPU `UPPER_BOUND` safety cap.
++- Did NOT change law, cast a ballot, perform Clerk intake, or claim this as the
++  independent Judiciary/Economy verification (that belongs to those offices).
++
++## Disposition
++
++Recommend the gate remain HOLD. Economy (Act 29 metering) and independent Judiciary
++should run the negative acceptance test and sign the exact maximum-overrun figure; if
++a lawful strict bound cannot be produced, the cap must be documented as
++stop-on-detection and the launch held until a provider-enforced per-request limit (or
++inline pre-request metering gate) is implemented and independently verified. S(n),
++SORT-BOUND-U and the SoringP1 research frontier are unaffected by this finding.

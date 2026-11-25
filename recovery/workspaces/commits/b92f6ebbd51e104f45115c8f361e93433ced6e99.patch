@@ -1,0 +1,330 @@
+commit b92f6ebbd51e104f45115c8f361e93433ced6e99
+Merge: 4c344af4 9b012451
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 24 05:09:04 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 24 05:09:04 2026 +0000
+
+    Merge remote-tracking branch 'origin/main' into exec/act22-act21s5-current-main
+
+diff --git a/government/RESTART-RECONCILIATION.md b/government/RESTART-RECONCILIATION.md
+new file mode 100644
+index 00000000..64c35d68
+--- /dev/null
++++ b/government/RESTART-RECONCILIATION.md
+@@ -0,0 +1,64 @@
++# Restart orphan reconciliation — Constitutional continuity
++
++**Scope:** Ordinary government agent appointments; no edits to the
++Founder-controlled constitution, bootstrap or S6 service definitions.
++
++On 2026-10-24 at 01:25:34 UTC, Billy's container restarted. Antonina
++reported the then-running Executive and Judiciary as `failed`, with
++`last_error="runner/model process disappeared without a captured exit status"`,
++no backend classification and no captured exit status. Government classified
++the absence of a backend error as permanent, repeated that same warning each
++three-minute cycle and could not resume either office. The Clerk had separately
++failed *before* the restart with a backend error explicitly marked
++`automatic_retry_safe=false`; it must never be treated as a safe automatic
++retry.
++
++**Independent Constitutional VIII continuity reconciliation:**
++
++- A controller may replace a **dead appointment** from the previous
++  container incarnation only when PID1's actual creation timestamp matches
++  the agent's terminal timestamp, the invocation began before that PID1,
++  the agent is terminal/not alive, both exit code and signal are absent,
++  no backend error exists, and the precise process-disappearance message
++  is recorded. If any field is unknown, absent, contradictory or outside
++  the timestamp window, the incumbent is retained for explicit review.
++- A pending steer or existing unsafe-hold blocks automatic succession.
++  The previous invocation/session/prompt is **never replayed**. The fresh
++  agent's ordinary office dispatch re-reads durable Git/Antonina state and
++  applicable handoffs; it must independently reconcile uncertain partial
++  work before taking consequential action.
++- `appointments.sh` serializes the compare/replace under its existing
++  registry lock, captures terminal evidence first (status, last log
++  snapshot, worktree HEAD/status) and records the old/new identities
++  in `restart-renewals.jsonl`. The prior agent and worktree are preserved.
++- This is a new appointment for a vanished container process, **not**
++  a model-error reset and not an exception to Act 19's three-transient-
++  failures threshold. Unknown backend failures and explicit unsafe
++  continuations continue to require existing Act 19 escalation and review.
++  An absent classification is surfaced as **unclassified**, never called
++  permanent without evidence.
++- Repeated observations of one unsafe failure or permanent/unclassified
++  incident are deduplicated; the original records remain durable. This
++  prevents observation frequency from inflating failure counts or alerts.
++
++**Operator restoration on October 24:** The Executive and Judiciary's
++lost-through-restart agents were replaced after positive PID1 comparison.
++The Clerk's explicit retry-unsafe failure was separately reviewed: the
++worktree was clean, no pending steers or open handoffs remained, and the
++new appointment was instructed through the ordinary independent intake
++cycle, without reusing the previous prompt. Its historical unsafe-hold
++observations were archived with a durable review receipt. These manual
++reviews do **not** establish that all possible side effects of the earlier
++interrupted processes are known.
++
++**Review:** The Judiciary/Legislature should independently review the
++interpretation that scheduled-incarnation appointment reconciliation is
++distinct from Act 19 §3.1 transient-error recovery. If they disagree,
++legislative clarification is needed. No legislation is enacted by this
++engineering change.
++
++Tests: `tests/appointments-smoke.sh` covers precise restart orphan
++recognition, non-replay, evidence preservation, idempotence, unsafe holds,
++old/new epoch mismatch, explicit backend errors and queued steers.
++`tests/continuity-incidents-smoke.sh` covers idempotent incident
++records and correct classification. Both are included in the full suite.
+diff --git a/government/appointments.sh b/government/appointments.sh
+index 8f88553d..5d66c720 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -71,9 +71,24 @@ if [ "$action" = resolve ]; then
+   printf '%s\n' "$old"
+   exit 0
+ fi
++# Constitution VIII requires continuity after the box restarts. A runner
++# physically lost during a positively identified PID1 restart is NOT an
++# Antonina-model transient-error reset under Act19 §3.1. Replace its dead
++# *appointment*, never resume the interrupted prompt or old session.
++# Do not bypass any unsafe prompt hold; those require an independent review.
++restart_orphan=no
++if [ "$action" = ensure ] && [ -n "$old" ] && [ "${status:-}" = failed ] &&
++   [ ! -s "${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness/unsafe-holds/$key" ] &&
++   [ -s "$town/government/restart-orphan.sh" ] &&
++   printf '%s\n' "$meta" | /bin/sh "$town/government/restart-orphan.sh"; then
++  restart_orphan=yes
++  expected=$old
++  action=replace
++fi
+ if [ "$action" = ensure ] && [ -n "$old" ]; then
+-  # Terminal agents remain assigned until per-office supervisor records the
+-  # failure and explicitly replaces at the legally required threshold.
++  # Backend failures remain assigned until lawful Act19 recovery or explicit
++  # review. An uncertain process disappearance outside the restart signature
++  # is NOT evidence of a safe automatic retry.
+   printf '%s\n' "$old"
+   exit 0
+ fi
+@@ -110,4 +125,14 @@ if [ -f "$registry" ]; then awk -F '\t' -v k="$key" '$1!=k {print}' "$registry"
+ printf '%s\t%s\n' "$key" "$new" >> "$tmp"
+ mv -f "$tmp" "$registry"
+ printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$key" "${old:--}" "$new" >> "$root/appointments.log"
++if [ "$restart_orphan" = yes ]; then
++  # A discrete audited incarnation handoff, not an Act19 transient reset.
++  # The terminal evidence directory was persisted before the new appointment.
++  jq -cn --arg at "$(date -u +%FT%TZ)" --arg office "$key" \
++    --arg previous "$old" --arg successor "$new" \
++    --arg evidence "terminal-evidence/$old" \
++    '{at:$at,kind:"container_restart_orphan_new_appointment_no_prompt_replay",
++      office:$office,previous:$previous,successor:$successor,
++      evidence:$evidence}' >> "$root/restart-renewals.jsonl"
++fi
+ printf '%s\n' "$new"
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index c27cf759..7c5a38dc 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -124,17 +124,43 @@ oc_clear_failures() {
+ # handoff queue; this marker prevents an automatic duplicate side effect.
+ oc_mark_unsafe_hold() {
+   # $1 liveness dir, $2 office key, $3 agent id, $4 invocation
+-  mkdir -p "$1/unsafe-holds"
+-  printf '%s\t%s\t%s\n' "$2" "$3" "$4" >> "$1/unsafe-holds/$2"
++  mkdir -p "$1/unsafe-holds" || return 1
++  oc_hold_file=$1/unsafe-holds/$2
++  oc_hold_line=$(printf '%s\t%s\t%s' "$2" "$3" "$4")
++  # Repeated 3-minute observations are not new invocations; the same
++  # unsafe hold must be recorded ONCE, not 158 times or once per sitting.
++  if [ -s "$oc_hold_file" ] && grep -Fxq "$oc_hold_line" "$oc_hold_file"; then
++    return 0
++  fi
++  printf '%s\n' "$oc_hold_line" >> "$oc_hold_file"
+ }
+ 
+-# Surface a permanent failure (expired credential, invalid configuration)
+-# instead of resetting it (§3.1.3). Durable: survives the 24 h restart.
++# Surface a permanent or UNCLASSIFIED failure exactly once per agent and
++# classification. An absent backend_error is NOT evidence of permanence.
++# Durable incident records survive restart without flooding each sitting.
+ oc_surface_permanent() {
+   # $1 liveness dir, $2 agent id, $3 classification
+-  printf '%s id=%s permanent_failure classification=%s surfaced-not-reset\n' \
+-    "$(date -u +%FT%TZ)" "$2" "$3" >> "$1/permanent-incidents.log"
+-  echo "Viche: permanent failure id=$2 classification=$3 surfaced, not reset (Act 19 §3.1)" >&2
++  mkdir -p "$1" || return 1
++  case "$2:$3" in *[!a-zA-Z0-9_:-]*|'') return 1;; esac
++  if [ -n "$3" ]; then
++    oc_kind=permanent_failure
++    oc_class=$3
++  else
++    oc_kind=unclassified_failure
++    oc_class=missing_backend_classification
++  fi
++  # The durable append IS the dedup marker. A crash before appending
++  # must not leave a separate empty marker that suppresses future reports.
++  # Every seat/agent has its own immutable id; repeated observations of that
++  # same incident cannot increment the count. Concurrent record attempts
++  # may append the same line twice, but can never erase or suppress it.
++  oc_record="id=$2 $oc_kind classification=$oc_class surfaced-not-reset"
++  if [ -f "$1/permanent-incidents.log" ] &&
++     grep -Fq "$oc_record" "$1/permanent-incidents.log"; then
++    return 0
++  fi
++  printf '%s %s\n' "$(date -u +%FT%TZ)" "$oc_record" >> "$1/permanent-incidents.log" || return 1
++  echo "Viche: $oc_kind id=$2 classification=$oc_class surfaced, not reset (Act 19 §3.1)" >&2
+   return 0
+ }
+ 
+diff --git a/government/restart-orphan.sh b/government/restart-orphan.sh
+new file mode 100644
+index 00000000..52972415
+--- /dev/null
++++ b/government/restart-orphan.sh
+@@ -0,0 +1,27 @@
++#!/bin/sh
++# Recognize a known container-restart orphan, NOT a failed model call.
++# Reads one Antonina agent-status JSON object from stdin.
++# No old session, invocation or prompt is ever resumed here.
++set -eu
++[ "$#" -eq 0 ] || exit 2
++birth=$(stat -c %Y /proc/1) || exit 1
++case "$birth" in ''|*[!0-9]*) exit 1;; esac
++# Hermetic regression fixture only. Production cannot override PID1 birth.
++if [ "${VICHE_TEST_NO_SYNC:-0}" = 1 ] &&
++   [ -n "${VICHE_TEST_PID1_BIRTH:-}" ]; then
++  birth=$VICHE_TEST_PID1_BIRTH
++fi
++case "$birth" in ''|*[!0-9]*) exit 1;; esac
++jq -e --argjson birth "$birth" '
++  .state == "failed"
++  and .alive == false
++  and .backend_error == null
++  and .exit_code == null and .exit_signal == null
++  and .last_error == "runner/model process disappeared without a captured exit status"
++  and ((.steers_pending // 0) == 0)
++  and .next_steer == null
++  and ((.steer_preempting // false) == false)
++  and (.started_at | type == "number" and . < $birth)
++  and (.finished_at | type == "number"
++       and . >= ($birth - 2) and . <= ($birth + 120))
++' >/dev/null
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+index 5f79654e..8f097d02 100644
+--- a/tests/appointments-smoke.sh
++++ b/tests/appointments-smoke.sh
+@@ -6,6 +6,7 @@ tmp=$(mktemp -d)
+ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+ mkdir -p "$tmp/bin" "$tmp/town/government" "$tmp/seats/a1" "$tmp/seats/branches/executive" "$tmp/state" "$tmp/mock"
+ printf 'a1\tClerk\tFounder intake\n' > "$tmp/town/government/seats.tsv"
++cp "$town/government/restart-orphan.sh" "$tmp/town/government/restart-orphan.sh"
+ cat > "$tmp/bin/antonina" <<'EOF'
+ #!/bin/sh
+ set -eu
+@@ -22,6 +23,14 @@ elif [ "$1" = agent ] && [ "$2" = status ]; then
+     printf '{"state":"failed","finished_at":1792775220.5,"prompts":2,"backend_error":{"classification":"upstream_endpoint_unavailable","transient":true,"automatic_retry_safe":false}}\n'
+   elif [ "$status" = failed-permanent ]; then
+     printf '{"state":"failed","finished_at":1792775230.25,"prompts":3,"backend_error":{"classification":"invalid_api_key","transient":false,"automatic_retry_safe":false}}\n'
++  elif [ "$status" = failed-restart ]; then
++    printf '{"state":"failed","alive":false,"started_at":1999999990,"finished_at":2000000000.5,"last_error":"runner/model process disappeared without a captured exit status","backend_error":null,"exit_code":null,"exit_signal":null,"steers_pending":0,"next_steer":null}\n'
++  elif [ "$status" = failed-restart-late ]; then
++    printf '{"state":"failed","alive":false,"started_at":2000000001,"finished_at":2000000002,"last_error":"runner/model process disappeared without a captured exit status","backend_error":null,"exit_code":null,"exit_signal":null}\n'
++  elif [ "$status" = failed-restart-with-error ]; then
++    printf '{"state":"failed","alive":false,"started_at":1999999990,"finished_at":2000000000.5,"last_error":"runner/model process disappeared without a captured exit status","backend_error":{"classification":"invalid_api_key","transient":false},"exit_code":null,"exit_signal":null}\n'
++  elif [ "$status" = failed-restart-with-steer ]; then
++    printf '{"state":"failed","alive":false,"started_at":1999999990,"finished_at":2000000000.5,"last_error":"runner/model process disappeared without a captured exit status","backend_error":null,"exit_code":null,"exit_signal":null,"steers_pending":1}\n'
+   else
+     printf '{"state":"%s","model":null,"variant":"low"}\n' "$status"
+   fi
+@@ -35,6 +44,9 @@ export VICHE_TOWN_ROOT=$tmp/town
+ export VICHE_SEATS_ROOT=$tmp/seats
+ export VICHE_STATE_ROOT=$tmp/state
+ PATH=$tmp/bin:$PATH; export PATH
++# PID1 birth override is only honored inside test-only government fixtures.
++VICHE_TEST_NO_SYNC=1 VICHE_TEST_PID1_BIRTH=2000000000
++export VICHE_TEST_NO_SYNC VICHE_TEST_PID1_BIRTH
+ script=$town/government/appointments.sh
+ a=$(/bin/sh "$script" ensure a1)
+ [ "$a" = fresh-1 ] || exit 1
+@@ -93,6 +105,40 @@ jq -e '.state=="failed" and .failure_class=="invalid_api_key" and
+         .prompts==3 and .finished_at==1792775230.25' \
+   "$tmp/state/appointments/terminal-evidence/fresh-5/event.json" >/dev/null
+ [ "$(wc -l < "$tmp/state/appointments/appointments.tsv")" -eq 2 ] || exit 1
++# A verified container-restart orphan is a new independent appointment, NOT
++# a first-failure Act19 transient reset or continuation of the previous prompt.
++printf failed-restart > "$MOCK/$f"
++g=$(/bin/sh "$script" ensure executive)
++[ "$g" = fresh-7 ] || { echo 'Restart orphan did not renew' >&2; exit 1; }
++jq -e '.state=="failed" and .agent_id=="fresh-6" and .failure_class==null' \
++  "$tmp/state/appointments/terminal-evidence/fresh-6/event.json" >/dev/null
++jq -e '.kind=="container_restart_orphan_new_appointment_no_prompt_replay" and
++       .previous=="fresh-6" and .successor=="fresh-7"' \
++  "$tmp/state/appointments/restart-renewals.jsonl" >/dev/null
++[ "$(/bin/sh "$script" ensure executive)" = "$g" ]
++[ "$(wc -l < "$tmp/state/appointments/restart-renewals.jsonl")" -eq 1 ]
++# An unrelated failure that happened after this incarnation began must NOT
++# be mistaken for an orphan, even if the error text was identical.
++printf failed-restart-late > "$MOCK/$g"
++[ "$(/bin/sh "$script" ensure executive)" = "$g" ]
++h=$(/bin/sh "$script" replace executive "$g")
++[ "$h" = fresh-8 ]
++# A backend error is not a missing-container-process error.
++printf failed-restart-with-error > "$MOCK/$h"
++[ "$(/bin/sh "$script" ensure executive)" = "$h" ]
++i=$(/bin/sh "$script" replace executive "$h")
++[ "$i" = fresh-9 ]
++# Pending steers require explicit review; do not discard their intent.
++printf failed-restart-with-steer > "$MOCK/$i"
++[ "$(/bin/sh "$script" ensure executive)" = "$i" ]
++j=$(/bin/sh "$script" replace executive "$i")
++[ "$j" = fresh-10 ]
++# Even true container orphans may not bypass an explicit unsafe hold.
++mkdir -p "$tmp/state/liveness/unsafe-holds"
++printf 'executive\told-id\tunsafe\n' > "$tmp/state/liveness/unsafe-holds/executive"
++printf failed-restart > "$MOCK/$j"
++[ "$(/bin/sh "$script" ensure executive)" = "$j" ]
++[ "$(wc -l < "$tmp/state/appointments/restart-renewals.jsonl")" -eq 1 ]
+ # No secret powers granted by supplying an unknown role key.
+ if /bin/sh "$script" ensure a2 >/dev/null 2>&1; then exit 1; fi
+ printf 'a1\tbad-1\na1\tbad-2\n' > "$tmp/state/appointments/appointments.tsv"
+diff --git a/tests/continuity-incidents-smoke.sh b/tests/continuity-incidents-smoke.sh
+new file mode 100644
+index 00000000..32b7b4fe
+--- /dev/null
++++ b/tests/continuity-incidents-smoke.sh
+@@ -0,0 +1,33 @@
++#!/bin/sh
++# Repeated observing of one failure is not N failures or N unsafe holds.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++. "$repo/government/office-continuity.sh"
++mkdir -p "$tmp/liveness"
++oc_mark_unsafe_hold "$tmp/liveness" executive agent-1 run-1
++oc_mark_unsafe_hold "$tmp/liveness" executive agent-1 run-1
++[ "$(wc -l < "$tmp/liveness/unsafe-holds/executive")" -eq 1 ]
++oc_mark_unsafe_hold "$tmp/liveness" executive agent-1 run-2
++[ "$(wc -l < "$tmp/liveness/unsafe-holds/executive")" -eq 2 ]
++oc_surface_permanent "$tmp/liveness" agent-1 ""
++oc_surface_permanent "$tmp/liveness" agent-1 ""
++grep -Fq 'unclassified_failure classification=missing_backend_classification' \
++ "$tmp/liveness/permanent-incidents.log"
++if grep -Fq 'permanent_failure classification=missing_backend_classification' "$tmp/liveness/permanent-incidents.log"; then
++ echo 'Missing classification was fabricated as permanent' >&2; exit 1
++fi
++[ "$(wc -l < "$tmp/liveness/permanent-incidents.log")" -eq 1 ]
++oc_surface_permanent "$tmp/liveness" agent-2 invalid_api_key
++oc_surface_permanent "$tmp/liveness" agent-2 invalid_api_key
++[ "$(wc -l < "$tmp/liveness/permanent-incidents.log")" -eq 2 ]
++grep -Fq 'permanent_failure classification=invalid_api_key' \
++ "$tmp/liveness/permanent-incidents.log"
++# If the append-only incident log is lost before durable publication, no
++# stale auxiliary marker may prevent a later observation from reporting it.
++cp "$tmp/liveness/permanent-incidents.log" "$tmp/previous-log"
++: > "$tmp/liveness/permanent-incidents.log"
++oc_surface_permanent "$tmp/liveness" agent-2 invalid_api_key
++[ "$(wc -l < "$tmp/liveness/permanent-incidents.log")" -eq 1 ]
++echo 'Idempotent holds and honest incident classifications smoke passed'

@@ -1,0 +1,188 @@
+commit b7bce18258eafc8d2e93252aa5c44734bebad20f
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 23:47:05 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 23:47:05 2026 +0000
+
+    Reject untracked ballots and malformed suite receipts
+
+diff --git a/government/predict-gate.sh b/government/predict-gate.sh
+index f9d84b75..8bee8c09 100644
+--- a/government/predict-gate.sh
++++ b/government/predict-gate.sh
+@@ -65,7 +65,12 @@ if [ -n "$at" ]; then
+     ballot_ts=$at
+ elif [ -f "$town/records/ballots/$id.tsv" ]; then
+     ballot_ts=$(git -C "$town" log --diff-filter=A --format=%ct -- "records/ballots/$id.tsv" 2>/dev/null | awk 'NR==1 { print; exit }')
+-    case "$ballot_ts" in ''|*[!0-9]*) ballot_ts=$(date +%s) ;; esac
++    case "$ballot_ts" in
++        ''|*[!0-9]*)
++            echo "predict-gate: REFUSE $id — existing ballot file has no trustworthy Git timestamp" >&2
++            exit 1
++            ;;
++    esac
+ else
+     ballot_ts=$(date +%s)
+ fi
+diff --git a/government/suite-compliance-check.sh b/government/suite-compliance-check.sh
+index 81bc0c6f..319d627c 100644
+--- a/government/suite-compliance-check.sh
++++ b/government/suite-compliance-check.sh
+@@ -7,7 +7,7 @@ set -eu
+ repo=${1:-${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+ python3 - "$repo" "$state" <<'PY'
+-import json, subprocess, sys
++import json, re, subprocess, sys
+ repo,state=sys.argv[1:]
+ def git(*args):
+     return subprocess.check_output(['git','-C',repo,*args], text=True).strip()
+@@ -26,9 +26,12 @@ def recorded_result(data, expected_suite):
+     runs=data.get('runs')
+     if not isinstance(runs,list):
+         return None
+-    if any(not isinstance(run,dict) or run.get('run')!=i+1
+-           or not isinstance(run.get('exit'),int)
+-           for i,run in enumerate(runs)):
++    def valid_run(run, number):
++        return (isinstance(run,dict) and type(run.get('run')) is int
++                and run.get('run')==number and type(run.get('exit')) is int
++                and run.get('result') in ('green','red')
++                and re.fullmatch(r'[0-9a-f]{64}',str(run.get('output_sha256',''))) is not None)
++    if any(not valid_run(run,i+1) for i,run in enumerate(runs)):
+         return None
+     if data.get('result')=='green':
+         if (len(runs)==1 and runs[0].get('result')=='green'
+diff --git a/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md b/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
+index 54c689db..bd88947f 100644
+--- a/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
++++ b/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
+@@ -323,3 +323,24 @@ After these additional corrections, focused prediction/compliance/tally tests
+ and `dash tests/run-all.sh` pass on the current-main-reconciled working tree.
+ The rev8 delivery predates these last corrections; independent review and fresh
+ CI must cover the next exact candidate.
++
++## Rev9 independent review response — 2026-10-23
++
++Audit seat `c1a0000b` reviewed rev9 (`80d9a74`) and found two remaining edge
++cases: tally could substitute the current clock for an existing untracked ballot
++file, and the suite checker accepted Python booleans as integer run fields while
++not requiring the generator's output digest. The gate now refuses an existing
++ballot file lacking a trustworthy Git add timestamp; the tally fixture first
++proves an untracked ballot is refused, then commits it with a timestamp later
++than registration and proves the pilot-listed tally passes. The checker now
++requires exact integer run numbers/exits (not booleans), valid 64-hex output
++digests, and exact run-sequence shapes. Added a boolean-run negative fixture.
++
++The review's coverage-denominator observation is retained as an explicit
++measurement interpretation: integrity-corrupt registrations remain in the
++registered denominator, while invalid outcomes are excluded from the score and
++resolved numerator, so reported coverage reflects the lost usable record. The
++Clerk-owned production pilot list remains unpopulated here; only the hermetic
++pilot tally is exercised. Focused tests and the full local suite pass after these
++corrections. The current draft needs fresh review, publication, and GitHub CI on
++its exact commit; merge and deployment remain outstanding.
+diff --git a/tests/suite-compliance-smoke.sh b/tests/suite-compliance-smoke.sh
+index 43b223dd..645a4e04 100644
+--- a/tests/suite-compliance-smoke.sh
++++ b/tests/suite-compliance-smoke.sh
+@@ -7,6 +7,7 @@ git -C "$tmp" init -q -b main
+ git -C "$tmp" config user.name test
+ git -C "$tmp" config user.email test@example.invalid
+ mkdir -p "$tmp/government" "$tmp/tests" "$tmp/records"
++run_hash=$(printf 'fixture output\n' | sha256sum | cut -d ' ' -f1)
+ export VICHE_STATE_ROOT=$tmp/state
+ mkdir -p "$VICHE_STATE_ROOT/delivery"
+ printf 'fixture\n' > "$tmp/government/base"
+@@ -16,7 +17,7 @@ base=$(git -C "$tmp" rev-parse HEAD)
+ # precedes the change but its tree necessarily differs from the resulting tree.
+ main_base=$(git -C "$tmp" rev-parse HEAD)
+ base_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","runs":[{"run":1,"result":"green","exit":0}]}\n' "$main_base" "$base_tree" > "$tmp/records/suite-status.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","runs":[{"run":1,"result":"green","exit":0,"output_sha256":"%s"}]}\n' "$main_base" "$base_tree" "$run_hash" > "$tmp/records/suite-status.json"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm green-record
+ # Construct a realistic merge commit: the receipt must name the final merged
+ # commit/tree, not merely its feature-branch parent.
+@@ -27,20 +28,25 @@ git -C "$tmp" checkout -qb merge-candidate main
+ git -C "$tmp" merge --no-ff -q -m 'merge candidate' code-change
+ green_change=$(git -C "$tmp" rev-parse HEAD)
+ green_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/records-smoke.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000,"runs":[{"run":1,"result":"green","exit":0}]}\n' \
+-    "$green_change" "$green_tree" > "$VICHE_STATE_ROOT/delivery/verified-wrong-suite.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/records-smoke.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000,"runs":[{"run":1,"result":"green","exit":0,"output_sha256":"%s"}]}\n' \
++    "$green_change" "$green_tree" "$run_hash" > "$VICHE_STATE_ROOT/delivery/verified-wrong-suite.json"
+ git -C "$tmp" checkout -q main
+ git -C "$tmp" merge --ff-only -q merge-candidate
+ # A green record for the wrong suite does not satisfy the code-change gate.
+ out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
+ printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["compliant"]==0; assert x["unreadable"]>0'
+ # Matching identity fields without a generated successful run are not evidence.
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000,"runs":[{"run":1,"result":"green","exit":0},{"run":2,"result":"red","exit":1}]}\n' \
+-    "$green_change" "$green_tree" > "$VICHE_STATE_ROOT/delivery/verified-malformed.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000,"runs":[{"run":1,"result":"green","exit":0,"output_sha256":"%s"},{"run":2,"result":"red","exit":1,"output_sha256":"%s"}]}\n' \
++    "$green_change" "$green_tree" "$run_hash" "$run_hash" > "$VICHE_STATE_ROOT/delivery/verified-malformed.json"
+ out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
+ printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["compliant"]==0; assert x["unreadable"]>0'
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000,"runs":[{"run":1,"result":"green","exit":0}]}\n' \
+-    "$green_change" "$green_tree" > "$VICHE_STATE_ROOT/delivery/verified-$green_change.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000,"runs":[{"run":1,"result":"green","exit":0,"output_sha256":"%s"}]}\n' \
++    "$green_change" "$green_tree" "$run_hash" > "$VICHE_STATE_ROOT/delivery/verified-$green_change.json"
++# JSON booleans are not valid integer run IDs/exits in suite-status evidence.
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000,"runs":[{"run":true,"result":"green","exit":false,"output_sha256":"%s"}]}\n' \
++    "$green_change" "$green_tree" "$run_hash" > "$VICHE_STATE_ROOT/delivery/verified-bool.json"
++out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
++printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["compliant"]==1'
+ # A main change with no matching prior verification is unreadable.
+ printf 'unverified\n' > "$tmp/tests/unverified"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm unverified-change
+@@ -52,18 +58,18 @@ git -C "$tmp" checkout -qb red-merge main
+ git -C "$tmp" merge --no-ff -q -m 'merge red candidate' red-code
+ red_commit=$(git -C "$tmp" rev-parse HEAD)
+ red_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","recorded_at":1001,"runs":[{"run":1,"result":"red","exit":1},{"run":2,"result":"red","exit":1},{"run":3,"result":"green","exit":0}]}\n' \
+-    "$red_commit" "$red_tree" > "$VICHE_STATE_ROOT/delivery/verified-malformed-red.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","recorded_at":1001,"runs":[{"run":1,"result":"red","exit":1,"output_sha256":"%s"},{"run":2,"result":"red","exit":1,"output_sha256":"%s"},{"run":3,"result":"green","exit":0,"output_sha256":"%s"}]}\n' \
++    "$red_commit" "$red_tree" "$run_hash" "$run_hash" "$run_hash" > "$VICHE_STATE_ROOT/delivery/verified-malformed-red.json"
+ git -C "$tmp" checkout -q main
+ git -C "$tmp" merge --ff-only -q red-merge
+ # A red/red/green sequence is neither a valid flaky-red resolution nor a
+ # red-main receipt, and cannot create a violation.
+ out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
+ printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["violations"]==0; assert x["main_red_episodes"]==0'
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","recorded_at":1002,"runs":[{"run":1,"result":"red","exit":1},{"run":2,"result":"red","exit":1}]}\n' \
+-    "$red_commit" "$red_tree" > "$VICHE_STATE_ROOT/delivery/verified-red-$red_commit.json"
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","runs":[{"run":1,"result":"red","exit":1},{"run":2,"result":"red","exit":1}]}\n' \
+-    "$red_commit" "$red_tree" > "$tmp/records/suite-status.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","recorded_at":1002,"runs":[{"run":1,"result":"red","exit":1,"output_sha256":"%s"},{"run":2,"result":"red","exit":1,"output_sha256":"%s"}]}\n' \
++    "$red_commit" "$red_tree" "$run_hash" "$run_hash" > "$VICHE_STATE_ROOT/delivery/verified-red-$red_commit.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","runs":[{"run":1,"result":"red","exit":1,"output_sha256":"%s"},{"run":2,"result":"red","exit":1,"output_sha256":"%s"}]}\n' \
++    "$red_commit" "$red_tree" "$run_hash" "$run_hash" > "$tmp/records/suite-status.json"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm red-record
+ out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
+ printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["status"]=="measured"; assert x["compliant"]==1; assert x["unreadable"]>0; assert x["main_red_episodes"]==1; assert x["violations"]==1'
+diff --git a/tests/tally-smoke.sh b/tests/tally-smoke.sh
+index 496d704c..64ce489c 100644
+--- a/tests/tally-smoke.sh
++++ b/tests/tally-smoke.sh
+@@ -11,6 +11,9 @@ assert gate < solicit, 'Act 22 pre-ballot gate must precede ballot solicitation
+ PY
+ scratch=$(mktemp -d)
+ trap 'rm -rf "$scratch"' 0
++git -C "$scratch" init -q
++git -C "$scratch" config user.name test
++git -C "$scratch" config user.email test@example.invalid
+ mkdir -p "$scratch/government" "$scratch/records/bills" "$scratch/records/ballots"
+ cp "$root/government/seats.tsv" "$scratch/government/seats.tsv"
+ cp "$root/government/voting.conf" "$scratch/government/voting.conf"
+@@ -36,6 +39,11 @@ while IFS="$tab" read -r seat title focus; do
+     printf '%s\tyes\t%s\n' "$seat" "$digest"
+ done < "$scratch/government/seats.tsv" > "$scratch/records/ballots/test-1.tsv"
+ VICHE_TOWN_ROOT=$scratch; export VICHE_TOWN_ROOT
++if /bin/sh "$root/government/tally.sh" test-1 >/dev/null 2>&1; then
++    echo "Untracked post-registration ballot file bypassed the Act 22 time gate" >&2
++    exit 1
++fi
++git -C "$scratch" add . && git -C "$scratch" commit -qm 'publish registered pilot ballot'
+ /bin/sh "$root/government/tally.sh" test-1 | grep -Fx 'PASSED'
+ # The tally cannot silently bypass Act 22 when the gate executable is absent.
+ mv "$scratch/government/predict-gate.sh" "$scratch/government/predict-gate.missing"

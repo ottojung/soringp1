@@ -1,0 +1,166 @@
+commit be62ce92517ea0d7af3421088cc8cef5d4a5d175
+Author:     c1a00002 Executive <c1a00002@viche.invalid>
+AuthorDate: Sat Nov 7 09:29:43 2026 +0000
+Commit:     c1a00002 Executive <c1a00002@viche.invalid>
+CommitDate: Sat Nov 7 09:29:43 2026 +0000
+
+    Require distinct healthy observations to close cases
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 75104b3c..2eecf30c 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -70,6 +70,30 @@ def collect():
+     return now, signals
+ 
+ 
++def latest_health_observation():
++    """Return the latest branch-health sample, not this reconciliation call.
++
++    Reconciliation can run repeatedly against unchanged inputs. Its wall-clock
++    time is therefore not an independent health observation. The branch
++    liveness probe appends timestamp/signal rows to this durable source.
++    """
++    path = ROOT / "branches/observations.tsv"
++    try:
++        rows = path.read_text().splitlines()
++    except OSError:
++        return None
++    for row in reversed(rows):
++        fields = row.split("\t", 1)
++        if len(fields) != 2:
++            continue
++        try:
++            observed_at = int(fields[0])
++        except ValueError:
++            continue
++        return observed_at, fields[1].strip()
++    return None
++
++
+ def owner(signal):
+     # The law already authorizes operational continuity under Acts 2/5.
+     if signal == "judiciary_mailbox_pending":
+@@ -84,6 +108,7 @@ def owner(signal):
+ 
+ def reconcile():
+     now, signals = collect()
++    health_observation = latest_health_observation()
+     STORE.mkdir(parents=True, exist_ok=True)
+     existing = sorted(STORE.glob("*.json"))
+     names = set(signals) | {p.stem for p in existing}
+@@ -108,14 +133,20 @@ def reconcile():
+             case["observations"] = case.get("observations", 0) + 1
+             case["clear_observations"] = 0
+         elif case.get("state") == "open":
+-            # Never resolve from agent success, a comment or a merge alone.
+-            # This confirmation observes the SAME underlying signal cleared
+-            # in two subsequent independent cycles.
+-            case["clear_observations"] = case.get("clear_observations", 0) + 1
+-            if case["clear_observations"] >= 2:
++            # Never count repeated reconciliations of one sample as separate
++            # healthy observations. Require distinct durable probe rows, each
++            # explicitly clear and later than the last time the signal held.
++            if health_observation is None or health_observation[1] != "clear":
++                case["clear_observations"] = 0
++                case.pop("last_clear_observation", None)
++            elif (health_observation[0] > case.get("last_seen", case.get("first_seen", 0))
++                  and health_observation[0] != case.get("last_clear_observation")):
++                case["clear_observations"] = case.get("clear_observations", 0) + 1
++                case["last_clear_observation"] = health_observation[0]
++            if case.get("clear_observations", 0) >= 2:
+                 case["state"] = "verified_closed"
+                 case["verified_at"] = now
+-                case["verification"] = "two successive deterministic health checks without signal"
++                case["verification"] = "two distinct later branch-health samples explicitly clear"
+         elif not case:
+             continue
+         atomic(path, case)
+diff --git a/tests/act19-office-continuity-smoke.sh b/tests/act19-office-continuity-smoke.sh
+index 0a2aaf33..4b6c3ac4 100644
+--- a/tests/act19-office-continuity-smoke.sh
++++ b/tests/act19-office-continuity-smoke.sh
+@@ -18,6 +18,7 @@ cp "$repo/government/eligible-work.py" "$d2/town/government/eligible-work.py"
+ cp "$repo/government/executive-cycle.sh" "$d2/town/government/executive-cycle.sh"
+ cp "$repo/government/handoff-queue.sh" "$d2/town/government/handoff-queue.sh"
+ cp "$repo/government/predict-scorer.py" "$d2/town/government/predict-scorer.py"
++cp "$repo/government/AGENT-REPORTING-POLICY.md" "$d2/town/government/AGENT-REPORTING-POLICY.md"
+ cat > "$d2/bin/antonina" <<'MOCK'
+ #!/bin/sh
+ set -eu
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index 11b1c71d..4abbff00 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -11,6 +11,7 @@ cp "$repo/government/appointments.sh" "$repo/government/branch-bootstrap.sh" \
+   "$repo/government/executive-cycle.sh" "$repo/government/office-continuity.sh" \
+   "$repo/government/terminal-appointment-evidence.sh" "$repo/government/policy-sync.sh" \
+   "$repo/government/seat-liveness.sh" "$repo/government/predict-scorer.py" \
++  "$repo/government/AGENT-REPORTING-POLICY.md" \
+   "$d/town/government/"
+ git -C "$d/seats/branches/executive" init -q
+ git -C "$d/seats/branches/executive" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
+@@ -166,7 +167,8 @@ mkdir -p "$d/safe/town/government" "$d/safe/town/records" \
+   "$d/safe/seats/branches/executive" "$d/safe/state/appointments"
+ cp "$repo/government/appointments.sh" "$repo/government/executive-cycle.sh" \
+   "$repo/government/handoff-queue.sh" "$repo/government/terminal-appointment-evidence.sh" \
+-  "$repo/government/predict-scorer.py" "$d/safe/town/government/"
++  "$repo/government/predict-scorer.py" "$repo/government/AGENT-REPORTING-POLICY.md" \
++  "$d/safe/town/government/"
+ printf 'c1a00001\tClerk\tintake\n' > "$d/safe/town/government/seats.tsv"
+ printf 'executive\tsafe-id\n' > "$d/safe/state/appointments/appointments.tsv"
+ printf '{"state":"idle","model":null,"variant":null}\n' > "$MOCK_ROOT/safe-id.json"
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index eadf8d69..ba8d622b 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -32,6 +32,7 @@ esac
+ MOCK
+ chmod +x "$d/bin/antonina" "$d/town/government/appointments.sh"
+ cp "$repo/government/EXECUTIVE-INNOVATION.md" "$d/town/government/EXECUTIVE-INNOVATION.md"
++cp "$repo/government/AGENT-REPORTING-POLICY.md" "$d/town/government/AGENT-REPORTING-POLICY.md"
+ printf '# Historic Act 14 — Legislative Centre\n' > "$d/town/government/LAWS.md"
+ printf 'Founder-controlled fixture Constitution\n' > "$d/charter"
+ export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock"
+@@ -57,22 +58,40 @@ grep -Fq 'old-agent' "$d/reconciliation-prompt"
+ 
+ # Deterministic cross-branch case survives agent/process restarts.
+ printf '{"signals":["innovation_stale"],"observed_at":1000}\n' > "$d/state/branches/incident.json"
++printf '1000\tinnovation_stale\n' > "$d/state/branches/observations.tsv"
+ export VICHE_CASE_NOW=1000
+ python3 "$repo/government/institutional-cases.py" reconcile > "$d/cases"
+ jq -e '.open_cases | length==2' "$d/cases" >/dev/null
+ jq -e '.state=="open" and .owner=="executive"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ jq -e '.state=="open" and .owner=="executive" and .first_seen==1000' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ rm "$d/state/branches/incident.json"
++printf '1100\tclear\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1100 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.state=="open" and .clear_observations==1 and .last_clear_observation==1100' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++VICHE_CASE_NOW=1150 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++printf '1175\texecutive_unhealthy\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1175 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++printf '1200\tclear\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1200 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++printf '1250\tclear\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1250 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="verified_closed" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ jq -e '.state=="open"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ # Only a matching independent Judiciary verification can discharge the
+ # uncertain-effects reconciliation case.
+ printf '{"previous_agent":"old-agent","successor_agent":"new-agent","verified_by":"judiciary","verification_scope":"external_effect_reconciled","evidence_ref":"fixture:independent-reviewed-effects"}\n' > "$d/state/continuity/verified-innovation-centre.json"
+ VICHE_CASE_NOW=1300 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++printf '1350\tclear\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1350 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ VICHE_CASE_NOW=1400 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++printf '1450\tclear\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1450 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="verified_closed"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ 
+ # After a real enactment, Executive unit runs on preserved worktree, not a

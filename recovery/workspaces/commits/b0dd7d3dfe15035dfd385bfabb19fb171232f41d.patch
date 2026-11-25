@@ -1,0 +1,499 @@
+commit b0dd7d3dfe15035dfd385bfabb19fb171232f41d
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Wed Nov 25 00:07:46 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Wed Nov 25 00:07:46 2026 +0000
+
+    Reflect large monotone circuits and verify generated certificates as durable proof obligations
+
+diff --git a/missions/pnp/research/README.md b/missions/pnp/research/README.md
+index 12ed122b..c21d0239 100644
+--- a/missions/pnp/research/README.md
++++ b/missions/pnp/research/README.md
+@@ -90,8 +90,17 @@ where the graph format is {"n":26,"edges":[[0,13],...],"bound":64}.
+ The star-cover construction uses minimum bipartite vertex cover or bounded
+ branch-and-bound, and symbolic antichain verification. Its Lean certificate
+ uses a permutation of concrete edges rather than exhaustive enumeration of
+-Boolean assignments. A generated file still needs kernel verification;
+-a failed construction does not prove a lower bound. The ordinary proof
++Boolean assignments. For more than 64 gates it uses a general Lean reflection
++lemma and verifies the concrete DNF plus edge permutation. The structured
++certificate is preserved as proof evidence; assembly reconstructs its checked
++helper namespace. On the order-5 projective plane (62 inputs, 216 gates),
++the original direct obligation check took 252.3 s, while reflection through
++the same graph checker took 22.9 s. Both were checked on the same public revision.
++A generated file still needs kernel verification;
++a failed construction does not prove a lower bound. For direct kernel verification and durable graph storage, add `--check` to
++the bound generator or run `certificate GRAPH.json --base PUBLIC_SHA --check`.
++Collect the returned verification request with `obligations collect CHECK_ID`;
++no helper extraction or manual obligation creation is required. The ordinary proof
+ synthesis and cheap preflight use this generator when applicable, with
+ fallback to legacy synthesis.
+ 
+diff --git a/missions/pnp/research/certificate.py b/missions/pnp/research/certificate.py
+index c9abbb78..7a55d8c7 100644
+--- a/missions/pnp/research/certificate.py
++++ b/missions/pnp/research/certificate.py
+@@ -26,7 +26,9 @@ def dnf(z):
+     """Exact ordered DNF of the star circuit; no absorption/reordering."""
+     w=[[(i,)] for i in range(z["n"])]
+     for op,a,b in z["gates"]:
+-        if op=="or":w.append(w[a]+w[b])
++        if op=="or":
++            if len(w[a])+len(w[b])>10000:raise ValueError("DNF expansion too large")
++            w.append(w[a]+w[b])
+         else:
+             if len(w[a])*len(w[b])>10000:raise ValueError("DNF expansion too large")
+             w.append([u+v for u in w[a] for v in w[b]])
+@@ -40,7 +42,7 @@ def lean_list(edges):
+ def expr(edges):
+     return " || ".join(f"(x {a} && x {b})" for a,b in edges)
+ 
+-def eval_body(z,ordered,permutation="any_perm"):
++def eval_body(z,ordered,permutation="any_perm",simp_steps=None):
+     n=z["n"];D=dnf(z)
+     L=[tuple(sorted(e)) for e in D];R=[tuple(sorted(e)) for e in ordered]
+     if sorted(L)!=sorted(R):
+@@ -49,6 +51,7 @@ def eval_body(z,ordered,permutation="any_perm"):
+     reverse=", ".join(f"Bool.and_comm (x {u}) (x {v})" for u,v in ordered if u>v)
+     left_extra=", "+swaps if swaps else ""
+     right_extra=", "+reverse if reverse else ""
++    simp="simp" if simp_steps is None else "simp (config := { maxSteps := "+str(simp_steps)+" })"
+     return f"""by
+   intro x
+   let L : List (Fin {n} × Fin {n}) := {lean_list(L)}
+@@ -56,11 +59,11 @@ def eval_body(z,ordered,permutation="any_perm"):
+   have hp : L.Perm R := by decide
+   calc
+     _ = L.any (fun e => x e.1 && x e.2) := by
+-      simp [witness, L, {NS}Circuit.eval, {NS}Circuit.wires,
++      {simp} [witness, L, {NS}Circuit.eval, {NS}Circuit.wires,
+         {NS}GateOp.eval, List.ofFn_succ, Bool.and_or_distrib_left,
+         Bool.and_or_distrib_right, Bool.or_assoc{left_extra}]
+     _ = R.any (fun e => x e.1 && x e.2) := {permutation} _ L R _ hp
+-    _ = _ := by simp [R, Bool.or_assoc{right_extra}]
++    _ = _ := by {simp} [R, Bool.or_assoc{right_extra}]
+ """
+ 
+ def parse(statement):
+@@ -76,6 +79,34 @@ def parse(statement):
+     if len(edges)!=len(ordered):return None
+     return n,bound,ordered,edges,rhs
+ 
++def witness_term(z):
++    gs=", ".join("⟨"+NS+"GateOp."+op+", ["+str(a)+", "+str(b)+"]⟩" for op,a,b in z["gates"])
++    return "⟨["+gs+"], "+str(z["output"])+"⟩"
++
++def indent(text,n=4):
++    return "\n".join(" "*n+line for line in text.rstrip().splitlines())
++
++def obligation_body(meta,z):
++    """Generate a complete term directly, without reparsing generated Lean."""
++    parsed=parse(meta["statement"])
++    if not parsed:raise ValueError("unsupported certificate statement")
++    n,bound,ordered,edges,rhs=parsed
++    if len(z["gates"])>bound or star.verify(n,edges,z["gates"],z["output"])["status"]!="verified":
++        raise ValueError("certificate is not within the stated bound")
++    if len(z["gates"])>64:
++        from . import dnf_reflection
++        return dnf_reflection.artifact(z)
++    steps=None
++    code="by\n  let witness : "+NS+"Circuit := "+witness_term(z)+"\n"
++    code+="  have any_perm : "+PERM_TYPE+" :=\n"+indent(PERM_BODY)+"\n"
++    code+="  have eval_witness : ∀ x : Fin "+str(n)+" → Bool, witness.eval (List.ofFn x) = ("+rhs+") :=\n"
++    code+=indent(eval_body(z,ordered,simp_steps=steps))+"\n"
++    code+="  have hwf : PEqualNP.MetaComplexity.Monotone2 witness := by\n"
++    code+="    intro g hg\n    simp only [witness, List.mem_cons, List.not_mem_nil, or_false] at hg\n"
++    code+="    rcases hg with "+" | ".join("rfl" for _ in z["gates"])+" <;> simp\n"
++    code+="  exact ⟨witness, hwf, by decide, eval_witness⟩\n"
++    return code
++
+ def render(meta,seconds=5):
+     parsed=parse(meta["statement"])
+     if not parsed:return {"status":"unsupported"}
+@@ -85,6 +116,11 @@ def render(meta,seconds=5):
+     info={"status":"generated","n":n,"gates":len(z["gates"]),"bound":bound,"verification":ver,"certificate":z}
+     if ver["status"]!="verified" or len(z["gates"])>bound:
+         return dict(info,status="no_witness_within_bound")
++    if len(z["gates"])>64:
++        from . import dnf_reflection
++        code=dnf_reflection.render(meta,z,ordered,rhs)
++        validate.validate(meta,code.encode())
++        return dict(info,candidate=code,proof_strategy="reflection")
+     mod=meta["module"];aux=mod+"_aux"
+     imports=["Mathlib"]+[m for m in meta["imports"] if m!="Mathlib"]
+     gs=", ".join("⟨"+NS+"GateOp."+op+", ["+str(a)+", "+str(b)+"]⟩" for op,a,b in z["gates"])
+@@ -112,9 +148,17 @@ def graph_meta(graph,module="PEqualNP.Outside.VicheStarCertificate"):
+ def main():
+     p=argparse.ArgumentParser(description=__doc__)
+     p.add_argument("graph",nargs="?",help="graph JSON; omit in a bound workspace for exact lease")
+-    p.add_argument("--output",required=True)
++    p.add_argument("--output")
++    p.add_argument("--check",action="store_true",help="store exact obligation and start async kernel verification")
++    p.add_argument("--base",help="public revision for independent --check")
++    p.add_argument("--family",default="graph-circuit")
++    p.add_argument("--wall",type=int,default=600)
++    p.add_argument("--rss-mib",type=int,default=8192)
+     p.add_argument("--seconds",type=float,default=5)
+     a=p.parse_args()
++    if not a.output and not a.check:p.error("--output or --check is required")
++    if a.check and a.graph and not a.base:p.error("independent --check requires --base")
++    if a.base and not (a.check and a.graph):p.error("--base applies to independent --check only")
+     if a.graph:
+         meta=graph_meta(json.loads(Path(a.graph).read_text()))
+     else:
+@@ -123,9 +167,28 @@ def main():
+         meta={"id":r["gap_id"],"module":r["module"],"file":r["path"],"statement":r["statement"],"imports":r["imports"]}
+     out=render(meta,a.seconds)
+     candidate=out.pop("candidate",None)
+-    if candidate:
++    if candidate and a.output:
+         with Path(a.output).open("x") as f:f.write(candidate)
+         out["path"]=str(Path(a.output).resolve())
++    if candidate and a.check:
++        from contextlib import closing
++        import tempfile
++        from . import knowledge as k,obligations as o,async_check
++        from .. import support
++        if a.graph:
++            base=a.base;o.public_toolchain(base)
++            provenance="certificate / graph file "+Path(a.graph).name
++            family=a.family
++        else:
++            base=b;provenance=r["gap_id"]+" / "+support.attempt(r)+" / certificate"
++            family=k.family((r.get("gap_title") or "")+" "+r["statement"])
++        detail=k.canon({"imports":sorted(set(["Mathlib"]+meta["imports"])),
++                        "options":{"maxHeartbeats":4000000,"maxRecDepth":10000}})
++        with closing(k.db()) as c:
++            node=k.add(c,"obligation",family,meta["statement"],detail,provenance,base=base)
++            with tempfile.NamedTemporaryFile(mode="w",suffix=".body") as f:
++                f.write(obligation_body(meta,out["certificate"]));f.flush()
++                out["verification_request"]=async_check.submit(c,node,f.name,bool(a.graph),a.wall,a.rss_mib)
+     print(json.dumps(out,indent=2))
+     return 0 if candidate else 1
+ if __name__=="__main__":raise SystemExit(main())
+diff --git a/missions/pnp/research/dnf_reflection.py b/missions/pnp/research/dnf_reflection.py
+new file mode 100644
+index 00000000..e808fcf2
+--- /dev/null
++++ b/missions/pnp/research/dnf_reflection.py
+@@ -0,0 +1,189 @@
++"""Reusable Lean reflection kernel for binary monotone circuits."""
++
++TEMPLATE = """abbrev Dnf := List (List Nat)
++def value (x : List Bool) (d : Dnf) : Bool :=
++  d.any (fun t => t.all (fun i => x.getD i false))
++
++def conjunction (a b : Dnf) : Dnf :=
++  a.flatMap (fun u => b.map (fun v => u ++ v))
++
++lemma value_prefix (x : List Bool) (u : List Nat) (b : Dnf) :
++    value x (b.map (fun v => u ++ v)) =
++      (u.all (fun i => x.getD i false) && value x b) := by
++  induction b with
++  | nil => simp [value]
++  | cons v vs ih =>
++    simp only [List.map_cons, value, List.any_cons, List.all_append] at *
++    rw [ih, Bool.and_or_distrib_left]
++
++lemma value_append (x : List Bool) (a b : Dnf) :
++    value x (a ++ b) = (value x a || value x b) := by
++  simp [value,List.any_append]
++
++lemma value_cons (x : List Bool) (u : List Nat) (a : Dnf) :
++    value x (u :: a) = (u.all (fun i => x.getD i false) || value x a) := rfl
++
++lemma value_conjunction (x : List Bool) (a b : Dnf) :
++    value x (conjunction a b) = (value x a && value x b) := by
++  induction a with
++  | nil => simp [conjunction,value]
++  | cons u us ih =>
++    change value x (b.map (fun v => u ++ v) ++ conjunction us b) = _
++    rw [value_append, value_prefix x u b, ih, value_cons, Bool.and_or_distrib_right]
++
++lemma value_getD (x : List Bool) (ds : List Dnf) (i : Nat) :
++    (ds.map (value x)).getD i false = value x (ds.getD i []) := by
++  simp only [List.getD_eq_getElem?_getD,List.getElem?_map]
++  cases ds[i]? <;> rfl
++
++abbrev Op := Bool × Nat × Nat
++def gate (g : Op) : Gate :=
++  ⟨if g.1 then GateOp.and else GateOp.or,[g.2.1,g.2.2]⟩
++def dstep (ds : List Dnf) (g : Op) : List Dnf :=
++  ds ++ [if g.1 then conjunction (ds.getD g.2.1 []) (ds.getD g.2.2 [])
++         else ds.getD g.2.1 [] ++ ds.getD g.2.2 []]
++
++def bstep (w : List Bool) (g : Gate) : List Bool :=
++  w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]
++
++lemma value_step (x : List Bool) (ds : List Dnf) (g : Op) :
++    (dstep ds g).map (value x) = bstep (ds.map (value x)) (gate g) := by
++  rcases g with ⟨b,i,j⟩
++  cases b <;> simp only [dstep,bstep,gate,Bool.false_eq_true,ite_false,ite_true,
++    List.map_append,List.map_cons,List.map_nil,GateOp.eval,List.any_cons,List.any_nil,
++    List.all_cons,List.all_nil,id,Bool.or_false,Bool.and_true,value_getD,value_append,value_conjunction]
++
++lemma value_fold (x : List Bool) (ds : List Dnf) (gs : List Op) :
++    (gs.foldl dstep ds).map (value x) =
++      (gs.map gate).foldl bstep (ds.map (value x)) := by
++  induction gs generalizing ds with
++  | nil => rfl
++  | cons g gs ih => simp only [List.foldl_cons,List.map_cons,ih,value_step]
++
++def inputs (n : Nat) : List Dnf := List.ofFn (fun i : Fin n => [[i.val]])
++
++lemma value_inputs {n : Nat} (x : Fin n → Bool) :
++    (inputs n).map (value (List.ofFn x)) = List.ofFn x := by
++  simp only [inputs,List.map_ofFn]
++  congr 1
++  funext i
++  simp [value,List.getD_eq_getElem?_getD]
++
++lemma sound {n : Nat} (x : Fin n → Bool) (gs : List Op) (out : Nat) :
++    (Circuit.mk (gs.map gate) out).eval (List.ofFn x) =
++      value (List.ofFn x) ((gs.foldl dstep (inputs n)).getD out []) := by
++  change ((gs.map gate).foldl bstep (List.ofFn x)).getD out false = _
++  have h := value_fold (List.ofFn x) (inputs n) gs
++  rw [value_inputs x] at h
++  rw [← h]
++  exact value_getD _ _ _
++lemma value_pairs {n : Nat} (x : Fin n → Bool) (l : List (Fin n × Fin n)) :
++    value (List.ofFn x) (l.map (fun e => [e.1.val,e.2.val])) =
++      l.any (fun e => x e.1 && x e.2) := by
++  induction l with
++  | nil => rfl
++  | cons e es ih =>
++    change (value (List.ofFn x) ([e.1.val,e.2.val] :: es.map (fun e => [e.1.val,e.2.val]))) = _
++    rw [value_cons, ih]
++    simp [List.getD_eq_getElem?_getD]
++
++def orderPair {n : Nat} (e : Fin n × Fin n) :=
++  if e.1 ≤ e.2 then e else (e.2,e.1)
++
++lemma value_ordered {n : Nat} (x : Fin n → Bool) (l : List (Fin n × Fin n)) :
++    (l.map orderPair).any (fun e => x e.1 && x e.2) =
++      l.any (fun e => x e.1 && x e.2) := by
++  induction l with
++  | nil => rfl
++  | cons e es ih =>
++    simp only [List.map_cons,List.any_cons,ih,orderPair]
++    split <;> simp [Bool.and_comm]
++
++lemma any_perm (α : Type) (L R : List α) (p : α → Bool) :
++    L.Perm R → L.any p = R.any p := by
++  intro hp
++  induction hp with
++  | nil => rfl
++  | cons _ _ ih => simp only [List.any_cons,ih]
++  | swap _ _ _ => simp only [List.any_cons, Bool.or_left_comm]
++  | trans _ _ ih₁ ih₂ => exact ih₁.trans ih₂
++
++lemma monotone (gs : List Op) (out : Nat) :
++    PEqualNP.MetaComplexity.Monotone2 (Circuit.mk (gs.map gate) out) := by
++  intro g hg
++  obtain ⟨t,ht,rfl⟩ := List.mem_map.mp hg
++  rcases t with ⟨b,i,j⟩
++  cases b <;> simp [gate]
++"""
++
++def data(z,ordered):
++    from .certificate import dnf,lean_list
++    D=dnf(z)
++    R=[tuple(sorted(e)) for e in ordered]
++    if sorted(tuple(sorted(e)) for e in D)!=sorted(R):
++        raise ValueError("reflection requires exactly one occurrence of each target edge")
++    ops="["+ ", ".join("("+("true" if op=="and" else "false")+", "+str(a)+", "+str(b)+")" for op,a,b in z["gates"])+"]"
++    return ops,lean_list(D),lean_list(R)
++
++def definitions(z,ordered):
++    ops,pairs,target=data(z,ordered)
++    n=z["n"];out=z["output"]
++    return f"""def ops : List Op := {ops}
++def pairs : List (Fin {n} × Fin {n}) := {pairs}
++def target : List (Fin {n} × Fin {n}) := {target}
++def witness : Circuit := ⟨ops.map gate, {out}⟩
++"""
++
++def eval_proof(z,ordered):
++    n=z["n"];out=z["output"]
++    swaps=", ".join(f"Bool.and_comm (x {u}) (x {v})" for u,v in ordered if u>v)
++    extra=", "+swaps if swaps else ""
++    return f"""by
++  change (Circuit.mk (ops.map gate) {out}).eval (List.ofFn x) = _
++  rw [sound]
++  have h : (ops.foldl dstep (inputs {n})).getD {out} [] =
++      pairs.map (fun e => [e.1.val,e.2.val]) := by decide
++  rw [h,value_pairs,← value_ordered]
++  have hp : (pairs.map orderPair).Perm target := by decide
++  rw [any_perm _ _ _ _ hp]
++  simp (config := {{maxSteps := 2000000}}) [target,Bool.or_assoc{extra}]
++"""
++
++OPTIONS="set_option maxHeartbeats 4000000 in\nset_option maxRecDepth 10000 in\n"
++
++def parts(z,ordered,rhs,aux):
++    n=z["n"];out=z["output"]
++    code="namespace "+aux+"\nopen PEqualNP.CircuitLowerBounds\n"
++    code+=TEMPLATE+"\n"+definitions(z,ordered)+"\n"+OPTIONS
++    code+=f"lemma eval_witness (x : Fin {n} → Bool) : witness.eval (List.ofFn x) = ({rhs}) :=\n"+eval_proof(z,ordered)
++    code+=f"\nlemma wf : PEqualNP.MetaComplexity.Monotone2 witness := monotone ops {out}\nend {aux}\n\n"
++    body=f"by\n  exact ⟨{aux}.witness,{aux}.wf,by decide,{aux}.eval_witness⟩"
++    return code,body
++
++def render(meta,z,ordered,rhs):
++    module=meta["module"];aux=module+"_aux"
++    imports=["Mathlib"]+[m for m in meta["imports"] if m!="Mathlib"]
++    helpers,body=parts(z,ordered,rhs,aux)
++    return "\n".join("import "+m for m in imports)+"\n\n"+helpers+OPTIONS+f"theorem {module} : {meta['statement']} := "+body+"\n"
++
++MARKER="-- viche-reflected-star-v1\n"
++
++def artifact(z):
++    import json
++    # Only computational data, not arbitrary injected Lean declarations.
++    return MARKER+json.dumps({"n":z["n"],"gates":z["gates"],"output":z["output"]},separators=(",",":"))+"\n"
++
++def unpack(text,statement,aux):
++    import json
++    from . import certificate,star
++    z=json.loads(text[len(MARKER):])
++    if not isinstance(z,dict) or set(z)!={"n","gates","output"}:
++        raise ValueError("invalid reflected proof artifact")
++    parsed=certificate.parse(statement)
++    if not parsed:raise ValueError("unsupported reflected proof statement")
++    n,bound,ordered,edges,rhs=parsed
++    if z["n"]!=n or len(z["gates"])>bound:
++        raise ValueError("reflected proof does not fit exact obligation")
++    if star.verify(n,edges,z["gates"],z["output"])["status"]!="verified":
++        raise ValueError("invalid reflected circuit")
++    return parts(z,ordered,rhs,aux)
+diff --git a/missions/pnp/research/entry.py b/missions/pnp/research/entry.py
+index 6b15a4b7..e411f345 100644
+--- a/missions/pnp/research/entry.py
++++ b/missions/pnp/research/entry.py
+@@ -9,7 +9,7 @@ def main():
+     import missions.pnp
+     canonical=root/"missions/pnp/research"
+     # A partial canonical rollout must not shadow the complete installed CLI.
+-    required=("entry.py","playbook.py","async_check.py","adoption.py","certificate.py")
++    required=("entry.py","playbook.py","async_check.py","adoption.py","certificate.py","dnf_reflection.py")
+     if not all((canonical/f).is_file() for f in required):
+         missions.pnp.__path__.insert(0,str(Path(__file__).resolve().parent.parent))
+     commands={"knowledge":"knowledge","obligations":"obligations","yield":"yield_model","star":"star","dispatch":"roles","start":"playbook","adoption":"adoption","guide":"playbook","certificate":"certificate"}
+diff --git a/missions/pnp/research/obligations.py b/missions/pnp/research/obligations.py
+index 6ded5ec0..1dcb747b 100644
+--- a/missions/pnp/research/obligations.py
++++ b/missions/pnp/research/obligations.py
+@@ -86,6 +86,12 @@ def declaration_options(meta):
+     return "".join(f"set_option {k} {v} in\n" for k,v in sorted(opts.items()))
+ 
+ 
++def proof_parts(node,text):
++    from . import dnf_reflection
++    if text.startswith(dnf_reflection.MARKER):
++        return dnf_reflection.unpack(text,node["statement"],"viche_r_"+node["id"])
++    return "",text
++
+ def build(c,oid,body=None):
+     nodes=plan(c,oid); base=nodes[-1]["base"]
+     imports=set(); lines=[]
+@@ -93,7 +99,8 @@ def build(c,oid,body=None):
+         meta=json.loads(o["detail"])
+         imports.update(meta["imports"])
+         text=body if o["id"]==oid and body is not None else checked_body(c,o["id"],base)
+-        lines.append(declaration_options(meta)+f"theorem {symbol(o['id'])} : {o['statement']} :=\n{text}\n")
++        helpers,text=proof_parts(o,text)
++        lines.append(helpers+declaration_options(meta)+f"theorem {symbol(o['id'])} : {o['statement']} :=\n{text}\n")
+     src="\n".join("import "+x for x in sorted(imports))+"\n\n"+"\n".join(lines)
+     return src+"\n#print axioms "+symbol(oid)+"\n"
+ 
+@@ -105,7 +112,8 @@ def candidate(c,oid,rec,base):
+     module=rec["module"];namespace=module+"_aux"
+     for node in nodes:
+         imports.update(json.loads(node["detail"])["imports"])
+-        lines.append(declaration_options(json.loads(node["detail"]))+f"lemma {symbol(node['id'])} : {node['statement']} :=\n{checked_body(c,node['id'],base)}\n")
++        helpers,text=proof_parts(node,checked_body(c,node["id"],base))
++        lines.append(helpers+declaration_options(json.loads(node["detail"]))+f"lemma {symbol(node['id'])} : {node['statement']} :=\n{text}\n")
+     src="\n".join("import "+x for x in sorted(imports,key=lambda x:(x!="Mathlib",x)))
+     src+="\n\nnamespace "+namespace+"\n"+"\n".join(lines)+"\nend "+namespace+"\n\n"
+     src+=f"theorem {module} : {rec['statement']} := by\n  exact {namespace}.{symbol(oid)}\n"
+diff --git a/missions/pnp/research/playbook.py b/missions/pnp/research/playbook.py
+index 528b803c..8a00b0be 100644
+--- a/missions/pnp/research/playbook.py
++++ b/missions/pnp/research/playbook.py
+@@ -11,7 +11,7 @@ P = "PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp."
+ CLI = "pnp-research"
+ ROLES = {
+     "general": ("Own the exact leased theorem; explore promising routes, reuse knowledge and share concrete results.",
+-        "Use the existing checked corpus before inventing a proof. For compatible graph constructions run pnp-research certificate --output Candidate.lean from the bound workspace. Verify generated candidates through the normal pipeline. Preserve your results when focus changes."),
++        "Use the existing checked corpus before inventing a proof. For compatible graph constructions run pnp-research certificate --check --output Candidate.lean from the bound workspace. Collect the proof check and submit the exact checked candidate through the normal pipeline. Preserve your results when focus changes."),
+     "integrator": ("Own the proof dependency graph and eventual exact submission, not another independent full-theorem search.",
+         "Request exact missing types, assign through Executive, reuse checked bodies. When the root is complete, assemble --candidate and submit immediately."),
+     "specialist": ("Solve the assigned distinct approach or exact obligation, not every part of the theorem.",
+@@ -61,7 +61,7 @@ def guide(role):
+     elif role in METHOD:
+         lines += [
+           "Use pnp-research obligations request --base SHA --family FAMILY --provenance SOURCE --statement TYPE; obligations solve ID BODY --method --async; obligations collect ID. The work packet supplies an exact public base. No desk lease is needed.",
+-          "Run pnp-research knowledge find QUERY; store exact reusable objects with knowledge add. Use pnp-research certificate GRAPH.json --output Candidate.lean for a Lean-rendered graph-circuit certificate; star GRAPH.json returns its computational witness."
++          "Run pnp-research knowledge find QUERY; store exact reusable objects with knowledge add. Use pnp-research certificate GRAPH.json --base SHA --check to generate and asynchronously verify a graph certificate in one command; --output FILE also writes the standalone Lean source."
+         ]
+     elif role in DECISIONS:
+         lines += ["Use pnp-research yield (empirical baseline; not calibrated) and " + P + "portfolio inspect. Read current proof artifacts before deciding."]
+@@ -130,7 +130,7 @@ INDEPENDENT METHOD WORKFLOW:
+   # proof.body: by intro a b; exact Bool.and_comm a b
+   pnp-research obligations solve NODE_ID proof.body --method --async
+   pnp-research obligations collect CHECK_ID
+-  pnp-research certificate GRAPH.json --output Candidate.lean
++  pnp-research certificate GRAPH.json --base BASE --check --output Candidate.lean
+ Keep reusable lemmas and counterexamples in the graph, not only in your transcript.
+ """
+     if role in {"knowledge","methods"}:
+@@ -198,9 +198,9 @@ def packet(role, cwd=None):
+             "pnp-research obligations ready --base "+base if base else "pnp-research obligations ready",
+             "marceline-request status "+base if base else "marceline-request status"]
+         if role=="tool":
+-            out["next_commands"].insert(0,"pnp-research certificate GRAPH.json --output Candidate.lean")
++            out["next_commands"].insert(0,"pnp-research certificate GRAPH.json --base "+(base or "BASE")+" --check")
+             out["source_locations"]=["missions/pnp/research/certificate.py","missions/pnp/research/star.py",
+-                                     "missions/pnp/research/certificate_bench.py","missions/pnp/proofs/"]
++                                     "missions/pnp/research/certificate_bench.py","missions/pnp/research/dnf_reflection.py","missions/pnp/proofs/"]
+         with knowledge.db() as c:
+             from . import obligations
+             out["open_method_nodes"]=[{"id":x["id"],"family":x["family"],"base":x["base"],"statement":x["statement"][:250]}
+diff --git a/tests/pnp-research.py b/tests/pnp-research.py
+index 47a0164e..47481c73 100644
+--- a/tests/pnp-research.py
++++ b/tests/pnp-research.py
+@@ -124,6 +124,32 @@ class Research(unittest.TestCase):
+         self.assertNotIn("∀ b0 b1",r["candidate"])
+         # No generated proof is claimed kernel-checked before verification.
+         self.assertEqual(r["verification"]["status"],"verified")
++    def test_reflected_artifact_assembly(self):
++        from missions.pnp.research import dnf_reflection as d
++        meta=certificate.graph_meta({"n":20,"edges":[(u,v) for u in range(10) for v in range(10,20)],"bound":109})
++        r=certificate.render(meta)
++        self.assertEqual(r["proof_strategy"],"reflection")
++        self.assertIn("lemma sound",r["candidate"])
++        self.assertIn("foldl dstep",r["candidate"])
++        body=certificate.obligation_body(meta,r["certificate"])
++        self.assertTrue(body.startswith(d.MARKER))
++        a=self.obligation(meta["statement"])
++        src=o.build(self.c,a,body)
++        self.assertIn("namespace viche_r_"+a,src)
++        self.assertIn("#print axioms "+o.symbol(a),src)
++        self.assertNotIn(d.MARKER,src)
++        bad=json.loads(body[len(d.MARKER):]);bad["output"]=0
++        with self.assertRaises(ValueError):o.build(self.c,a,d.artifact(bad))
++        h=k.store_bytes(body.encode())
++        with self.c:self.c.execute("INSERT INTO proof VALUES(?,?,?,?,?,?)",(a,self.base,h,"fixture",k.canon({"status":"kernel_checked"}),1))
++        b=self.obligation("True",[a])
++        h=k.store_bytes(b"by trivial")
++        with self.c:self.c.execute("INSERT INTO proof VALUES(?,?,?,?,?,?)",(b,self.base,h,"fixture",k.canon({"status":"kernel_checked"}),1))
++        rec={"gap_id":"L-meta-1","module":"PEqualNP.Outside.L_meta_1","path":"lean/PEqualNP/Outside/L_meta_1.lean","statement":"True","imports":["Mathlib"]}
++        result=o.candidate(self.c,b,rec,self.base)
++        self.assertIn("namespace viche_r_"+a,result)
++        self.assertEqual(result.count("theorem "),1)
++        self.assertNotIn("#print",result)
+     def test_archive_ingest(self):
+         archive=Path(config.STATE_ROOT).parent/"quarantine"/"L-meta-2-20261124100000"
+         archive.mkdir(parents=True)

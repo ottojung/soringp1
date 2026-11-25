@@ -1,0 +1,205 @@
+commit ba232a2586d838fb62f1bbbc14eaf5cf33d61570
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Wed Nov 25 16:50:12 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Wed Nov 25 16:50:12 2026 +0000
+
+    Integrate delivery/pnp-sparse-worktrees-20261125 (operator): Run sparse workspace test directly under the hermetic suite environment
+    
+    Landed by the integration queue (Act 31) as one candidate on main 180edb60f974.
+    
+    Delivery-Branch: delivery/pnp-sparse-worktrees-20261125
+    Delivery-Head: ab86b94e64270278551ed910dbedcf80c581a284
+    Proposed-By: operator
+    Reviewed-By: reviewer-egz6ditzio9s2ta3cobdnm-relate
+    Review-Reason: Change matches its messages: research worktrees are now sparse/pinned (root tree plus allowed Outside modules and their transitive imports), corpus stays in Git, and the hermetic test verifies isolation, recovery and no clobbering. Publication still uses a full fresh worktree; no laws/seats or recor
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/missions/pnp/assignment.py b/missions/pnp/assignment.py
+index b5752499..efb47b99 100644
+--- a/missions/pnp/assignment.py
++++ b/missions/pnp/assignment.py
+@@ -117,10 +117,19 @@ def prepare(gap, checkout=True, worker=None, base=None, expected=None):
+         fd = os.open(str(marker) + ".prepare.lock", os.O_CREAT | os.O_RDWR, 0o600)
+         try:
+             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+-            if not (path / ".git").exists():
++            from . import research_workspace
++            setup = marker.parent / "storage-setup.json"
++            if setup.exists():
++                pending = json.loads(setup.read_text())
++                research_workspace.restore_incomplete(gitctl.MIRROR, path,
++                                                      pending["base"], rec.get("imports"))
++                setup.unlink()
++            elif not (path / ".git").exists():
+                 base = base or gitctl.ensure_mirror()
+-                gitctl.run(["git", "--git-dir=" + gitctl.MIRROR, "worktree", "add",
+-                            "--detach", str(path), base])
++                # Pin the revision before any partial checkout may be created.
++                state.atomic_write(str(setup), json.dumps({"base": base}) + "\n")
++                research_workspace.create(gitctl.MIRROR, path, base, rec.get("imports"))
++                setup.unlink()
+             gitctl.prepare_build_cache(str(path))
+         except gitctl.GitError as exc:
+             raise ValueError(str(exc)) from exc
+diff --git a/missions/pnp/research/playbook.py b/missions/pnp/research/playbook.py
+index 364aab76..16c34e3c 100644
+--- a/missions/pnp/research/playbook.py
++++ b/missions/pnp/research/playbook.py
+@@ -67,7 +67,8 @@ def guide(role):
+         lines += [
+           "In your workspace, pnp-research obligations ready --current shows open dependencies; obligations show ID gives the exact type. Request with obligations request --statement TYPE --requires ID; solve with obligations solve ID BODY --async, collect with obligations collect ID. BODY is a Lean term beginning with by.",
+           "Run pnp-remote-check --availability once per checkout. Use --scratch --async FILE.lean for experimental Lean or --async FILE.lean for complete candidates; pnp-remote-check --wait ID retrieves the result. NEVER launch raw `lake`, `lake env lean`, `lean` or `checklemma` yourself: a single unmanaged lean/lake process in a pnp worktree makes build_control.legacy_compilers() defer EVERY managed compile (exit 75), blocking kernel receipts for the whole swarm. When remote is unavailable use ONLY the managed compiler: PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile -- lake ... (or --light for narrow scratch). Do not build the same file twice.",
+-          "Use pnp-research knowledge find QUERY; knowledge show ID retrieves artifacts. Share findings through the existing support channel. Complete exact proof: use the normal submit command immediately."
++          "Use pnp-research knowledge find QUERY; knowledge show ID retrieves artifacts. Share findings through the existing support channel. Complete exact proof: use the normal submit command immediately.",
++          "Research checkouts omit the upstream Outside proof corpus, not your new files. Search the pinned full corpus with git grep PATTERN HEAD -- lean/PEqualNP/Outside; read exact source with git show HEAD:lean/PEqualNP/Outside/NAME.lean. Use git sparse-checkout add /lean/PEqualNP/Outside/NAME.lean only if a physical file is needed. Never materialize the entire corpus routinely."
+         ]
+     elif role in METHOD:
+         lines += [
+diff --git a/missions/pnp/research_workspace.py b/missions/pnp/research_workspace.py
+new file mode 100644
+index 00000000..246527b5
+--- /dev/null
++++ b/missions/pnp/research_workspace.py
+@@ -0,0 +1,65 @@
++"""Small pinned research checkout; public Outside sources remain in Git."""
++import re
++from pathlib import Path
++
++from . import gitctl
++
++OUTSIDE = "lean/PEqualNP/Outside/"
++PATTERNS = ("/*", "!/" + OUTSIDE)
++MODULE = re.compile(r"PEqualNP\.Outside\.[A-Za-z0-9_.]+")
++
++
++def required(mirror, base, imports):
++    """Include explicitly allowed Outside modules and their Outside imports."""
++    pending = list(imports or ())
++    seen = set()
++    while pending:
++        module = pending.pop()
++        if not isinstance(module, str) or not MODULE.fullmatch(module):
++            continue
++        path = "lean/" + module.replace(".", "/") + ".lean"
++        if path in seen:
++            continue
++        src = gitctl.run(["git", "--git-dir=" + mirror, "show", base + ":" + path]).stdout
++        seen.add(path)
++        for line in src.splitlines():
++            if line.startswith("import "):
++                pending.extend(line.split()[1:])
++    return sorted(seen)
++
++
++def create(mirror, path, base, imports):
++    """Do not expand the huge proof corpus even temporarily."""
++    path = Path(path)
++    patterns = [*PATTERNS, *("/" + f for f in required(mirror, base, imports))]
++    gitctl.run(["git", "--git-dir=" + mirror, "worktree", "add",
++                "--detach", "--no-checkout", str(path), base])
++    gitctl.run(["git", "sparse-checkout", "set", "--no-cone", *patterns], cwd=path)
++    # This is exclusively the freshly created, never dispatched checkout.
++    gitctl.run(["git", "reset", "--hard", base], cwd=path)
++    (path / OUTSIDE).mkdir(parents=True, exist_ok=True)
++
++
++def restore_incomplete(mirror, path, base, imports):
++    """Only resume a marked initialization; refuse any unexpected local content."""
++    path = Path(path)
++    if not (path / ".git").is_file():
++        create(mirror, path, base, imports)
++        return
++    head = gitctl.run(["git", "rev-parse", "HEAD"], cwd=path).stdout.strip()
++    if head != base:
++        raise gitctl.GitError("incomplete checkout has unexpected HEAD")
++    # Incomplete initialization may have an empty or partially populated index.
++    # Refuse to reset if a non-Git file is present, unless the checkout is already
++    # fully initialized and clean. Never reset an existing researcher's work.
++    files = [p for p in path.rglob("*") if p != path / ".git"
++             and (p.is_file() or p.is_symlink())]
++    status = gitctl.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=path).stdout
++    if files:
++        if status or not (path / "lean/lean-toolchain").is_file():
++            raise gitctl.GitError("incomplete checkout contains local files; inspect manually")
++    else:
++        patterns = [*PATTERNS, *("/" + f for f in required(mirror, base, imports))]
++        gitctl.run(["git", "sparse-checkout", "set", "--no-cone", *patterns], cwd=path)
++        gitctl.run(["git", "reset", "--hard", base], cwd=path)
++    (path / OUTSIDE).mkdir(parents=True, exist_ok=True)
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index b87ee7ff..1f3acc8d 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -18,6 +18,7 @@ python3 tests/pnp-allocator.py
+ 
+ python3 tests/pnp-continuity.py
+ python3 tests/pnp-staffing.py
++python3 tests/pnp-sparse-workspace.py
+ 
+ python3 tests/pnp-brief.py
+ python3 tests/pnp-tool-discovery.py
+diff --git a/tests/pnp-sparse-workspace.py b/tests/pnp-sparse-workspace.py
+new file mode 100644
+index 00000000..51bbb0f1
+--- /dev/null
++++ b/tests/pnp-sparse-workspace.py
+@@ -0,0 +1,58 @@
++import pathlib
++import subprocess
++import tempfile
++import sys
++import unittest
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
++from missions.pnp import research_workspace as w
++
++
++def git(path, *args):
++    return subprocess.check_output(["git", "-C", str(path), *args],
++                                   stderr=subprocess.STDOUT).decode().strip()
++
++
++class SparseWorkspace(unittest.TestCase):
++    def test_pinned_outside_and_isolation(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = pathlib.Path(d)
++            repo = root / "repo"
++            repo.mkdir()
++            git(repo, "init", "-q")
++            out = repo / w.OUTSIDE
++            out.mkdir(parents=True)
++            (repo / "lean/lean-toolchain").write_text("test")
++            (out / "A.lean").write_text("import PEqualNP.Outside.B\n")
++            (out / "B.lean").write_text("def b := 1\n")
++            (out / "Huge.lean").write_text("a" * 1000000)
++            git(repo, "add", ".")
++            git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
++                "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
++            head = git(repo, "rev-parse", "HEAD")
++            dest = root / "worker"
++            w.create(str(repo / ".git"), dest, head, ["PEqualNP.Outside.A"])
++            self.assertTrue((dest / w.OUTSIDE / "A.lean").exists())
++            self.assertTrue((dest / w.OUTSIDE / "B.lean").exists())
++            self.assertFalse((dest / w.OUTSIDE / "Huge.lean").exists())
++            self.assertTrue((repo / w.OUTSIDE / "Huge.lean").exists())
++            self.assertEqual(git(dest, "status", "--porcelain"), "")
++            self.assertEqual(len(git(dest, "show", "HEAD:" + w.OUTSIDE + "Huge.lean")), 1000000)
++            (dest / w.OUTSIDE / "New.lean").write_text("unique")
++            with self.assertRaises(Exception):
++                w.restore_incomplete(str(repo / ".git"), dest, head, [])
++            self.assertEqual((dest / w.OUTSIDE / "New.lean").read_text(), "unique")
++            second = root / "partial"
++            git(repo, "worktree", "add", "--detach", "--no-checkout", str(second), head)
++            w.restore_incomplete(str(repo / ".git"), second, head, [])
++            self.assertTrue((second / "lean/lean-toolchain").exists())
++            self.assertFalse((second / w.OUTSIDE / "A.lean").exists())
++            git(second, "sparse-checkout", "add", "/" + w.OUTSIDE + "A.lean")
++            self.assertTrue((second / w.OUTSIDE / "A.lean").exists())
++            self.assertEqual(git(second, "status", "--porcelain"), "")
++            git(dest, "sparse-checkout", "disable")
++            self.assertEqual((dest / w.OUTSIDE / "Huge.lean").stat().st_size, 1000000)
++
++
++if __name__ == "__main__":
++    unittest.main()

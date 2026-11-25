@@ -1,0 +1,65 @@
+commit b796569fa018a7bedc40efd28411d7cf044a1412
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Thu Oct 15 11:10:28 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Thu Oct 15 11:10:28 2026 -0700
+
+    Never resume an unsafe failed Clerk session after cooldown (#13)
+    
+    * Refuse unsafe failed Clerk continuation regardless of cooldown expiry
+    
+    * Test that cooldown expiry does not permit unsafe Clerk continuation
+
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+index 2b1bc72d..f53316a5 100644
+--- a/government/clerk-liveness.sh
++++ b/government/clerk-liveness.sh
+@@ -12,21 +12,23 @@ id=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
+ metadata=$(antonina agent status --id "$id" --json)
+ kind=$(printf '%s\n' "$metadata" | jq -r '.state')
+ reason=$(printf '%s\n' "$metadata" | jq -r '.backend_error.classification // ""')
++# The intake and sitting gates must never reuse a terminally failed
++# continuation if Antonina classifies automatic retry as unsafe. A cooldown
++# expiring authorizes supervisor recovery, NOT direct reuse of that session.
++if [ "${1:-}" = --gate ]; then
++  unsafe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_safe == false then "yes" else "no" end')
++  if [ "$kind" = failed ] && { [ "$reason" = upstream_endpoint_unavailable ] || [ "$unsafe" = yes ]; }; then
++    echo "Viche: refusing failed Clerk continuation; supervisor recovery required" >&2
++    exit 1
++  fi
++  exit 0
++fi
+ [ "$kind" = failed ] || exit 0
+ [ "$reason" = upstream_endpoint_unavailable ] || exit 0
+ now=$(date +%s)
+ last=0
+ [ ! -s "$state/last-reset" ] || last=$(cat "$state/last-reset")
+ case "$last" in ''|*[!0-9]*) last=0;; esac
+-# The ordinary sitting and independent Founder intake both honor this gate.
+-# A failed session must not be retried with the same unsafe continuation.
+-if [ "${1:-}" = --gate ]; then
+-  if [ $((now-last)) -lt 1800 ]; then
+-    echo "Viche: waiting for Clerk endpoint recovery cooldown" >&2
+-    exit 1
+-  fi
+-  exit 0
+-fi
+ [ $((now-last)) -ge 1800 ] || exit 0
+ [ -d "$seats/$id" ] || exit 1
+ snapshot=$(mktemp -d "$state/recovery-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+diff --git a/tests/clerk-liveness-smoke.sh b/tests/clerk-liveness-smoke.sh
+index 4c8bf359..0390e68b 100644
+--- a/tests/clerk-liveness-smoke.sh
++++ b/tests/clerk-liveness-smoke.sh
+@@ -48,8 +48,10 @@ dash "$repo/government/clerk-liveness.sh"
+ test "$(wc -l < "$d/mock/actions")" -eq 2
+ # Once the window expires, one fresh session is allowed.
+ printf '0\n' > "$d/state/liveness/last-reset"
+-dash "$repo/government/clerk-liveness.sh" --gate
++# Even after the cooldown expires, a failed session must never be continued.
++if dash "$repo/government/clerk-liveness.sh" --gate; then exit 1; fi
+ dash "$repo/government/clerk-liveness.sh"
++dash "$repo/government/clerk-liveness.sh" --gate
+ test "$(wc -l < "$d/mock/actions")" -eq 4
+ test -f "$d/seats/c1a00001/uncommitted.txt"
+ printf 'Viche Clerk liveness smoke passed\n'

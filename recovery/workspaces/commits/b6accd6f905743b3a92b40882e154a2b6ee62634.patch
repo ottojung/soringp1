@@ -1,0 +1,144 @@
+commit b6accd6f905743b3a92b40882e154a2b6ee62634
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Thu Oct 15 11:07:21 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Thu Oct 15 11:07:21 2026 -0700
+
+    Restore failed non-Clerk parliamentary seats with bounded recovery (#12)
+    
+    * Recover non-Clerk endpoint-failed parliamentary seats with evidence and cooldown
+    
+    * Reconcile terminally failed parliamentary seats independently each cycle
+    
+    * Test liveness recovery of a non-Clerk failed seat and 30-minute cooldown
+    
+    * Exercise non-Clerk session recovery in CI
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index 3be59a8f..52b649bb 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -27,6 +27,8 @@ jobs:
+         run: dash tests/boot-smoke.sh
+       - name: Exercise Clerk liveness recovery and cooldown
+         run: dash tests/clerk-liveness-smoke.sh
++      - name: Exercise parliamentary seat liveness recovery
++        run: dash tests/seat-liveness-smoke.sh
+       - name: Exercise legislative tally
+         run: dash tests/tally-smoke.sh
+       - name: Exercise urgent Founder intake independently of sittings
+diff --git a/government/boot.sh b/government/boot.sh
+index 6a53fe3e..b5c89af6 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -43,6 +43,12 @@ while IFS="$tab" read -r agent_id title focus; do
+     if ! antonina agent status --id "$agent_id" --json >/dev/null 2>&1; then
+         antonina agent new --id "$agent_id" --cwd "$seat_dir" --title "Viche: $title"
+     fi
++    # All seats have durable, independently recoverable sessions; don't let a
++    # failed provider continuation permanently remove a future voter.
++    if [ -f "$town/government/seat-liveness.sh" ]; then
++        /bin/sh "$town/government/seat-liveness.sh" "$agent_id" ||
++            echo "Viche: seat $agent_id recovery failed" >&2
++    fi
+ done < "$town/government/seats.tsv"
+ 
+ # Restore a failed Clerk's independent Antonina session only after a cooldown.
+diff --git a/government/seat-liveness.sh b/government/seat-liveness.sh
+new file mode 100644
+index 00000000..306fbfa0
+--- /dev/null
++++ b/government/seat-liveness.sh
+@@ -0,0 +1,36 @@
++#!/bin/sh
++# Recover failed non-Clerk parliamentary sessions; retain their Git worktrees.
++set -eu
++[ "$#" -eq 1 ] || exit 2
++id=$1
++case "$id" in ''|*[!0123456789abcdef]*) exit 2;; esac
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
++root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness
++clerk=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
++[ "$id" != "$clerk" ] || exit 0
++title=$(awk -F '\t' -v id="$id" '$1==id {print $2; found=1; exit} END {if(!found) exit 1}' "$town/government/seats.tsv")
++[ -n "$title" ] || exit 1
++meta=$(antonina agent status --id "$id" --json)
++mode=$(printf '%s\n' "$meta" | jq -r '.state')
++reason=$(printf '%s\n' "$meta" | jq -r '.backend_error.classification // ""')
++[ "$mode" = failed ] && [ "$reason" = upstream_endpoint_unavailable ] || exit 0
++mkdir -p "$root"
++umask 077
++now=$(date +%s)
++last=0
++marker="$root/last-reset-$id"
++[ ! -s "$marker" ] || last=$(cat "$marker")
++case "$last" in ''|*[!0-9]*) last=0;; esac
++[ $((now-last)) -ge 1800 ] || exit 0
++seat="$seats/$id"
++[ -d "$seat" ] || exit 1
++snapshot=$(mktemp -d "$root/recovery-$id-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
++printf '%s\n' "$meta" > "$snapshot/agent-status.json"
++antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1 || :
++git -C "$seat" status --short > "$snapshot/worktree-status.txt"
++git -C "$seat" rev-parse HEAD > "$snapshot/worktree-head.txt"
++printf '%s\n' "$now" > "$marker"
++antonina agent delete --id "$id"
++antonina agent new --id "$id" --cwd "$seat" --title "Viche: $title"
++printf '%s seat=%s session_reset=endpoint_unavailable evidence=%s\n' "$(date -u +%FT%TZ)" "$id" "$snapshot" >> "$root/recoveries.log"
+diff --git a/tests/seat-liveness-smoke.sh b/tests/seat-liveness-smoke.sh
+new file mode 100644
+index 00000000..8c3c6e7c
+--- /dev/null
++++ b/tests/seat-liveness-smoke.sh
+@@ -0,0 +1,50 @@
++#!/bin/sh
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT
++mkdir -p "$d/bin" "$d/town/government" "$d/seats/c1a00007" "$d/state" "$d/mock"
++printf 'c1a00001\tClerk\tAgenda\nc1a00007\tConstitutional member\tLegality\n' > "$d/town/government/seats.tsv"
++git -C "$d/seats/c1a00007" init -q
++git -C "$d/seats/c1a00007" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
++printf 'uncommitted material\n' > "$d/seats/c1a00007/valuable.txt"
++cat > "$d/mock/status" <<'JSON'
++{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable"}}
++JSON
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++ 'agent status') cat "$MOCK_ROOT/status" ;;
++ 'agent log') echo 'Endpoint is unavailable' ;;
++ 'agent delete') echo delete >> "$MOCK_ROOT/actions" ;;
++ 'agent new')
++   echo new >> "$MOCK_ROOT/actions"
++   printf '{"state":"idle"}\n' > "$MOCK_ROOT/status"
++   ;;
++ *) exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++PATH="$d/bin:$PATH"
++MOCK_ROOT="$d/mock"
++VICHE_TOWN_ROOT="$d/town"
++VICHE_SEATS_ROOT="$d/seats"
++VICHE_STATE_ROOT="$d/state"
++export PATH MOCK_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT
++dash "$repo/government/seat-liveness.sh" c1a00001
++test ! -f "$d/mock/actions"
++dash "$repo/government/seat-liveness.sh" c1a00007
++test "$(wc -l < "$d/mock/actions")" -eq 2
++test -f "$d/seats/c1a00007/valuable.txt"
++test -s "$d/state/liveness/recoveries.log"
++cat > "$d/mock/status" <<'JSON'
++{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable"}}
++JSON
++dash "$repo/government/seat-liveness.sh" c1a00007
++test "$(wc -l < "$d/mock/actions")" -eq 2
++printf '0\n' > "$d/state/liveness/last-reset-c1a00007"
++dash "$repo/government/seat-liveness.sh" c1a00007
++test "$(wc -l < "$d/mock/actions")" -eq 4
++test -f "$d/seats/c1a00007/valuable.txt"
++echo 'Viche parliamentary seat liveness smoke passed'

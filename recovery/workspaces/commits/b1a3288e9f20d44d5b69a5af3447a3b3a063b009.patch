@@ -1,0 +1,156 @@
+commit b1a3288e9f20d44d5b69a5af3447a3b3a063b009
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Wed Nov 18 20:01:20 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Wed Nov 18 20:01:20 2026 +0000
+
+    research: bounded auditable retention of measurement snapshots (research only)
+
+diff --git a/records/research/2026-11-18-bounded-auditable-retention-of-measurement-snapshots.md b/records/research/2026-11-18-bounded-auditable-retention-of-measurement-snapshots.md
+new file mode 100644
+index 00000000..ac12d322
+--- /dev/null
++++ b/records/research/2026-11-18-bounded-auditable-retention-of-measurement-snapshots.md
+@@ -0,0 +1,142 @@
++# Research note — Bounded, auditable retention of high-volume measurement/audit snapshots
++
++**Author:** Executive Innovation Office research front (`office/retention-freesoftware-20261118`), 2026-11-18.
++**Scope:** research only. No production code, no bills, no Judiciary compliance work. This note is not law, not an executive order, and not a Janitor action. It proposes; enactment is Parliament's and implementation is for an authorized Executive/Janitor office.
++**Question:** how can Viche bound the growth of `suite-compliance-<epoch>.json` detail snapshots while preserving (a) one copy of each distinct content state and (b) the `observed_at` transition sequence, using only the Janitor Act 12 reversible/indexed/grace-period quarantine path?
++
++---
++
++## 1. Baseline, re-derived (commands + observed output)
++
++Snapshots are written by `government/judiciary-measurements.py :: suite_compliance()`
++(lines 100–151). The writer pops the large `per_change` array out of the bounded
++prompt-facing summary, builds `full = {observed_at, summary, changes_reaching_main_red, red_chronology_unresolved_changes, per_change}`, serialises it with `json.dumps(sort_keys=True, indent=2)+"\n"`, and atomically writes `root/'branches'/('suite-compliance-%d.json' % now)` via a `.tmp` + `replace()`. So the *filename epoch* and the *body `observed_at`* are the same captured `now`, and every file carries a SHA-256 (`details_sha256`) in the prompt-facing report.
++
++The files are **not** in this worktree; they live in the shared state root. Location found with:
++
++```
++$ find /var/lib/lubko/wd/viche* -name 'suite-compliance-*.json' 2>/dev/null | wc -l
++8707
++```
++
++Re-derivation scripts: `/tmp/opencode/analyze.py`, `/tmp/opencode/analyze2.py` (scratch, not committed). Key outputs:
++
++| Metric | Baseline supplied | Re-derived | Command / method |
++|---|---|---|---|
++| Snapshot count | 8,707 | **8,707** at first read; **8,708** minutes later | `ls state/branches/suite-compliance-*.json \| wc -l` over `/var/lib/lubko/wd/viche-state/branches/` |
++| Footprint | 2.52 GiB | **2,703,737,459 B = 2.518 GiB** (`du -sh` → `2.6G`) | `du -sb` + `os.path.getsize` sum |
++| Oldest → newest | 2026-10-24 → today | **2026-10-24T05:52:44Z → 2026-11-18** | filename epoch via `datetime.fromtimestamp(..., UTC)` |
++| Distinct states ignoring `observed_at` | 529 | **529** | sha256 of canonical JSON with `observed_at` removed recursively |
++| Size of one copy per distinct state | ~157 MiB | **152,914,643 B = 145.8 MiB apparent / 146.9 MiB on-disk (st_blocks)** | sum of one representative file per canonical group |
++| Largest duplicate group | 1,049 | **1,049** | `max(len(v) for v in groups.values())` |
++| Newest 12 byte-identical except timestamp | yes | **yes**: 12 raw files differ; after removing only `observed_at` all 12 are equal (1 distinct state) | compare `json.load` of newest 12 with `observed_at` stripped |
++| `per_change` status | ~98% `unreadable` | **98.71%** (7,102,820 / 7,195,706); 89,991 `compliant`, 2,895 `red_chronology_unresolved` | tally `c['status']` across all files |
++
++Two observations worth recording explicitly:
++
++1. **The directory is live.** Between two reads the count went 8,707 → 8,708 and the newest filename epoch advanced from `1795031475` to `1795031739` (~4.4 min apart). Any retention implementation must tolerate a concurrent writer and must not touch `.tmp` files or in-flight detail records.
++2. The ~157 MiB figure in the supplied baseline differs from my 145.8/146.9 MiB by ~7%; this is within measurement-method variance (representative choice, apparent vs. allocated blocks, pretty-printed JSON). It does not affect any conclusion. All other baseline figures reproduce exactly.
++
++Daily footprint by UTC date (from the same script) rises from ~56 MiB on 2026-10-24 to ~130–180 MiB on recent days; the supplied ~150 MB/day growth rate is consistent with the recent trend. I did **not** inspect actual filesystem free space or the Act 29/30 resource forecast (`government/economy-resources.py`) — see §6.
++
++**Authority context (reported, not independently located).** The inquiry reports that a Ministry of Economy proceed request asked Judiciary to rotate these snapshots and Judiciary declined: out of authority under Act 15, and because the snapshots are audit evidence, so any retention must preserve auditability and use the Janitor Act 12 reversible/indexed quarantine path. I searched `records/`, `records/requests/`, and Judiciary reports and did not locate that specific exchange; I treat it as reported baseline and flag verification of the exact record as an open item (§6). The legal frame itself is verifiable in `government/LAWS.md`: Act 12.3–12.5 (classify, evidence standard, non-negotiable safety invariants), 12.6–12.7 (reversible allowlist, authorization gate, quarantine before removal), 12.11 (audit/review); Act 15 (Judiciary measurement independence); Act 30.2 (deleting/overwriting evidence never proceeds by default).
++
++**Janitor mechanics actually available** (`government/janitor.sh`, `government/janitor.conf`):
++- `janitor.sh quarantine` requires an inventory row classified `quarantine-candidate`, moves the directory/file to `$VICHE_STATE_ROOT/quarantine/<base>-<UTCstamp>`, and appends an index row `ts / src / dest / size_kb / quarantined_at` to `janitor/quarantined.tsv`. This is the reversible, indexed step.
++- `quarantine_grace_seconds=604800` (7 days, configurable). `reclaim-quarantined` removes items whose indexed age ≥ grace, gated by `reclaim_enabled` (currently `1`); direct deletion without a quarantine/recovery window remains prohibited by 12.7.
++- **Crucial property:** quarantine alone does *not* free disk space — it moves data within the same filesystem. Space is reclaimed only by the destructive `reclaim-quarantined` step after grace. Any "bounded footprint" policy therefore has two phases, and the second is the authorization-sensitive one.
++
++---
++
++## 2. Mechanism comparison
++
++For each mechanism: what it guarantees, cost, and what audit information it keeps or drops. "Distinct state" and "transition sequence" refer to the two invariants in §1.
++
++| Mechanism | Guarantees | Costs | Audit info preserved | Audit info lost |
++|---|---|---|---|---|
++| **logrotate** | Bounded count/size via `rotate N`, `maxage`, `dateext`; compression; ubiquitous, simple POSIX tooling | No content awareness, no dedup; only a contiguous recent window survives; mtime ≈ rotation time, not a semantic observation clock | The last N files with their original bytes; filesystem mtimes; rotation log | Every state that recurs only outside the window; the *number and timing* of observations of a state; no content index/integrity check |
++| **systemd journald vacuum** | `SystemMaxUse`/`MaxRetentionSec` bound disk/age; cursor index; optional FSS (`Seal=yes`) gives forward-secure tamper evidence; precise realtime timestamps per entry | Time/size bound still drops old entries; binary format requires `journalctl`; sealing adds CPU; no dedup of identical entries | Exact per-entry wall-clock time, monotonic sequence, tamper evidence, cursors | All records older than retention; like-with-like duplicates still consume budget; no content-state identity |
++| **Prometheus TSDB retention + compaction** | Time/size-bounded (`retention.time`/`retention.size`); block index; compaction merges small blocks losslessly *within* the window; WAL for recent samples | Deletes samples outside retention; compaction merges block provenance; stores every scrape timestamp (no value dedup); not designed for arbitrary JSON blobs | Every sample's exact timestamp and series identity inside the window; queryable index | Samples older than retention; which original block/scrape produced a compacted sample; dedup benefit absent (identical values at different times are all kept) |
++| **RRDtool round-robin archives** | Strictly bounded, never grows; multiple resolution/consolidation tiers (AVERAGE/MIN/MAX/LAST); automatic aging | Lossy; fixed schema must be known upfront; overwrites raw data permanently; no content dedup; bucket boundaries replace exact times | Long-term trends at degrading resolution; bounded footprint forever | Exact per-observation values and exact `observed_at` for aged data; a short-lived distinct state can be averaged out of existence — fails both invariants for old data |
++| **Git object store** | Content-addressed (SHA-1/256), exact blob identity + integrity, implicit dedup, immutable objects, packfiles, refs/reflog give history | No built-in time retention — GC/prune drops unreferenced objects; timestamps live only in commit/reflog metadata, not inherent to blobs; raw JSON blobs are not queryable | One copy per distinct blob; content integrity; history while referenced | Unreferenced objects after GC; observation times unless explicitly modelled as commits/metadata |
++| **restic / borg** | Chunked content-defined dedup across snapshots; encryption; snapshot timestamps; `forget`/`prune` policies (keep-daily/weekly/monthly, `--keep-within`); borg `append_only` mode prevents rewrite | Sub-file chunking means a "state" is a manifest of chunks, not one blob; pruning reclaims chunks of forgotten snapshots; append-only mode trades bounded size for immutability (unbounded) | Snapshot timestamps, dedup, encryption/integrity, policy-based time coverage | Chunks unique to forgotten snapshots once pruned; with append-only enabled, nothing is reclaimed (no bound) |
++| **Append-only log + compaction** (Kafka-style key compaction, LSM, snapshot+truncate) | Durable append order, offset/time ordering, replayability; compaction bounds size by key cardinality (last value per key) | Compaction *keeps only the latest value per key*, discarding intermediate values; full retention is unbounded; tombstones/additional snapshot machinery | Append order, latest state per key, offsets/timestamps | Intermediate transitions per key — precisely invariant (b). Only an uncompacted full log preserves the transition sequence, and that is unbounded |
++
++### Synthesis against the two invariants
++
++- Pure **time/size-bound** schemes (logrotate, journald vacuum, TSDB retention, RRD) all drop *old* observations. Because measurement states here are non-monotonic and a distinct state may appear only once (or recur after a long gap), time-bounded dropping can destroy a state that never reappears → invariant (a) fails. RRD additionally destroys exact timestamps.
++- Pure **value-dedup** schemes (git, restic/borg, key-compacted logs) keep one representative per distinct state → invariant (a) is natural, but they do not by themselves keep *every* `observed_at` at which that state was seen. Key compaction explicitly keeps only the last value → invariant (b) fails; restic/borg keep snapshot timestamps (good) but their retention tiering is time-based and pruning unique chunks reintroduces (a) loss; git needs refs/metadata discipline.
++- **journald's FSS sealing** is the only listed mechanism with built-in tamper evidence; nothing else here authenticates that a retained record is unmodified. No listed mechanism both deduplicates by content *and* preserves an exact observation-event index by default — that combination must be assembled.
++
++---
++
++## 3. Recommendation — minimal policy (proposal only)
++
++**Objective:** reduce ~2.52 GiB / 8.7k files to roughly one canonical copy of each of the 529 distinct states (~146 MiB) plus a small ordered index, while keeping the full `observed_at` transition sequence queryable, and using only the Janitor quarantine path.
++
++**Design (invariants first, mechanism second):**
++
++1. **Content identity.** Define a state's identity as the SHA-256 of its JSON canonicalised with `observed_at` removed (exactly the re-derivation in §1). This is the dedup key; store it alongside the existing `details_sha256` for cross-check. One file per content hash is retained in place as the *canonical copy*.
++2. **Transition index.** Write a separate, append-only, durable index of **every** observation: `observed_at → state_hash → original_path → canonical_copy_path`. 8,708 rows of a few hundred bytes are <10 MiB, i.e. three orders of magnitude smaller than the duplicates. This preserves the *number, order and timing* of observations, including recurrences — the information that raw dedup alone would discard. `changes_reaching_main_red` / `red_chronology_unresolved_changes` and the `summary` are part of the canonical state and travel with the retained copy.
++3. **Pointer integrity.** The prompt-facing `judiciary-measurements.json` contains `details_ref` paths that may point at a deduplicated-away file. The index must let any such reference be resolved to the canonical copy (or the referenced file must be pinned as canonical). Verify resolvability before any reclamation.
++4. **Removal only via Janitor quarantine.** Redundant files are *moved* (never deleted) into the Janitor quarantine staging area, each recorded in `quarantined.tsv` with `src`, `dest`, `size_kb`, `quarantined_at` — reversible by reversing that row. Invoke through the existing `janitor.sh inventory → classify → quarantine` modes; do not introduce a new deletion path.
++5. **Grace, then gated reclaim.** Apply the configured `quarantine_grace_seconds` (7 days) recovery window. Only after grace, an independent before/after measurement (Act 12.4(e)), a sample audit (12.11), and the proper authorization for touching audit evidence (below), may `reclaim-quarantined` free the space. Until that step runs, footprint is unchanged — this is the central tradeoff of a quarantine-only mandate.
++6. **Bound at the source too.** Retention without reducing the writer's output only delays the problem. The durable fix (outside this note's authority) is for Parliament to require the writer to emit a state hash + `observed_at` line to an append-only index and a full detail file only on *state change*, with bounded periodic checkpoints. That is what makes the policy bounded rather than a one-off cleanup.
++
++**Why this is minimal:** it adds exactly two artifacts (one canonical copy per state, one ordered index) and reuses the existing quarantine index; it invents no new storage engine, no new deletion primitive, and no new legal power. logrotate/journald/TSDB/RRD are rejected as *primary* policies because they lose distinct old states or exact timestamps; git/restic/borg/compaction are rejected as *complete* solutions because none preserves both invariants without an added `observed_at` index (and append-only variants conflict with a size bound).
++
++**Tradeoffs:** (i) the transition index is a new critical record — losing it loses invariant (b) even though canonical states survive; it deserves a hash manifest of its own. (ii) Recurrence frequency is retained as index rows, not as independently verifiable files — auditors must trust the index unless each row also carries the canonical hash (which it does) and the hash is recomputable. (iii) The 7-day grace means ~2.5 GiB remains allocated during the window; a genuine disk emergency would need the separate, already-existing Act 12.9 critical-response path, not a shortcut. (iv) Quarantine+reclaim of Judiciary evidence is the authorization-sensitive step and may be refused even if technically safe.
++
++---
++
++## 4. Competing hypotheses (stated so they can be falsified)
++
++- **H1 — "Content dedup alone is auditably lossless."** *Rejected.* Removing 8,179 duplicates removes the evidence that a state was observed 8,179 times at specific times. The newest-12 identical states still have 12 distinct `observed_at` values; those transitions are audit information. Mitigation: the transition index of §3.
++- **H2 — "Time-based retention (journald/TSDB/logrotate) is enough."** *Rejected.* States are non-monotonic and can be unique; a sliding window can delete the only copy of a state. It also cannot express "keep one of each distinct state."
++- **H3 — "RRD-style consolidation is fine because these snapshots are 98.7% `unreadable` anyway."** *Not established.* A high `unreadable` rate is a statement about per-change `status`, not about whether the *state-level* summary or the transition sequence is used by any consumer. I found no consumer inventory (§6).
++- **H4 — "Append-only log compaction preserves the state, so it preserves the audit trail."** *Rejected.* Key compaction keeps only the last value per key and destroys intermediate transitions — the opposite of invariant (b).
++- **H5 — "A content-addressed store (git/restic/borg) solves retention by itself."** *Partially true.* It gives dedup and integrity, but needs an explicit `observed_at` index and a retention policy; git GC drops unreferenced objects; restic/borg append-only mode prevents reclamation. None is a drop-in bounded+auditable solution here.
++- **H6 — "Growth at ~150 MB/day makes immediate reclamation urgent."** *Directionally supported, operationally unexamined.* I reproduced the growth rate but did not measure free space, inode pressure, or the Act 29/30 forecast. Urgency is an Executive resource decision, not a research conclusion.
++
++---
++
++## 5. Authority status / blocker
++
++- This office has **no authority** to delete, move, or quarantine any snapshot, to change `janitor.conf`, to set `reclaim_enabled`, to alter the writer, or to enact anything. No such action was taken.
++- The supplied baseline reports Judiciary declined rotation as out of authority (Act 15) and as audit evidence. Act 30.2 confirms that deleting/overwriting evidence is a reserved matter that never proceeds by default; Act 12.3–12.5 requires classification, evidence, and an independent check, and 12.7 forbids non-allowlist deletion without a quarantine/recovery window. Therefore the **space-freeing reclaim step cannot be self-authorised** by this research front or, on the reported facts, by the Executive alone.
++- **Disposition:** legal enactment/authorisation (whether dedup of Judiciary audit evidence is permitted at all, under what index and audit conditions) is left to Parliament; implementation, if authorised, to the authorized Executive/Janitor office. This note is the research input to that decision, not the decision.
++
++---
++
++## 6. What remains unexamined
++
++1. The exact record of the Ministry→Judiciary request and declination was not located in `records/`; the claim is reported baseline, not verified here.
++2. No consumer inventory: do any scripts read *all* `suite-compliance-*.json` files, or require each `details_ref` to resolve to a distinct file? (Grep of government scripts for the glob was not completed.) This determines whether pointer remapping (§3.3) is sufficient.
++3. Actual filesystem free space, inode count, and the `economy-resources.py` time-to-exhaustion forecast were not inspected; urgency (H6) is unquantified.
++4. Integrity of the 529 canonical copies was not independently verified beyond the writer's own `details_sha256`; a full hash manifest and sample audit are untested.
++5. Concurrency: behaviour of a dedup/quarantine pass racing the ~4-minute live writer (including `.tmp` files and `replace()` atomicity) was not tested.
++6. Grace-period restoration (reversing a `quarantined.tsv` row) and the independent before/after measurement were not exercised — no dry-run was performed against live state.
++7. Whether the `per_change` entries' ~98.7% `unreadable` status reflects a measurement defect (and thus whether these snapshots have evidentiary value worth bounding at all) is a separate Judiciary question, out of scope here.
++8. Legal nuance: whether *deduplication* (not just deletion) of evidence is restricted under Act 15 was not resolved; the prior declination concerned rotation, not dedup specifically.
++
++---
++
++## Appendix — exact verification commands
++
++```
++# locate + count
++find /var/lib/lubko/wd/viche* -name 'suite-compliance-*.json' 2>/dev/null | wc -l
++ls /var/lib/lubko/wd/viche-state/branches/suite-compliance-*.json | wc -l
++du -sh /var/lib/lubko/wd/viche-state/branches
++du -sb /var/lib/lubko/wd/viche-state/branches
++
++# re-derivation (scratch scripts)
++python3 /tmp/opencode/analyze.py     # count, bytes, dates, dedup, largest group, statuses
++python3 /tmp/opencode/analyze2.py    # newest-12-only-observed_at, apparent vs st_blocks, daily growth
++
++# relevant source / law
++grep -n "suite_compliance\|observed_at\|details_ref" government/judiciary-measurements.py
++sed -n '81,100p' government/LAWS.md     # Act 12
++sed -n '689,726p' government/janitor.sh # quarantine()
++cat government/janitor.conf             # grace, allowlist, gates
++```

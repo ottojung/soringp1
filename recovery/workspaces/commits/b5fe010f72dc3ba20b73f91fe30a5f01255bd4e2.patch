@@ -1,0 +1,400 @@
+commit b5fe010f72dc3ba20b73f91fe30a5f01255bd4e2
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Fri Nov 20 17:57:00 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Fri Nov 20 18:09:29 2026 +0000
+
+    Add fail-closed Statistics readiness preflight gate and evidence tests
+    
+    Deterministic manifest/verify/missingness utilities (tamper detection,
+    unavailable != zero), a Statistics-only readiness gate wired additively into
+    the knowledge office dispatch path, and hermetic tests. The real attestation
+    is not_ready, so the gate keeps dispatch closed. Existing activation and
+    post-outage smoke fixtures updated to include the new ready prerequisite;
+    full tests/run-all.sh is green. Does not touch post.py or any Post guard.
+
+diff --git a/government/knowledge-office-cycle.sh b/government/knowledge-office-cycle.sh
+index 4281a703..68102343 100644
+--- a/government/knowledge-office-cycle.sh
++++ b/government/knowledge-office-cycle.sh
+@@ -35,6 +35,20 @@ if [ "$office" = spying ]; then
+     exit 1
+   }
+ fi
++# Statistics-only readiness preflight. Additive and fail-closed: the office
++# cannot dispatch until a source-attested comparator, a metered Economy cost
++# with a hard cap, a signed Executive order and an independent Judiciary
++# determination are all green. Other offices are unaffected.
++if [ "$office" = statistics ]; then
++  [ -f "$town/government/statistics-preflight.sh" ] || {
++    echo "Knowledge: statistics preflight helper missing; no dispatch" >&2
++    exit 0
++  }
++  /bin/sh "$town/government/statistics-preflight.sh" "$office" || {
++    echo "Knowledge: statistics readiness preflight failed; no dispatch" >&2
++    exit 0
++  }
++fi
+ root=$state/knowledge/offices/$office
+ cwd=$seats/branches/$office
+ charter=${VICHE_CONSTITUTION:-${VICHE_CHARTER_PATH:-}}
+diff --git a/government/statistics-evidence.py b/government/statistics-evidence.py
+new file mode 100644
+index 00000000..e0609a75
+--- /dev/null
++++ b/government/statistics-evidence.py
+@@ -0,0 +1,146 @@
++#!/usr/bin/env python3
++"""Deterministic evidence utilities for the Act 32 Statistics trial preflight.
++
++No network, no clock, no randomness: the same bytes always yield the same
++output. Used to freeze source snapshots, detect tampering and record missing
++observations honestly (unavailable is not zero). POSIX-invocable from sh.
++"""
++import hashlib
++import json
++import os
++import sys
++from pathlib import Path
++
++REQUIRED_DESIGN_FIELDS = (
++    "candidate_outcome", "numerator", "denominator_statistical",
++    "denominator_resource", "negative_controls", "missingness",
++    "observation_windows", "comparison", "falsifiers", "gates",
++)
++
++
++def sha256_of(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as fh:
++        for block in iter(lambda: fh.read(65536), b""):
++            h.update(block)
++    return h.hexdigest()
++
++
++def manifest(source_dir):
++    """Return sha256sum-style lines for every regular file, sorted by name."""
++    root = Path(source_dir)
++    if not root.is_dir():
++        raise SystemExit("evidence: not a directory: %s" % source_dir)
++    lines = []
++    for path in sorted(root.iterdir()):
++        if not path.is_file() or path.name == "MANIFEST.sha256":
++            continue
++        lines.append("%s  %s" % (sha256_of(path), path.name))
++    return "\n".join(lines) + ("\n" if lines else "")
++
++
++def load_attestation(path):
++    with open(path, "r", encoding="utf-8") as fh:
++        return json.load(fh)
++
++
++def verify(attestation_path, source_dir):
++    """Check pinned source snapshots against their declared hashes and sizes.
++
++    Prints a JSON report. Exit 0 only when every pinned snapshot is present and
++    byte-identical and the frozen MANIFEST (if present) is consistent.
++    """
++    att = load_attestation(attestation_path)
++    root = Path(source_dir)
++    problems = []
++    sources = att.get("sources")
++    if not isinstance(sources, list) or not sources:
++        problems.append("no pinned sources in attestation")
++        sources = []
++    for entry in sources:
++        if not isinstance(entry, dict):
++            problems.append("malformed source entry")
++            continue
++        name = entry.get("snapshot")
++        if not name or not isinstance(name, str):
++            problems.append("source entry without snapshot name")
++            continue
++        path = root / name
++        if not path.is_file():
++            problems.append("missing source: %s" % name)
++            continue
++        got_hash = sha256_of(path)
++        want_hash = entry.get("sha256")
++        want_size = entry.get("size_bytes")
++        size = path.stat().st_size
++        if want_hash is not None and got_hash != want_hash:
++            problems.append("hash mismatch: %s" % name)
++        if want_size is not None and size != want_size:
++            problems.append("size mismatch: %s" % name)
++    manifest_path = root / "MANIFEST.sha256"
++    if manifest_path.is_file():
++        declared = {}
++        for line in manifest_path.read_text(encoding="utf-8").splitlines():
++            parts = line.split("  ", 1)
++            if len(parts) == 2:
++                declared[parts[1]] = parts[0]
++        for name, digest in sorted(declared.items()):
++            path = root / name
++            if not path.is_file():
++                problems.append("manifest file missing: %s" % name)
++            elif sha256_of(path) != digest:
++                problems.append("manifest hash mismatch: %s" % name)
++    report = {
++        "verified": not problems,
++        "source_count": len(sources),
++        "problems": problems,
++    }
++    print(json.dumps(report, sort_keys=True))
++    return 0 if not problems else 1
++
++
++def missingness(attestation_path):
++    """Assert the design is present and unavailable measures are not faked as 0.
++
++    A resource measurement that was never metered must be recorded as
++    "unavailable"; writing 0 would manufacture a comparator the Town does not
++    have. Exit 0 only for an honest record.
++    """
++    att = load_attestation(attestation_path)
++    problems = []
++    for key in REQUIRED_DESIGN_FIELDS:
++        if key not in att or att[key] in (None, "", [], {}):
++            problems.append("missing design field: %s" % key)
++    res = att.get("denominator_resource")
++    if isinstance(res, dict):
++        if res.get("meter_available") is True and res.get("units") in (None, "", "unavailable"):
++            problems.append("meter claimed available without units")
++        if res.get("meter_available") is not True:
++            for field in ("tokens", "machine_time", "wall_time"):
++                if res.get(field) == 0:
++                    problems.append("unmetered %s recorded as zero" % field)
++                if res.get(field) is None and field not in res.get("_declared_unavailable", []):
++                    problems.append("unmetered %s not declared unavailable" % field)
++    else:
++        problems.append("denominator_resource is not an object")
++    report = {"honest": not problems, "problems": problems}
++    print(json.dumps(report, sort_keys=True))
++    return 0 if not problems else 1
++
++
++def main(argv):
++    if len(argv) < 2:
++        raise SystemExit("usage: statistics-evidence.py manifest|verify|missingness ...")
++    cmd = argv[1]
++    if cmd == "manifest" and len(argv) == 3:
++        sys.stdout.write(manifest(argv[2]))
++        return 0
++    if cmd == "verify" and len(argv) == 4:
++        return verify(argv[2], argv[3])
++    if cmd == "missingness" and len(argv) == 3:
++        return missingness(argv[2])
++    raise SystemExit("evidence: unknown command or argument count")
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv))
+diff --git a/government/statistics-preflight.sh b/government/statistics-preflight.sh
+new file mode 100644
+index 00000000..46070740
+--- /dev/null
++++ b/government/statistics-preflight.sh
+@@ -0,0 +1,44 @@
++#!/bin/sh
++# Fail-closed readiness gate for the Act 32 Statistics-only trial.
++#
++# Exits 0 ONLY for the statistics office when a source-attested preflight record
++# exists, every pinned snapshot is byte-identical, the design is honestly
++# recorded (unavailable is not zero), and every preactivation gate is green:
++#   - verified outcome numerator (Act 23 5.2),
++#   - frozen Economy resource denominator with metered units and a hard cap,
++#   - signed reversible Executive activation order,
++#   - independent Judiciary factual determination.
++# No artifact, tampered artifact, missing measure or unmet gate fails closed.
++# This script never enables an office; it only withholds readiness. POSIX sh.
++set -eu
++
++office=${1:-}
++[ "$office" = "statistics" ] || exit 0
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++att=$town/records/knowledge/statistics-trial-preflight-20261120.json
++src=$town/records/knowledge/statistics-preflight-20261120-sources
++helper=$town/government/statistics-evidence.py
++
++[ -s "$att" ] || exit 1
++[ -d "$src" ] || exit 1
++[ -s "$helper" ] || exit 1
++
++# Tamper detection + missingness: pinned bytes must match and unmetered values
++# must be declared unavailable rather than silently converted to zero.
++python3 "$helper" verify "$att" "$src" >/dev/null 2>&1 || exit 1
++python3 "$helper" missingness "$att" >/dev/null 2>&1 || exit 1
++
++# Every gate green, readiness explicitly ready, and a real metered denominator.
++jq -e '
++    .schema == "viche-statistics-trial-preflight-1" and
++    .office == "statistics" and
++    .readiness == "ready" and
++    (.gates | type == "object") and
++    ([.gates[] | .status] | all(. == "green")) and
++    (.denominator_resource.meter_available == true) and
++    (.denominator_resource.units != "unavailable") and
++    (.denominator_resource.units != null)
++  ' "$att" >/dev/null 2>&1 || exit 1
++
++exit 0
+diff --git a/tests/knowledge-post-outage-smoke.sh b/tests/knowledge-post-outage-smoke.sh
+index bfa994be..38d42e51 100644
+--- a/tests/knowledge-post-outage-smoke.sh
++++ b/tests/knowledge-post-outage-smoke.sh
+@@ -14,6 +14,32 @@ printf '## Act 32 — Institutional Knowledge and Communications Act (enacted fo
+ printf 'Synthetic frozen baseline\n' > "$d/town/records/knowledge/baseline-20261119.json"
+ cp "$repo/government/post.py" "$repo/government/post_guard.py" "$repo/government/post-inbox-brief.sh" \
+    "$repo/government/knowledge-activation-verify.sh" "$d/town/government/"
++# Statistics dispatch now also requires a ready, source-attested preflight.
++# Supply a green fixture so this test keeps checking its intended property
++# (Post-outage independence), not the comparator gate itself.
++cp "$repo/government/statistics-preflight.sh" \
++   "$repo/government/statistics-evidence.py" "$d/town/government/"
++mkdir -p "$d/town/records/knowledge/statistics-preflight-20261120-sources"
++printf 'ready fixture\n' > "$d/town/records/knowledge/statistics-preflight-20261120-sources/src.json"
++sha=$(sha256sum "$d/town/records/knowledge/statistics-preflight-20261120-sources/src.json" | cut -d' ' -f1)
++size=$(stat -c %s "$d/town/records/knowledge/statistics-preflight-20261120-sources/src.json")
++python3 - "$sha" "$size" > "$d/town/records/knowledge/statistics-trial-preflight-20261120.json" <<'PY'
++import json, sys
++sha, size = sys.argv[1], int(sys.argv[2])
++gates = {k: {"status": "green"} for k in (
++    "verified_numerator", "frozen_resource_denominator",
++    "budget_cap_and_auto_disable", "executive_order", "judiciary_determination")}
++json.dump({
++    "schema": "viche-statistics-trial-preflight-1", "office": "statistics",
++    "readiness": "ready", "gates": gates,
++    "candidate_outcome": "x", "numerator": "x", "denominator_statistical": "x",
++    "negative_controls": ["x"], "observation_windows": "x", "comparison": "x",
++    "falsifiers": ["x"], "missingness": ["x"],
++    "denominator_resource": {"meter_available": True, "units": "usd",
++        "tokens": 1, "machine_time": 1, "wall_time": 1},
++    "sources": [{"snapshot": "src.json", "sha256": sha, "size_bytes": size}],
++}, sys.stdout, sort_keys=True)
++PY
+ cat > "$d/town/government/branch-bootstrap.sh" <<'SH'
+ #!/bin/sh
+ exit 0
+diff --git a/tests/statistics-evidence-smoke.sh b/tests/statistics-evidence-smoke.sh
+new file mode 100644
+index 00000000..edd9d8f9
+--- /dev/null
++++ b/tests/statistics-evidence-smoke.sh
+@@ -0,0 +1,115 @@
++#!/bin/sh
++# Hermetic tests for the Statistics preflight evidence utilities and gate.
++# Only temp fixtures are used; canonical records and state are never touched.
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++helper=$(pwd -P)/government/statistics-evidence.py
++preflight=$(pwd -P)/government/statistics-preflight.sh
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++town=$d/town
++mkdir -p "$town/government" "$town/records/knowledge/statistics-preflight-20261120-sources"
++cp "$helper" "$town/government/statistics-evidence.py"
++src=$town/records/knowledge/statistics-preflight-20261120-sources
++att=$town/records/knowledge/statistics-trial-preflight-20261120.json
++
++printf 'frozen source alpha\n' > "$src/alpha.json"
++printf 'frozen source beta\n'  > "$src/beta.json"
++ha=$(sha256sum "$src/alpha.json" | cut -d' ' -f1)
++hb=$(sha256sum "$src/beta.json"  | cut -d' ' -f1)
++sa=$(stat -c %s "$src/alpha.json")
++sb=$(stat -c %s "$src/beta.json")
++
++write_att() {
++  python3 - "$att" "$ha" "$hb" "$sa" "$sb" "$1" "$2" "$3" "$4" <<'PY'
++import json, sys
++path, ha, hb, sa, sb, ready, gate_status, tokens, meter = sys.argv[1:10]
++gates = {k: {"status": gate_status} for k in (
++    "verified_numerator", "frozen_resource_denominator",
++    "executive_order", "judiciary_determination")}
++json.dump({
++  "schema": "viche-statistics-trial-preflight-1",
++  "office": "statistics",
++  "readiness": ready,
++  "gates": gates,
++  "candidate_outcome": "x", "numerator": "x", "denominator_statistical": "x",
++  "negative_controls": ["x"], "observation_windows": "x", "comparison": "x",
++  "falsifiers": ["x"], "missingness": ["x"],
++  "denominator_resource": {
++    "meter_available": meter == "true", "units": "usd" if meter == "true" else "unavailable",
++    "tokens": None if tokens == "none" else int(tokens),
++    "machine_time": None, "wall_time": None,
++    "_declared_unavailable": ["machine_time", "wall_time"]},
++  "sources": [
++    {"snapshot": "alpha.json", "sha256": ha, "size_bytes": int(sa)},
++    {"snapshot": "beta.json", "sha256": hb, "size_bytes": int(sb)}],
++}, open(path, "w"), sort_keys=True)
++PY
++}
++
++# --- evidence utility: stability, tamper detection, missingness -------------
++m1=$(python3 "$helper" manifest "$src")
++m2=$(python3 "$helper" manifest "$src")
++[ "$m1" = "$m2" ] || { echo "FAIL: manifest not stable" >&2; exit 1; }
++printf '%s' "$m1" | grep -q 'alpha.json' || { echo "FAIL: manifest lacks a file" >&2; exit 1; }
++
++write_att ready green 100 true
++python3 "$helper" verify "$att" "$src" | grep -q '"verified": true' || {
++  echo "FAIL: verify rejected identical snapshots" >&2; exit 1; }
++python3 "$helper" missingness "$att" | grep -q '"honest": true' || {
++  echo "FAIL: missingness rejected metered record" >&2; exit 1; }
++
++# Tamper: a byte change must be detected by both manifest and verify.
++printf 'TAMPERED\n' > "$src/alpha.json"
++python3 "$helper" verify "$att" "$src" | grep -q 'hash mismatch: alpha.json' || {
++  echo "FAIL: tamper not detected" >&2; exit 1; }
++m3=$(python3 "$helper" manifest "$src")
++[ "$m3" != "$m1" ] || { echo "FAIL: tamper did not change manifest" >&2; exit 1; }
++printf 'frozen source alpha\n' > "$src/alpha.json"
++
++# Missing: a deleted snapshot must be reported, not treated as an empty zero.
++rm "$src/beta.json"
++python3 "$helper" verify "$att" "$src" | grep -q 'missing source: beta.json' || {
++  echo "FAIL: missing source not detected" >&2; exit 1; }
++printf 'frozen source beta\n'  > "$src/beta.json"
++
++# Unmetered cost must not be fabricated as zero.
++write_att ready green 0 false
++python3 "$helper" missingness "$att" | grep -q 'unmetered tokens recorded as zero' || {
++  echo "FAIL: zero-as-meter not rejected" >&2; exit 1; }
++
++# --- preflight gate: fail closed --------------------------------------------
++write_att ready green 100 true
++VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics || {
++  echo "FAIL: ready preflight rejected an all-green record" >&2; exit 1; }
++
++write_att not_ready green 100 true
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: not_ready passed" >&2; exit 1; fi
++
++write_att ready hold 100 true
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: non-green gate passed" >&2; exit 1; fi
++
++write_att ready green 100 false
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: unmetered denominator passed" >&2; exit 1; fi
++
++# Missing attestation fails closed.
++mv "$att" "$att.hidden"
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: missing attestation passed" >&2; exit 1; fi
++mv "$att.hidden" "$att"
++
++# Tampered snapshot fails the whole gate even with all flags green.
++write_att ready green 100 true
++printf 'TAMPERED\n' > "$src/beta.json"
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: tampered snapshot passed the gate" >&2; exit 1; fi
++printf 'frozen source beta\n'  > "$src/beta.json"
++
++# The gate is statistics-only; other offices are untouched by this change.
++VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" foresight || {
++  echo "FAIL: non-statistics office affected" >&2; exit 1; }
++
++echo 'statistics evidence: stable, tamper/missing detected, unmetered!=zero, preflight fail-closed'

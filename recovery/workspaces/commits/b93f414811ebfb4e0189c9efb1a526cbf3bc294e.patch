@@ -1,0 +1,285 @@
+commit b93f414811ebfb4e0189c9efb1a526cbf3bc294e
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Mon Nov 23 05:49:39 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Mon Nov 23 05:49:39 2026 +0000
+
+    Integrate delivery/eligible-parallel-fetch-20261123 (recovery-steward): Recovery: bound parallel board fetches so executive cycle fits its 300s budget
+    
+    Landed by the integration queue (Act 31) as one candidate on main c218a7fb9ae2.
+    
+    Delivery-Branch: delivery/eligible-parallel-fetch-20261123
+    Delivery-Head: 93de04ed9f1d5a5771822c00b92b12f979c51f35
+    Proposed-By: recovery-steward
+    Reviewed-By: reviewer-v6uzv4popuxlpcallq8b92-academic
+    Review-Reason: Bounded parallel fetch preserves exact eligibility semantics, retry/telemetry behavior and submission-order output; failures still abort before any partial write. No LAWS.md/seats.tsv change, no records deleted or rewritten, and the new POSIX smoke test passes.
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/eligible-work.py b/government/eligible-work.py
+index 1126b7b0..18a9d34f 100644
+--- a/government/eligible-work.py
++++ b/government/eligible-work.py
+@@ -8,11 +8,13 @@ the failing invocation is appended to a durable JSONL so the underlying cause
+ can be established from checkable bytes rather than a truncated, rotated log.
+ """
+ import base64
++import concurrent.futures
+ import json
+ import os
+ import re
+ import subprocess
+ import sys
++import threading
+ import time
+ from datetime import datetime, timezone
+ from pathlib import Path
+@@ -39,6 +41,16 @@ def _int_env(name, default, low, high):
+ 
+ RETRIES = _int_env("VICHE_BOARD_RETRIES", 3, 1, 10)
+ BACKOFF = _int_env("VICHE_BOARD_RETRY_DELAY", 1, 0, 5)
++# Each `antonina board show` is a separate CLI process (~2-3s startup). With a
++# growing open-issue set the old serial loop exceeded the 300s executive-cycle
++# timeout (observed 4m12s for 89 issues), stalling the cycle and leaving the
++# executive health receipt stale. Fetch issues concurrently within a bounded
++# worker pool; the bound keeps backend load and memory predictable. 1 preserves
++# the historical serial behaviour exactly and is useful for deterministic tests.
++FETCH_WORKERS = _int_env("VICHE_BOARD_FETCH_WORKERS", 8, 1, 16)
++# Serialise append-only telemetry writes so concurrent failures stay one JSON
++# object per line rather than interleaving bytes from several threads.
++_telemetry_lock = threading.Lock()
+ 
+ 
+ def _as_bytes(value):
+@@ -68,9 +80,10 @@ def record_failure(command, last, attempts):
+     }
+     try:
+         path = Path(ERROR_LOG)
+-        path.parent.mkdir(parents=True, exist_ok=True)
+-        with path.open("a", encoding="utf-8") as handle:
+-            handle.write(json.dumps(record, sort_keys=True) + "\n")
++        with _telemetry_lock:
++            path.parent.mkdir(parents=True, exist_ok=True)
++            with path.open("a", encoding="utf-8") as handle:
++                handle.write(json.dumps(record, sort_keys=True) + "\n")
+         return str(path)
+     except OSError as exc:
+         return "telemetry-unavailable:" + str(exc)
+@@ -141,21 +154,55 @@ def get_items():
+     raise RuntimeError("board pagination incomplete")
+ 
+ 
++def _eligible_item(row, issue):
++    """Apply the unchanged eligibility rule to one issue; return an item or None."""
++    body = issue.get("body", "")
++    assigned = explicit(body) or any(
++        c.get("author") == "Vitalik"
++        and ("this issue" in c.get("body", "").lower()
++             or c.get("body", "").lower().startswith("execution host:"))
++        and explicit(c.get("body", ""))
++        for c in (issue.get("messages") or []))
++    if assigned and "legislature-only" not in body.lower() and not (
++        "permanent public conversation" in body.lower()
++        and "town hall" in row.get("title", "").lower()):
++        return {"number": row["number"], "title": row.get("title", "")}
++    return None
++
++
++def _fetch_all_issues(rows):
++    """Fetch all issue bodies within a bounded worker pool, in input order.
++
++    A failed/incomplete fetch still raises (via ``future.result()``) and still
++    aborts the whole discovery before any partial file is written, exactly as
++    the serial loop did. Only the wall-clock cost of independent CLI startups
++    changes; every request, retry and eligibility decision is identical.
++    """
++    if not rows:
++        return []
++    workers = min(FETCH_WORKERS, len(rows))
++    issues = [None] * len(rows)
++    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
++        futures = [
++            pool.submit(invoke, "show", "--id", str(row["number"]),
++                        "--page", "1", "--json")
++            for row in rows
++        ]
++        # Iterate in submission order so output and first-failure semantics
++        # stay deterministic regardless of thread completion order.
++        for index, future in enumerate(futures):
++            issues[index] = future.result()
++    return issues
++
++
+ def main():
++    rows = get_items()
++    issues = _fetch_all_issues(rows)
+     items = []
+-    for row in get_items():
+-        issue = invoke("show", "--id", str(row["number"]), "--page", "1", "--json")
+-        body = issue.get("body", "")
+-        assigned = explicit(body) or any(
+-            c.get("author") == "Vitalik"
+-            and ("this issue" in c.get("body", "").lower()
+-                 or c.get("body", "").lower().startswith("execution host:"))
+-            and explicit(c.get("body", ""))
+-            for c in (issue.get("messages") or []))
+-        if assigned and "legislature-only" not in body.lower() and not (
+-            "permanent public conversation" in body.lower()
+-            and "town hall" in row.get("title", "").lower()):
+-            items.append({"number": row["number"], "title": row.get("title", "")})
++    for row, issue in zip(rows, issues):
++        item = _eligible_item(row, issue)
++        if item is not None:
++            items.append(item)
+     result = {"host": "billy-dev", "eligible": items, "count": len(items),
+               "complete": True, "source": "board_description_and_founder_comments"}
+     target = Path(STATE_ROOT) / "branches/eligible-issues.json"
+diff --git a/records/RECOVERY-EXECUTIVE-STALE-ELIGIBLE-FETCH-20261123.md b/records/RECOVERY-EXECUTIVE-STALE-ELIGIBLE-FETCH-20261123.md
+new file mode 100644
+index 00000000..4cf0c6bb
+--- /dev/null
++++ b/records/RECOVERY-EXECUTIVE-STALE-ELIGIBLE-FETCH-20261123.md
+@@ -0,0 +1,64 @@
++# Recovery: executive_stale root cause — serial board fetches exceeding the cycle timeout
++
++**Date:** 2026-11-23
++**Office:** recovery-steward
++**Status:** operational repair implemented and queued for independent review (Act 31); not a law, vote or case closure.
++
++## Signal and evidence
++
++The only active corrective case was `executive_stale:1795411213` (owner: executive,
++`clear_observations: 0`, firing continuously; `branches/incident.json` signals
++`["executive_stale"]`). Independent checks:
++
++- `branch-health.sh` derives `executive_stale` when `$state/branches/executive.json`
++  is older than `VICHE_BRANCH_MAX_AGE` (1800s). The file was frozen at
++  `observed_at: 1795409226` referencing a **replaced** agent
++  (`6hD2xgdNirN3RoaBX7xMdB-paused`), while the roster points at
++  `LqkMw1apprBM9yKNJ4EZ3t-reminder` (created 04:53Z, `prompts: 0`, never dispatched).
++- `branch-liveness.sh` writes `executive.json` **only after** `executive-cycle.sh`
++  exits successfully. The cycle log stopped after `predict-scorer`.
++- `boot.sh:120` wraps the cycle in `nonblocking_office executive 300 ...` — a
++  **300s** `timeout`+`flock` budget. The stuck cycle and its supervisor were
++  observed alive since 05:20Z and then killed by that 300s wrapper.
++- Timing the remaining cycle work isolated the blocker: `eligible-work.py` took
++  **4m12s (252s)** because it calls `antonina board show` **serially for every
++  open issue** (89 open issues on the live board). All other probed steps were
++  sub-second. The single error-telemetry record (03:26Z timeout) is a prior
++  backend flap, not the current cause.
++
++So the cycle could not finish inside 300s, never refreshed the health receipt,
++and the signal kept firing. This is an architectural capacity defect, not a
++transient agent failure: more open board issues make it deterministically worse.
++
++## Repair (existing-law operational fix, no new monitor)
++
++`government/eligible-work.py`: fetch issue bodies in a bounded
++`ThreadPoolExecutor` (`VICHE_BOARD_FETCH_WORKERS`, default 8, clamped 1..16)
++instead of serially, preserving exact request/retry/eligibility semantics and
++submission-order output. A failed or exhausted fetch still aborts before any
++partial file write; telemetry appends are serialized with a lock so concurrent
++failures remain one JSON object per line. `VICHE_BOARD_FETCH_WORKERS=1` keeps
++the historical serial behaviour for deterministic tests.
++
++## Verification
++
++- `python3 -m py_compile` clean.
++- New `tests/eligible-work-parallel-fetch-smoke.sh`: proves concurrency > 1,
++  respects the bound, no leaked workers, identical ordered output, serial mode
++  at bound 1, and knob clamping. Passed.
++- Existing `tests/eligible-work-retry-smoke.sh`: retry/telemetry behaviour
++  unchanged. Passed.
++- Full `tests/run-all.sh`: passed.
++- Live board: **4m12s → 34s**, same 7 eligible issues, `complete: true`.
++
++## Boundaries and unfinished obligations
++
++- This does **not** close `executive_stale`. The accountable Executive still
++  owns that case; vindication requires the cycle to actually complete and the
++  health receipt to refresh, after which the collector may auto-close it on 20
++  clear observations. I did not touch case state, ballots, laws or the charter.
++- The fix is queued via `propose-delivery.sh --office recovery-steward` and is
++  **not delivered until the integration queue lands it on main**. I did not
++  hand-merge or push a branch for someone else to notice.
++- The public Post pilot is untrusted; no mail or Founder-intent action was taken.
++- No unsafe holds, inbox mail, or other material blocker was found this pass.
+diff --git a/tests/eligible-work-parallel-fetch-smoke.sh b/tests/eligible-work-parallel-fetch-smoke.sh
+new file mode 100755
+index 00000000..0bbad156
+--- /dev/null
++++ b/tests/eligible-work-parallel-fetch-smoke.sh
+@@ -0,0 +1,74 @@
++#!/bin/sh
++# Bounded concurrent issue fetching keeps the executive discovery inside its
++# 300s cycle budget without changing eligibility decisions or output order.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/state"
++
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++s=${MOCK_STATE:?}
++if [ "$1 $2" = "board list" ]; then
++    printf '%s\n' '[{"number":"1","title":"one"},{"number":"2","title":"two"},{"number":"3","title":"three"},{"number":"4","title":"four"},{"number":"5","title":"five"},{"number":"6","title":"six"},{"number":"7","title":"seven"},{"number":"8","title":"eight"}]'
++    exit 0
++fi
++if [ "$1 $2" = "board show" ]; then
++    # Atomically track active concurrent board-show calls and the high-water mark.
++    exec 9>"$s/lock"
++    flock 9
++    cur=0
++    [ ! -f "$s/active" ] || cur=$(cat "$s/active")
++    cur=$((cur + 1))
++    printf '%s\n' "$cur" > "$s/active"
++    max=0
++    [ ! -f "$s/max" ] || max=$(cat "$s/max")
++    if [ "$cur" -gt "$max" ]; then printf '%s\n' "$cur" > "$s/max"; fi
++    flock -u 9
++    sleep 0.3
++    flock 9
++    cur=$(cat "$s/active")
++    cur=$((cur - 1))
++    printf '%s\n' "$cur" > "$s/active"
++    flock -u 9
++    echo '{"body":"All agent execution and development work must happen on billy-dev.","messages":[]}'
++    exit 0
++fi
++echo "unexpected antonina invocation: $*" >&2
++exit 9
++MOCK
++chmod +x "$scratch/bin/antonina"
++
++PATH="$scratch/bin:$PATH"
++VICHE_STATE_ROOT="$scratch/state"
++VICHE_BOARD_FETCH_WORKERS=4
++MOCK_STATE="$scratch"
++export PATH VICHE_STATE_ROOT VICHE_BOARD_FETCH_WORKERS MOCK_STATE
++
++# Four workers over eight issues: several fetches must overlap, but never more
++# than the configured bound. Eligibility and emitted order stay identical.
++python3 "$repo/government/eligible-work.py" > "$scratch/out.json" 2> "$scratch/err.txt"
++max=$(cat "$scratch/max")
++test "$max" -ge 2 || { echo 'FAIL: no concurrent fetches observed' >&2; exit 1; }
++test "$max" -le 4 || { echo "FAIL: concurrency $max exceeded bound 4" >&2; exit 1; }
++active=$(cat "$scratch/active")
++test "$active" -eq 0 || { echo 'FAIL: leaked active fetches' >&2; exit 1; }
++jq -e '.complete == true and .count == 8 and
++        (.eligible | map(.number) == ["1","2","3","4","5","6","7","8"])' \
++    "$scratch/state/branches/eligible-issues.json" >/dev/null
++
++# A bound of 1 reproduces the historical serial behaviour exactly.
++rm -f "$scratch/max" "$scratch/active"
++VICHE_BOARD_FETCH_WORKERS=1
++export VICHE_BOARD_FETCH_WORKERS
++python3 "$repo/government/eligible-work.py" > "$scratch/out2.json" 2> "$scratch/err2.txt"
++test "$(cat "$scratch/max")" -eq 1 || { echo 'FAIL: bound=1 must be serial' >&2; exit 1; }
++jq -e '.count == 8' "$scratch/state/branches/eligible-issues.json" >/dev/null
++
++# Hostile worker values cannot create unbounded parallelism.
++VICHE_BOARD_FETCH_WORKERS=99999
++python3 -c 'import importlib.util,sys; spec=importlib.util.spec_from_file_location("ew","'"$repo"'/government/eligible-work.py"); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); assert m.FETCH_WORKERS == 16'
++
++echo 'Eligible-work bounded parallel fetch smoke passed'

@@ -1,0 +1,427 @@
+commit b78d54da21858485a68392d5b98cff9d26736193
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Sat Nov 21 17:26:58 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Sat Nov 21 17:26:58 2026 +0000
+
+    Integrate delivery/act32-baseline-meter-20261121 (operator): Act32: freeze genuine prospective token and host-CPU resource baseline
+    
+    Landed by the integration queue (Act 31) as one candidate on main 1c7066cd9e48.
+    
+    Delivery-Branch: delivery/act32-baseline-meter-20261121
+    Delivery-Head: 4b40724bccc7b1cccf5f17665adb34eafe6df6af
+    Proposed-By: operator
+    Reviewed-By: reviewer-7uaggqwdla6prxumtlossw-dorr
+    Review-Reason: Adds a standalone, honest prospective Act 32 resource meter plus an additive record and tests; the claimed snapshot SHA-256 hashes and comparison figures (3,569,291 tokens, 729.62 CPU s, 540 sessions, 261.635 s) verify exactly against the real private snapshots and all 5 unit tests plus the POSIX sm
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/statistics-trial-meter.py b/government/statistics-trial-meter.py
+new file mode 100644
+index 00000000..2c91c08a
+--- /dev/null
++++ b/government/statistics-trial-meter.py
+@@ -0,0 +1,208 @@
++#!/usr/bin/env python3
++"""Prospective, source-attested Act 32 business-as-usual resource snapshots.
++
++Does NOT assert any verified OUTCOME or authorize activation. It provides the
++previously missing reproducible resource-denominator methodology for a matched
++pre/post comparison, to be interpreted by Economy and independently by Judiciary.
++"""
++import argparse
++import datetime as dt
++import hashlib
++import importlib.util
++import json
++import math
++import os
++from pathlib import Path
++import sqlite3
++import sys
++import time
++import urllib.parse
++
++SCHEMA = "viche-statistics-resource-snapshot-v1"
++FIELDS = ("tokens_input","tokens_output","tokens_reasoning",
++          "tokens_cache_read","tokens_cache_write")
++VICHE_PREFIX="/var/lib/lubko/wd/viche-seats/"
++VICHE_ROOT="/var/lib/lubko/wd/viche"
++DEFAULT_DB="/home/lubko/.local/state/antonina/opencode-service/opencode.db"
++
++
++def host_cpu():
++    # Same monotone whole-host upper-bound method as the Act 32 budget patch,
++    # kept independent so the preactivation baseline can be captured first.
++    import re
++    boot=Path("/proc/sys/kernel/random/boot_id").read_text().strip()
++    if not re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}",boot):
++        raise ValueError("host boot identifier invalid")
++    with Path("/proc/stat").open() as file:
++        fields=file.readline().split()
++    if len(fields)<9 or fields[0]!="cpu":
++        raise ValueError("host CPU counters unavailable")
++    ticks=[int(x) for x in fields[1:9]]
++    if any(x<0 for x in ticks):
++        raise ValueError("host CPU counter is invalid")
++    hz=os.sysconf("SC_CLK_TCK")
++    if not isinstance(hz,int) or hz<=0:
++        raise ValueError("invalid host CPU tick rate")
++    return {"cpu_seconds":sum(ticks[i] for i in (0,1,2,5,6,7))/hz,
++            "cpu_boot_id":boot,"cpu_available":True,
++            "cpu_source":"proc-stat-host-busy-upper-bound-v1",
++            "cpu_attribution":"conservative-whole-host-upper-bound"}
++
++
++def sessions(db):
++    if not Path(db).is_file():
++        raise ValueError("OpenCode authoritative SQLite meter is missing")
++    uri="file:"+urllib.parse.quote(str(db),safe="/")+"?mode=ro"
++    with sqlite3.connect(uri,uri=True,timeout=10) as con:
++        con.execute("PRAGMA query_only=ON")
++        con.execute("BEGIN")
++        fields=",".join(("id","directory","time_created","time_updated")+FIELDS)
++        columns={r[1] for r in con.execute("PRAGMA table_info(session_v2)")}
++        if not set(("id","directory","time_created","time_updated")+FIELDS)<=columns:
++            raise ValueError("OpenCode meter schema lacks required fields")
++        rows=con.execute("SELECT "+fields+" FROM session_v2").fetchall()
++    result={}
++    for row in rows:
++        sid,directory,created,updated,*tokens=row
++        if not isinstance(sid,str) or not sid:
++            raise ValueError("OpenCode meter has malformed session identifier")
++        if not isinstance(directory,str):
++            raise ValueError("OpenCode meter directory cannot be classified")
++        if any(isinstance(v,bool) or not isinstance(v,int) or v<0 for v in tokens):
++            raise ValueError("OpenCode token counters unavailable or invalid")
++        if (not isinstance(created,int) or not isinstance(updated,int)
++                or updated<created):
++            raise ValueError("OpenCode session timestamps invalid")
++        if directory!=VICHE_ROOT and not directory.startswith(VICHE_PREFIX):
++            continue
++        result[sid]={"directory":directory,"time_created_ms":created,
++                     "time_updated_ms":updated,
++                     "tokens":dict(zip(FIELDS,tokens))}
++    return result,len(rows)
++
++
++def snapshot(db):
++    cpu=host_cpu()
++    session_data,all_rows=sessions(db)
++    return {"schema":SCHEMA,"created_at_utc":dt.datetime.now(dt.timezone.utc).isoformat(),
++            "time_epoch_ms":int(time.time()*1000),"cpu":cpu,
++            "token_meter":{"source":"opencode-service-session-v2",
++                           "viche_coverage":"exact directory /var/lib/lubko/wd/viche or prefix /var/lib/lubko/wd/viche-seats/",
++                           "sessions_in_viche_directory":len(session_data),
++                           "all_host_sessions":all_rows},
++            "sessions":session_data,
++            "caveat":"Host CPU is an UPPER BOUND, not per-office actual. Directory selection may include Viche-related development rather than official office work."}
++
++
++def digest(value):
++    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
++
++
++def write_new(path,obj):
++    path=Path(path)
++    if path.is_symlink():
++        raise ValueError("refusing symlinked snapshot")
++    path.parent.mkdir(parents=True,mode=0o700,exist_ok=True)
++    if path.parent.is_symlink():
++        raise ValueError("refusing symlinked snapshot directory")
++    raw=(json.dumps(obj,sort_keys=True,indent=2)+"\n").encode()
++    fd=os.open(str(path),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
++    try:
++        with os.fdopen(fd,"wb") as dest:
++            dest.write(raw)
++            dest.flush()
++            os.fsync(dest.fileno())
++        folder=os.open(str(path.parent),os.O_RDONLY|os.O_DIRECTORY)
++        try: os.fsync(folder)
++        finally: os.close(folder)
++    except BaseException:
++        path.unlink(missing_ok=True)
++        raise
++    return hashlib.sha256(raw).hexdigest()
++
++
++def compare(before,after):
++    if before.get("schema")!=SCHEMA or after.get("schema")!=SCHEMA:
++        raise ValueError("snapshot schema mismatch")
++    a=before["cpu"];b=after["cpu"]
++    if a.get("cpu_boot_id")!=b.get("cpu_boot_id"):
++        raise ValueError("host reboot during window; split windows by boot")
++    if a.get("cpu_source")!="proc-stat-host-busy-upper-bound-v1" or b.get("cpu_source")!=a.get("cpu_source"):
++        raise ValueError("host CPU meter method changed")
++    start=before["time_epoch_ms"];end=after["time_epoch_ms"]
++    if not all(isinstance(x,int) for x in (start,end)) or end<=start:
++        raise ValueError("window duration invalid")
++    c1=a["cpu_seconds"];c2=b["cpu_seconds"]
++    if not all(isinstance(x,(int,float)) and math.isfinite(x) for x in (c1,c2)) or c2<c1:
++        raise ValueError("host CPU counter reset")
++    prev=before["sessions"];curr=after["sessions"]
++    if not isinstance(prev,dict) or not isinstance(curr,dict):
++        raise ValueError("session source missing")
++    if set(prev)-set(curr):
++        raise ValueError("OpenCode sessions vanished; no complete token denominator")
++    totals=dict.fromkeys(FIELDS,0)
++    by_directory={}
++    new_count=0
++    for sid,item in curr.items():
++        old=prev.get(sid)
++        if old is not None and item["directory"]!=old["directory"]:
++            raise ValueError("OpenCode session directory changed")
++        if old is None:
++            new_count+=1
++            if item["time_created_ms"]<start:
++                raise ValueError("newly observed session predates baseline; source incomplete")
++        delta={}
++        for key in FIELDS:
++            current=item["tokens"][key]
++            previous=old["tokens"][key] if old else 0
++            if (isinstance(current,bool) or not isinstance(current,int) or current<previous
++                    or not isinstance(previous,int) or isinstance(previous,bool)):
++                raise ValueError("OpenCode token counter reset or unavailable")
++            delta[key]=current-previous
++            totals[key]+=delta[key]
++        d=by_directory.setdefault(item["directory"],dict.fromkeys(FIELDS,0))
++        for key in FIELDS: d[key]+=delta[key]
++    return {
++        "schema":"viche-statistics-resource-window-v1",
++        "start":before["created_at_utc"],"end":after["created_at_utc"],
++        "duration_seconds":(end-start)/1000,
++        "viche_directory_tokens":sum(totals.values()),
++        "tokens_by_category":totals,
++        "sessions_begin":len(prev),"sessions_end":len(curr),"new_sessions":new_count,
++        "host_cpu_upper_bound_seconds":round(c2-c1,3),
++        "host_cpu_attribution":"all-host-busy-upper-bound",
++        "by_directory":by_directory,
++        "source_snapshot_sha256":{"start":digest(before),"end":digest(after)},
++        "outcome_numerator":None,
++        "independent_factual_verdict":None,
++        "honest_limit":"Token directory matching includes Viche development, not necessarily only government offices; CPU includes other projects. No verified outcome benefit is asserted."
++    }
++
++
++def main():
++    parser=argparse.ArgumentParser(description=__doc__)
++    subs=parser.add_subparsers(dest="cmd",required=True)
++    take=subs.add_parser("capture");take.add_argument("--out",required=True)
++    take.add_argument("--db",default=DEFAULT_DB)
++    diff=subs.add_parser("compare");diff.add_argument("--before",required=True)
++    diff.add_argument("--after",required=True)
++    args=parser.parse_args()
++    try:
++        if args.cmd=="capture":
++            obj=snapshot(args.db)
++            sha=write_new(args.out,obj)
++            print(json.dumps({"captured":args.out,"sha256":sha,
++                              "viche_session_count":len(obj["sessions"]),
++                              "verified_outcome":False},sort_keys=True))
++        else:
++            a=json.loads(Path(args.before).read_text())
++            b=json.loads(Path(args.after).read_text())
++            print(json.dumps(compare(a,b),sort_keys=True))
++    except (OSError,ValueError,KeyError,TypeError,sqlite3.Error) as exc:
++        print("statistics-trial-meter: "+str(exc),file=sys.stderr)
++        return 1
++    return 0
++
++
++if __name__=="__main__":
++    sys.exit(main())
+diff --git a/records/knowledge/STATISTICS-RESOURCE-BASELINE-20261121.md b/records/knowledge/STATISTICS-RESOURCE-BASELINE-20261121.md
+new file mode 100644
+index 00000000..71e14f96
+--- /dev/null
++++ b/records/knowledge/STATISTICS-RESOURCE-BASELINE-20261121.md
+@@ -0,0 +1,79 @@
++# Act 32: prospective, source-attested resource comparator
++
++**Status: begun, not yet an independently verified outcome comparator or authorization.**
++
++The Nov19 baseline-20261119.json used mutable paths and reported
++process counts, not verified effects or measured usage. The Nov20 preflight
++correctly rejected that as a false comparator. No Statistics office was
++activated. The proper fix is prospective measurement, not retrospectively
++inventing a useful-outcome numerator or tokens.
++
++## Measurement
++
++government/statistics-trial-meter.py snapshots the authoritative read-only
++OpenCode session_v2 token counters for all sessions whose directory is
++exactly the canonical Viche root or is under viche-seats/. It also freezes
++the monotone /proc/stat whole-host busy-CPU counter and kernel boot ID.
++Snapshots reside in private state with mode 0600 and an exclusive, fsynced
++create operation. They cannot be silently overwritten.
++
++Comparison requires two snapshots on the same boot, strictly increasing
++timestamps, the same session population plus new sessions whose creation
++postdates the first snapshot, and non-decreasing counters. Old sessions that
++disappear or reset are unavailable, not zero. The recorded token delta
++is the sum of real differences for old session IDs and full counters for
++new sessions. This includes development agents in Viche worktrees, not
++just government offices. It is consequently not a certified per-office
++spend figure. The host CPU busy delta includes all projects, so it is a
++pessimistic upper bound on Viche CPU, not a per-office actual number.
++Use the same method in subsequent comparison windows, report sample
++coverage/missingness, and avoid causal claims from a simple before/after.
++
++## First frozen snapshot
++
++- Path: /var/lib/lubko/wd/viche-state/knowledge/baseline/20261121-prelaunch-start.json
++- SHA-256 (raw file): a7f83c7077c38046b90f1e4195bbd383d84894602b634ac67ca89a67fbe90f48
++- Viche-directory sessions: 540
++- Status: pre-activation; all four offices were disabled
++- Privacy: raw session IDs remain in owner-only state; not published in Git
++
++A first short-window check (NOT the full pretrial observation period)
++has been collected after 261.635 seconds, with all four offices still disabled.
++Its private source file is state/knowledge/baseline/20261121-prelaunch-shortcheck.json,
++SHA-256 6d3e44d6d786193ee18e38e8b42edd068f5fa2c9de8692da1ba9be912d62b06d.
++Two-source comparison returned 3,569,291 observed Viche-directory OpenCode
++tokens (including 3,266,048 cache reads), and 729.62 host busy CPU seconds
++(conservative upper bound, overlapping unrelated host work). 540 matching
++sessions were present at both endpoints and no sessions were missing. It
++establishes that the resource-denominator INSTRUMENT runs against actual
++inputs, not that any useful work was accomplished or an office cost was
++attributed.
++
++A later full baseline window-end sample must be captured and compared using
++the same instrument, at a documented UTC timestamp before any knowledge
++office activation. The result's SHA-256 must be recorded independently, and
++the Judiciary must inspect both inputs. A missing sample or reboot makes
++the single-window comparison invalid. Reboot requires separate windows.
++
++## Outcome endpoint
++
++The primary effect numerator is independently confirmed material operational
++repair or other independently accepted actual result, not messages, runs,
++commits, auto-closed signals, or forecasts. The Nov21 Judiciary audit
++records/JUDICIARY-REPORT-2026-11-21-cycle-d3aea539-sampled-evidence.md
++is real independent evidence but its one verified case concerns an external
++project and cannot be automatically used as a Viche material repair.
++
++A plausible candidate is the Viche audit-dispatch E2BIG repair at
++803de536 and subsequent production post-fix evidence at f2021202,
++after seven failures before the fix. Source:
++records/investigations/recovery-steward-audit-dispatch-e2big-20261121T1323Z.md.
++It is not yet an independently Judiciary-verified effect. Judiciary
++issue kiuY9oh8p7JLijkx2F7lJN-comments requests an independent
++determination, complete eligible-event population, missingness and
++honest matching window, without altering randomized sample selection.
++
++No new office is authorized until a verified numerator, matched resource
++denominator, Economy hard cap, real Executive order and independent
++Judiciary phase gate satisfy Act 32 D/E/H/K. A positive result from one
++case would not prove broad causal effectiveness.
+diff --git a/tests/statistics-trial-meter-smoke.sh b/tests/statistics-trial-meter-smoke.sh
+new file mode 100644
+index 00000000..a69d854f
+--- /dev/null
++++ b/tests/statistics-trial-meter-smoke.sh
+@@ -0,0 +1,4 @@
++#!/bin/sh
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++python3 tests/test_statistics_trial_meter.py
+diff --git a/tests/test_statistics_trial_meter.py b/tests/test_statistics_trial_meter.py
+new file mode 100644
+index 00000000..56b92cd2
+--- /dev/null
++++ b/tests/test_statistics_trial_meter.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python3
++"""Act 32 prospective cost baseline: real source, no invented outcomes."""
++import importlib.util
++import json
++from pathlib import Path
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++
++ROOT=Path(__file__).resolve().parents[1]
++TOOL=ROOT/"government/statistics-trial-meter.py"
++s=importlib.util.spec_from_file_location("statistics_trial_meter",TOOL)
++mod=importlib.util.module_from_spec(s)
++s.loader.exec_module(mod)
++VICHE="/var/lib/lubko/wd/viche-seats/branches/executive"
++OTHER="/home/lubko/soring-fronts/curator"
++
++
++def record(n, tokens, directory=VICHE, created=1000):
++    return {"directory":directory,"time_created_ms":created,
++            "time_updated_ms":max(created,1100+n),
++            "tokens":{k:(tokens if k=="tokens_input" else 0) for k in mod.FIELDS}}
++
++
++def snap(when,cpu,sessions,boot="12345678-1234-1234-1234-123456789abc"):
++    return {"schema":mod.SCHEMA,"created_at_utc":str(when),
++            "time_epoch_ms":when*1000,
++            "cpu":{"cpu_seconds":cpu,"cpu_boot_id":boot,
++                   "cpu_source":"proc-stat-host-busy-upper-bound-v1"},
++            "sessions":sessions}
++
++
++class TestTrialMeter(unittest.TestCase):
++    def test_token_delta_and_whole_host_upper_bound(self):
++        a=snap(10,1000,{"id1":record(1,120)})
++        b=snap(20,1090,{"id1":record(3,145),
++                          "id2":record(4,19,created=15000)})
++        x=mod.compare(a,b)
++        self.assertEqual(x["viche_directory_tokens"],44)
++        self.assertEqual(x["host_cpu_upper_bound_seconds"],90)
++        self.assertEqual(x["new_sessions"],1)
++        self.assertIsNone(x["outcome_numerator"])
++        self.assertIsNone(x["independent_factual_verdict"])
++
++    def test_missing_sessions_reset_and_reboot_are_errors(self):
++        a=snap(10,1000,{"id1":record(1,120)})
++        with self.assertRaisesRegex(ValueError,"vanished"):
++            mod.compare(a,snap(20,1100,{}))
++        with self.assertRaisesRegex(ValueError,"counter reset"):
++            mod.compare(a,snap(20,1100,{"id1":record(3,119)}))
++        with self.assertRaisesRegex(ValueError,"reboot"):
++            mod.compare(a,snap(20,1100,{"id1":record(3,190)},
++                boot="87654321-1234-1234-1234-123456789abc"))
++        with self.assertRaisesRegex(ValueError,"source incomplete"):
++            mod.compare(a,snap(20,1100,{"id1":record(1,120),
++                "id2":record(4,40,created=1000)}))
++
++    def test_private_immutable_fsynced_snapshot(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            p=Path(tmp)/"attested"/"first.json"
++            a=snap(10,1000,{"id":record(1,55)})
++            digest=mod.write_new(p,a)
++            self.assertEqual(len(digest),64)
++            self.assertEqual(p.stat().st_mode & 0o777,0o600)
++            self.assertEqual(json.loads(p.read_text()),a)
++            with self.assertRaises(FileExistsError):
++                mod.write_new(p,snap(11,1001,{}))
++
++    def test_real_sqlite_readonly_prefix_filter_and_schema(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            p=Path(tmp)/"meter.db"
++            with sqlite3.connect(p) as db:
++                db.execute("CREATE TABLE session_v2 (id TEXT,directory TEXT,time_created INTEGER,time_updated INTEGER,"+
++                           ",".join(k+" INTEGER" for k in mod.FIELDS)+")")
++                db.execute("INSERT INTO session_v2 VALUES(?,?,?,?,?,?,?,?,?)",
++                           ("viche",VICHE,1000,1001,2,3,4,5,6))
++                db.execute("INSERT INTO session_v2 VALUES(?,?,?,?,?,?,?,?,?)",
++                           ("other",OTHER,1000,1001,2000,0,0,0,0))
++            result,total=mod.sessions(p)
++            self.assertEqual(total,2)
++            self.assertEqual(list(result),["viche"])
++            self.assertEqual(sum(result["viche"]["tokens"].values()),20)
++            # A read-only meter cannot silently create or mutate schema.
++            with sqlite3.connect(p) as db:
++                self.assertEqual(db.execute("SELECT COUNT(*) FROM session_v2").fetchone()[0],2)
++
++    def test_snapshot_db_unavailable_does_not_mean_zero(self):
++        with self.assertRaisesRegex(ValueError,"missing"):
++            mod.sessions("/does/not/exist/act32-usage.sqlite3")
++
++
++if __name__=="__main__":
++    unittest.main()
