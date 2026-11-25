@@ -1,0 +1,177 @@
+commit 618db72ac9220dd35508ede89b3ed3f7da73ab8a
+Author:     Viche Executive <executive@phoebe-dev.local>
+AuthorDate: Sat Oct 17 23:37:17 2026 +0000
+Commit:     Viche Executive <executive@phoebe-dev.local>
+CommitDate: Sat Oct 17 23:37:17 2026 +0000
+
+    Janitor: build-cache-aware inventory and liveness classification
+    
+    Closes the growth-attribution gap: nested build caches (e.g. Lean .lake
+    dirs) were invisible to the depth-1 inventory. The scan now also records
+    .maxdepth-2 .lake dirs as their own inventory rows (~31.9 GB currently
+    tracked box-wide), and classify() applies a liveness rule:
+    
+    - a live or recently touched cache (age < 30d) is only monitored, never
+      quarantined (it may be reused by an in-flight or upcoming build);
+    - an aged cache (age >= 30d) whose parent worktree is also aged is a
+      quarantine candidate (the work it supported is surely merged/abandoned);
+    - an aged cache whose parent worktree is still live is monitored.
+    
+    This prevents a naive rule from quarantining a live build. POSIX /bin/sh;
+    sh -n PASS; tests/janitor-smoke.sh PASS (new hermetic .lake classification
+    regression).
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index f62c01e5..cefbba13 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -321,6 +321,31 @@ incident() {
+     return 0
+ }
+ 
++# Record one inventory row for a directory into $tmp_inv (read-only probe).
++record_inv_dir() {
++    d=$1
++    size=$(timeout 10 du -s -k "$d" 2>/dev/null | awk 'NR==1{print $1; exit}')
++    is_num "$size" || return 0
++    [ "$size" -ge "$inventory_min_kb" ] || return 0
++    mtime=$(stat -c %Y "$d" 2>/dev/null || printf '0')
++    is_num "$mtime" || mtime=0
++    age_days=$(( (now - mtime) / 86400 ))
++    is_git=0
++    uncommitted=0
++    unpushed=0
++    if [ -d "$d/.git" ]; then
++        is_git=1
++        if [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]; then
++            uncommitted=1
++        fi
++        unpushed=$(timeout 15 git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr -d ' ')
++        is_num "$unpushed" || unpushed=0
++    fi
++    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n' \
++        "$ts" "$host" "$d" "$size" "$mtime" "$age_days" "$is_git" "$uncommitted" "$unpushed" >> "$tmp_inv"
++    return 0
++}
++
+ # --- box inventory (read-only) -------------------------------------------------
+ inventory() {
+     inv=$jstate/inventory.tsv
+@@ -332,25 +357,12 @@ inventory() {
+     for root in /workspace /home/lubko /var/lib/lubko/wd /tmp/opencode; do
+         [ -d "$root" ] || continue
+         find "$root" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while IFS= read -r d; do
+-            size=$(timeout 10 du -s -k "$d" 2>/dev/null | awk 'NR==1{print $1; exit}')
+-            is_num "$size" || continue
+-            [ "$size" -ge "$inventory_min_kb" ] || continue
+-            mtime=$(stat -c %Y "$d" 2>/dev/null || printf '0')
+-            is_num "$mtime" || mtime=0
+-            age_days=$(( (now - mtime) / 86400 ))
+-            is_git=0
+-            uncommitted=0
+-            unpushed=0
+-            if [ -d "$d/.git" ]; then
+-                is_git=1
+-                if [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]; then
+-                    uncommitted=1
+-                fi
+-                unpushed=$(timeout 15 git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr -d ' ')
+-                is_num "$unpushed" || unpushed=0
+-            fi
+-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n' \
+-                "$ts" "$host" "$d" "$size" "$mtime" "$age_days" "$is_git" "$uncommitted" "$unpushed" >> "$tmp_inv"
++            record_inv_dir "$d"
++        done
++        # Build caches (e.g. Lean .lake dirs) sit one level below the worktree; they are
++        # the largest transient consumers, so track them as their own inventory rows.
++        find "$root" -maxdepth 2 -mindepth 2 -type d -name .lake 2>/dev/null | while IFS= read -r d; do
++            record_inv_dir "$d"
+         done
+     done
+     mv "$tmp_inv" "$inv"
+@@ -384,17 +396,39 @@ classify() {
+         [ -n "$path" ] || continue
+         [ -d "$path" ] || continue
+         class=retain
+-        if [ "$is_git" -eq 1 ] && [ "${unpushed:-0}" -gt 0 ]; then
+-            class=retain-unpushed
+-        elif [ "$is_git" -eq 1 ] && [ "$uncommitted" -eq 1 ]; then
+-            class=retain-live
+-        elif [ "$is_git" -eq 1 ] && [ "$age" -ge 30 ]; then
+-            class=quarantine-candidate
+-        elif [ "$is_git" -eq 0 ] && [ "$age" -ge 30 ] && [ "$size" -ge 1048576 ]; then
+-            class=quarantine-candidate
+-        elif [ "$age" -ge 7 ]; then
+-            class=monitor
+-        fi
++        case "$path" in
++        */.lake)
++            # Build cache (e.g. Lean .lake). Never quarantine a live or recently
++            # touched cache: it may be reused by an in-flight or upcoming build.
++            # Only an aged cache whose parent worktree is also gone or aged is a
++            # quarantine candidate (the work it supported is surely merged/abandoned).
++            parent=${path%/.lake}
++            if [ "$age" -lt 30 ]; then
++                class=monitor
++            else
++                page=$(awk -F'\t' -v p="$parent" 'NR>1 && $3==p {print $6; exit}' "$inv" 2>/dev/null)
++                is_num "$page" || page=999999
++                if [ "$page" -lt 30 ]; then
++                    class=monitor
++                else
++                    class=quarantine-candidate
++                fi
++            fi
++            ;;
++        *)
++            if [ "$is_git" -eq 1 ] && [ "${unpushed:-0}" -gt 0 ]; then
++                class=retain-unpushed
++            elif [ "$is_git" -eq 1 ] && [ "$uncommitted" -eq 1 ]; then
++                class=retain-live
++            elif [ "$is_git" -eq 1 ] && [ "$age" -ge 30 ]; then
++                class=quarantine-candidate
++            elif [ "$is_git" -eq 0 ] && [ "$age" -ge 30 ] && [ "$size" -ge 1048576 ]; then
++                class=quarantine-candidate
++            elif [ "$age" -ge 7 ]; then
++                class=monitor
++            fi
++            ;;
++        esac
+         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+             "$ts" "$host" "$path" "$size" "$mtime" "$age" "$is_git" "$uncommitted" "$unpushed" "$class" >> "$tmp"
+     done
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+index 9a960203..04d98821 100644
+--- a/tests/janitor-smoke.sh
++++ b/tests/janitor-smoke.sh
+@@ -97,4 +97,29 @@ printf 'safe_reclaim_enabled=1\nreclaim_enabled=1\n' >> "$town/government/janito
+ [ ! -d "$q/old-item" ]
+ [ -d "$q/new-item" ]
+ 
+-printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, responds to critical capacity, and reclaims only quarantined items past grace\n'
++# 7. build-cache (.lake) classification: a live/recent cache is only monitored;
++#    an aged cache whose parent worktree is also aged is a quarantine candidate.
++box=$d/box
++mkdir -p "$box/live-work/.lake" "$box/aged-work/.lake"
++printf 'x\n' > "$box/live-work/.lake/f"
++printf 'x\n' > "$box/aged-work/.lake/f"
++touch -d '2 days ago' "$box/live-work/.lake" "$box/live-work"
++touch -d '40 days ago' "$box/aged-work/.lake" "$box/aged-work"
++now=$(date -u +%s)
++host=phoebe-dev
++live_mtime=$(stat -c %Y "$box/live-work/.lake")
++aged_mtime=$(stat -c %Y "$box/aged-work/.lake")
++live_age=$(( (now - live_mtime) / 86400 ))
++aged_age=$(( (now - aged_mtime) / 86400 ))
++{
++    printf 'ts\thost\tpath\tsize_kb\tmtime\tage_days\tis_git\tuncommitted\tunpushed\tclass\n'
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t1024\t%s\t5\t0\t0\t0\t\n' "$host" "$box/live-work" "$live_mtime"
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t1024\t%s\t%s\t0\t0\t0\t\n' "$host" "$box/live-work/.lake" "$live_mtime" "$live_age"
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t1024\t%s\t40\t0\t0\t0\t\n' "$host" "$box/aged-work" "$aged_mtime"
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t1024\t%s\t%s\t0\t0\t0\t\n' "$host" "$box/aged-work/.lake" "$aged_mtime" "$aged_age"
++} > "$state/janitor/inventory.tsv"
++/bin/sh "$town/government/janitor.sh" classify
++awk -F'\t' 'NR>1 && $3=="'"$box"'/live-work/.lake" {print $10}' "$state/janitor/inventory.tsv" | grep -qx 'monitor'
++awk -F'\t' 'NR>1 && $3=="'"$box"'/aged-work/.lake" {print $10}' "$state/janitor/inventory.tsv" | grep -qx 'quarantine-candidate'
++
++printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, responds to critical capacity, reclaims only quarantined items past grace, and classifies build caches by liveness\n'

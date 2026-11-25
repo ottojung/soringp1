@@ -1,0 +1,161 @@
+commit 63bb214d357ee9e74c0d275e7ca0e5ac2a04aa74
+Author:     billy-dev <billy-dev@viche.invalid>
+AuthorDate: Mon Nov 9 18:07:28 2026 +0000
+Commit:     billy-dev <billy-dev@viche.invalid>
+CommitDate: Mon Nov 9 18:07:28 2026 +0000
+
+    Require the Act 26 record's reviewer, pin, commands, assertion basis and parent base
+
+diff --git a/government/suite-compliance-check.sh b/government/suite-compliance-check.sh
+index e1cb5a33..16ea30bc 100644
+--- a/government/suite-compliance-check.sh
++++ b/government/suite-compliance-check.sh
+@@ -59,12 +59,7 @@ def canonical_digest(record):
+     body={key:value for key,value in record.items() if key!='sha256'}
+     canonical=json.dumps(body,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+     return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+-def record_time(record):
+-    """The reviewer's ISO time, falling back to the board pin's server time."""
+-    value=record.get('created_at')
+-    if not isinstance(value,str) or not value.strip():
+-        pin=record.get('board_pin')
+-        value=pin.get('server_timestamp') if isinstance(pin,dict) else None
++def iso_epoch(value):
+     if not isinstance(value,str) or not value.strip():
+         return None
+     try:
+@@ -74,15 +69,43 @@ def record_time(record):
+     if parsed.tzinfo is None:
+         parsed=parsed.replace(tzinfo=datetime.timezone.utc)
+     return parsed.timestamp()
++def record_time(record):
++    """Act 26 §2.1: created_at must not be later than the board pin's time.
++
++    The pin is the chronology evidence; a created_at after the pin is
++    backdated or inconsistent, and a record without a pin is incomplete.
++    """
++    pin=record.get('board_pin')
++    if not isinstance(pin,dict) or not isinstance(pin.get('message_id'),str) or not pin['message_id'].strip():
++        return None
++    pin_time=iso_epoch(pin.get('server_timestamp'))
++    created=iso_epoch(record.get('created_at'))
++    if pin_time is None or created is None or created > pin_time:
++        return None
++    return pin_time
+ def act26_record(path,data):
+     """Return the record's epoch time only if it is a complete Act 26 record."""
+     if not isinstance(data,dict) or data.get('schema')!='act26-prelanding-record/v1':
+         return None
+-    for field in ('commit','tree','parent'):
++    for field in ('commit','tree','parent','reviewer','independence_basis',
++                  'phase','bill_id','landing_authorisation'):
+         value=data.get(field)
+-        if not isinstance(value,str) or not value:
++        if not isinstance(value,str) or not value.strip():
++            return None
++    if data.get('verdict')!='pass':
++        return None
++    if data.get('status') in ('parent_mismatch','fail','failed'):
++        return None
++    commands=data.get('commands')
++    if not isinstance(commands,list) or not commands:
++        return None
++    for entry in commands:
++        if (not isinstance(entry,dict)
++                or not isinstance(entry.get('command'),str)
++                or not entry['command'].strip()
++                or type(entry.get('exit')) is not int):
+             return None
+-    if data.get('verdict')!='pass' or not data.get('landing_authorisation'):
++    if not isinstance(data.get('main_at_verification'),str) or not data['main_at_verification'].strip():
+         return None
+     timestamp=record_time(data)
+     if timestamp is None:
+@@ -93,7 +116,7 @@ def act26_record(path,data):
+     for assertion in assertions:
+         if not isinstance(assertion,dict):
+             return None
+-        for field in ('expected','actual'):
++        for field in ('expected','actual','basis'):
+             value=assertion.get(field)
+             if not isinstance(value,str) or not value.strip():
+                 return None
+@@ -244,9 +267,12 @@ try:
+         # Act 26 chronology: the next first-parent commit bounds the landing.
+         upper=commit_times.get(commits[i+1]) if i+1 < len(commits) else None
+         act26_greens=[]
++        parent=commits[i-1] if i>0 else None
+         if upper is not None:
+             act26_greens=[(name,r) for name,r,stamp in act26_records
+                           if r.get('commit')==commit and r.get('tree')==tree
++                          and r.get('parent')==parent
++                          and r.get('main_at_verification')==parent
+                           and stamp < upper]
+         if reds:
+             status='violation'; reason='red suite recorded for exact commit/tree'
+diff --git a/tests/suite-compliance-act26-record-smoke.sh b/tests/suite-compliance-act26-record-smoke.sh
+index 18cb87e4..c6d1b533 100644
+--- a/tests/suite-compliance-act26-record-smoke.sh
++++ b/tests/suite-compliance-act26-record-smoke.sh
+@@ -49,12 +49,25 @@ record = {
+     'status': 'verified',
+     'landing_authorisation': 'fast_forward_main_to_this_exact_commit_only',
+     'created_at': stamp.strftime('%Y-%m-%dT%H:%M:%SZ'),
+-    'board_pin': {'server_timestamp': stamp.strftime('%Y-%m-%dT%H:%M:%SZ')},
++    'board_pin': {'author': 'c1-test-reviewer',
++                  'message_id': 'sha256:synthetic-pin',
++                  'server_timestamp': stamp.strftime('%Y-%m-%dT%H:%M:%SZ')},
+ }
+ if mode == 'noassert':
+     del record['content_assertions']
+ if mode == 'noverdict':
+     del record['verdict']
++if mode == 'noreviewer':
++    del record['reviewer']
++if mode == 'nopin':
++    del record['board_pin']
++if mode == 'nocmd':
++    del record['commands']
++if mode == 'nobasis':
++    del record['content_assertions'][0]['basis']
++if mode == 'backdated':
++    record['created_at'] = stamp.strftime('%Y-%m-%dT%H:%M:%SZ')
++    record['board_pin']['server_timestamp'] = '2020-01-01T00:00:00Z' 
+ if mode != 'nodigest':
+     body = {k: v for k, v in record.items() if k != 'sha256'}
+     canonical = json.dumps(body, sort_keys=True, separators=(',', ':'),
+@@ -83,7 +96,7 @@ printf 'boundary one\n' > "$tmp/README.md"
+ git -C "$tmp" add .
+ commit_at 1700000200 'boundary after valid change'
+ write_act26 "$VICHE_STATE_ROOT/delivery/act26-valid.json" \
+-    "$c1" "$c1_tree" 1700000150 "$(git -C "$tmp" rev-parse HEAD~1)" valid
++    "$c1" "$c1_tree" 1700000150 "$(git -C "$tmp" rev-parse "$c1^")" valid
+ 
+ # C2: a record whose tree does not match the change is not evidence.
+ printf 'tree mismatch\n' > "$tmp/tests/tree-mismatch"
+@@ -138,6 +151,19 @@ write_act26 "$VICHE_STATE_ROOT/delivery/act26-no-verdict.json" \
+     "$c4" "$c4_tree" 1700000750 "$c4_parent" noverdict
+ write_act26 "$VICHE_STATE_ROOT/delivery/act26-no-digest.json" \
+     "$c4" "$c4_tree" 1700000750 "$c4_parent" nodigest
++write_act26 "$VICHE_STATE_ROOT/delivery/act26-no-reviewer.json" \
++    "$c4" "$c4_tree" 1700000750 "$c4_parent" noreviewer
++write_act26 "$VICHE_STATE_ROOT/delivery/act26-no-pin.json" \
++    "$c4" "$c4_tree" 1700000750 "$c4_parent" nopin
++write_act26 "$VICHE_STATE_ROOT/delivery/act26-no-commands.json" \
++    "$c4" "$c4_tree" 1700000750 "$c4_parent" nocmd
++write_act26 "$VICHE_STATE_ROOT/delivery/act26-no-basis.json" \
++    "$c4" "$c4_tree" 1700000750 "$c4_parent" nobasis
++write_act26 "$VICHE_STATE_ROOT/delivery/act26-backdated.json" \
++    "$c4" "$c4_tree" 1700000750 "$c4_parent" backdated
++wrong_parent=$(git -C "$tmp" rev-parse "$c4_parent^")
++write_act26 "$VICHE_STATE_ROOT/delivery/act26-wrong-parent.json" \
++    "$c4" "$c4_tree" 1700000750 "$wrong_parent" valid
+ 
+ # C5: the existing reviewed-merge receipt route must remain a positive control.
+ printf 'receipt change\n' > "$tmp/tests/receipt-change"
+@@ -207,4 +233,4 @@ assert x["main_red_episodes"] == 0, x
+ assert x["compliant"] == 2, x
+ '
+ 
+-echo 'suite-compliance-act26-record-smoke: passed (valid Act 26 record compliant with source; tree mismatch, late record and missing fields unreadable; receipt control green)'
++echo 'suite-compliance-act26-record-smoke: passed (valid Act 26 record compliant with source; tree mismatch, late/backdated record, missing required fields, missing pin/commands/basis and wrong parent unreadable; receipt control green)'

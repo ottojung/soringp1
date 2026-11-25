@@ -1,0 +1,263 @@
+commit 6ff09050c75ad4dfa0cd2cc803da067862317979
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 03:48:27 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 03:48:28 2026 +0000
+
+    Separate resource economics from Executive staffing; maintain independent work under contention
+
+diff --git a/government/MINISTRY-OF-ECONOMY.md b/government/MINISTRY-OF-ECONOMY.md
+index 6fdb4da6..dc895382 100644
+--- a/government/MINISTRY-OF-ECONOMY.md
++++ b/government/MINISTRY-OF-ECONOMY.md
+@@ -38,23 +38,29 @@ You never spend money, add a paid model, create an account, hold a credential, o
+ - Read the `town_owned_largest` list and the Janitor's classification, and find what is actually growing. Ask why: a worktree no office uses, a log with no rotation, a snapshot kept for a dead investigation, a loop that writes every pass.
+ - Select further quarantine candidates **with the evidence Act 12.4 requires** (what it is, why unneeded, recoverable, not live, before/after measure), and run the Janitor modes yourself. Quarantine first; removal only after the grace window and with `reclaim_enabled=1`, which Act 12.7 lets the Executive set for evidence-satisfying actions.
+ - Fix the **cause** when it is cheap and reversible (rotate a log, stop a loop from rewriting a large file) by asking the owning office through a request (`government/proceed-by-default.sh`, 24 h deadline) and proceeding if it does not answer. Prevention beats reclamation.
+-- Check headroom before the Town asks for more concurrency; if memory is `short`, say so to the Executive coordinator the same hour.
++- Report memory headroom, pressure and peak risks; if memory is `short`, say so to the Executive coordinator the same hour.
+ - When a resource is still `short` or `critical` after the pipeline ran, write one line beginning `NEEDS-FOUNDER:` on Town Hall that says what is needed (the script's `needs_founder` list has the wording). Do not repeat it while nothing has changed.
+ 
+ **You never**: touch `records/`, `government/`, credentials, live processes, open files or any path whose liveness you have not verified (Act 12.5); delete outside the Janitor's quarantine path; bypass the Judiciary's measurement or an independent check; or act on another machine's resources through anything but a request to its owner.
+ 
+ ## 3. Efficiency of the rest of the Town
+ 
+-- Treat sustained unused CPU and safe memory headroom, when valuable assigned
+-  work is available, as potential **resource waste**, not merely healthy capacity.
+-  The resource report's `capacity` field measures CPU usage over a cgroup counter
+-  interval and memory above the reserve. Investigate underuse, identify whether
+-  funding, dependencies, scheduling, disk or low marginal yield is the true
+-  constraint, and provide actionable recommendations to the Executive. Prefer
+-  bounded independent work using existing caches when disk is short. Do not aim
+-  to fill RAM or create busywork. The Executive alone commissions workers; assess
+-  the resulting delivered output and revise recommendations. Unknown or stale
+-  capacity is not evidence of waste or spare capacity.
++- Measure utilization and waste **separately for each resource**. Report actual
++  CPU consumption and contention (including pressure stalls), reclaimable and
++  non-reclaimable memory headroom, disk consumption and growth, model funding
++  and quotas, and evidence about waste or low marginal output. A resource can
++  be scarce while another is underused. State uncertainty, peak risks and the
++  resource cost of different activities when measurable.
++- **Do not prescribe staffing.** Never recommend an agent count, a worker
++  increment/decrement, a concurrency limit, a staffing freeze, a utilization
++  threshold for starting workers, or which agents/projects to commission.
++  Staffing, workload selection, scheduling, and tradeoffs are exclusively
++  the Executive's decisions. Report resource facts, forecasts, avoidable costs,
++  and resource-specific mitigations; not staffing instructions. A report
++  must not turn CPU contention into a global ban on independent model work.
++  Disregard inherited staffing recommendations in older reports. Unmeasured
++  capacity is unknown, not zero. The Ministry retains its resource maintenance
++  and funding duties under Acts 12, 13 and 29.
+ 
+ - Read `state/dispatch-gate/` (passes skipped because nothing changed), `state/obligations/` (obligations expired unverified) and the daily digest. Find where tokens are spent without an outcome: repeated passes, reports that restate the previous report, work that keeps getting re-triggered.
+ - Report findings to the Executive coordinator as short, evidence-backed recommendations with an estimated saving and the risk of the cut. Implementation of an approved change is the Executive's; a change to law is Parliament's, which you may inform with evidence but not sponsor.
+diff --git a/government/economy-resources.py b/government/economy-resources.py
+index 63f6a35a..145109c9 100644
+--- a/government/economy-resources.py
++++ b/government/economy-resources.py
+@@ -210,6 +210,22 @@ def cpu_counter():
+         return None
+ 
+ 
++def pressure():
++    """Cgroup pressure-stall measurements; unavailable is not zero."""
++    result = {}
++    for resource in ("cpu", "memory", "io"):
++        try:
++            values = {}
++            for line in (CGROUP / (resource + ".pressure")).read_text().splitlines():
++                kind, *fields = line.split()
++                fields = dict(field.split("=", 1) for field in fields)
++                values[kind] = float(fields["avg60"])
++            result[resource] = values
++        except (OSError, ValueError, KeyError):
++            result[resource] = None
++    return result
++
++
+ def capacity_assessment(resources, counter, previous, current, pol):
+     """Report potential resource waste separately from scarcity/safety status.
+ 
+@@ -240,6 +256,8 @@ def capacity_assessment(resources, counter, previous, current, pol):
+     disks = [v for k, v in resources.items() if k.startswith("disk:")]
+     disk_mode = ("unknown" if not disks else "blocked" if any(v["status"] == "critical" for v in disks)
+                  else "disk-light-only" if any(v["status"] in ("short", "watch") for v in disks) else "normal")
++    # Distinct resources constrain distinct workloads. This summary is
++    # not an admission decision, an agent quota, or a global stop signal.
+     reasons = []
+     if disk_mode in ("blocked", "unknown"):
+         reasons.append("disk safety or visibility")
+@@ -258,7 +276,20 @@ def capacity_assessment(resources, counter, previous, current, pol):
+         status = "underused"
+     else:
+         status = "no_clear_spare_capacity"
+-    signal = {"status": status, "disk_mode": disk_mode,
++    cpu_state = ("unknown" if cpu is None else
++                 "spare" if spare_cpu >= 1.0 and cpu / sample["cpus"] <= .70 else
++                 "busy")
++    if resources.get("load", {}).get("status") in ("short", "critical"):
++        cpu_state = "contended"
++    memory_state = ("unknown" if spare_mem is None else
++                    "pressure" if new_oom or mem.get("status") != "ok" else
++                    "spare" if spare_mem >= 2.0 else "limited")
++    funding_state = ("unknown" if not isinstance(free, int) else
++                     "unavailable" if free < 1 else "available")
++    stalls = pressure()
++    dimensions = {"cpu": cpu_state, "memory": memory_state,
++                  "disk": disk_mode, "model_funding": funding_state}
++    signal = {"status": status, "dimensions": dimensions,
+               "spare_cpu_band": int(spare_cpu) if spare_cpu is not None else None,
+               "spare_memory_band": int(spare_mem // 2) if spare_mem is not None else None,
+               "constraints": reasons}
+@@ -267,9 +298,10 @@ def capacity_assessment(resources, counter, previous, current, pol):
+             "cpu_spare_cores": round(spare_cpu, 2) if spare_cpu is not None else None,
+             "memory_headroom_gib": headroom, "memory_reserve_gib": reserve,
+             "memory_spare_gib": round(spare_mem, 2) if spare_mem is not None else None,
+-            "disk_mode": disk_mode, "constraints": reasons, "dispatch_signal": signal,
+-            "action": ("Potential resource waste: Executive should expand useful independent work within the measured resource envelope, or record the concrete constraint. Assess verified output, not worker count."
+-                       if status == "underused" else "Assess capacity and constraints; do not manufacture load or spend to occupy resources.")}
++            "disk_mode": disk_mode, "constraints": reasons,
++            "dimensions": dimensions, "pressure_avg60_pct": stalls,
++            "recent_oom": new_oom, "dispatch_signal": signal,
++            "interpretation": "Resource observations only. Each constraint is specific to the resource; the Executive determines workload allocation. Neither saturation nor free capacity implies a worker count."}
+ 
+ 
+ def growth_sizes(current, urgent):
+diff --git a/government/executive-agenda.md b/government/executive-agenda.md
+index 242706b7..b4cdb319 100644
+--- a/government/executive-agenda.md
++++ b/government/executive-agenda.md
+@@ -8,17 +8,35 @@ Acts 2 and 8 assign the executive, not the Clerk, responsibility for delivering
+ 
+ **Founder-directed throughput improvement (2026-10-23).** The Town has been underutilized. At every Executive pass, commission useful independent work and integrate reviewed outputs; don't confuse finished prompts, status reporting, or accumulated local branches with delivery. A stale instruction file in an old worktree is a policy-refresh problem, not a justification to suspend a standing Founder mission. Use the *current canonical* laws and Founder directives. When an authorized PR mechanism is unavailable, investigate the actual available delivery paths: inspect government/DELIVERY.md and use signed, exact-commit verified Git SSH delivery after lawful independent review. Do not repeatedly announce unavailable GitHub API access as a blocker. Distinct mathematical fronts may proceed in parallel without an artificial global agent cap.
+ 
+-**Economy-driven allocation.** Read the Ministry of Economy's current resource
+-report (`state/economy/resources.json` in the configured state root). Safe idle
+-compute capacity with useful outstanding work is resource waste. Use the measured
+-CPU and memory envelope to commission additional independent productive fronts;
+-when capacity is underused and work exists, expansion is the default. If expansion
+-is blocked, record the actual limiting resource, dependency, or marginal yield
+-and work to remove it. Disk shortage restricts disk-heavy work, not every
+-productive activity. Never deliberately consume resources without expected value.
+-Assess delivered outcomes and avoid duplicate work. Unknown/stale data calls for
+-fresh measurement, not an assumption of zero utilization. Only the Executive
+-allocates and dispatches research workers; the Ministry assesses and recommends.
++**Economy-driven, work-conserving allocation.** The Ministry reports measured
++resources, waste and forecasts; it does not prescribe staffing, staffing
++increments, worker caps or freezes. Ignore older staffing prescriptions.
++The Executive alone chooses allocation. Read the current resource report
++(`economy/resources.json` under the configured state root) and optimize
++verified delivery across authorized work. Treat spare resources with useful
++pending work as wasted opportunity. Do not turn one constrained resource
++into a global staffing limit. CPU saturation constrains local compilation
++and CPU-intensive search; it does not itself prevent concurrent reasoning
++or network/model-bound work. Memory, disk, funding and pressure are distinct
++constraints. Distinguish the resource footprint of each kind of work; keep
++independent research and review fronts moving while expensive local checks
++are queued or run in a bounded fashion. Avoid redundant builds and caches,
++control peak memory and disk growth, and preserve Act 13 safeguards.
++Use observed marginal results and resource pressure to adjust parallelism
++up or down; there is no fixed numerical workforce target or cap.
++
++**Work allocation is an early duty, not the last action of a long session.**
++At the beginning of each Executive pass, reconcile existing workers and
++authorized independent work. Promptly commission useful independent fronts
++and replenish vacancies before lengthy investigations or administrative
++reviews. Delegate long investigations and reviews to distinct agents rather
++than making the coordinator a serial bottleneck. Do not wait for a whole
++research stream to complete before assigning another. When work remains
++but independent fronts are not in progress, identify the specific measured
++constraint for that workload or take corrective action; lack of an immediately
++claimable external task does not prohibit other legitimate preparatory work.
++Keep allocation decisions concise and evidence-based. Never manufacture
++activity, disregard quotas, or treat agent headcount as delivery.
+ 
+ **Standing mission research parallelism.** At every Executive pass, inspect
+ the mission mandates under missions/*/mandate.md, their open issues, and live
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 2e272609..79a7a9b4 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -184,14 +184,20 @@ $prompt
+ === MINISTRY OF ECONOMY: RESOURCE CAPACITY AND WASTE ===
+ $economy_capacity
+ === END ECONOMY REPORT ===
+-Treat unused safe compute capacity with useful outstanding work as resource waste.
+-When Economy identifies underuse, commission additional independent productive
+-fronts promptly within actual CPU, memory, disk and funding constraints. Do not
+-wait for one front to finish if another can proceed. Record a concrete reason if
+-safe capacity cannot be used; investigate the bottleneck rather than merely
+-reporting it. Reassess results and marginal yield, not activity counts. Preserve
+-resource safety and existing model funding policy. Only the Executive manages
+-research workers. No fixed worker cap or requirement to artificially consume RAM.
++The Ministry reports resource facts; staffing recommendations in older reports
++are not authoritative. You alone decide staffing. Allocate independent work
++early in this pass, before lengthy reviews. Optimize verified delivery, not
++headcount. CPU contention constrains CPU-heavy local jobs, not automatically
++model-bound reasoning or independent research. Keep these fronts in flight
++while bounding expensive builds/searches and peak memory/disk usage.
++Use each measured resource dimension and model quota separately. Missing
++measurements are unknown, not zero. With useful work pending, expand and
++replenish until a workload-specific constraint or marginal output justifies
++otherwise; explain the actual constraint and mitigate it. No numerical worker
++cap or artificial resource consumption. Preserve existing safety and funding
++policy. Do not wait for one worker or a long review before assigning other
++independent work. Delegate long investigations rather than monopolizing
++the Executive coordinator. Only the Executive dispatches workers.
+ EOF
+ )
+ cases='{"open_cases":[]}'
+diff --git a/government/executive-economy-cycle.sh b/government/executive-economy-cycle.sh
+index bbf26ba6..ee3c4d06 100644
+--- a/government/executive-economy-cycle.sh
++++ b/government/executive-economy-cycle.sh
+@@ -146,9 +146,11 @@ $report
+ === LATEST RESOURCE REPORT (deterministic: disk, inodes, memory, load, Town-owned growth) ===
+ $resources
+ === END RESOURCE REPORT ===
+-Treat safely underused compute with useful outstanding work as resource waste.
+-Investigate the capacity assessment, recommend concrete increases in productive
+-parallelism to the Executive, and verify the resulting throughput.
++Report utilization, avoidable waste and resource-specific constraints independently.
++Do not prescribe agent counts, staffing increments, concurrency caps, staffing
++freezes or workload assignments. Retract inherited staffing recommendations
++from earlier reports. Only the Executive decides staffing and allocation.
++Report evidence and resource-cost mitigations, not a staffing plan.
+ Your mandate is the availability of EVERY scarce resource, not only model funding
+ (Act 29 section 6). government/economy-resources.py measures and forecasts and has
+ already run the safe Janitor steps listed under actions_this_pass; you act on what
+diff --git a/tests/economy-capacity-smoke.sh b/tests/economy-capacity-smoke.sh
+index 3b073754..67216747 100755
+--- a/tests/economy-capacity-smoke.sh
++++ b/tests/economy-capacity-smoke.sh
+@@ -20,6 +20,16 @@ def assess(resources=r, counter=cpu, previous=old, current=1600):
+ x = assess()
+ assert x['status']=='underused' and x['cpu_used_cores']==.2 and x['cpu_spare_cores']==3.8, x
+ assert x['memory_spare_gib']==8 and x['disk_mode']=='disk-light-only', x
++assert x['dimensions']=={'cpu':'spare','memory':'spare','disk':'disk-light-only','model_funding':'available'}, x
++mixed=copy.deepcopy(r)
++mixed['load']['status']='short'
++y=assess(resources=mixed,counter=dict(cpu,usage_usec=2_250_000_000))
++assert y['dimensions']['cpu']=='contended' and y['dimensions']['memory']=='spare'
++assert y['dimensions']['model_funding']=='available' and y['status']=='constrained'
++assert 'action' not in y and 'worker count' in y['interpretation']
++mixed['model_funding']['free_available_now']=None
++assert assess(resources=mixed)['dimensions']['model_funding']=='unknown'
++
+ assert assess(counter=dict(cpu,usage_usec=2_250_000_000))['status']=='no_clear_spare_capacity'
+ assert assess(current=1100+3600)['status']=='unmeasured'
+ assert assess(counter=dict(cpu,identity='new'))['status']=='unmeasured'
+@@ -31,10 +41,13 @@ for key, change in [('memory',{'status':'critical','headroom_gib':1}), ('memory'
+ with tempfile.TemporaryDirectory() as tmp:
+     d=Path(tmp)
+     (d/'cpu.stat').write_text('usage_usec 2000000\n')
++    (d/'cpu.pressure').write_text('some avg10=99.00 avg60=82.00 avg300=71.00 total=10\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n')
+     (d/'cpu.max').write_text('150000 100000\n')
+     (d/'cpuset.cpus.effective').write_text('0-3\n')
+     with patch.object(m,'CGROUP',d),patch.object(m.os,'sched_getaffinity',return_value={0,1,2,3}):
+         assert m.cpu_counter()['cpus']==1.5
+         assert m.cpu_counter()['usage_usec']==2_000_000
++        assert m.pressure()['cpu']['some']==82.0
++        assert m.pressure()['memory'] is None
+ print('Economy capacity: measured underuse, quotas, stale counters and safety constraints passed')
+ PY_TEST

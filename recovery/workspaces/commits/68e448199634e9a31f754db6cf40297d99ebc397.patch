@@ -1,0 +1,766 @@
+commit 68e448199634e9a31f754db6cf40297d99ebc397
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Sun Nov 22 02:25:46 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Sun Nov 22 02:25:46 2026 +0000
+
+    Act 19 §3: single-source per-office failure-event recorder + supervisor
+    decision point (issue #4Ux4sxiHjpXqSi9T9d2suq-alabama)
+    
+    A terminal appointment (failed/stopped/killed) no longer causes an immediate
+    new disposable Antonina ID or a registry overwrite.
+    
+    Recorder (single source): liveness/failures/events.tsv is the per-office
+    failure-event ledger; every office supervisor (branch-bootstrap,
+    terminal-continuity, seat-liveness, clerk-liveness, sitting) records every
+    terminal appointment event into it. The row is extended: terminal_state
+    (failed|stopped|killed), transient_flag, retry_safe (from
+    backend_error.automatic_retry_safe/transient) and a durable evidence_path
+    captured via terminal-appointment-evidence.sh once per agent
+    (oc_capture_terminal_evidence). Legacy rows stay readable.
+    
+    Supervisor decision point: oc_supervisor_replacement_due (office-
+    continuity.sh) is consulted before any replacement (branch-bootstrap,
+    terminal-continuity, sitting; clerk/seat liveness go through terminal-
+    continuity, which consults it). Replacement is due when either
+      (1) the Act 19 §3.1 threshold reset is due (oc_reset_due: three distinct
+          transient failures inside the window, progress guard, cooldown); or
+      (2) terminal-continuity is due: a terminal state is recorded, the newest
+          ledger terminal event has aged past oc_cooldown, and no reset has
+          been recorded since that event.
+    A terminal appointment by itself never replaces: terminal-continuity defers
+    (exit 1, no replacement) while the decision point is not due; sitting
+    triggers the shared terminal-continuity path when due and re-resolves the
+    seat; branch-bootstrap no longer exits 1 when terminal continuity defers.
+    
+    Tests:
+    - New real-integration test:
+      tests/office-failure-recorder-integration-smoke.sh (real appointments.sh,
+      branch-bootstrap.sh, terminal-continuity.sh, sitting.sh + mock Antonina):
+      single terminal failures do not replace; the decision point is not-due
+      while events are fresh; the Act 19 threshold replaces once; the aged
+      terminal-continuity boundary replaces; sitting consults the decision
+      point and replaces at threshold through it.
+    - tests/terminal-continuity-o1-smoke.sh: control updated to the
+      no-immediate-replacement semantics (fresh terminal event → deferred, no
+      replacement; aged event → replacement).
+    - tests/institutional-recovery-smoke.sh: same control update (terminal 5xx
+      recorded in the ledger; deferred while fresh; replacement when aged).
+    - act19-office-continuity-smoke.sh and clerk-liveness-smoke.sh already
+      delegate to the real integration path (appointment-recovery-integration
+      smoke); the new real test covers the recorder/decision point there.
+    
+    Full suite: sh tests/run-all.sh → All Viche tests passed.
+
+diff --git a/government/APPOINTMENT-RECOVERY.md b/government/APPOINTMENT-RECOVERY.md
+index 5ec47ade..bc7a4831 100644
+--- a/government/APPOINTMENT-RECOVERY.md
++++ b/government/APPOINTMENT-RECOVERY.md
+@@ -28,13 +28,29 @@ per-ID snapshot is authoritative; an interrupted index append is repaired on
+ its next idempotent invocation. Private state uses umask 077. A snapshot must
+ be persisted before the registry changes; failures block replacement.
+ 
+-**Act 19 recovery (2026-10-23):** Ordinary ensure now preserves the same
+-failed appointment until a supervisor can record an actual failed invocation.
+-The office ledger is durable and keyed by office + managed agent ID +
+-invocation identity, with observed fractional finished timestamps normalized
+-for 30-minute window arithmetic. Merely polling a failed invocation multiple
+-times cannot satisfy Act 19's **three distinct transient failures** threshold.
+-Actual Git commits since the earlier failure break the consecutive streak.
++**Act 19 recovery (2026-10-23, decision-point extension):** Ordinary ensure now
++preserves the same failed appointment until a supervisor can record an actual
++failed invocation. The office ledger is the **single source** of terminal
++failure events — durable and keyed by office + managed agent ID + invocation
++identity, with observed fractional finished timestamps normalized for
++30-minute window arithmetic. Every office supervisor (branch-bootstrap,
++terminal-continuity, seat-liveness, clerk-liveness) records every terminal
++appointment event — failed, stopped or killed — into the same per-office
++ledger, with the runtime classification, the `automatic_retry_safe`/`transient`
++flags, the durable terminal-evidence reference and the observed worktree head.
++**A terminal appointment by itself never authorizes a new Antonina ID or a
++registry overwrite:** the shared supervisor decision point
++(`oc_supervisor_replacement_due` in `government/office-continuity.sh`) consults
++the same durable ledger, so every replacement path (branch-bootstrap,
++terminal-continuity and sitting) reaches the same conclusion. Replacement is
++due when either (1) the Act 19 §3.1 threshold reset is due — three distinct
++transient failures inside the 30-minute window, progress guard and cooldown
++applied — or (2) the terminal-continuity reconcile boundary is due — the
++office is terminally dead, its newest ledger terminal event has aged past the
++cooldown, and no reset has been recorded since that event. Merely polling a
++failed invocation multiple times cannot satisfy the threshold, and a freshly
++dead office never gets an immediate swap. Actual Git commits since the
++earlier failure break the consecutive streak.
+ After threshold and cooldown, the supervisor snapshots evidence and performs
+ exactly **one** compare-and-swap replacement. If the old front has resumed
+ running, it must first be stopped and observed quiescent; an unsuccessful
+@@ -54,7 +70,17 @@ independently justified next action or a lawful Act 19 amendment.
+ 
+ The complete real-appointments regression covers failure-event identity,
+ fractional timestamps, unreadable status, a single reset, permanent errors,
+-retry-safe fresh handoffs and unsafe holds. Separate source code review and
++retry-safe fresh handoffs and unsafe holds. The real-integration path
++(`tests/office-failure-recorder-integration-smoke.sh`) additionally covers the
++single-source recorder and the shared supervisor decision point end to end
++with the real `appointments.sh`, `branch-bootstrap.sh`,
++`terminal-continuity.sh` and `sitting.sh`: single terminal failures do not
++create new IDs or overwrite the registry, the decision point stays not-due
++while events are fresh, the Act 19 threshold replaces once, the aged
++terminal-continuity boundary replaces, and sitting consults the same decision
++point. `tests/terminal-continuity-o1-smoke.sh` and
++`tests/institutional-recovery-smoke.sh` assert the no-immediate-replacement
++control and the aged-replacement control. Separate source code review and
+ Act 21 exact merged-commit attestation are still required before delivery.
+ 
+ The Executive and Legislature must implement the complete lawful treatment
+diff --git a/government/branch-bootstrap.sh b/government/branch-bootstrap.sh
+index d6c1c1f8..2b71475a 100755
+--- a/government/branch-bootstrap.sh
++++ b/government/branch-bootstrap.sh
+@@ -54,14 +54,26 @@ reason=$(printf '%s\n' "$meta" | jq -r '.backend_error.classification // ""')
+ tflag=$(printf '%s\n' "$meta" | jq -r '.backend_error.transient // false')
+ invocation=$(printf '%s\n' "$meta" | jq -r '.invocation_id // .run_id // .finished_at // ""')
+ finished=$(printf '%s\n' "$meta" | jq -r '.finished_at // ""')
+-if [ "$mode" = failed ]; then
+-  if oc_is_transient "$reason" "$tflag"; then
+-    unsafe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == false then "yes" else "no" end')
+-    retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+-    oc_record_failure "$liv" "$branch" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$cwd" || exit 1
+-    [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$liv" "$branch" "$id" "$invocation"
++if [ "$mode" = failed ] || [ "$mode" = stopped ] || [ "$mode" = killed ]; then
++  # Every terminal appointment event enters the single-source per-office
++  # ledger (with retry-safe and durable evidence); the shared supervisor
++  # decision point (oc_supervisor_replacement_due) reads that ledger before
++  # any new Antonina ID may be created or the registry overwritten.
++  oc_capture_terminal_evidence "$town" "$branch" "$id" "$cwd" "$meta"
++  oc_evidence_path=$(oc_terminal_evidence_path "$id")
++  if [ "$mode" = failed ]; then
++    if oc_is_transient "$reason" "$tflag"; then
++      retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
++      oc_record_failure "$liv" "$branch" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$cwd" "$mode" "$tflag" "$oc_evidence_path" || exit 1
++      [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$liv" "$branch" "$id" "$invocation"
++    else
++      oc_record_failure "$liv" "$branch" "$id" "$invocation" "$reason" "$finished" "no" "$tflag" "$now" "$cwd" "$mode" "$tflag" "$oc_evidence_path" || exit 1
++      oc_surface_permanent "$liv" "$id" "$reason"
++    fi
+   else
+-    oc_surface_permanent "$liv" "$id" "$reason"
++    # stopped/killed appointments enter the ledger too: the decision point
++    # must see every terminal event, and replacement stays with it.
++    oc_record_failure "$liv" "$branch" "$id" "$invocation" "$reason" "$finished" "no" "$tflag" "$now" "$cwd" "$mode" "$tflag" "$oc_evidence_path" || :
+   fi
+ fi
+ oc_commit_age_signal "$liv" "$id" "$cwd" "$now"
+@@ -88,15 +100,15 @@ if [ "$reset_due" = true ]; then
+   reset_due=true
+   # The single replacement above completed this reset.
+ fi
+-# A single terminal failure with unsafe literal replay can NEVER reach the
+-# three-failure oscillation threshold. Constitution VIII separately requires
+-# renewed institutional continuity: replace the DEAD appointment and give a
+-# fresh agent a reconciliation instruction (never reuse the old model turn).
+-# Retain Act 19's existing counter/threshold for still-recoverable oscillations.
++# A terminal appointment alone never authorizes a new appointment: the shared
++# supervisor decision point (inside terminal-continuity) reads the
++# single-source per-office ledger and replaces only when it is due (Act 19
++# §3.1 threshold, or aged terminal-continuity reconcile). When it is not due
++# the office keeps its terminal appointment and the boot proceeds.
+ if [ "$reset_due" != true ] &&
+    { [ "$mode" = failed ] || [ "$mode" = stopped ] || [ "$mode" = killed ]; } &&
+    [ -f "$town/government/terminal-continuity.sh" ]; then
+-  /bin/sh "$town/government/terminal-continuity.sh" recover "$branch" || exit 1
++  /bin/sh "$town/government/terminal-continuity.sh" recover "$branch" || :
+   id=$(/bin/sh "$town/government/appointments.sh" resolve "$branch")
+   meta=$(antonina agent status --id "$id" --json)
+ fi
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+index 552b0f0c..c0e163b0 100644
+--- a/government/clerk-liveness.sh
++++ b/government/clerk-liveness.sh
+@@ -23,13 +23,20 @@ unsafe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_sa
+ invocation=$(printf '%s\n' "$metadata" | jq -r '.invocation_id // .run_id // .finished_at // ""')
+ finished=$(printf '%s\n' "$metadata" | jq -r '.finished_at // ""')
+ if [ "$kind" = failed ]; then
++  oc_capture_terminal_evidence "$town" "$seat_id" "$id" "$seats/$seat_id" "$metadata" || :
+   if oc_is_transient "$reason" "$tflag"; then
+     retry_safe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+-    oc_record_failure "$state" "$seat_id" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$seats/$seat_id"
++    oc_record_failure "$state" "$seat_id" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$seats/$seat_id" "$kind" "$tflag" "$(oc_terminal_evidence_path "$id")"
+     [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$state" "$seat_id" "$id" "$invocation"
+   else
++    oc_record_failure "$state" "$seat_id" "$id" "$invocation" "$reason" "$finished" "no" "$tflag" "$now" "$seats/$seat_id" "$kind" "$tflag" "$(oc_terminal_evidence_path "$id")" || :
+     oc_surface_permanent "$state" "$id" "$reason"
+   fi
++elif [ "$kind" = stopped ] || [ "$kind" = killed ]; then
++  # Terminal events enter the single-source per-office ledger; the shared
++  # supervisor decision point reads it, and replacement stays with it.
++  oc_capture_terminal_evidence "$town" "$seat_id" "$id" "$seats/$seat_id" "$metadata" || :
++  oc_record_failure "$state" "$seat_id" "$id" "$invocation" "$reason" "$finished" "no" "$tflag" "$now" "$seats/$seat_id" "$kind" "$tflag" "$(oc_terminal_evidence_path "$id")" || :
+ fi
+ oc_commit_age_signal "$state" "$id" "$seats/$seat_id" "$now"
+ # Act 19 §3.1: failure-count-based reset, decidable from the durable record
+@@ -59,7 +66,10 @@ fi
+ if [ "$reset_due" != true ] &&
+    { [ "$kind" = failed ] || [ "$kind" = stopped ] || [ "$kind" = killed ]; } &&
+    [ -f "$town/government/terminal-continuity.sh" ]; then
+-  /bin/sh "$town/government/terminal-continuity.sh" recover "$seat_id" || exit 1
++  # A terminal appointment alone never authorizes a new appointment: the
++  # shared decision point reads the single-source ledger; the Clerk stays
++  # assigned when it is not due.
++  /bin/sh "$town/government/terminal-continuity.sh" recover "$seat_id" || :
+   id=$(/bin/sh "$town/government/appointments.sh" resolve "$seat_id")
+   metadata=$(antonina agent status --id "$id" --json)
+   kind=$(printf '%s\n' "$metadata" | jq -r '.state')
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index 09fdb204..38e40cc1 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -3,6 +3,14 @@
+ # POSIX /bin/sh only: no `local`, no bashisms, no top-level side effects.
+ # All variables are prefixed oc_ so callers are not clobbered.
+ #
++# Topology: `liveness/failures/events.tsv` is the SINGLE-SOURCE per-office
++# failure-event recorder (one durable, append-only ledger per office).
++# `oc_supervisor_replacement_due` is the SINGLE supervisor decision point:
++# every path that might replace an appointment (branch-bootstrap,
++# terminal-continuity, seat-liveness, clerk-liveness, sitting) consults it,
++# so a terminal appointment by itself never authorizes a new disposable
++# Antonina ID or a registry overwrite.
++#
+ # §3.1 starting values set by the Legislature (records/bills/office-continuity-act.md):
+ #   oc_threshold consecutive transient failures, oc_window seconds (30 min),
+ #   oc_cooldown seconds between resets for the same office (1800 s).
+@@ -28,18 +36,24 @@ oc_is_transient() {
+ # Record a terminal invocation once, independently of its disposable agent ID.
+ # Event identity is (agent ID, finished_at, invocation id when supplied). This
+ # makes repeated polling idempotent while preserving separate runs of one agent.
+-# Line format: "<finished_at> <agent-id> <invocation-id> <classification> <head>".
+-# Progress guard (§3.1.2): a durable commit since the previous failure breaks
+-# the consecutive streak, so the record is truncated before appending.
++# Line format (tab-separated, append-only):
++#   finished_seconds office agent_id invocation classification retry_safe
++#   head terminal_state transient_flag evidence_path
++# terminal_state (failed|stopped|killed) and the trailing columns are
++# optional: legacy rows without them stay readable. Supervisors record every
++# terminal appointment event (failed/stopped/killed) so the ledger is the
++# single source of terminal events; the supervisor decision point below reads
++# it. Progress guard (§3.1.2): a durable commit since the previous failure
++# breaks the consecutive streak, so the record is truncated before appending.
+ oc_record_failure() {
+   # $1 liveness dir, $2 office key, $3 agent id, $4 invocation identity,
+   # $5 classification, $6 finished_at, $7 retry-safe (yes/no), $8 now,
+-  # $9 workdir
++  # $9 workdir, $10 terminal_state, $11 transient flag, $12 evidence path.
+   mkdir -p "$1/failures" || return 1
+   oc_log=$1/failures/events.tsv
+   oc_sha=$(git -C "$9" rev-parse HEAD 2>/dev/null || printf -- -)
+-  if [ -n "$4" ]; then oc_event=$4; elif [ -n "$6" ]; then oc_event=$6; else return 1; fi
+-  if [ -n "$6" ]; then oc_finished=$6; else return 1; fi
++  if [ -n "$4" ]; then oc_event=$4; elif [ -n "$6" ] || [ -n "$8" ]; then oc_event=${6:-$8}; else return 1; fi
++  if [ -n "$6" ]; then oc_finished=$6; elif [ -n "$8" ]; then oc_finished=$8; else return 1; fi
+   case "$oc_event" in ''|*[!a-zA-Z0-9_.:-]*) return 1;; esac
+   # Antonina's finished_at is often fractional UNIX seconds. Preserve the
+   # exact invocation identity, but use integer seconds for the window math.
+@@ -64,7 +78,33 @@ oc_record_failure() {
+     printf '%s\n' "$oc_count" > "$1/reset-sequence-$2"
+   fi
+   if [ "$oc_sha" != - ]; then printf '%s\n' "$oc_sha" > "$oc_head_marker"; fi
+-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$oc_finished_seconds" "$2" "$3" "$oc_event" "$5" "$7" "$oc_sha" >> "$oc_log"
++  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
++    "$oc_finished_seconds" "$2" "$3" "$oc_event" "$5" "$7" "$oc_sha" \
++    "${10:-}" "${11:-}" "${12:-}" >> "$oc_log"
++  return 0
++}
++
++# Ledger evidence path for a departed agent ID: durable terminal evidence is
++# retained at $VICHE_STATE_ROOT/appointments/terminal-evidence/<agent_id>
++# (the layout appointments.sh writes on replacement and terminal-continuity
++# receipts reference).
++oc_terminal_evidence_path() {
++  # $1 agent id
++  printf 'appointments/terminal-evidence/%s\n' "$1"
++}
++
++# Capture durable terminal evidence once per departed agent ID. Idempotent:
++# evidence captured during a replacement (appointments.sh) or an earlier
++# observation is not recaptured. Supervisors call this before
++# oc_record_failure so the ledger row can reference real evidence for every
++# terminal event, replaced or not.
++oc_capture_terminal_evidence() {
++  # $1 town, $2 office, $3 agent id, $4 cwd, $5 meta JSON
++  [ -f "$1/government/terminal-appointment-evidence.sh" ] || return 0
++  if [ -d "${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/appointments/terminal-evidence/$3" ]; then
++    return 0
++  fi
++  printf '%s\n' "$5" | /bin/sh "$1/government/terminal-appointment-evidence.sh" "$2" "$3" "$4" >/dev/null 2>&1 || :
+   return 0
+ }
+ 
+@@ -94,8 +134,8 @@ oc_quiesce_for_reset() {
+ }
+ 
+ # Decide from the failure record alone (§3.1.5) whether a bounded reset is due:
+-# at least oc_threshold failures inside oc_window, cooldown expired. The
+-# currently-observed agent state is irrelevant to this decision.
++# at least oc_threshold transient failures inside oc_window, cooldown expired.
++# The currently-observed agent state is irrelevant to this decision.
+ oc_reset_due() {
+   # $1 liveness dir, $2 office key, $3 now; returns 0 when a reset is due
+   oc_log=$1/failures/events.tsv
+@@ -111,11 +151,21 @@ oc_reset_due() {
+     oc_now_sha=$(git -C "$oc_worktree" rev-parse HEAD 2>/dev/null || true)
+   fi
+   oc_line=0
+-  while IFS="$(printf '\t')" read -r oc_finished oc_office oc_agent oc_inv oc_cls oc_safe oc_sha; do
++  while IFS="$(printf '\t')" read -r oc_finished oc_office oc_agent oc_inv oc_cls oc_retry_safe oc_sha oc_tstate oc_transient oc_evidence; do
+     oc_line=$((oc_line+1))
+     [ "$oc_line" -gt "$oc_after" ] || continue
+     case "$oc_finished" in ''|*[!0-9]*) continue ;; esac
+     [ "$oc_office" = "$2" ] || continue
++    # Reset-eligible: an observed terminal failure the runtime classifies as
++    # transient. Legacy rows without a stored transient flag stay eligible on
++    # their classification (supervisors historically recorded only transient
++    # failures); recorded stopped/killed events are never threshold resets.
++    if [ -n "$oc_tstate" ] && [ "$oc_tstate" != "failed" ]; then continue; fi
++    if [ -n "$oc_transient" ]; then
++      if ! oc_is_transient "$oc_cls" "$oc_transient"; then continue; fi
++    else
++      oc_is_transient "$oc_cls" "" >/dev/null 2>&1 || continue
++    fi
+     if [ -n "$oc_now_sha" ] && [ "$oc_sha" != "$oc_now_sha" ]; then continue; fi
+     if [ $((oc_finished + oc_window)) -gt "$3" ]; then
+       oc_count=$((oc_count + 1))
+@@ -131,6 +181,59 @@ oc_reset_due() {
+   return 0
+ }
+ 
++# THE supervisor decision point (Act 19 §3, single-source per-office ledger):
++# consults the durable failure ledger; a terminal appointment by itself NEVER
++# authorizes a new Antonina ID or a registry overwrite. Replacement is due
++# when either:
++#   (1) the Act 19 §3.1 threshold reset is due (oc_reset_due); or
++#   (2) terminal continuity is due: the office is terminally dead
++#       ($4 in failed|stopped|killed), the ledger has a recorded terminal
++#       event for this office, that event has aged past oc_cooldown (no
++#       immediate replacement of a freshly dead office), and no reset has
++#       been recorded for the office since that event (the replacement
++#       boundary).
++# Every path that might replace an appointment (branch-bootstrap,
++# terminal-continuity, seat-liveness, clerk-liveness, sitting) must consult
++# this function first.
++oc_supervisor_replacement_due() {
++  # $1 liveness dir, $2 office, $3 now, $4 terminal state
++  if oc_reset_due "$1" "$2" "$3"; then
++    return 0
++  fi
++  case "$4" in
++    failed|stopped|killed) : ;;
++    *) return 1 ;;
++  esac
++  oc_log=$1/failures/events.tsv
++  [ -s "$oc_log" ] || return 1
++  oc_newest=0
++  while IFS="$(printf '\t')" read -r oc_f1 oc_f2 oc_f3 oc_f4 oc_f5 oc_f6 oc_f7 oc_tstate oc_transient oc_evidence; do
++    [ "$oc_f2" = "$2" ] || continue
++    case "$oc_tstate" in
++      failed|stopped|killed) : ;;
++      *) continue ;;
++    esac
++    case "$oc_f1" in ''|*[!0-9]*) continue ;; esac
++    if [ "$oc_f1" -gt "$oc_newest" ]; then
++      oc_newest=$oc_f1
++      :
++    fi
++  done < "$oc_log"
++  [ "$oc_newest" -gt 0 ] || return 1
++  # The office is replaced only after its newest terminal event ages past
++  # the cooldown; a fresh terminal event never triggers an immediate swap.
++  [ $((oc_newest + oc_cooldown)) -gt "$3" ] && return 1
++  oc_last_reset=0
++  if [ -s "$1/last-reset-$2" ]; then
++    oc_last_reset=$(cat "$1/last-reset-$2")
++    case "$oc_last_reset" in ''|*[!0-9]*) oc_last_reset=0 ;; esac
++  fi
++  # A reset recorded since the terminal event means the office is already
++  # being re-established; do not replace it again while it is alive.
++  [ "$oc_last_reset" -lt "$oc_newest" ] || return 1
++  return 0
++}
++
+ # Clear the consecutive-failure record after a reset so the next streak starts
+ # at zero. History remains auditable in recoveries.log and the incident log.
+ oc_clear_failures() {
+diff --git a/government/seat-liveness.sh b/government/seat-liveness.sh
+index 604c501b..c014774f 100644
+--- a/government/seat-liveness.sh
++++ b/government/seat-liveness.sh
+@@ -23,18 +23,28 @@ if [ "$mode" != failed ]; then
+   oc_commit_age_signal "$root" "$id" "$seats/$seat_id" "$now"
+   exit 0
+ fi
++if [ "$mode" = stopped ] || [ "$mode" = killed ]; then
++  # Terminal events enter the single-source per-office ledger; the shared
++  # supervisor decision point reads it, and replacement stays with it.
++  oc_capture_terminal_evidence "$town" "$seat_id" "$id" "$seats/$seat_id" "$meta" || :
++  oc_record_failure "$root" "$seat_id" "$id" "$invocation" "$reason" "$finished" "no" "$tflag" "$now" "$seats/$seat_id" "$mode" "$tflag" "$(oc_terminal_evidence_path "$id")" || :
++  oc_commit_age_signal "$root" "$id" "$seats/$seat_id" "$now"
++  exit 0
++fi
+ if ! oc_is_transient "$reason" "$tflag"; then
++  oc_record_failure "$root" "$seat_id" "$id" "$invocation" "$reason" "$finished" "no" "$tflag" "$now" "$seats/$seat_id" "$mode" "$tflag" "$(oc_terminal_evidence_path "$id")" || :
+   oc_surface_permanent "$root" "$id" "$reason"
+   # Permanent for the old invocation does not imply that a completely new
+   # investigator must be prohibited from diagnosing or repairing the cause.
+   # Do not replay the original request.
+   if [ -f "$town/government/terminal-continuity.sh" ]; then
+-    /bin/sh "$town/government/terminal-continuity.sh" recover "$seat_id"
++    /bin/sh "$town/government/terminal-continuity.sh" recover "$seat_id" || :
+   fi
+   exit 0
+ fi
+ retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+-oc_record_failure "$root" "$seat_id" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$seats/$seat_id"
++oc_capture_terminal_evidence "$town" "$seat_id" "$id" "$seats/$seat_id" "$meta" || :
++oc_record_failure "$root" "$seat_id" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$seats/$seat_id" "$mode" "$tflag" "$(oc_terminal_evidence_path "$id")"
+ [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$root" "$seat_id" "$id" "$invocation"
+ oc_commit_age_signal "$root" "$id" "$seats/$seat_id" "$now"
+ oc_worktree=$seats/$seat_id
+@@ -42,7 +52,7 @@ if ! oc_reset_due "$root" "$seat_id" "$now"; then
+   # The ordinary Act19 threshold covers oscillations, not a dead runner.
+   # A terminal old session must not freeze a seat until three failures.
+   if [ -f "$town/government/terminal-continuity.sh" ]; then
+-    /bin/sh "$town/government/terminal-continuity.sh" recover "$seat_id"
++    /bin/sh "$town/government/terminal-continuity.sh" recover "$seat_id" || :
+   fi
+   exit 0
+ fi
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 2605760b..f55e3612 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -7,6 +7,13 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ tab=$(printf '\t')
+ clerk=$(sed -n "1s/$tab.*//p" "$town/government/seats.tsv")
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++# Single-source supervisor helpers (Act 19 §3): the shared failure-event
++# recorder and the supervisor decision point read the durable per-office
++# ledger; sitting consults the same decision point before any new
++# appointment may be created for this seat.
++if [ -f "$town/government/office-continuity.sh" ]; then
++  . "$town/government/office-continuity.sh"
++fi
+ if [ "$seat" = "$clerk" ] && [ -f "$town/government/institutional-cases.py" ]; then
+   python3 "$town/government/institutional-cases.py" reconcile >/dev/null 2>&1 || true
+ fi
+@@ -26,6 +33,21 @@ mode=$(printf '%s\n' "$status" | jq -r '.state')
+ if [ "$mode" = failed ]; then
+   retry_safe=$(printf '%s\n' "$status" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+   [ "$retry_safe" = yes ] || { echo "Viche: seat $seat failed without retry-safe evidence" >&2; exit 1; }
++  # Single supervisor decision point (Act 19 §3): a terminal appointment by
++  # itself never authorizes a new Antonina ID or a registry overwrite. When
++  # the office ledger says replacement is due, run the shared
++  # terminal-continuity path and re-resolve so the seat is dispatched on the
++  # new appointment; otherwise the seat stays on its terminal appointment.
++  if [ -f "$town/government/office-continuity.sh" ]; then
++    if oc_supervisor_replacement_due "$state/liveness" "$seat" "$(date +%s)" "$mode" 2>/dev/null; then
++      if [ -f "$town/government/terminal-continuity.sh" ]; then
++        /bin/sh "$town/government/terminal-continuity.sh" recover "$seat" 2>/dev/null || :
++      fi
++      appointed=$(/bin/sh "$town/government/appointments.sh" resolve "$seat") || exit 1
++      status=$(antonina agent status --id "$appointed" --json) || exit 1
++      mode=$(printf '%s\n' "$status" | jq -r '.state')
++    fi
++  fi
+ fi
+ case "$mode" in stopped|killed) exit 1;; esac
+ # Resource Safety Act: defer convening when cgroup headroom is below the floor.
+diff --git a/government/terminal-continuity.sh b/government/terminal-continuity.sh
+index bcbc12e6..da342d70 100644
+--- a/government/terminal-continuity.sh
++++ b/government/terminal-continuity.sh
+@@ -58,6 +58,13 @@ fi
+ [ "$operation" = recover ] || exit 2
+ mkdir -p "$root"
+ umask 077
++# The single-source supervisor decision point (Act 19 §3): consult the
++# durable per-office failure ledger before creating any new appointment.
++# Older trees without office-continuity.sh keep legacy replace-on-failure
++# behavior.
++if [ -f "$town/government/office-continuity.sh" ]; then
++    . "$town/government/office-continuity.sh"
++fi
+ # Protect from concurrent boot/rescue processes; no double appointment.
+ exec 9>"$root/lock-$office"
+ flock -x 9
+@@ -107,6 +114,18 @@ if [ "$mode" = stopped ] || [ "$mode" = killed ]; then
+   fi
+   exit 1
+ fi
++# Single supervisor decision point (Act 19 §3): a terminal appointment by
++# itself never authorizes a new Antonina ID or a registry overwrite. When the
++# office ledger says replacement is due (the Act 19 §3.1 threshold, or the
++# aged terminal-continuity reconcile boundary), the replacement below
++# proceeds; otherwise the office keeps its terminal appointment.
++oc_now=$(date +%s)
++if [ -f "$town/government/office-continuity.sh" ]; then
++    if ! oc_supervisor_replacement_due "$state/liveness" "$office" "$oc_now" "$mode"; then
++        echo "Continuity: $office terminal $mode is not due for replacement (Act 19 supervisor decision point)" >&2
++        exit 1
++    fi
++fi
+ printf '%s\n' "$meta" | jq -e '(.intent // "") != "stop"' >/dev/null || {
+   echo "Continuity: failed $office was intentionally stopped; no automatic replacement" >&2
+   exit 1
+@@ -141,6 +160,11 @@ fi
+ tmp=$(mktemp "$root/reconciled.XXXXXXXX")
+ jq -c --arg new "$new" '. + {state:"awaiting_reconciliation",successor_agent:$new}' "$receipt" > "$tmp"
+ mv -f "$tmp" "$receipt"
++# The replacement is a reset of this office's per-office streak boundary.
++if [ -f "$town/government/office-continuity.sh" ]; then
++    mkdir -p "$state/liveness"
++    printf '%s\n' "$oc_now" > "$state/liveness/last-reset-$office"
++fi
+ # A hold on the OLD request is valid evidence, not a prohibition on a NEW
+ # reconciliatory appointment. Archive it instead of erasing it.
+ hold=$state/liveness/unsafe-holds/$office
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 9d283364..114ab01a 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -52,9 +52,33 @@ if /bin/sh "$repo/government/executive-innovation-cycle.sh" 2>/dev/null; then
+ fi
+ test ! -e "$MOCK_ROOT/runs"
+ 
+-# One terminal 5xx is sufficient for a NEW reconciliation appointment,
+-# never for literal replay of the failed native turn. Preserve original id.
+- /bin/sh "$repo/government/terminal-continuity.sh" recover innovation-centre
++# A terminal 5xx is recorded in the single-source per-office ledger by the
++# office supervisor; terminal continuity by itself does not replace while
++# the shared supervisor decision point is not due — a fresh terminal event
++# never triggers an immediate new appointment.
++cp "$repo/government/office-continuity.sh" "$d/town/government/office-continuity.sh"
++. "$repo/government/office-continuity.sh"
++oc_record_failure "$d/state/liveness" innovation-centre old-agent run-old \
++  transient_backend_server_error "$(date +%s)" "no" "$(date +%s)" \
++  "$d/seats/branches/innovation-centre" failed true ""
++: > "$MOCK_ROOT/replacements"
++if /bin/sh "$repo/government/terminal-continuity.sh" recover innovation-centre 2>"$d/fresh-err"; then
++  echo 'terminal continuity replaced without the decision point being due' >&2; exit 1
++fi
++test "$(cat "$MOCK_ROOT/registry")" = old-agent
++test "$(wc -l < "$MOCK_ROOT/replacements")" -eq 0
++grep -Fq 'not due for replacement' "$d/fresh-err"
++# Once the terminal event ages past the decision point cooldown, the office
++# is due: a newly dead office earns a NEW reconciliation appointment with
++# durable evidence, never a literal replay of the failed native turn. The
++# ledger is the single source of terminal events; age the recorded event to
++# simulate the passage of time.
++awk -v aged="$(( $(date +%s) - 3600 ))" '
++  NR == 1 { sub(/^[0-9]+/, aged); print; next }
++  { print }
++' "$d/state/liveness/failures/events.tsv" > "$d/state/liveness/failures/events.tsv.aged"
++mv "$d/state/liveness/failures/events.tsv.aged" "$d/state/liveness/failures/events.tsv"
++/bin/sh "$repo/government/terminal-continuity.sh" recover innovation-centre
+ test "$(cat "$MOCK_ROOT/registry")" = new-agent
+ test "$(wc -l < "$MOCK_ROOT/replacements")" -eq 1
+ jq -e '.state=="awaiting_reconciliation" and .previous_agent=="old-agent" and .successor_agent=="new-agent" and .old_session_preserved==true' "$d/state/continuity/reconciliation-innovation-centre.json" >/dev/null
+diff --git a/tests/office-failure-recorder-integration-smoke.sh b/tests/office-failure-recorder-integration-smoke.sh
+new file mode 100755
+index 00000000..d2211f1e
+--- /dev/null
++++ b/tests/office-failure-recorder-integration-smoke.sh
+@@ -0,0 +1,160 @@
++#!/bin/sh
++# Real integration path for Act 19 §3: the office supervisor (branch-bootstrap)
++# records every terminal appointment event in the single-source per-office
++# ledger (with retry-safe and durable evidence); the shared supervisor decision
++# point (oc_supervisor_replacement_due) gates every new appointment;
++# terminal-continuity and sitting consult the same decision point.
++#
++# Property under test: a failed/stopped/killed appointment by itself causes NO
++# new Antonina ID and NO registry overwrite. Replacements happen only when the
++# decision point is due: the Act 19 §3.1 threshold, or the aged
++# terminal-continuity reconcile boundary.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++
++mkdir -p "$d/bin" \
++         "$d/town/government" \
++         "$d/seats/branches/executive" "$d/seats/branches/judiciary" \
++         "$d/seats/branches/economy" "$d/seats/branches/innovation-centre" \
++         "$d/state" "$d/mock"
++printf 'c1a00001\tClerk\tintake\n' > "$d/town/government/seats.tsv"
++for f in appointments.sh branch-bootstrap.sh office-continuity.sh \
++         terminal-continuity.sh terminal-appointment-evidence.sh sitting.sh \
++         AGENT-REPORTING-POLICY.md; do
++    cp "$repo/government/$f" "$d/town/government/$f"
++done
++for branch in executive judiciary economy innovation-centre; do
++    git -C "$d/seats/branches/$branch" init -q
++    git -C "$d/seats/branches/$branch" -c user.name=fixture -c user.email=fixture@example.com \
++        commit --allow-empty -qm "$branch-baseline"
++done
++
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  'agent status')
++    id=$4
++    [ -s "$MOCK_ROOT/$id.json" ] || exit 3
++    cat "$MOCK_ROOT/$id.json" ;;
++  'agent new')
++    n=0; [ ! -s "$MOCK_ROOT/next" ] || n=$(cat "$MOCK_ROOT/next")
++    n=$((n+1)); printf '%s\n' "$n" > "$MOCK_ROOT/next"
++    id="id-$n"
++    printf '{"state":"idle","model":null,"variant":null}\n' > "$MOCK_ROOT/$id.json"
++    printf '%s\n' "$id" ;;
++  'agent log')
++    printf 'captured log\n' ;;
++  'agent stop')
++    id=$4
++    jq '.state="stopped"' "$MOCK_ROOT/$id.json" > "$MOCK_ROOT/$id.next"
++    mv "$MOCK_ROOT/$id.next" "$MOCK_ROOT/$id.json" ;;
++  'board list') printf '[]\n' ;;
++  'board show') printf '{"body":"","messages":[]}\n' ;;
++  *) echo "unexpected Antonina call: $*" >&2; exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock" \
++       VICHE_TOWN_ROOT="$d/town" VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state"
++
++# Real scripts under test, sourced from the fixture town.
++. "$d/town/government/office-continuity.sh"
++mkdir -p "$VICHE_STATE_ROOT/appointments"
++liv=$VICHE_STATE_ROOT/liveness
++registry=$VICHE_STATE_ROOT/appointments/appointments.tsv
++ledger=$liv/failures/events.tsv
++
++# $1 state, $2 finished_at, $3 invocation, $4 classification,
++# $5 transient, $6 automatic_retry_safe, $7 agent id
++set_status() {
++  printf '{"state":"%s","alive":false,"active_runner":false,"model":null,"variant":"low","finished_at":"%s","invocation_id":"%s","backend_error":{"classification":"%s","transient":%s,"automatic_retry_safe":%s}}\n' \
++    "$1" "$2" "$3" "$4" "$5" "$6" > "$MOCK_ROOT/$7.json"
++}
++run_branch() { /bin/sh "$VICHE_TOWN_ROOT/government/branch-bootstrap.sh" "$1"; }
++registry_row() { awk -F '\t' -v k="$1" '$1==k {print $2}' "$registry"; }
++ledger_rows_for() { awk -F '\t' -v k="$1" '$2==k {n++} END {print n+0}' "$ledger"; }
++
++# --- Part 1: the office supervisor path (branch-bootstrap) ------------------
++printf '{"state":"idle","model":null,"variant":"low"}\n' > "$MOCK_ROOT/executive-agent.json"
++printf 'executive\texecutive-agent\n' > "$registry"
++base=$(date +%s)
++
++# A: a single transient failure enters the ledger; no new appointment.
++set_status failed "$((base+1))" run-a1 upstream_endpoint_unavailable true true executive-agent
++run_branch executive
++test "$(registry_row executive)" = executive-agent
++test "$(ledger_rows_for executive)" -eq 1
++test "$(awk -F '\t' -v k=executive '$2==k && $8=="failed" {n++} END {print n+0}' "$ledger")" -eq 1
++test "$(awk -F '\t' -v k=executive '$2==k && $6=="yes" {n++} END {print n+0}' "$ledger")" -eq 1
++test "$(awk -F '\t' -v k=executive '$2==k && $9=="true" {n++} END {print n+0}' "$ledger")" -eq 1
++test -s "$VICHE_STATE_ROOT/appointments/terminal-evidence/executive-agent"
++# A fresh terminal event is NOT an immediate replacement.
++if oc_supervisor_replacement_due "$liv" executive "$(date +%s)" failed; then
++  echo 'decision point fired on a fresh terminal event' >&2; exit 1
++fi
++
++# B: a second distinct transient failure is still below the threshold.
++set_status failed "$((base+2))" run-a2 upstream_endpoint_unavailable true true executive-agent
++run_branch executive
++test "$(registry_row executive)" = executive-agent
++test "$(ledger_rows_for executive)" -eq 2
++if oc_supervisor_replacement_due "$liv" executive "$(date +%s)" failed; then
++  echo 'decision point fired below the Act 19 threshold' >&2; exit 1
++fi
++
++# C: the third distinct transient failure inside the window reaches the
++# Act 19 §3.1 threshold: branch-bootstrap performs exactly one replacement.
++set_status failed "$((base+3))" run-a3 upstream_endpoint_unavailable true true executive-agent
++run_branch executive
++new_exec_id=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve executive)
++test "$new_exec_id" != executive-agent
++test "$(registry_row executive)" = "$new_exec_id"
++test "$(wc -l < "$VICHE_STATE_ROOT/liveness/recoveries.log")" -eq 1
++
++# --- Part 2: the terminal-continuity decision-point path -------------------
++# D: a freshly dead office below threshold — terminal continuity defers.
++judge_id=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure judiciary)
++set_status failed "$(date +%s)" run-judge-fresh upstream_endpoint_unavailable true true "$judge_id"
++run_branch judiciary
++test "$(registry_row judiciary)" = "$judge_id"
++if oc_supervisor_replacement_due "$liv" judiciary "$(date +%s)" failed; then
++  echo 'decision point fired on a fresh terminal event (judiciary)' >&2; exit 1
++fi
++
++# E: an aged terminal event — the decision point is due: terminal continuity
++# replaces the dead appointment with a new reconcilatory one.
++econ_id=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure economy)
++set_status failed "$(( $(date +%s) - 3600 ))" run-econ-death upstream_endpoint_unavailable true true "$econ_id"
++run_branch economy
++econ_id_after=$(registry_row economy)
++test "$econ_id_after" != "$econ_id"
++jq -e '.state=="awaiting_reconciliation" and .previous_agent=="'"$econ_id"'"' \
++  "$d/state/continuity/reconciliation-economy.json" >/dev/null
++test -s "$d/state/liveness/last-reset-economy"
++
++# --- Part 3: sitting consults the same decision point -----------------------
++# F: sitting on a fresh death defers (no immediate new appointment).
++innov_id=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure innovation-centre)
++set_status failed "$(date +%s)" run-inv-0 upstream_endpoint_unavailable true true "$innov_id"
++oc_record_failure "$liv" innovation-centre "$innov_id" run-inv-0 upstream_endpoint_unavailable "$(date +%s)" yes "$(date +%s)" "$d/seats/branches/innovation-centre" failed true "$(oc_terminal_evidence_path "$innov_id")"
++/bin/sh "$VICHE_TOWN_ROOT/government/sitting.sh" innovation-centre
++test "$(registry_row innovation-centre)" = "$innov_id"
++if oc_supervisor_replacement_due "$liv" innovation-centre "$(date +%s)" failed; then
++  echo 'decision point fired on a fresh terminal event (innovation-centre)' >&2; exit 1
++fi
++
++# F2: the §3.1 threshold is reached — sitting replaces through the shared
++# decision point and re-resolves the seat before returning.
++oc_record_failure "$liv" innovation-centre "$innov_id" run-inv-1 upstream_endpoint_unavailable "$(date +%s)" yes "$(date +%s)" "$d/seats/branches/innovation-centre" failed true "$(oc_terminal_evidence_path "$innov_id")"
++oc_record_failure "$liv" innovation-centre "$innov_id" run-inv-2 upstream_endpoint_unavailable "$(date +%s)" yes "$(date +%s)" "$d/seats/branches/innovation-centre" failed true "$(oc_terminal_evidence_path "$innov_id")"
++set_status failed "$(date +%s)" run-inv-2 upstream_endpoint_unavailable true true "$innov_id"
++/bin/sh "$VICHE_TOWN_ROOT/government/sitting.sh" innovation-centre
++innov_id_after=$(registry_row innovation-centre)
++test "$innov_id_after" != "$innov_id"
++jq -e '.state=="awaiting_reconciliation" and .previous_agent=="'"$innov_id"'"' \
++  "$d/state/continuity/reconciliation-innovation-centre.json" >/dev/null
++
++echo 'Office failure-recorder real-integration smoke passed'
+diff --git a/tests/terminal-continuity-o1-smoke.sh b/tests/terminal-continuity-o1-smoke.sh
+index 7466f54e..51601b72 100755
+--- a/tests/terminal-continuity-o1-smoke.sh
++++ b/tests/terminal-continuity-o1-smoke.sh
+@@ -42,11 +42,28 @@ cp "$repo/government/terminal-continuity.sh" "$d/town/government/terminal-contin
+ export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock"
+ export VICHE_TOWN_ROOT="$d/town" VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state"
+ 
+-# Control: a positively dead failed backend turn still earns the automatic
+-# reconciliatory appointment with durable evidence, never a prompt replay.
++# Control: a positively dead failed backend turn enters the single-source
++# ledger; terminal continuity by itself does not replace while the shared
++# supervisor decision point is not due — a fresh terminal event never
++# triggers an immediate new appointment.
+ printf 'old-agent\n' > "$d/mock/registry"
+ : > "$d/mock/replacements"
+ printf '{"state":"failed","alive":false,"active_runner":false,"intent":null,"native_session_id":"ses_failed","steers_pending":0,"finished_at":1000.0,"backend_error":{"classification":"transient_backend_server_error","transient":true,"automatic_retry_safe":false}}\n' > "$d/mock/old-agent.json"
++cp "$repo/government/office-continuity.sh" "$d/town/government/office-continuity.sh"
++. "$repo/government/office-continuity.sh"
++if /bin/sh "$repo/government/terminal-continuity.sh" recover innovation-centre 2>"$d/fresh-err"; then
++  echo 'terminal continuity replaced without the decision point being due' >&2; exit 1
++fi
++test "$(cat "$d/mock/registry")" = old-agent
++test "$(wc -l < "$d/mock/replacements")" -eq 0
++grep -Fq 'not due for replacement' "$d/fresh-err"
++# Once the terminal event ages past the decision point cooldown, the office
++# is due: a newly dead office earns a new reconciliatory appointment with
++# durable evidence, never a prompt replay of the uncertain turn.
++now_s=$(date +%s)
++oc_record_failure "$d/state/liveness" innovation-centre old-agent run-old-aged \
++  upstream_endpoint_unavailable "$((now_s - 3600))" yes "$now_s" \
++  "$d/seats/branches/innovation-centre" failed true ""
+ /bin/sh "$repo/government/terminal-continuity.sh" recover innovation-centre
+ test "$(cat "$d/mock/registry")" = new-agent
+ test "$(wc -l < "$d/mock/replacements")" -eq 1

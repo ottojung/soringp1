@@ -1,0 +1,551 @@
+commit 69ba50f51ff2d7fd60b18497a55c55bc566f48b9
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Mon Nov 23 23:34:37 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Nov 23 23:34:37 2026 +0000
+
+    PnP: optimize for verified leaderboard rank and rising lead; delegate staffing to Executive
+
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index d2458a1d..72b325d3 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -140,6 +140,7 @@ fi
+ # Optional mission-specific diagnostics are supplied by the missions, never
+ # wired into the Executive itself. They are advisory, bounded and read-only.
+ mission_diagnostics=
++mission_dispatch_signature=
+ for diagnostic in "$town"/missions/*/status.sh; do
+   [ -f "$diagnostic" ] || continue
+   label=${diagnostic%/status.sh}
+@@ -148,6 +149,14 @@ for diagnostic in "$town"/missions/*/status.sh; do
+     line='{"status":"unavailable","action":"investigate diagnostic failure"}'
+   mission_diagnostics="$mission_diagnostics
+ $label: $line"
++  # Compact stable signal: a change in staffing, checked output or mission
++  # state causes an Executive pass. Timestamps and full notes do not.
++  signal=$(printf '%s\n' "$line" | jq -cS '
++      if type=="object" then
++        (.dispatch_signal // {status,counts,by_state})
++      else . end' 2>/dev/null) || signal="unreadable"
++  mission_dispatch_signature="$mission_dispatch_signature
++$label:$signal"
+ done
+ prompt=$(cat <<EOF
+ $prompt
+@@ -206,7 +215,7 @@ if [ -f "$town/government/dispatch-gate.sh" ]; then
+   if { printf '%s\n' "$eligible" "$delivery" "$handoffs" "$recovery" "$board_sig" "$proceed"
+        git -C "$town" rev-parse HEAD 2>/dev/null || :
+        printf '%s\n' "$cases" | jq -cS '[.open_cases[]? | {id,signal,state,owner}]' 2>/dev/null || printf '%s\n' "$cases"
+-       printf '%s\n' "$frontier" | jq -cS '{status,counts,fronts_total}' 2>/dev/null || printf '%s\n' "$frontier"; } |
++       printf '%s\n' "$mission_dispatch_signature"; } |
+      /bin/sh "$town/government/dispatch-gate.sh" check executive "${VICHE_EXECUTIVE_GATE_MAX_AGE:-7200}" > "$state/branches/executive-gate.log"; then
+     :
+   else
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index 7d95a414..53066d36 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -54,3 +54,14 @@ The Viche boot cycle runs `missions/pnp/cycle.sh` independently to renew
+ leases every nine minutes and reconcile remote results without blocking
+ other Town work. The standing Executive agenda continuously commissions
+ useful mathematics; completing this setup does not close the mission.
++
++
++## Public leaderboard and independent staffing
++
++The site leaderboard is read from data.pequalnp.com/head.json and the immutable
++contributors export it names. Run python3 missions/pnp/leaderboard.py update
++(offline: status). The mission cycle updates this nonblocking and retains the
++last verified snapshot through outages. Only checked steps credited to
++ottojung count. Source and observations persist under Viche state, never
++under government. The status.sh adapter reports leaderboard movement plus
++actual Antonina P vs NP worker visibility; only Executive dispatches them.
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 32d985e4..9aa380ea 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -6,4 +6,8 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
+ [ -r "$town/missions/pnp/cli.py" ] || exit 0
+ cd "$town"
++# The site itself, not our PR counts or agent count, decides the score.
++# A transient network failure keeps the last verified snapshot intact.
++python3 missions/pnp/leaderboard.py update || echo "PnP public leaderboard unavailable; retry next cycle" >&2
++# Handle existing leases and PRs regardless of leaderboard availability.
+ python3 missions/pnp/cli.py reconcile
+diff --git a/missions/pnp/leaderboard.py b/missions/pnp/leaderboard.py
+new file mode 100644
+index 00000000..861d11f3
+--- /dev/null
++++ b/missions/pnp/leaderboard.py
+@@ -0,0 +1,141 @@
++#!/usr/bin/env python3
++"""The public, all-time P vs NP leaderboard is the research mission's scoreboard.
++
++Only the site's exported checked-step totals count, never agent/PR activity.
++The immutable contributor-file path is taken from the site's live head.json.
++"""
++import datetime
++import json
++import os
++from pathlib import Path
++import re
++import subprocess
++import sys
++import tempfile
++
++BASE = "https://data.pequalnp.com/"
++OWNER = "ottojung"
++PATH_RE = re.compile(r"data/contributors\.[0-9a-f]{8,64}\.json\Z")
++
++
++def fetch_json(url):
++    p = subprocess.run(["curl", "--fail", "--silent", "--show-error",
++                        "--location", "--max-time", "15", url],
++                       capture_output=True, timeout=20, check=True)
++    if len(p.stdout) > 4_000_000:
++        raise ValueError("oversized leaderboard export")
++    return json.loads(p.stdout)
++
++
++def scoreboard(entries, owner=OWNER):
++    if not isinstance(entries, list):
++        raise ValueError("contributors list is missing")
++    rows = []
++    seen = set()
++    for entry in entries:
++        name = entry.get("github")
++        score = entry.get("steps")
++        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,39}", name):
++            raise ValueError("invalid contributor handle")
++        if type(score) is not int or score < 1 or name.lower() in seen:
++            raise ValueError("invalid or duplicated checked-step count")
++        seen.add(name.lower())
++        rows.append({"handle": name, "steps": score,
++                     "first": entry.get("first_proof_at") or ""})
++    # Official website: most checked steps first; first proof breaks ties.
++    rows.sort(key=lambda x: (-x["steps"], x["first"] or "9999",
++                             x["handle"].lower()))
++    mine = next(((i + 1, p) for i, p in enumerate(rows)
++                 if p["handle"].lower() == owner.lower()), None)
++    rank = mine[0] if mine else None
++    our_steps = mine[1]["steps"] if mine else 0
++    competitors = [p for p in rows if p["handle"].lower() != owner.lower()]
++    runner_up = competitors[0] if competitors else None
++    leader = rows[0] if rows else None
++    their_best = runner_up["steps"] if runner_up else 0
++    return {"rank": rank, "contributors": len(rows),
++            "our_steps": our_steps, "leader": leader,
++            "runner_up": runner_up if rank == 1 else
++                         (rows[1] if len(rows) > 1 else None),
++            "our_margin_vs_best_competitor": our_steps - their_best,
++            "lead_over_second": (our_steps - their_best if rank == 1 else None),
++            "additional_steps_to_clear_first": max(0, their_best + 1 - our_steps),
++            "rank_one": rank == 1}
++
++
++def record_path():
++    return Path(os.environ.get("VICHE_STATE_ROOT",
++                              "/var/lib/lubko/wd/viche-state")) / "pnp/leaderboard"
++
++
++def load():
++    path = record_path() / "latest.json"
++    try:
++        return json.loads(path.read_text())
++    except (OSError, ValueError):
++        return {"available": False, "reason": "no verified leaderboard snapshot"}
++
++
++def save(snapshot):
++    path = record_path()
++    path.mkdir(parents=True, exist_ok=True)
++    old = load()
++    old_margin = old.get("our_margin_vs_best_competitor")
++    snapshot["margin_change_since_previous_snapshot"] = (
++        snapshot["our_margin_vs_best_competitor"] - old_margin
++        if isinstance(old_margin, int) else None)
++    old_core = {k: old.get(k) for k in
++                ("rank", "our_steps", "leader", "runner_up")}
++    new_core = {k: snapshot.get(k) for k in old_core}
++    # Only append history when scoreboard values change.
++    if old_core != new_core:
++        with (path / "history.jsonl").open("a", encoding="utf-8") as history:
++            history.write(json.dumps(snapshot, sort_keys=True) + "\n")
++    fd, tmp = tempfile.mkstemp(prefix=".leaderboard-", dir=path)
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as file:
++            json.dump(snapshot, file, sort_keys=True, indent=2)
++            file.write("\n")
++            file.flush()
++            os.fsync(file.fileno())
++        os.replace(tmp, path / "latest.json")
++    finally:
++        if os.path.exists(tmp):
++            os.unlink(tmp)
++
++
++def update():
++    head = fetch_json(BASE + "head.json")
++    rel = head.get("files", {}).get("contributors", "")
++    if not isinstance(rel, str) or not PATH_RE.fullmatch(rel):
++        raise ValueError("unexpected contributor file in live export")
++    source = fetch_json(BASE + rel)
++    entries = source.get("contributors", source.get("entries"))
++    result = scoreboard(entries)
++    checked_at = head.get("checked_at") or head.get("generated_at")
++    if not isinstance(checked_at, str) or not checked_at:
++        raise ValueError("leaderboard source timestamp missing")
++    result.update({"available": True, "source": BASE + rel,
++                   "source_version": head.get("version"),
++                   "source_checked_at": checked_at,
++                   "observed_at": datetime.datetime.now(
++                       datetime.timezone.utc).isoformat()})
++    save(result)
++    return result
++
++
++def main():
++    if len(sys.argv) != 2 or sys.argv[1] not in ("update", "status"):
++        raise SystemExit("usage: leaderboard.py update|status")
++    try:
++        result = update() if sys.argv[1] == "update" else load()
++        print(json.dumps(result, sort_keys=True))
++    except (subprocess.SubprocessError, OSError, ValueError,
++            json.JSONDecodeError) as exc:
++        print("PnP leaderboard unavailable (preserved last good snapshot): " +
++              str(exc), file=sys.stderr)
++        raise SystemExit(1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 4cd9c746..b6f9430f 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -7,22 +7,78 @@ mission.** The bootstrap issue R4WYVaWyRxoD911soUtcAo-sciatic may be closed
+ only after the independently checked delivery is deployed; the research
+ mission must continue without any new setup project or Founder prompting.
+ 
+-Every Executive research cycle, alongside existing SoringP1 obligations:
+-inspect current ottojung P vs NP desk leases, research agents and submitted PRs;
+-advance/research worthwhile public mathematical gaps and counterexamples;
+-commission independent useful Antonina research, not redundant workers;
+-route finished candidate proofs through the deterministic Viche publisher;
+-follow checker verdicts, repair rejected proofs and record accepted outcomes.
+-Do not equate local proof compilation, Git branch push, open PR, acceptance,
+-or research novelty. Keep only useful work, without artificial agent caps,
+-while preserving SoringP1 and other offices' resource entitlements.
++## Objective: lead the public, all-time contributor leaderboard
++
++The Founder explicitly defines the long-standing performance objective as:
++**maximize the account ottojung's position on pequalnp.com's public,
++all-time contributor leaderboard. Once ottojung is #1, maximize and
++continuously seek to INCREASE its lead in accepted, checked steps over #2.**
++Competing agents can improve at any time; assess and improve the real
++lead trajectory rather than claiming it can never fall. Tie-breaks are the
++website's published first-proof order; prefer a strictly positive step lead.
++
++The metric is **checked steps credited to ottojung in the site's published
++immutable contributor export**, not agents launched, files written, branches,
++PRs opened, GitHub Actions green, or locally compiling proofs. Refutations
++count when the site credits them. Leaderboard evidence and change history:
++  /var/lib/lubko/wd/viche-state/pnp/leaderboard/{latest.json,history.jsonl}
++  python3 missions/pnp/leaderboard.py status
++  /bin/sh missions/pnp/status.sh
++Treat unavailable/stale data as UNKNOWN, never zero. Recheck external credit
++after GitHub's authoritative checker has accepted/merged contributions.
++Current 2026-11-23 public baseline: ottojung absent/unranked (zero checked),
++first 53 checked steps, second 46. This is a baseline, NOT a fixed threshold:
++poll the live source and adapt to leaderboard movement.
++
++## Ownership, staffing, and continuity — Executive only
++
++**ONLY Viche Executive may create, start, restart, steer or retire research
++agents.** Founder's external assistants, maintenance automation, Judiciary,
++researchers and publisher do not launch research agents. The Founder may
++specify objectives and inspect the system without seeding worker sessions.
++Do not infer Executive staffing effectiveness from agents started by an
++external operator. Require evidence that Executive independently recognizes
++zero/insufficient useful staffing and replenishes it through Antonina.
++Record the Executive's decisions and worker assignments durably.
++
++For every Executive cycle:
++- Inspect the exact public rank/score, the #1 and #2 totals, gap, and changes
++  since earlier measurements, plus desk leases, research experiments and PRs.
++- Dispatch and replenish **multiple genuinely independent mathematical
++  fronts** (Lean formalization, counterexample searching, proof reasoning,
++  desk gap claims and PR corrections as appropriate), allocating concurrency
++  by marginal verified contributions, host resource availability and current
++  independent tasks. ONE researcher is not a satisfactory steady state while
++  multiple valuable fronts are available. Do not hard-cap worker count or
++  spawn redundant agents just to increase a counter.
++- Take over the preexisting managed agents/worktrees under the roster
++  /var/lib/lubko/wd/viche-state/pnp/swarm/agents.json if useful, or retire them
++  and replace them yourself. Never expect an outside operator to restart them.
++  Check their actual Antonina states, output, remaining leases and dependencies.
++- Prefer claimable, well-scoped proofs with high expected accepted-step
++  throughput; keep a portfolio of harder/high-value results and rigorous
++  refutations where useful. Demand completed exact Lean proofs or reproducible
++  counterexamples, honest releases, and measurable progress. Track verified
++  accepted steps per time and resource use; avoid duplicate expensive builds.
++- When all desk leases are held or claim service is cooling, DO NOT go idle:
++  investigate published open claims and prepare proofs or bounded searches,
++  then promptly obtain official leases once available; never submit an
++  unleased gap against the project's rules.
++- Investigate any slowdown in credit rate or lost leadership: stalled workers,
++  model access, invalid checker, forgotten claims, unnecessary work, duplicate
++  efforts, excessive resources, or stalled upstream verdicts. Correct the
++  causes as part of normal Executive work without asking the Founder to
++  operate agents.
++
++Standing mission stays OPEN even while #1 or its lead is growing; this is
++an ongoing competition and never a one-time completion condition.
+ 
+ Exact project rules and execution contract:
+ missions/pnp/PROTOCOL.md.
+ Operator interface from the canonical checkout:
+ python3 missions/pnp/cli.py status|acquire|beat|release|submit|reconcile.
+-Existing desk leases are renewed by the independently nonblocking
+-missions/pnp/cycle.sh triggered from boot; the Executive still owns research,
++Desk lease reconciliation and public leaderboard observation are run
++by the independently nonblocking missions/pnp/cycle.sh from generic boot; the Executive still owns research,
+ failed-work decisions and dispatch. Do not launch a competing scheduler.
+ The publisher hardcodes Otto Jung <otto.jung@vauplace.com>, his GPG signing
+ subkey 08AF2726387BD4A4C87DF1821BEDDF96D7B1BA2B and the exact fork and
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+new file mode 100644
+index 00000000..68519b42
+--- /dev/null
++++ b/missions/pnp/status.py
+@@ -0,0 +1,104 @@
++#!/usr/bin/env python3
++"""Read-only P vs NP mission state and independent, Executive-owned worker signal."""
++import collections
++import datetime
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++if __package__ in (None, ""):
++    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
++    from missions.pnp import leaderboard
++else:
++    from . import leaderboard
++
++STATE = Path(os.environ.get("VICHE_STATE_ROOT",
++                            "/var/lib/lubko/wd/viche-state"))
++
++
++def workers():
++    """Unknown must never be reported as zero; the Executive must investigate."""
++    try:
++        p = subprocess.run(["antonina", "agent", "list", "--running",
++                            "--page", "1", "--limit", "100", "--json"],
++                           capture_output=True, text=True, timeout=8, check=True)
++        data = json.loads(p.stdout)
++        agents = data.get("agents")
++        if not isinstance(agents, list):
++            raise ValueError("unreadable agent roster")
++        filtered = [a for a in agents if
++                    (a.get("title") or "").startswith("Viche P vs NP:")]
++        coverage = ("partial" if len(agents) >= 100 or data.get("unreadable")
++                    else "complete")
++        return {"count": len(filtered), "coverage": coverage,
++                "agents": [{"id": a.get("id"), "title": a.get("title"),
++                            "state": a.get("state")}
++                           for a in filtered]}
++    except (OSError, ValueError, subprocess.SubprocessError):
++        return {"count": None, "coverage": "unavailable", "agents": []}
++
++
++def snapshot():
++    rows = []
++    for path in sorted((STATE / "pnp/gaps").glob("*/state.json")):
++        try:
++            item = json.loads(path.read_text())
++        except (OSError, ValueError):
++            continue
++        rows.append({"gap": item.get("gap_id"),
++                     "state": item.get("state"),
++                     "pr_url": item.get("pr_url"),
++                     "failure_reason": item.get("failure_reason")})
++    lb = leaderboard.load()
++    stale = True
++    if lb.get("available"):
++        try:
++            age = (datetime.datetime.now(datetime.timezone.utc) -
++                   datetime.datetime.fromisoformat(
++                       lb["observed_at"].replace("Z", "+00:00"))).total_seconds()
++            stale = age > 1800
++        except (KeyError, ValueError):
++            stale = True
++    w = workers()
++    score = {k: lb.get(k) for k in ("rank", "our_steps", "leader",
++                                   "runner_up", "lead_over_second",
++                                   "our_margin_vs_best_competitor",
++                                   "additional_steps_to_clear_first",
++                                   "source_checked_at", "observed_at",
++                                   "margin_change_since_previous_snapshot")}
++    score["available"] = lb.get("available", False)
++    score["stale"] = stale
++    by_state = dict(collections.Counter(r["state"] for r in rows))
++    return {
++        "observed": len(rows), "by_state": by_state, "recent": rows[-12:],
++        "leaderboard": score, "workers": w,
++        "owned_by": "Viche Executive; other operators do not launch agents",
++        "action": (
++            "Executive must restore multiple independent P vs NP researchers "
++            "and coordinate desk acquisition and submissions."
++            if w["count"] == 0 else
++            "Executive must replenish independent P vs NP research fronts; "
++            "one worker is not a steady-state research program."
++            if w["count"] == 1 else
++            "Executive must restore visibility of the actual worker roster."
++            if w["count"] is None else
++            "Executive must increase the verified checked-step lead over #2 "
++            "and protect the lead trajectory."
++            if score.get("rank") == 1 else
++            "Executive must increase checked-step throughput to gain #1; "
++            "evaluate research yield, resources and worker replenishment."),
++        # No timestamps here: the general government dispatch gate changes
++        # only when mission facts or staffing change, not every refresh.
++        "dispatch_signal": {
++            "leaderboard": [score.get("rank"), score.get("our_steps"),
++                            (score.get("leader") or {}).get("steps"),
++                            (score.get("runner_up") or {}).get("steps")],
++            "workers": w["count"], "coverage": w["coverage"],
++            "gaps": by_state},
++        "caveat": "Only public checked steps count; local activity is not proof."}
++
++
++if __name__ == "__main__":
++    print(json.dumps(snapshot(), sort_keys=True))
+diff --git a/missions/pnp/status.sh b/missions/pnp/status.sh
+index 7fcd9ecc..b091689b 100755
+--- a/missions/pnp/status.sh
++++ b/missions/pnp/status.sh
+@@ -1,20 +1,5 @@
+ #!/bin/sh
+-# Local, read-only overview; the desk is not required for status reporting.
++# Public scoreboard + agent visibility + local research state, read-only.
+ set -eu
+-state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+-python3 - "$state/pnp/gaps" <<'PY_STATUS'
+-import json,pathlib,sys,collections
+-root=pathlib.Path(sys.argv[1])
+-rows=[]
+-for path in sorted(root.glob('*/state.json')):
+-    try:
+-        d=json.loads(path.read_text())
+-    except (OSError,ValueError):
+-        continue
+-    rows.append({'gap':d.get('gap_id'), 'state':d.get('state'),
+-                 'pr_url':d.get('pr_url'), 'failure_reason':d.get('failure_reason'),
+-                 'updated_at':d.get('updated_at')})
+-print(json.dumps({'observed':len(rows),'by_state':dict(collections.Counter(
+-    x['state'] for x in rows)),'recent':rows[-12:],
+-    'caveat':'local records are not independent proof of a mathematical result'}))
+-PY_STATUS
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++exec python3 "$town/missions/pnp/status.py"
+diff --git a/tests/pnp-leaderboard-smoke.sh b/tests/pnp-leaderboard-smoke.sh
+new file mode 100644
+index 00000000..ed2e7e96
+--- /dev/null
++++ b/tests/pnp-leaderboard-smoke.sh
+@@ -0,0 +1,90 @@
++#!/bin/sh
++# Hermetic scoreboard, ranking and staffing tests. No live network or agents.
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++python3 - <<'PY'
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++from unittest.mock import patch
++from missions.pnp import leaderboard, status
++
++def people(*pairs):
++    return [{"github": name, "steps": steps, "first_proof_at":
++             "2026-11-23T12:00:00Z"} for name, steps in pairs]
++
++first = leaderboard.scoreboard(people(("a", 4), ("ottojung", 5), ("b", 3)))
++assert first["rank"] == 1
++assert first["our_steps"] == 5
++assert first["lead_over_second"] == 1
++assert first["additional_steps_to_clear_first"] == 0
++
++unranked = leaderboard.scoreboard(people(("kongeskog", 53), ("sanchan", 46)))
++assert unranked["rank"] is None and unranked["our_steps"] == 0
++assert unranked["additional_steps_to_clear_first"] == 54
++assert unranked["our_margin_vs_best_competitor"] == -53
++
++third = leaderboard.scoreboard(people(("a", 11), ("b", 8), ("ottojung", 2)))
++assert third["rank"] == 3 and third["lead_over_second"] is None
++assert third["additional_steps_to_clear_first"] == 10
++
++same = leaderboard.scoreboard(people(("ottojung", 5), ("b", 5)))
++assert same["rank"] in (1,2)
++assert same["our_margin_vs_best_competitor"] == 0
++
++for bad in (
++    [{"github":"a","steps":0}], [{"github":"a","steps":True}],
++    [{"github":"a","steps":1},{"github":"A","steps":2}]):
++    try: leaderboard.scoreboard(bad)
++    except ValueError: pass
++    else: raise AssertionError("invalid leaderboard entry accepted")
++
++with tempfile.TemporaryDirectory() as tmp:
++    os.environ["VICHE_STATE_ROOT"] = tmp
++    a = {"available": True, **unranked, "observed_at": "2026-11-23T12:00:00+00:00",
++         "source_checked_at": "2026-11-23T12:00:00Z", "source_version": "a"}
++    leaderboard.save(a)
++    history = Path(tmp, "pnp/leaderboard/history.jsonl")
++    assert len(history.read_text().splitlines()) == 1
++    # Same public count must not generate a new scoring event.
++    leaderboard.save(dict(a, source_version="b"))
++    assert len(history.read_text().splitlines()) == 1
++    leaderboard.save(dict(a, **first, observed_at="2026-11-23T12:10:00+00:00"))
++    assert len(history.read_text().splitlines()) == 2
++    assert leaderboard.load()["margin_change_since_previous_snapshot"] == 54
++    # A network failure does not wipe a prior verified rank.
++    with patch.object(leaderboard, "fetch_json",
++                      side_effect=subprocess.CalledProcessError(22, "curl")):
++        try: leaderboard.update()
++        except subprocess.CalledProcessError: pass
++        else: raise AssertionError("network failure unexpectedly succeeded")
++    assert leaderboard.load()["our_steps"] == 5
++
++    def roster(n):
++        return subprocess.CompletedProcess(
++            args=[], returncode=0, stdout=json.dumps({
++                "agents":[{"id":str(i),"title":"Viche P vs NP: proof",
++                           "state":"running"} for i in range(n)],
++                "unreadable":[]}),stderr="")
++    with patch.object(status.subprocess, "run", return_value=roster(3)):
++        full = status.snapshot()
++    with patch.object(status.subprocess, "run", return_value=roster(0)):
++        empty = status.snapshot()
++    assert full["workers"]["count"] == 3
++    assert empty["workers"]["count"] == 0
++    assert full["dispatch_signal"] != empty["dispatch_signal"]
++    assert "restore multiple" in empty["action"]
++    with patch.object(status.subprocess, "run",
++                      side_effect=FileNotFoundError("antonina")):
++        unknown = status.snapshot()
++    assert unknown["workers"]["count"] is None
++    assert unknown["workers"]["coverage"] == "unavailable"
++    assert unknown["dispatch_signal"] != empty["dispatch_signal"]
++gov = Path("government/executive-cycle.sh").read_text()
++assert "mission_dispatch_signature=" in gov
++assert "mission_dispatch_signature" in gov.split("# Founder directive 2026-11-16 (item 4):")[-1]
++assert "frontier" not in gov.split("# Founder directive 2026-11-16 (item 4):")[-1]
++print("PnP live-score ranking, reliable snapshots, staffing signals: passed")
++PY

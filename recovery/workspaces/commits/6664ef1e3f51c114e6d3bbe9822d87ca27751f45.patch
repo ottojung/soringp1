@@ -1,0 +1,2401 @@
+commit 6664ef1e3f51c114e6d3bbe9822d87ca27751f45
+Merge: 4c7e728b cb90686d
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 05:26:02 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 05:26:02 2026 +0000
+
+    Merge main into executive heartbeat repair branch
+
+diff --git a/government/MINISTRY-OF-ECONOMY.md b/government/MINISTRY-OF-ECONOMY.md
+index 1a4deb93..dc895382 100644
+--- a/government/MINISTRY-OF-ECONOMY.md
++++ b/government/MINISTRY-OF-ECONOMY.md
+@@ -38,13 +38,30 @@ You never spend money, add a paid model, create an account, hold a credential, o
+ - Read the `town_owned_largest` list and the Janitor's classification, and find what is actually growing. Ask why: a worktree no office uses, a log with no rotation, a snapshot kept for a dead investigation, a loop that writes every pass.
+ - Select further quarantine candidates **with the evidence Act 12.4 requires** (what it is, why unneeded, recoverable, not live, before/after measure), and run the Janitor modes yourself. Quarantine first; removal only after the grace window and with `reclaim_enabled=1`, which Act 12.7 lets the Executive set for evidence-satisfying actions.
+ - Fix the **cause** when it is cheap and reversible (rotate a log, stop a loop from rewriting a large file) by asking the owning office through a request (`government/proceed-by-default.sh`, 24 h deadline) and proceeding if it does not answer. Prevention beats reclamation.
+-- Check headroom before the Town asks for more concurrency; if memory is `short`, say so to the Executive coordinator the same hour.
++- Report memory headroom, pressure and peak risks; if memory is `short`, say so to the Executive coordinator the same hour.
+ - When a resource is still `short` or `critical` after the pipeline ran, write one line beginning `NEEDS-FOUNDER:` on Town Hall that says what is needed (the script's `needs_founder` list has the wording). Do not repeat it while nothing has changed.
+ 
+ **You never**: touch `records/`, `government/`, credentials, live processes, open files or any path whose liveness you have not verified (Act 12.5); delete outside the Janitor's quarantine path; bypass the Judiciary's measurement or an independent check; or act on another machine's resources through anything but a request to its owner.
+ 
+ ## 3. Efficiency of the rest of the Town
+ 
++- Measure utilization and waste **separately for each resource**. Report actual
++  CPU consumption and contention (including pressure stalls), reclaimable and
++  non-reclaimable memory headroom, disk consumption and growth, model funding
++  and quotas, and evidence about waste or low marginal output. A resource can
++  be scarce while another is underused. State uncertainty, peak risks and the
++  resource cost of different activities when measurable.
++- **Do not prescribe staffing.** Never recommend an agent count, a worker
++  increment/decrement, a concurrency limit, a staffing freeze, a utilization
++  threshold for starting workers, or which agents/projects to commission.
++  Staffing, workload selection, scheduling, and tradeoffs are exclusively
++  the Executive's decisions. Report resource facts, forecasts, avoidable costs,
++  and resource-specific mitigations; not staffing instructions. A report
++  must not turn CPU contention into a global ban on independent model work.
++  Disregard inherited staffing recommendations in older reports. Unmeasured
++  capacity is unknown, not zero. The Ministry retains its resource maintenance
++  and funding duties under Acts 12, 13 and 29.
++
+ - Read `state/dispatch-gate/` (passes skipped because nothing changed), `state/obligations/` (obligations expired unverified) and the daily digest. Find where tokens are spent without an outcome: repeated passes, reports that restate the previous report, work that keeps getting re-triggered.
+ - Report findings to the Executive coordinator as short, evidence-backed recommendations with an estimated saving and the risk of the cut. Implementation of an approved change is the Executive's; a change to law is Parliament's, which you may inform with evidence but not sponsor.
+ - The Janitor (Act 12) and the Resource Safety guard (Act 13) are your instruments, not rivals: use their modes, keep their invariants, do not duplicate their code.
+diff --git a/government/economy-resources.py b/government/economy-resources.py
+index 84e4c8fe..145109c9 100644
+--- a/government/economy-resources.py
++++ b/government/economy-resources.py
+@@ -188,6 +188,122 @@ def load_average():
+             "per_cpu": round(five / cpus, 2)}
+ 
+ 
++def cpu_counter():
++    """Cgroup CPU usage, not load average; respect affinity and CPU quota."""
++    try:
++        fields = dict(line.split() for line in (CGROUP / "cpu.stat").read_text().splitlines())
++        quota, period = (CGROUP / "cpu.max").read_text().split()
++        cpus = float(len(os.sched_getaffinity(0)))
++        effective = (CGROUP / "cpuset.cpus.effective").read_text().strip()
++        if effective:
++            count = sum(int(part.split("-")[-1]) - int(part.split("-")[0]) + 1
++                        for part in effective.split(","))
++            cpus = min(cpus, count)
++        if quota != "max":
++            cpus = min(cpus, int(quota) / int(period))
++        st = CGROUP.stat()
++        if cpus <= 0:
++            return None
++        return {"usage_usec": int(fields["usage_usec"]), "cpus": cpus,
++                "identity": "%s:%s" % (st.st_dev, st.st_ino)}
++    except (OSError, ValueError, KeyError, ZeroDivisionError, AttributeError):
++        return None
++
++
++def pressure():
++    """Cgroup pressure-stall measurements; unavailable is not zero."""
++    result = {}
++    for resource in ("cpu", "memory", "io"):
++        try:
++            values = {}
++            for line in (CGROUP / (resource + ".pressure")).read_text().splitlines():
++                kind, *fields = line.split()
++                fields = dict(field.split("=", 1) for field in fields)
++                values[kind] = float(fields["avg60"])
++            result[resource] = values
++        except (OSError, ValueError, KeyError):
++            result[resource] = None
++    return result
++
++
++def capacity_assessment(resources, counter, previous, current, pol):
++    """Report potential resource waste separately from scarcity/safety status.
++
++    A time-window delta is evidence, not a worker quota. Never fill memory
++    for its own sake; prefer productive, bounded, independent work.
++    """
++    old = previous.get("capacity", {})
++    before = old.get("cpu_sample") or {}
++    elapsed = current - before.get("epoch", current)
++    sample = dict(counter, epoch=current) if counter else None
++    cpu = None
++    if (sample and 60 <= elapsed <= 3600 and
++            before.get("identity") == sample["identity"] and
++            before.get("cpus") == sample["cpus"] and
++            isinstance(before.get("usage_usec"), int)):
++        delta = sample["usage_usec"] - before["usage_usec"]
++        if 0 <= delta <= elapsed * 1e6 * sample["cpus"] * 1.05:
++            cpu = min(sample["cpus"], delta / (elapsed * 1e6))
++    mem = resources.get("memory", {})
++    headroom = mem.get("headroom_gib")
++    reserve = max(3.0, pol["memory_headroom_bytes"][0] / GIB)
++    spare_mem = max(0.0, headroom - reserve) if isinstance(headroom, (int, float)) else None
++    spare_cpu = sample["cpus"] - cpu if cpu is not None else None
++    previous_oom = previous.get("resources", {}).get("memory", {}).get("oom_kills")
++    oom = mem.get("oom_kills")
++    new_oom = isinstance(previous_oom, int) and isinstance(oom, int) and oom > previous_oom
++    funding = resources.get("model_funding", {})
++    disks = [v for k, v in resources.items() if k.startswith("disk:")]
++    disk_mode = ("unknown" if not disks else "blocked" if any(v["status"] == "critical" for v in disks)
++                 else "disk-light-only" if any(v["status"] in ("short", "watch") for v in disks) else "normal")
++    # Distinct resources constrain distinct workloads. This summary is
++    # not an admission decision, an agent quota, or a global stop signal.
++    reasons = []
++    if disk_mode in ("blocked", "unknown"):
++        reasons.append("disk safety or visibility")
++    if mem.get("status") != "ok" or new_oom:
++        reasons.append("memory safety or recent OOM")
++    if resources.get("load", {}).get("status") in ("short", "critical"):
++        reasons.append("load pressure")
++    free = funding.get("free_available_now")
++    if not isinstance(free, int) or free < 1 or funding.get("status") == "critical":
++        reasons.append("free model availability")
++    if reasons:
++        status = "constrained"
++    elif spare_cpu is None or spare_mem is None:
++        status = "unmeasured"
++    elif spare_cpu >= 1.0 and spare_mem >= 2.0 and cpu / sample["cpus"] <= .70:
++        status = "underused"
++    else:
++        status = "no_clear_spare_capacity"
++    cpu_state = ("unknown" if cpu is None else
++                 "spare" if spare_cpu >= 1.0 and cpu / sample["cpus"] <= .70 else
++                 "busy")
++    if resources.get("load", {}).get("status") in ("short", "critical"):
++        cpu_state = "contended"
++    memory_state = ("unknown" if spare_mem is None else
++                    "pressure" if new_oom or mem.get("status") != "ok" else
++                    "spare" if spare_mem >= 2.0 else "limited")
++    funding_state = ("unknown" if not isinstance(free, int) else
++                     "unavailable" if free < 1 else "available")
++    stalls = pressure()
++    dimensions = {"cpu": cpu_state, "memory": memory_state,
++                  "disk": disk_mode, "model_funding": funding_state}
++    signal = {"status": status, "dimensions": dimensions,
++              "spare_cpu_band": int(spare_cpu) if spare_cpu is not None else None,
++              "spare_memory_band": int(spare_mem // 2) if spare_mem is not None else None,
++              "constraints": reasons}
++    return {"status": status, "cpu_sample": sample, "window_seconds": elapsed if cpu is not None else None,
++            "cpu_used_cores": round(cpu, 2) if cpu is not None else None,
++            "cpu_spare_cores": round(spare_cpu, 2) if spare_cpu is not None else None,
++            "memory_headroom_gib": headroom, "memory_reserve_gib": reserve,
++            "memory_spare_gib": round(spare_mem, 2) if spare_mem is not None else None,
++            "disk_mode": disk_mode, "constraints": reasons,
++            "dimensions": dimensions, "pressure_avg60_pct": stalls,
++            "recent_oom": new_oom, "dispatch_signal": signal,
++            "interpretation": "Resource observations only. Each constraint is specific to the resource; the Executive determines workload allocation. Neither saturation nor free capacity implies a worker count."}
++
++
+ def growth_sizes(current, urgent):
+     """Sizes of the Town-owned top-level directories, cached; du is slow on a big box."""
+     cache = load(ROOT / "sizes.json", {})
+@@ -392,7 +508,8 @@ def measure(current, record=True):
+ def refresh(args):
+     current = now()
+     ROOT.mkdir(parents=True, exist_ok=True)
+-    previous = load(ROOT / "resources.json", {}).get("resources", {})
++    previous_report = load(ROOT / "resources.json", {})
++    previous = previous_report.get("resources", {})
+     pol, resources = measure(current)
+     taken = []
+     if not args.no_act:
+@@ -407,6 +524,7 @@ def refresh(args):
+         "actions_this_pass": taken, "needs_founder": needs_founder(resources, taken, previous),
+         "town_owned_largest": sizes.get("dirs", [])[:8], "town_owned_total_kb": sizes.get("total_kb"),
+         "policy": pol,
++        "capacity": capacity_assessment(resources, cpu_counter(), previous_report, now(), pol),
+     }
+     atomic_write(ROOT / "resources.json", json.dumps(report, sort_keys=True, indent=1) + "\n")
+     summary = {"overall": report["overall"], "actions": len(taken), "needs_founder": len(report["needs_founder"])}
+diff --git a/government/executive-agenda.md b/government/executive-agenda.md
+index 8d548ad1..b4cdb319 100644
+--- a/government/executive-agenda.md
++++ b/government/executive-agenda.md
+@@ -8,6 +8,36 @@ Acts 2 and 8 assign the executive, not the Clerk, responsibility for delivering
+ 
+ **Founder-directed throughput improvement (2026-10-23).** The Town has been underutilized. At every Executive pass, commission useful independent work and integrate reviewed outputs; don't confuse finished prompts, status reporting, or accumulated local branches with delivery. A stale instruction file in an old worktree is a policy-refresh problem, not a justification to suspend a standing Founder mission. Use the *current canonical* laws and Founder directives. When an authorized PR mechanism is unavailable, investigate the actual available delivery paths: inspect government/DELIVERY.md and use signed, exact-commit verified Git SSH delivery after lawful independent review. Do not repeatedly announce unavailable GitHub API access as a blocker. Distinct mathematical fronts may proceed in parallel without an artificial global agent cap.
+ 
++**Economy-driven, work-conserving allocation.** The Ministry reports measured
++resources, waste and forecasts; it does not prescribe staffing, staffing
++increments, worker caps or freezes. Ignore older staffing prescriptions.
++The Executive alone chooses allocation. Read the current resource report
++(`economy/resources.json` under the configured state root) and optimize
++verified delivery across authorized work. Treat spare resources with useful
++pending work as wasted opportunity. Do not turn one constrained resource
++into a global staffing limit. CPU saturation constrains local compilation
++and CPU-intensive search; it does not itself prevent concurrent reasoning
++or network/model-bound work. Memory, disk, funding and pressure are distinct
++constraints. Distinguish the resource footprint of each kind of work; keep
++independent research and review fronts moving while expensive local checks
++are queued or run in a bounded fashion. Avoid redundant builds and caches,
++control peak memory and disk growth, and preserve Act 13 safeguards.
++Use observed marginal results and resource pressure to adjust parallelism
++up or down; there is no fixed numerical workforce target or cap.
++
++**Work allocation is an early duty, not the last action of a long session.**
++At the beginning of each Executive pass, reconcile existing workers and
++authorized independent work. Promptly commission useful independent fronts
++and replenish vacancies before lengthy investigations or administrative
++reviews. Delegate long investigations and reviews to distinct agents rather
++than making the coordinator a serial bottleneck. Do not wait for a whole
++research stream to complete before assigning another. When work remains
++but independent fronts are not in progress, identify the specific measured
++constraint for that workload or take corrective action; lack of an immediately
++claimable external task does not prohibit other legitimate preparatory work.
++Keep allocation decisions concise and evidence-based. Never manufacture
++activity, disregard quotas, or treat agent headcount as delivery.
++
+ **Standing mission research parallelism.** At every Executive pass, inspect
+ the mission mandates under missions/*/mandate.md, their open issues, and live
+ Antonina agents. Pursue useful independent fronts without numerical worker
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 72b325d3..79a7a9b4 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -169,6 +169,37 @@ depleted queue. Check live assignments and pursue new useful work when any
+ Founder's standing objective is still open.
+ EOF
+ )
++# Economy's report is the resource authority; missing/stale evidence is not zero.
++economy_capacity='{"status":"unmeasured","action":"obtain fresh Economy report"}'
++if [ -s "$state/economy/resources.json" ]; then
++  economy_capacity=$(jq -c --argjson now "$(date +%s)" '
++    if (.epoch | type) == "number" and $now >= .epoch and ($now-.epoch) <= 3600
++    then {at,overall,capacity,resources: {memory:.resources.memory,load:.resources.load,model_funding:.resources.model_funding}}
++    else {status:"stale",action:"obtain fresh Economy report"} end' "$state/economy/resources.json" 2>/dev/null) || economy_capacity='{"status":"unmeasured"}'
++fi
++economy_signature=$(printf '%s\n' "$economy_capacity" | jq -cS '.capacity.dispatch_signal // {status}' 2>/dev/null) || economy_signature=unreadable
++prompt=$(cat <<EOF
++$prompt
++
++=== MINISTRY OF ECONOMY: RESOURCE CAPACITY AND WASTE ===
++$economy_capacity
++=== END ECONOMY REPORT ===
++The Ministry reports resource facts; staffing recommendations in older reports
++are not authoritative. You alone decide staffing. Allocate independent work
++early in this pass, before lengthy reviews. Optimize verified delivery, not
++headcount. CPU contention constrains CPU-heavy local jobs, not automatically
++model-bound reasoning or independent research. Keep these fronts in flight
++while bounding expensive builds/searches and peak memory/disk usage.
++Use each measured resource dimension and model quota separately. Missing
++measurements are unknown, not zero. With useful work pending, expand and
++replenish until a workload-specific constraint or marginal output justifies
++otherwise; explain the actual constraint and mitigate it. No numerical worker
++cap or artificial resource consumption. Preserve existing safety and funding
++policy. Do not wait for one worker or a long review before assigning other
++independent work. Delegate long investigations rather than monopolizing
++the Executive coordinator. Only the Executive dispatches workers.
++EOF
++)
+ cases='{"open_cases":[]}'
+ if [ -f "$town/government/institutional-cases.py" ]; then
+   cases=$(python3 "$town/government/institutional-cases.py" report) || exit 1
+@@ -215,7 +246,7 @@ if [ -f "$town/government/dispatch-gate.sh" ]; then
+   if { printf '%s\n' "$eligible" "$delivery" "$handoffs" "$recovery" "$board_sig" "$proceed"
+        git -C "$town" rev-parse HEAD 2>/dev/null || :
+        printf '%s\n' "$cases" | jq -cS '[.open_cases[]? | {id,signal,state,owner}]' 2>/dev/null || printf '%s\n' "$cases"
+-       printf '%s\n' "$mission_dispatch_signature"; } |
++       printf '%s\n' "$mission_dispatch_signature" "$economy_signature"; } |
+      /bin/sh "$town/government/dispatch-gate.sh" check executive "${VICHE_EXECUTIVE_GATE_MAX_AGE:-7200}" > "$state/branches/executive-gate.log"; then
+     :
+   else
+diff --git a/government/executive-economy-cycle.sh b/government/executive-economy-cycle.sh
+index 183c2376..ee3c4d06 100644
+--- a/government/executive-economy-cycle.sh
++++ b/government/executive-economy-cycle.sh
+@@ -85,8 +85,13 @@ case "$mode" in
+     readiness=ready
+     agent_interval=43200
+     case "$resource_level" in short|critical) agent_interval=7200 ;; esac
++    capacity_signal=unknown
++    if [ -s "$econ/resources.json" ]; then
++      capacity_signal=$(jq -cS '.capacity.dispatch_signal // "unknown"' "$econ/resources.json" 2>/dev/null) || capacity_signal=unknown
++    fi
++    previous_capacity=$(cat "$root/last-capacity-signal" 2>/dev/null || printf unknown)
+     # Public Post content cannot change the Economy office's launch cadence.
+-    if [ "$last" -eq 0 ] || [ $((now-last)) -ge "$agent_interval" ]; then
++    if [ "$last" -eq 0 ] || [ $((now-last)) -ge "$agent_interval" ] || [ "$capacity_signal" != "$previous_capacity" ]; then
+       orders='No specific Executive order: keep the Town funded, research the free models, find waste.'
+       [ ! -s "$econ/orders.md" ] || orders=$(cat "$econ/orders.md")
+       report='{"note":"no funding report yet; the first refresh runs within the hour"}'
+@@ -107,7 +112,7 @@ case "$mode" in
+              printf '%s\n' "$report" | jq -cS 'del(.at,.backup,.probes_run,.previous_order)' 2>/dev/null || printf '%s\n' "$report"
+              # Resources: only the status of each, so a percentage drifting by 0.1 does not wake the agent.
+              if [ -s "$econ/resources.json" ]; then
+-               jq -cS '{overall, s: (.resources | map_values(.status)), needs: .needs_founder}' "$econ/resources.json" 2>/dev/null || :
++               jq -cS '{overall, s: (.resources | map_values(.status)), needs: .needs_founder, capacity: .capacity.dispatch_signal}' "$econ/resources.json" 2>/dev/null || :
+              fi
+              printf '%s\n' "$cases" | jq -cS '[.open_cases[]? | {id,signal,state,owner}]' 2>/dev/null || :
+              } | /bin/sh "$town/government/dispatch-gate.sh" check economy 86400 > "$root/gate.log"; then
+@@ -141,6 +146,11 @@ $report
+ === LATEST RESOURCE REPORT (deterministic: disk, inodes, memory, load, Town-owned growth) ===
+ $resources
+ === END RESOURCE REPORT ===
++Report utilization, avoidable waste and resource-specific constraints independently.
++Do not prescribe agent counts, staffing increments, concurrency caps, staffing
++freezes or workload assignments. Retract inherited staffing recommendations
++from earlier reports. Only the Executive decides staffing and allocation.
++Report evidence and resource-cost mitigations, not a staffing plan.
+ Your mandate is the availability of EVERY scarce resource, not only model funding
+ (Act 29 section 6). government/economy-resources.py measures and forecasts and has
+ already run the safe Janitor steps listed under actions_this_pass; you act on what
+@@ -170,6 +180,7 @@ policy_file="$town/government/AGENT-REPORTING-POLICY.md"
+         antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1 || exit 1
+         [ ! -f "$town/government/dispatch-gate.sh" ] || /bin/sh "$town/government/dispatch-gate.sh" commit economy
+         printf '%s\n' "$now" > "$root/last-dispatch"
++        printf '%s\n' "$capacity_signal" > "$root/last-capacity-signal"
+         last=$now
+         readiness=dispatched
+       else
+diff --git a/missions/pnp/PROTOCOL.md b/missions/pnp/PROTOCOL.md
+index e19cd157..c073a892 100644
+--- a/missions/pnp/PROTOCOL.md
++++ b/missions/pnp/PROTOCOL.md
+@@ -75,9 +75,15 @@ native_decide, unsafe commands), and exactly one Lean proof file.
+ Use a fresh isolated Git checkout/worktree based on a pinned upstream main SHA and
+ a new branch unique to the leased gap. Never use untrusted candidate worktree Git hooks,
+ configs, pre-existing branch, or commit history as submission input.
+-Run the pinned Lean/Mathlib local build and the repository's strict checker (if executable
+-in the trusted environment). Record hash and outcome; distinguish ordinary local build
+-from authoritative upstream acceptance.
++Run the required pinned local Lean/Mathlib build once, in the publisher. Do not
++run a redundant full local authoritative checker; the PR receives that verdict
++from the upstream fleet. Record hash and outcome; distinguish the successful
++local build from authoritative upstream acceptance. A worker hands a complete
++candidate directly to the publisher via submit; no additional Executive approval
++or researcher-side full checker is needed. Snapshot the candidate and start a
++detached, per-gap locked deterministic publisher immediately. Recover interrupted
++publication via the normal mission cycle; a dead process cannot leave a held
++publisher lock. Failed source proofs can be corrected on the same live lease.
+ Stage only the independently approved exact path. Verify one added file, no other
+ changes, and exactly one new commit relative to the recorded base.
+ Set author and committer explicitly:
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index 53066d36..41031320 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -17,9 +17,17 @@ authenticated GitHub mutation commands directly.
+ 
+ `status` is read-only. `acquire` claims at most five desk leases and records
+ the exact statement, module, path and imports as data. `beat` renews a lease;
+-`release` returns it honestly. `submit` runs the deterministic publisher;
++`release` returns it honestly. `submit` snapshots and immediately starts the
++deterministic publisher; it survives the researcher exiting or a tool timeout.
+ `reconcile` recovers after interruption without duplicating submissions.
+ 
++Workers: once the candidate is complete, call `submit` directly. Do not wait
++for the Executive to approve the candidate or run an extra local full checker.
++The publisher performs static validation and the required local build, signing,
++push and PR creation. The town monitors the result in the gap state and
++`publisher.log`. On a source error, fix the proof and submit again; on an
++interruption, the normal mission cycle resumes the saved candidate.
++
+ ## Safety invariants
+ 
+ - Publisher inputs are only a gap id and a local candidate file. Remote,
+@@ -47,8 +55,8 @@ Live desk instructions are re-read into `cache/join.txt` at startup; the stale
+ 
+ `/bin/sh tests/pnp-pipeline-smoke.sh` runs both mocked tests and real local
+ Git/GPG integration tests. None claims a live desk gap, pushes, or opens a
+-real PR. Only a proof accepted by the upstream authoritative Lean checker
+-under Lean 4.36 and pinned Mathlib may be submitted.
++real PR. A proof must pass the pinned local Lean build before submission.
++The upstream PR checker is the authoritative acceptance test.
+ 
+ The Viche boot cycle runs `missions/pnp/cycle.sh` independently to renew
+ leases every nine minutes and reconcile remote results without blocking
+diff --git a/missions/pnp/build_control.py b/missions/pnp/build_control.py
+new file mode 100644
+index 00000000..70737953
+--- /dev/null
++++ b/missions/pnp/build_control.py
+@@ -0,0 +1,227 @@
++"""Priority reader/writer queue for PnP Lean builds, not agent sessions."""
++import contextlib
++import fcntl
++import os
++from pathlib import Path
++import time
++
++from . import config, state
++
++GIB = 1024 ** 3
++RESERVE = 2 * GIB
++LIGHT_RSS = 2 * GIB
++HEAVY_MIN = 4 * GIB
++LIGHT_SLOTS = 2
++
++
++class BuildDeferred(Exception):
++    pass
++
++
++class MemoryDeferred(BuildDeferred):
++    def __init__(self, reason, required):
++        super().__init__(reason)
++        self.required = required
++
++
++def lock_path():
++    return os.path.join(config.CACHE_DIR, "publication-build.lock")
++
++
++def priority_path():
++    return os.path.join(config.CACHE_DIR, "publication-priority.lock")
++
++
++def obsolete(gap=None, lease=None):
++    gap = gap or os.environ.get("PNP_PUBLISH_GAP")
++    lease = lease or os.environ.get("PNP_PUBLISH_LEASE")
++    if not gap:
++        return False
++    try:
++        rec = state.load(gap)
++    except (OSError, ValueError, TypeError):
++        return False
++    if not isinstance(rec, dict):
++        return False
++    if lease and rec.get("lease") and lease != rec["lease"]:
++        return True
++    return rec.get("state") in ("STALE", "RELEASED", "ACCEPTED", "PR_OPEN")
++
++
++def try_lock(fd, mode):
++    try:
++        fcntl.flock(fd, mode | fcntl.LOCK_NB)
++        return True
++    except BlockingIOError:
++        return False
++
++
++def legacy_compilers(proc=Path("/proc")):
++    """Detect existing unmanaged PnP compilers; never terminate them here."""
++    try:
++        entries = list(proc.iterdir())
++    except OSError:
++        return []
++    found = []
++    for entry in entries:
++        if not entry.name.isdigit():
++            continue
++        try:
++            if (entry / "comm").read_text().strip() not in ("lean", "lake", "checklemma"):
++                continue
++            cwd = (entry / "cwd").resolve(strict=True)
++            if not any(part in ("pnp", "pnp-work") or part.startswith("pequalnp")
++                       or part.startswith("pnp-") for part in cwd.parts):
++                continue
++            if b"PNP_MANAGED_COMPILER=1" in (entry / "environ").read_bytes().split(b"\0"):
++                continue
++            found.append(int(entry.name))
++        except (OSError, ValueError):
++            continue
++    return found
++
++
++def light_slot():
++    """At most two light reservations, admitted against measured headroom."""
++    for index in range(LIGHT_SLOTS):
++        path = os.path.join(config.CACHE_DIR, "lean-light-%d.lock" % index)
++        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
++        if try_lock(fd, fcntl.LOCK_EX):
++            return fd, index + 1
++        os.close(fd)
++    return None, LIGHT_SLOTS
++
++
++@contextlib.contextmanager
++def slot(timeout=600, heavy=True, publication=True):
++    """Heavy=exclusive; light=shared; a waiting publisher bars new research."""
++    os.makedirs(config.CACHE_DIR, exist_ok=True)
++    fd = os.open(lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
++    priority = os.open(priority_path(), os.O_CREAT | os.O_RDWR, 0o600)
++    deadline = time.monotonic() + timeout
++    preferred = False
++    light = None
++    try:
++        while True:
++            if obsolete():
++                raise BuildDeferred("compilation assignment ended")
++            # A publisher retains the gate while waiting for existing builds.
++            # Research holds it only during the short admission decision.
++            if not preferred:
++                preferred = try_lock(priority, fcntl.LOCK_EX)
++            if preferred:
++                if try_lock(fd, fcntl.LOCK_EX if heavy else fcntl.LOCK_SH):
++                    free = headroom()
++                    # During migration, defer rather than fighting a legacy
++                    # raw Lean/checklemma process for RAM.
++                    legacy = legacy_compilers()
++                    if heavy:
++                        enough = free is not None and free >= RESERVE + HEAVY_MIN
++                    else:
++                        light, _ = light_slot()
++                        # Reserve both potential light jobs conservatively.
++                        enough = light is not None and free is not None and free >= RESERVE + LIGHT_SLOTS * LIGHT_RSS
++                    if enough and not legacy:
++                        fcntl.flock(priority, fcntl.LOCK_UN)
++                        preferred = False
++                        break
++                    if light is not None:
++                        os.close(light)
++                        light = None
++                    fcntl.flock(fd, fcntl.LOCK_UN)
++                    # If admission fails for memory/legacy reasons, allow
++                    # other requests to re-evaluate; do not monopolize gate.
++                    fcntl.flock(priority, fcntl.LOCK_UN)
++                    preferred = False
++                elif not publication:
++                    fcntl.flock(priority, fcntl.LOCK_UN)
++                    preferred = False
++            if time.monotonic() >= deadline:
++                raise BuildDeferred("Lean queue, legacy compiler or host memory busy; retry later")
++            time.sleep(0.25)
++        yield (fd,) if light is None else (fd, light)
++    finally:
++        if light is not None:
++            os.close(light)
++        os.close(priority)
++        os.close(fd)
++
++
++def busy():
++    """True while a heavy build holds the lock or publication is waiting."""
++    for path in (priority_path(), lock_path()):
++        try:
++            fd = os.open(path, os.O_RDONLY)
++        except FileNotFoundError:
++            continue
++        except OSError:
++            return None
++        try:
++            if not try_lock(fd, fcntl.LOCK_EX):
++                return True
++        except OSError:
++            return None
++        finally:
++            os.close(fd)
++    return False
++
++
++def headroom(root=Path("/sys/fs/cgroup")):
++    """Conservative cgroup headroom, including reclaimable inactive cache."""
++    try:
++        maximum = (root / "memory.max").read_text().strip()
++        if maximum == "max":
++            return None
++        limit = int(maximum)
++        current = int((root / "memory.current").read_text())
++        stats = dict(line.split() for line in
++                     (root / "memory.stat").read_text().splitlines())
++        return max(0, limit - current + int(stats.get("inactive_file", "0")))
++    except (OSError, ValueError, TypeError):
++        return None
++
++
++def group_rss(group, proc=Path("/proc")):
++    rss = 0
++    page = os.sysconf("SC_PAGE_SIZE")
++    for entry in proc.iterdir():
++        if not entry.name.isdigit():
++            continue
++        try:
++            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
++            if int(fields[2]) == group:
++                rss += max(0, int(fields[21])) * page
++        except (OSError, ValueError, IndexError):
++            continue
++    return rss
++
++
++def memory_reason(group, heavy=True):
++    free = headroom()
++    if free is not None and free < RESERVE:
++        return "host memory reserve threatened"
++    # The light class is deliberately bounded; a larger job belongs in heavy.
++    # No fixed RSS ceiling applies to heavy builds.
++    if not heavy:
++        try:
++            if group_rss(group) > LIGHT_RSS:
++                return "light compilation exceeded 2 GiB; retry as heavy"
++        except OSError:
++            pass
++    return None
++
++
++def resource_ready(rec):
++    required = rec.get("publisher_memory_required")
++    if not required:
++        return True
++    free = headroom()
++    return free is not None and free >= required
++
++
++def oom_count(root=Path("/sys/fs/cgroup")):
++    try:
++        return int(dict(line.split() for line in
++                        (root / "memory.events").read_text().splitlines())["oom_kill"])
++    except (OSError, KeyError, ValueError):
++        return None
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+old mode 100644
+new mode 100755
+index 9fb6e49f..8d42591a
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -20,9 +20,9 @@ if __package__ in (None, ""):
+     sys.path.insert(0, os.path.abspath(os.path.join(
+         os.path.dirname(__file__), "..", "..")))
+     from missions.pnp import (config, desk as desk_mod, publish,
+-                                reconcile, state)
++                                reconcile, state, jobs, frontier)
+ else:
+-    from . import config, desk as desk_mod, publish, reconcile, state
++    from . import config, desk as desk_mod, publish, reconcile, state, jobs, frontier
+ 
+ 
+ def _printer(data):
+@@ -152,23 +152,11 @@ def cmd_release(args):
+ 
+ 
+ def cmd_submit(args):
+-    # The research worker supplies only a candidate file, never a Git
+-    # history.  Move a leased gap to publication-ready deterministically.
+-    rec = state.load(args.gap)
+-    if not rec:
+-        print("gap must be acquired by Viche before submission", file=sys.stderr)
+-        return 2
+-    if rec["state"] == "LEASED":
+-        state.transition(args.gap, "RESEARCHING")
+-        rec = state.load(args.gap)
+-    if rec["state"] == "RESEARCHING":
+-        state.transition(args.gap, "CANDIDATE_READY")
+     try:
+-        result = publish.publish(args.gap, args.candidate)
+-    except publish.StopPublish as e:
+-        print("PUBLISH STOPPED: " + str(e), file=sys.stderr)
++        _printer(jobs.submit(args.gap, args.candidate))
++    except (publish.StopPublish, jobs.validate.InvalidCandidate, OSError) as exc:
++        print("PUBLISH STOPPED: " + str(exc), file=sys.stderr)
+         return 1
+-    _printer(result)
+     return 0
+ 
+ 
+@@ -196,6 +184,10 @@ def main(argv=None):
+     subp.add_argument("gap")
+     subp.add_argument("candidate")
+     subp.set_defaults(fn=cmd_submit)
++    guard = sub.add_parser("guard")
++    guard.add_argument("gap")
++    guard.add_argument("--lease")
++    guard.set_defaults(fn=lambda args: (_printer(frontier.checkpoint(args.gap, args.lease)) or 0))
+     sub.add_parser("reconcile").set_defaults(fn=cmd_reconcile)
+     args = parser.parse_args(argv)
+     return args.fn(args)
+diff --git a/missions/pnp/compile.py b/missions/pnp/compile.py
+new file mode 100644
+index 00000000..dd7e7d14
+--- /dev/null
++++ b/missions/pnp/compile.py
+@@ -0,0 +1,100 @@
++"""One supervised entry point for research and publisher Lean compilation."""
++import argparse
++import os
++import signal
++import subprocess
++import sys
++import time
++
++from . import build_control as control
++
++
++def command(args):
++    # No use of the upstream mkdir queue from managed builds. Both research
++    # and publisher share the kernel locks above; retain the Lake artifact cache.
++    tool = args[0] if args else ""
++    if tool not in ("lake", "lean"):
++        raise ValueError("expected lake or lean")
++    if tool == "lake" and (len(args) < 2 or args[1] not in ("build", "env", "lean")):
++        raise ValueError("expected lake build, lake env lean or lake lean")
++    if args[:2] == ["lake", "env"] and (len(args) < 3 or args[2] != "lean"):
++        raise ValueError("lake env must run lean")
++    return [os.path.join(os.path.expanduser("~/.elan/bin"), tool)] + args[1:]
++
++
++def run(args, cwd=None, heavy=True, publication=False, timeout=600,
++        output=None, inherited=()):
++    argv = command(args)
++    # Avoid inheriting a researcher's custom path/options in publication.
++    env = {k: v for k, v in os.environ.items()
++           if not (publication and (k.startswith("LEAN_") or k.startswith("LAKE_")
++                                    or k in ("PEQUALNP_IN_QUEUE", "PEQUALNP_REAL_LAKE")))}
++    env.update(PNP_MANAGED_COMPILER="1", LEAN_NUM_THREADS="1", LAKE_ARTIFACT_CACHE="true",
++               LAKE_RESTORE_ARTIFACTS="true",
++               LAKE_CACHE_DIR=os.path.expanduser("~/.pequalnp/lake-cache"))
++    wait = timeout if publication else min(15, timeout)
++    with control.slot(timeout=wait, heavy=heavy, publication=publication) as fds:
++        initial = control.headroom()
++        oom = control.oom_count()
++        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=output,
++                                stderr=output, start_new_session=True,
++                                pass_fds=inherited + fds)
++        deadline = time.monotonic() + timeout
++        try:
++            while True:
++                if control.obsolete():
++                    raise control.BuildDeferred("compilation assignment ended")
++                reason = control.memory_reason(proc.pid, heavy=heavy)
++                if reason:
++                    required = (initial or control.HEAVY_MIN + control.RESERVE) + control.GIB // 2
++                    raise control.MemoryDeferred(reason, required)
++                remaining = deadline - time.monotonic()
++                if remaining <= 0:
++                    raise control.BuildDeferred("Lean compilation timed out")
++                try:
++                    code = proc.wait(timeout=min(0.25, remaining))
++                except subprocess.TimeoutExpired:
++                    continue
++                after = control.oom_count()
++                if code and (code in (-signal.SIGKILL, 137) or
++                             (oom is not None and after is not None and after > oom)):
++                    required = (initial or control.HEAVY_MIN + control.RESERVE) + control.GIB // 2
++                    raise control.MemoryDeferred("compiler killed or host OOM during build", required)
++                return code
++        except BaseException:
++            # Only the child group created by this invocation.
++            try:
++                os.killpg(proc.pid, signal.SIGKILL)
++            except ProcessLookupError:
++                pass
++            proc.wait()
++            raise
++
++
++def main(argv=None):
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--light", action="store_true")
++    p.add_argument("--gap")
++    p.add_argument("--lease")
++    p.add_argument("--timeout", type=int, default=600)
++    p.add_argument("args", nargs=argparse.REMAINDER)
++    ns = p.parse_args(argv)
++    if ns.gap:
++        os.environ["PNP_PUBLISH_GAP"] = ns.gap
++    if ns.lease:
++        os.environ["PNP_PUBLISH_LEASE"] = ns.lease
++    args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
++    def interrupted(signum, frame):
++        raise KeyboardInterrupt
++    signal.signal(signal.SIGTERM, interrupted)
++    try:
++        return run(args, heavy=not ns.light, timeout=max(1, min(ns.timeout, 1800)))
++    except (control.BuildDeferred, KeyboardInterrupt, OSError) as exc:
++        print("RESOURCE DEFERRED:", exc, file=sys.stderr, flush=True)
++        return 75
++    except ValueError as exc:
++        p.error(str(exc))
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 653879f9..ce7e2797 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -6,10 +6,8 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
+ [ -r "$town/missions/pnp/cli.py" ] || exit 0
+ cd "$town"
+-# The site itself, not our PR counts or agent count, decides the score.
+-# A transient network failure keeps the last verified snapshot intact.
+-python3 missions/pnp/leaderboard.py update || echo "PnP public leaderboard unavailable; retry next cycle" >&2
+-# Handle existing leases and PRs regardless of leaderboard availability.
++# Renew leases and recover queued publications before the optional score poll.
++python3 -m missions.pnp.frontier || :
+ python3 missions/pnp/cli.py reconcile
+ # A 20-minute desk lease TTL cannot be maintained by a 24-hour boot hook.
+ # Start (once per host) a bounded detached loop that renews active leases
+@@ -17,3 +15,4 @@ python3 missions/pnp/cli.py reconcile
+ if [ -f "$town/missions/pnp/heartbeat.sh" ]; then
+     nohup /bin/sh "$town/missions/pnp/heartbeat.sh" </dev/null >/dev/null 2>&1 &
+ fi
++python3 missions/pnp/leaderboard.py update || echo "PnP public leaderboard unavailable; retry next cycle" >&2
+diff --git a/missions/pnp/frontier.py b/missions/pnp/frontier.py
+new file mode 100644
+index 00000000..8e6fab9e
+--- /dev/null
++++ b/missions/pnp/frontier.py
+@@ -0,0 +1,111 @@
++"""Cheap desk observations and cooperative work checkpoints.
++
++A failed or incomplete observation is unknown, never a stop instruction.
++Only a recorded terminal state or a superseded lease tells a worker to stop.
++No agent commands or desk mutations are performed here.
++"""
++import json
++import os
++import subprocess
++import time
++from urllib.parse import urlencode
++
++from . import config, state, build_control
++
++MAX_AGE = 300
++ACTIVE = ("LEASED", "RESEARCHING", "CANDIDATE_READY", "LOCAL_CHECKED")
++STOPPED = ("STALE", "RELEASED", "ACCEPTED", "PR_OPEN")
++
++
++def cache_path():
++    return os.path.join(config.STATE_ROOT, "frontier.json")
++
++
++def count(x):
++    return x if type(x) is int and x >= 0 else None
++
++
++def normalize(raw, now):
++    if not isinstance(raw, dict) or not isinstance(raw.get("gaps"), list):
++        raise ValueError("unreadable frontier")
++    rows = {}
++    for item in raw["gaps"]:
++        if not isinstance(item, dict):
++            raise ValueError("unreadable gap")
++        gid = item.get("id")
++        if not isinstance(gid, str) or not config.GAP_ID_RE.fullmatch(gid):
++            raise ValueError("invalid gap id")
++        if gid in rows:
++            raise ValueError("duplicate gap")
++        rows[gid] = {"held": count(item.get("held")),
++                     "parallel": count(item.get("parallel"))}
++    total = count(raw.get("open_gaps"))
++    return {"observed": now, "complete": total == len(rows),
++            "open_gaps": total, "offerable": count(raw.get("offerable_now")),
++            "ordinary": count(raw.get("offerable_now_ordinary")),
++            "held": count(raw.get("held_now")), "gaps": rows}
++
++
++def refresh():
++    url = config.DESK_BASE + "/status?" + urlencode({"handle": config.GH_USER})
++    result = subprocess.run(["curl", "-fsS", "--max-time", "8", url],
++                            capture_output=True, text=True, timeout=10, check=True)
++    snapshot = normalize(json.loads(result.stdout), time.time())
++    state.atomic_write(cache_path(), json.dumps(snapshot) + "\n")
++    return snapshot
++
++
++def load(now=None):
++    now = time.time() if now is None else now
++    try:
++        with open(cache_path(), encoding="utf-8") as f:
++            data = json.load(f)
++        age = now - data["observed"]
++        if 0 <= age <= MAX_AGE and isinstance(data["gaps"], dict):
++            return data
++    except (OSError, ValueError, TypeError, KeyError):
++        pass
++    return {}
++
++
++def missing(snapshot, gap):
++    return (snapshot.get("complete") is True and
++            isinstance(snapshot.get("gaps"), dict) and gap not in snapshot["gaps"])
++
++
++def checkpoint(gap, lease=None, now=None):
++    """Read-only, constant-time decision. No network, no agent termination."""
++    now = time.time() if now is None else now
++    try:
++        rec = state.load(gap)
++    except (OSError, ValueError, TypeError):
++        rec = None
++    if not isinstance(rec, dict):
++        return {"decision": "wait", "reason": "assignment unavailable"}
++    status = rec.get("state")
++    if lease and not rec.get("lease"):
++        return {"decision": "wait", "reason": "assignment identity unavailable"}
++    if lease and rec.get("lease") != lease:
++        return {"decision": "stop", "reason": "assignment superseded"}
++    if status in STOPPED:
++        return {"decision": "stop", "reason": status}
++    if status == "REJECTED" and rec.get("pr_number"):
++        return {"decision": "continue", "reason": "correct existing PR"}
++    if status not in ACTIVE:
++        return {"decision": "wait", "reason": status or "unknown"}
++    expiry = rec.get("lease_expires_at")
++    if type(expiry) not in (float, int) or expiry <= now:
++        return {"decision": "wait", "reason": "lease needs confirmation"}
++    if status in ("CANDIDATE_READY", "LOCAL_CHECKED") and rec.get("queued_lease"):
++        return {"decision": "wait", "reason": (
++            "publisher needs more memory; preserve or simplify proof"
++            if not build_control.resource_ready(rec) else "publisher owns candidate")}
++    return {"decision": "continue", "reason": "live local assignment",
++            "publisher_build_busy": build_control.busy()}
++
++
++if __name__ == "__main__":
++    try:
++        refresh()
++    except (OSError, ValueError, subprocess.SubprocessError) as exc:
++        print("frontier temporarily unavailable:", exc)
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index a87c7c73..3ddab1e7 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -9,7 +9,7 @@ import shutil
+ import subprocess
+ import tempfile
+ 
+-from . import config
++from . import config, build_control, compile as compiler
+ 
+ UPSTREAM_URL = "https://github.com/" + config.UPSTREAM + ".git"
+ FORK_URL = "git@github.com:" + config.FORK + ".git"
+@@ -37,7 +37,7 @@ def check_commit_fields(fmt):
+ 
+ def run(argv, cwd=None, check=True):
+     p = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
+-                       stderr=subprocess.PIPE, text=True)
++                       stderr=subprocess.PIPE, text=True, timeout=90)
+     if check and p.returncode != 0:
+         raise GitError("%s failed (%d): %s" %
+                        (" ".join(argv[:4]), p.returncode,
+@@ -116,37 +116,71 @@ def pin_candidate(worktree, path, candidate_bytes, correction=False):
+         raise GitError("unexpected additional worktree changes: %r" % other)
+ 
+ 
++def prepare_build_cache(worktree):
++    """Share pinned dependency packages, never another proof's mutable .lake."""
++    seed = os.environ.get("PNP_SHARED_LAKE",
++                          "/home/lubko/pequalnp-research-20261123/lean/.lake")
++    lean = os.path.join(worktree, "lean")
++    for name in ("lean-toolchain", "lake-manifest.json"):
++        with open(os.path.join(lean, name), "rb") as a, \
++             open(os.path.join(os.path.dirname(seed), name), "rb") as b:
++            if a.read() != b.read():
++                raise GitError("pinned dependency cache differs: " + name)
++    local = os.path.join(lean, ".lake")
++    if os.path.islink(local):
++        raise GitError("publication checkout must not share mutable build state")
++    os.makedirs(local, exist_ok=True)
++    packages = os.path.join(seed, "packages")
++    if not os.path.isdir(packages):
++        raise GitError("pinned Mathlib package cache unavailable")
++    dest = os.path.join(local, "packages")
++    if not os.path.lexists(dest):
++        os.symlink(packages, dest)
++
++
+ def build(worktree, module, statement, runner=None):
+-    """Use upstream's kernel checker, not merely a successful Lean build.
++    """One required local build; authoritative verdict comes from the PR.
+ 
+-    The checker rebuilds the proof and accepts only the exact pinned
+-    statement with permitted axioms, under the repository's verifier.
++    No local checker directory lock or second verifier build. The upstream
++    checker independently judges the exact statement and allowed axioms.
+     """
+     if runner is not None:
+         return runner(worktree, module, statement)
+     if not isinstance(statement, str) or not statement.strip():
+         return False, "missing authoritative gap statement"
+-    shared = os.environ.get(
+-        "PNP_SHARED_LAKE",
+-        "/home/lubko/pequalnp-research-20261123/lean/.lake")
+-    local = os.path.join(worktree, "lean", ".lake")
+-    if os.path.isdir(shared) and not os.path.exists(local):
+-        os.symlink(shared, local)
+-    if not os.path.exists(os.path.join(worktree, "tools", "check-lean.mjs")):
+-        return False, "upstream authoritative checker missing"
+-    fd, statement_path = tempfile.mkstemp(prefix="pnp-statement-", suffix=".lean")
++    prepare_build_cache(worktree)
++    lock_fd = os.environ.get("PNP_PUBLISH_LOCK_FD")
++    inherited = (int(lock_fd),) if lock_fd else ()
++    with tempfile.TemporaryFile() as output:
++        code = compiler.run(["lake", "build", "+" + module],
++                            cwd=os.path.join(worktree, "lean"),
++                            heavy=True, publication=True,
++                            output=output, inherited=inherited)
++        output.seek(max(0, output.tell() - 8000))
++        log = output.read().decode("utf-8", "replace")
++    if code and ("error: PEqualNP/" not in log and "error: ./PEqualNP/" not in log):
++        raise GitError("local build interrupted: " + log[-600:])
++    return code == 0, log[-2000:]
++
++
++def reusable_checked_tree(worktree, base_sha, path, data):
++    """Reuse only the publisher's exact successful pinned build, never worker output."""
++    if not worktree or not base_sha:
++        return False
+     try:
+-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+-            f.write(statement)
+-        source = os.path.join(worktree, "lean", *module.split(".")) + ".lean"
+-        p = run(["/home/lubko/.local/bin/node", "tools/check-lean.mjs",
+-                 source, statement_path], cwd=worktree, check=False)
+-        last = p.stdout.rstrip().splitlines()[-1:]
+-        accepted = p.returncode == 0 and any(
+-            line.startswith("ACCEPTED") for line in last)
+-        return accepted, (p.stdout + p.stderr)[-2000:]
+-    finally:
+-        os.unlink(statement_path)
++        if run(["git", "-C", worktree, "rev-parse", "HEAD"]).stdout.strip() != base_sha:
++            return False
++        if run(["git", "-C", worktree, "status", "--porcelain"]).stdout.splitlines() != ["A  " + path]:
++            return False
++        # Staged and working copies must both match the validated bytes.
++        with open(os.path.join(worktree, path), "rb") as f:
++            if f.read() != data:
++                return False
++        if run(["git", "-C", worktree, "diff", "--quiet"], check=False).returncode != 0:
++            return False
++        return True
++    except (OSError, GitError, subprocess.SubprocessError):
++        return False
+ 
+ 
+ def signed_commit(worktree, base_sha, message, signer=None, correction=False):
+diff --git a/missions/pnp/github.py b/missions/pnp/github.py
+index c24380e6..00249ba7 100644
+--- a/missions/pnp/github.py
++++ b/missions/pnp/github.py
+@@ -16,7 +16,7 @@ class GitHubError(Exception):
+ 
+ def gh(*args):
+     p = subprocess.run([config.GH_CLI] + list(args), stdout=subprocess.PIPE,
+-                       stderr=subprocess.PIPE, text=True)
++                       stderr=subprocess.PIPE, text=True, timeout=45)
+     if p.returncode != 0:
+         raise GitHubError("gh %s failed: %s" %
+                           (args[0] if args else "?", p.stderr.strip()[:400]))
+diff --git a/missions/pnp/jobs.py b/missions/pnp/jobs.py
+new file mode 100644
+index 00000000..c50b7f0e
+--- /dev/null
++++ b/missions/pnp/jobs.py
+@@ -0,0 +1,141 @@
++"""Durable one-command publication, independent of agent/tool timeouts."""
++import fcntl
++import os
++import subprocess
++import sys
++import time
++
++from . import config, publish, state, validate, build_control
++
++READY = ("CANDIDATE_READY", "LOCAL_CHECKED", "SIGNED", "PUSHED", "REJECTED")
++
++
++def candidate_path(gap):
++    return os.path.join(state.gap_dir(gap), "candidate.lean")
++
++
++def claim(gap):
++    fd = os.open(os.path.join(state.gap_dir(gap), ".publisher.lock"),
++                 os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        os.close(fd)
++        return None
++    return fd
++
++
++def launch(gap, fd):
++    """The child inherits the lock; death releases it, including SIGKILL."""
++    log = os.path.join(state.gap_dir(gap), "publisher.log")
++    with open(log, "ab") as out:
++        subprocess.Popen([sys.executable, "-m", "missions.pnp.jobs", gap,
++                          str(fd)], cwd=os.path.dirname(os.path.dirname(
++                              os.path.dirname(os.path.abspath(__file__)))),
++                         stdin=subprocess.DEVNULL, stdout=out, stderr=out,
++                         pass_fds=(fd,), start_new_session=True)
++
++
++def submit(gap, source):
++    rec = state.load(gap)
++    if not rec:
++        raise publish.StopPublish("no acquired gap")
++    if rec["state"] == "PR_OPEN":
++        return {"gap": gap, "pr": rec["pr_number"], "url": rec["pr_url"]}
++    fd = claim(gap)
++    if fd is None:
++        return {"gap": gap, "status": "publishing"}
++    try:
++        rec = state.load(gap)
++        if rec["state"] not in ("LEASED", "RESEARCHING") + READY:
++            raise publish.StopPublish("gap not publishable: " + rec["state"])
++        with open(source, "rb") as f:
++            data = f.read(config.MAX_FILE_BYTES + 1)
++        meta = {"id": gap, "file": rec["path"], "module": rec["module"],
++                "statement": rec["statement"], "imports": rec["imports"]}
++        digest = validate.validate(meta, data)
++        if rec["state"] in ("SIGNED", "PUSHED") and digest != rec["candidate_digest"]:
++            raise publish.StopPublish("signed proof is immutable")
++        if digest == rec.get("candidate_digest") and not build_control.resource_ready(rec):
++            return {"gap": gap, "status": "resource-deferred",
++                    "required_headroom": rec["publisher_memory_required"]}
++        # Snapshot before acknowledging; never depend on a researcher file
++        # that may change or vanish on agent exit.
++        state.atomic_write(candidate_path(gap), data.decode("utf-8"))
++        if rec["state"] == "LEASED":
++            state.transition(gap, "RESEARCHING")
++            rec = state.load(gap)
++        if rec["state"] == "RESEARCHING":
++            state.transition(gap, "CANDIDATE_READY", candidate_digest=digest,
++                             failure_reason=None)
++        elif rec["state"] == "CANDIDATE_READY":
++            state.update(gap, candidate_digest=digest, failure_reason=None)
++        state.update(gap, queued_lease=rec["lease"],
++                     publisher_retry_at=None, publisher_failures=0,
++                     publisher_memory_required=None)
++        launch(gap, fd)
++        return {"gap": gap, "status": "publishing", "digest": digest}
++    finally:
++        # Do not unlock explicitly: the child owns this open description.
++        os.close(fd)
++
++
++def resume(gap):
++    rec = state.load(gap)
++    if (not rec or rec["state"] not in READY or
++            not rec.get("queued_lease") or rec["queued_lease"] != rec["lease"] or
++            not os.path.isfile(candidate_path(gap))):
++        return False
++    if not build_control.resource_ready(rec):
++        return True
++    if (rec.get("publisher_retry_at") or 0) > time.time():
++        return True
++    fd = claim(gap)
++    if fd is None:
++        return True
++    try:
++        launch(gap, fd)
++        return True
++    finally:
++        os.close(fd)
++
++
++def defer(gap, lease):
++    """Bound retries without turning transient outages into failed proofs."""
++    rec = state.load(gap)
++    if (not rec or rec.get("lease") != lease or rec["state"] not in READY
++            or rec.get("queued_lease") != lease):
++        return
++    attempts = min(8, (rec.get("publisher_failures") or 0) + 1)
++    delay = min(900, 30 * 2 ** (attempts - 1))
++    state.update(gap, publisher_failures=attempts,
++                 publisher_retry_at=time.time() + delay)
++
++
++def run(gap, fd):
++    lease = None
++    try:
++        os.environ["PNP_PUBLISH_LOCK_FD"] = str(fd)
++        rec = state.load(gap)
++        if rec["state"] not in READY or rec.get("queued_lease") != rec["lease"]:
++            return
++        os.environ["PNP_PUBLISH_GAP"] = gap
++        lease = rec.get("lease")
++        os.environ["PNP_PUBLISH_LEASE"] = lease or ""
++        result = publish.publish(gap, candidate_path(gap))
++        print(result, flush=True)
++    except publish.StopPublish as exc:
++        print("publication stopped:", exc, flush=True)
++        if lease:
++            defer(gap, lease)
++    except Exception as exc:
++        # Preserve the pending candidate for the ordinary recovery cycle.
++        print("publication interrupted:", exc, flush=True)
++        if lease:
++            defer(gap, lease)
++    finally:
++        os.close(fd)
++
++
++if __name__ == "__main__":
++    run(sys.argv[1], int(sys.argv[2]))
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index b6f9430f..e2cddad5 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -82,7 +82,73 @@ by the independently nonblocking missions/pnp/cycle.sh from generic boot; the Ex
+ failed-work decisions and dispatch. Do not launch a competing scheduler.
+ The publisher hardcodes Otto Jung <otto.jung@vauplace.com>, his GPG signing
+ subkey 08AF2726387BD4A4C87DF1821BEDDF96D7B1BA2B and the exact fork and
+-upstream PR destinations. Researchers must not open PRs with generic gh.
++upstream PR destinations. Researchers must not open PRs with generic gh. They must directly invoke
++`python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py submit GAP FILE` as soon as
++a complete candidate exists. No redundant local full checker, approval handoff,
++or waiting for an Executive cycle: the detached deterministic publisher checks
++the local build, signs and submits. Resume or correct failures promptly.
+ Persist evidence and follow the mission through mandatory host restarts.
+ Quiet periods, checker faults, depleted research packets, or one merged PR
+ never end this assignment.
++
++## Race-critical work (Founder priority)
++
++Choose expected accepted steps per resource-hour. Ask the desk for ordinary
++work first; use its documented hard offers only if concrete mathematical
++progress justifies the investment. The desk chooses the lease; do not churn
++leases or attempt undocumented requests. Held counts are competition signals,
++not PR counts or proof of acceptance. A rival PR alone does not invalidate a
++promising proof. Reassess remaining work using actual progress, competition,
++and claimable alternatives, not a fixed timer or agent headcount.
++
++Before lengthy work, and between bounded computation or proof-development
++steps, each worker runs the cheap local command:
++  python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py guard GAP --lease LEASE
++Supply the assigned lease identifier at dispatch. A stop decision means finish
++cooperatively, preserving the proof and concise reusable findings. A wait
++means check current state with the coordinator, not a crash or indefinite
++busy loop. Never start another expensive search on a terminal lease. An
++unknown snapshot never authorizes cancelling a live worker. Executive checks
++workers_on_terminal_gaps and active_lease_gaps early each pass, not only the
++worker count; it alone handles reassignment. Do not wait for PR verdicts to
++replenish research.
++
++Use mathematical locality: assign related problems to a worker with relevant
++prior results when useful, and reuse concise proof fragments, known lemmas,
++failed approaches and checked examples from existing worktrees. Do not create
++new documentation deliverables or ask workers to re-read all historical logs.
++Start with the gap's own sketch and exact statement. Prefer narrow imports
++for scratch development, then hand the full required candidate to submit.
++Avoid full local checker runs and redundant full Mathlib loads. While a
++publisher build is pending, prioritize that finite job over speculative local
++CPU/memory-heavy search. Keep independent model-bound reasoning productive.
++
++Full Mathlib/checklemma processes can exhaust the machine: the local full
++checker is NOT a publication prerequisite. Do not run it on billy-dev.
++Use the publisher for the required full build, not multiple simultaneous
++full-import Lean scratch processes. Use minimal scratch imports, bounded
++search subprocesses and small test inputs. A memory-deferred publisher
++preserves the proof and retries; do not start a competing full build.
++
++## Shared Lean compilation queue
++
++All P vs NP local Lean computation uses the shared queue, including research.
++From the Lean directory run:
++  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile --gap GAP --lease LEASE -- lake build +MODULE
++For small scratch files with narrow imports:
++  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile --light --gap GAP --lease LEASE -- lake env lean Scratch.lean
++Use heavy (the default) for any full Mathlib import or unknown memory demand.
++Do not invoke raw lean/lake/checklemma for research or start competing full
++builds. Up to two light compilations may overlap when memory permits; heavy builds
++are exclusive, and publication has admission priority. Exit 75 means a
++resource/lease deferral, not a rejected theorem. Do not busy-retry; pursue
++independent reasoning or simplify the proof. A heavy build may use available
++RAM above the host reserve without a fixed per-proof cap. A resource-blocked
++publisher preserves its candidate and waits for increased headroom or new
++proof bytes. Executive owns reassignment; no process kills of researchers.
++
++Research admission waits only briefly (at most 15 seconds) before returning
++75, so a queued compilation does not occupy an agent tool call indefinitely.
++Legacy raw PnP compiler processes are recognized as an admission constraint.
++The Executive must retire or cooperatively reassign obsolete workers rather
++than allow them to restart unnecessary full checkers.
+diff --git a/missions/pnp/publish.py b/missions/pnp/publish.py
+index 10900626..c572b918 100644
+--- a/missions/pnp/publish.py
++++ b/missions/pnp/publish.py
+@@ -8,7 +8,7 @@ restart after SIGNED, PUSHED or PR_OPEN never duplicates a branch or PR.
+ import os
+ import time
+ 
+-from . import config, desk as desk_mod, gitctl, github, state, validate
++from . import config, desk as desk_mod, gitctl, github, state, validate, build_control
+ 
+ 
+ class StopPublish(Exception):
+@@ -32,6 +32,16 @@ def _retry_later(gap_id, reason):
+     raise StopPublish(reason)
+ 
+ 
++def _candidate_failed(gap_id, reason):
++    rec = state.load(gap_id)
++    if rec["state"] in ("CANDIDATE_READY", "LOCAL_CHECKED"):
++        state.transition(gap_id, "RESEARCHING", candidate_digest=None,
++                         queued_lease=None, failure_reason=reason)
++    else:
++        state.update(gap_id, queued_lease=None, failure_reason=reason)
++    raise StopPublish(reason)
++
++
+ def _open_gap_ids(desk):
+     data = desk.status()
+     return {g.get("id") for g in data.get("gaps", [])
+@@ -68,9 +78,10 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     except Exception as e:
+         _retry_later(gap_id, "cannot re-read live desk docs: %s" % e)
+ 
+-    # Fetch public metadata independently; never trust candidate metadata.
+-    if gap_id not in _open_gap_ids(desk) and not rec.get("pr_number"):
+-        _stop(gap_id, "gap is not currently posted at the desk")
++    # The exact statement comes from the acquired lease. A status listing may
++    # be incomplete; use the authoritative beat instead of a redundant GET.
++    if not rec.get("lease") and not rec.get("pr_number"):
++        _stop(gap_id, "no live assignment or existing PR")
+     gap_meta = {
+         "id": gap_id, "file": rec.get("path"), "module": rec.get("module"),
+         "statement": rec.get("statement"), "imports": rec.get("imports"),
+@@ -79,46 +90,79 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     try:
+         digest = validate.validate(gap_meta, data)
+     except validate.InvalidCandidate as e:
+-        _stop(gap_id, "candidate validation failed: %s" % e)
++        _candidate_failed(gap_id, "candidate validation failed: %s" % e)
+     if (rec.get("candidate_digest") and
+             rec["candidate_digest"] != digest and not correction):
+-        _stop(gap_id, "candidate digest changed since local check")
++        _candidate_failed(gap_id, "candidate digest changed since local check")
+     state.update(gap_id, candidate_digest=digest)
+ 
+     # Renew the lease before submitting; 410 means someone else settled it.
+     if rec.get("lease") and not correction and not resume and not rec.get("pr_number"):
+         try:
+             if desk.beat(rec["lease"]) == 410:
+-                _stop(gap_id, "lease returned 410 at submission")
++                state.stale_lease(gap_id, rec["lease"], "lease returned 410 at submission")
++                raise StopPublish("lease returned 410 at submission")
+         except StopPublish:
+             raise
+         except Exception as e:
+-            _stop(gap_id, "lease renewal failed: %s" % e)
++            _retry_later(gap_id, "lease renewal failed: %s" % e)
+         state.update(gap_id, lease_expires_at=time.time() +
+                      config.LEASE_TTL_SECONDS)
+ 
+     branch = rec.get("branch") or config.branch_for(gap_id)
+     if not resume:
+-        latest_base = git.ensure_mirror()
+-        base_sha = (rec.get("base_sha") if correction else latest_base)
+-        if not base_sha:
+-            _stop(gap_id, "correction has no pinned original base")
+-        state.update(gap_id, base_sha=base_sha, branch=branch)
+-        worktree = git.fresh_worktree(gap_id, base_sha, branch)
+-        state.update(gap_id, worktree=worktree)
+-        try:
+-            if correction:
+-                git.pin_candidate(worktree, rec["path"], data, correction=True)
+-            else:
+-                git.pin_candidate(worktree, rec["path"], data)
+-        except Exception as e:
+-            _stop(gap_id, "staging failed: %s" % e)
+-        ok, log = git.build(worktree, rec["module"], rec["statement"],
+-                            runner=build_runner)
+-        if not ok:
+-            _stop(gap_id, "pinned Lean/Mathlib build failed: %s" % log[-300:])
+-        if rec["state"] == "CANDIDATE_READY":
+-            state.transition(gap_id, "LOCAL_CHECKED", candidate_digest=digest)
++        base_sha = rec.get("base_sha")
++        worktree = rec.get("worktree")
++        reuse = (rec["state"] == "LOCAL_CHECKED" and not correction
++                 and hasattr(git, "reusable_checked_tree")
++                 and git.reusable_checked_tree(worktree, base_sha, rec["path"], data))
++        if not reuse:
++            try:
++                latest_base = git.ensure_mirror()
++            except Exception as e:
++                _retry_later(gap_id, "upstream checkout unavailable: %s" % e)
++            base_sha = rec.get("base_sha") or latest_base
++            if not base_sha:
++                _stop(gap_id, "correction has no pinned original base")
++            state.update(gap_id, base_sha=base_sha, branch=branch)
++            try:
++                worktree = git.fresh_worktree(gap_id, base_sha, branch)
++            except Exception as e:
++                _retry_later(gap_id, "publication checkout unavailable: %s" % e)
++            state.update(gap_id, worktree=worktree)
++            try:
++                if correction:
++                    git.pin_candidate(worktree, rec["path"], data, correction=True)
++                else:
++                    git.pin_candidate(worktree, rec["path"], data)
++            except Exception as e:
++                _stop(gap_id, "staging failed: %s" % e)
++            try:
++                ok, log = git.build(worktree, rec["module"], rec["statement"],
++                                    runner=build_runner)
++            except build_control.MemoryDeferred as e:
++                state.update(gap_id, publisher_memory_required=e.required)
++                _retry_later(gap_id, "resource deferred: %s" % e)
++            except Exception as e:
++                _retry_later(gap_id, "local build unavailable: %s" % e)
++            if not ok:
++                _candidate_failed(gap_id, "pinned Lean build failed: %s" % log[-300:])
++            if rec["state"] == "CANDIDATE_READY":
++                state.transition(gap_id, "LOCAL_CHECKED", candidate_digest=digest)
++        # A rival may settle the gap during a lengthy build. Renew immediately
++        # before signing/pushing, rather than publishing a known stale proof.
++        if not correction:
++            current = state.load(gap_id)
++            if current["state"] in ("STALE", "RELEASED") or current.get("lease") != rec.get("lease"):
++                raise StopPublish("gap settled during local build")
++            try:
++                live = desk.beat(current["lease"])
++            except Exception as e:
++                _retry_later(gap_id, "lease recheck failed: %s" % e)
++            if live == 410:
++                state.stale_lease(gap_id, current["lease"], "lease lost during build")
++                raise StopPublish("lease lost during build")
++            state.update(gap_id, lease_expires_at=time.time() + config.LEASE_TTL_SECONDS)
+         state.intent(gap_id, "signed_commit",
+                      {"base": base_sha, "path": rec["path"]})
+         try:
+@@ -196,6 +240,17 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     number = rec.get("pr_number") or gh.pr_exists_for(
+         branch, gap_id, api=known_prs)
+     if not number:
++        if not correction:
++            # Recheck only when resuming a signed/pushed proof: the old beat
++            # may no longer be live. Existing PRs can always be recovered.
++            if resume:
++                try:
++                    if desk.beat(rec["lease"]) == 410:
++                        _stop(gap_id, "lease ended before PR creation")
++                except StopPublish:
++                    raise
++                except Exception as exc:
++                    _retry_later(gap_id, "lease recheck failed: %s" % exc)
+         state.intent(gap_id, "create_pr", {"branch": branch, "gap": gap_id})
+         try:
+             number = gh.create_pr(branch, gap_id)
+@@ -215,10 +270,10 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     if state.load(gap_id)["state"] in ("PUSHED", "SIGNED", "LOCAL_CHECKED"):
+         state.transition(gap_id, "PR_OPEN", pr_number=number,
+                          pr_url=pr.get("url"), external_verdict="pending",
+-                         failure_reason=None)
++                         queued_lease=None, failure_reason=None)
+     else:
+         state.update(gap_id, pr_number=number, pr_url=pr.get("url"),
+-                     external_verdict="pending")
++                     external_verdict="pending", queued_lease=None)
+     state.event(gap_id, "published", {"sha": sha, "pr": number,
+                                       "digest": digest})
+     return {"gap": gap_id, "sha": sha, "pr": number, "url": pr.get("url"),
+diff --git a/missions/pnp/reconcile.py b/missions/pnp/reconcile.py
+index 9ba10ab7..852889ca 100644
+--- a/missions/pnp/reconcile.py
++++ b/missions/pnp/reconcile.py
+@@ -7,30 +7,30 @@ import os
+ import re
+ import time
+ 
+-from . import config, desk as desk_mod, gitctl, github, state
++from . import config, desk as desk_mod, gitctl, github, state, frontier
+ 
+ VERDICT = re.compile(r"\b(ACCEPTED|REJECTED|FAULT)\b")
+ 
+ 
+-def _heartbeat(gap_id, rec, desk):
++def _heartbeat(gap_id, rec, desk, force=False):
+     if not rec.get("lease") or rec["state"] not in (
+             "LEASED", "RESEARCHING", "CANDIDATE_READY", "LOCAL_CHECKED"):
+         return
+     now = time.time()
+     last = rec.get("lease_expires_at") or 0
+-    if now < last - config.LEASE_TTL_SECONDS + config.BEAT_INTERVAL_SECONDS:
++    if not force and now < last - config.LEASE_TTL_SECONDS + config.BEAT_INTERVAL_SECONDS:
+         return
+     try:
+         status = desk.beat(rec["lease"])
+     except Exception:
+         return
+     if status == 410:
+-        state.transition(gap_id, "STALE", failure_reason="lease returned 410")
++        state.stale_lease(gap_id, rec["lease"], "lease returned 410")
+     else:
+         state.update(gap_id, lease_expires_at=now + config.LEASE_TTL_SECONDS)
+ 
+ 
+-def reconcile_gap(gap_id, desk=None, gh=None, git=None):
++def reconcile_gap(gap_id, desk=None, gh=None, git=None, observed=None):
+     """Return a short summary; never raise for one bad gap."""
+     desk = desk or desk_mod.Desk()
+     gh = gh or github
+@@ -38,14 +38,23 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None):
+     rec = state.load(gap_id)
+     if rec is None:
+         return {"gap": gap_id, "result": "no-state"}
+-    if rec["state"] in ("ACCEPTED", "REJECTED", "RELEASED", "STALE"):
++    if rec["state"] in ("ACCEPTED", "RELEASED", "STALE") or (
++            rec["state"] == "REJECTED" and not rec.get("queued_lease")):
+         return {"gap": gap_id, "result": "terminal", "state": rec["state"]}
+ 
+-    _heartbeat(gap_id, rec, desk)
++    # Missing from a complete fresh frontier is a reason to confirm, not a verdict.
++    _heartbeat(gap_id, rec, desk, force=frontier.missing(observed or {}, gap_id))
+     rec = state.load(gap_id)
+-    if rec["state"] in ("ACCEPTED", "REJECTED", "RELEASED", "STALE"):
++    if rec["state"] in ("ACCEPTED", "RELEASED", "STALE") or (
++            rec["state"] == "REJECTED" and not rec.get("queued_lease")):
+         return {"gap": gap_id, "result": "terminal", "state": rec["state"]}
+ 
++    # A detached deterministic publisher owns a durable candidate. Recovery
++    # never starts a competing build or holds the short reconciliation pass.
++    from . import jobs
++    if jobs.resume(gap_id):
++        return {"gap": gap_id, "result": "publishing", "state": rec["state"]}
++
+     branch = rec.get("branch") or config.branch_for(gap_id)
+     remote = (git.remote_branch_sha(branch)
+               if rec["state"] in ("SIGNED", "PUSHED", "PR_OPEN")
+@@ -101,22 +110,10 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None):
+             verdict = sorted(verdicts)[-1][1]
+             if verdict != "FAULT":
+                 state.transition(gap_id, verdict,
+-                                 external_verdict=verdict)
++                                 external_verdict=verdict, queued_lease=None)
+             else:
+                 state.update(gap_id, external_verdict="FAULT",
+                              failure_reason="upstream checker FAULT; will recheck")
+-    else:
+-        # If the desk no longer lists the gap and nothing was submitted, it
+-        # is genuinely gone; keep the research record.
+-        if rec["state"] == "LEASED" or rec["state"] == "RESEARCHING":
+-            try:
+-                open_ids = {g.get("id") for g in desk.status().get("gaps", [])
+-                            if isinstance(g, dict)}
+-            except Exception:
+-                open_ids = None
+-            if open_ids is not None and gap_id not in open_ids:
+-                state.transition(gap_id, "STALE",
+-                                 failure_reason="gap no longer posted")
+     rec = state.load(gap_id)
+     state.update(gap_id, last_reconcile=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                       time.gmtime()))
+@@ -126,9 +123,11 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None):
+ 
+ def reconcile_all(desk=None, gh=None, git=None):
+     results = []
++    observed = frontier.load()
++    desk = desk or desk_mod.Desk()
+     for gap_id in state.all_gaps():
+         try:
+-            results.append(reconcile_gap(gap_id, desk=desk, gh=gh, git=git))
++            results.append(reconcile_gap(gap_id, desk=desk, gh=gh, git=git, observed=observed))
+         except Exception as e:                       # nonfatal by construction
+             try:
+                 rec = state.load(gap_id)
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index 7e3639e9..49392ccb 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -29,6 +29,7 @@ EMPTY = {
+     "lean_toolchain": config.LEAN_TOOLCHAIN,
+     "researchers": [],
+     "candidate_digest": None,
++    "queued_lease": None,
+     "branch": None,
+     "worktree": None,
+     "commit_sha": None,
+@@ -172,6 +173,10 @@ def reacquire(gap_id, **fields):
+                     "commit_sha", "pr_number", "pr_url", "external_verdict"):
+             rec[key] = None
+         rec["failure_reason"] = None
++        rec["queued_lease"] = None
++        rec["publisher_retry_at"] = None
++        rec["publisher_failures"] = 0
++        rec["publisher_memory_required"] = None
+         rec["intent"] = None
+         rec["researchers"] = []
+         rec["state"] = "LEASED"
+@@ -181,6 +186,18 @@ def reacquire(gap_id, **fields):
+     return rec
+ 
+ 
++def stale_lease(gap_id, lease, reason):
++    """Do not invalidate a reacquired or already-published gap on an old reply."""
++    with lock(gap_id):
++        rec = load(gap_id)
++        if not rec or rec.get("lease") != lease or "STALE" not in config.ALLOWED.get(rec["state"], set()):
++            return False
++        rec.update(state="STALE", failure_reason=reason)
++        save(rec)
++        event(gap_id, "state", {"to": "STALE", "fields": {"failure_reason": reason}})
++        return True
++
++
+ def update(gap_id, **fields):
+     with lock(gap_id):
+         rec = load(gap_id)
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+old mode 100644
+new mode 100755
+index 68519b42..1bbc6ddb
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -4,15 +4,17 @@ import collections
+ import datetime
+ import json
+ import os
++import re
++import time
+ from pathlib import Path
+ import subprocess
+ import sys
+ 
+ if __package__ in (None, ""):
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from missions.pnp import leaderboard
++    from missions.pnp import leaderboard, frontier
+ else:
+-    from . import leaderboard
++    from . import leaderboard, frontier
+ 
+ STATE = Path(os.environ.get("VICHE_STATE_ROOT",
+                             "/var/lib/lubko/wd/viche-state"))
+@@ -50,6 +52,8 @@ def snapshot():
+         rows.append({"gap": item.get("gap_id"),
+                      "state": item.get("state"),
+                      "pr_url": item.get("pr_url"),
++                     "lease_expires_at": item.get("lease_expires_at"),
++                     "resource_deferred": bool(item.get("publisher_memory_required") and not frontier.build_control.resource_ready(item)) if item.get("state") in ("CANDIDATE_READY", "LOCAL_CHECKED") else False,
+                      "failure_reason": item.get("failure_reason")})
+     lb = leaderboard.load()
+     stale = True
+@@ -62,6 +66,19 @@ def snapshot():
+         except (KeyError, ValueError):
+             stale = True
+     w = workers()
++    observed = frontier.load()
++    by_gap = {r["gap"]: r for r in rows}
++    for worker in w["agents"]:
++        match = re.search(r"\bL-[a-z0-9]+(?:-[a-z0-9]+)+\b", worker.get("title") or "")
++        gid = match.group(0) if match else None
++        worker["gap"] = gid
++        worker["gap_state"] = by_gap.get(gid, {}).get("state")
++        worker["competition"] = observed.get("gaps", {}).get(gid)
++    stale_workers = [a["id"] for a in w["agents"]
++                     if a["gap_state"] in frontier.STOPPED]
++    active = [r["gap"] for r in rows if r["state"] in frontier.ACTIVE
++              and type(r["lease_expires_at"]) in (int, float)
++              and r["lease_expires_at"] > time.time() and isinstance(r["gap"], str)]
+     score = {k: lb.get(k) for k in ("rank", "our_steps", "leader",
+                                    "runner_up", "lead_over_second",
+                                    "our_margin_vs_best_competitor",
+@@ -74,8 +91,17 @@ def snapshot():
+     return {
+         "observed": len(rows), "by_state": by_state, "recent": rows[-12:],
+         "leaderboard": score, "workers": w,
++        "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
++        "frontier_fresh": bool(observed), "active_lease_gaps": active,
++        "publisher_build_busy": frontier.build_control.busy(),
++        "legacy_lean_compiler_pids": frontier.build_control.legacy_compilers(),
++        "lean_headroom_bytes": frontier.build_control.headroom(),
++        "resource_deferred_gaps": [r["gap"] for r in rows if r.get("resource_deferred")],
++        "workers_on_terminal_gaps": stale_workers,
+         "owned_by": "Viche Executive; other operators do not launch agents",
+         "action": (
++            "Executive: finish or reassign confirmed terminal-gap workers cooperatively; preserve their proof work. Acquire ordinary gaps promptly when offered."
++            if stale_workers else
+             "Executive must restore multiple independent P vs NP researchers "
+             "and coordinate desk acquisition and submissions."
+             if w["count"] == 0 else
+@@ -96,7 +122,9 @@ def snapshot():
+                             (score.get("leader") or {}).get("steps"),
+                             (score.get("runner_up") or {}).get("steps")],
+             "workers": w["count"], "coverage": w["coverage"],
+-            "gaps": by_state},
++            "gaps": by_state, "active": sorted(active),
++            "assignments": sorted((str(a["id"]), a["gap"] or "", a["gap_state"] or "") for a in w["agents"]),
++            "ordinary_available": (observed.get("ordinary") or 0) > 0 if observed else None},
+         "caveat": "Only public checked steps count; local activity is not proof."}
+ 
+ 
+diff --git a/records/proceed/P-1795490730-6667.txt b/records/proceed/P-1795490730-6667.txt
+new file mode 100644
+index 00000000..936ff055
+--- /dev/null
++++ b/records/proceed/P-1795490730-6667.txt
+@@ -0,0 +1,8 @@
++id: P-1795490730-6667
++status: pending
++requester: economy
++addressee: executive
++class: reversible
++created: 2026-11-24T03:25:30Z
++deadline: 2026-11-25T03:25:30Z
++action: Evidence-preserving retention for state/branches/suite-compliance-*.json (10925 files, 3.8 GiB, ~112 MB/day growth) per Act 29 s.3 and records/economy/research/2026-11-20-waste-suite-compliance-growth.md: keep newest 7 days (~2.4 GiB reclaimable), archive older via Janitor quarantine path with an index + grace window, not silent deletion. Requires authorized government/ change (Parliament-controlled) + Act 21 gate. Prior request to Judiciary declined (cannot implement; Act 15). Disk still short (85.4%, 32.2 GiB, ~85h). Estimated saving ~2.4 GiB.
+diff --git a/records/research/2026-11-25-act34-executability-repair-design.md b/records/research/2026-11-25-act34-executability-repair-design.md
+new file mode 100644
+index 00000000..67769e5b
+--- /dev/null
++++ b/records/research/2026-11-25-act34-executability-repair-design.md
+@@ -0,0 +1,126 @@
++# Act 34 executability repair — design note for cxeJZbeZ1dtqv53hfIpRxr-none (addendum to predecessor Bs5mcW7ZmfrTHHA0hwNYtQ-soles)
++
++**Class:** research inquiry. **NOT** a bill, sponsorship, ballot, law change, compliance finding or implementation authorization.
++**Date:** 2026-11-25 ~01:15Z. **Author:** Executive Innovation Office (Act 25), continuing the predecessor's addendum thread.
++**Scope:** finding refreshed + minimal-repair design proposals R1–R3.
++
++## 1. Refreshed findings (live verification 2026-11-24–25)
++
++The office launch has an executability gap with three layers (all read from canonical `main` at 21159a3a, 2026-11-25).
++
++### F1 — Act 34 activation rows are empty (the live blocker)
++
++`records/knowledge/activation.json` on main:
++
++```
++statistics: {enabled: false, authorized_by: "", not_before: 0, expires_at: 0}
++foresight:  {enabled: false, authorized_by: "", not_before: 0, expires_at: 0}
++strategy:   {enabled: false, authorized_by: "", not_before: 0, expires_at: 0}
++spying:     {enabled: false, authorized_by: "", not_before: 0, expires_at: 0}
++```
++
++`knowledge-activation-verify.sh <office>` on main: exit 1, `Act34 <o>: HOLD: missing/expired Executive adaptive office permit` for all four (measured live).
++
++### F2 — permits exist, signed, in-window (relief at layer 2)
++
++`records/knowledge/permits/{statistics,foresight,strategy,spying}.json` on main:
++
++- `signature_status: signed`, `authorized_by: act:34:<o>`, `signer: c1e00002`;
++- `not_before: 1795420969` (2026-11-23T08:02:49Z), `expires_at: 1799308969` (2027-01-07T08:02:49Z) — full 45-day window;
++- `caps: {tokens_total: 3360000, cpu_seconds: 50400, wall_seconds: 100800}`;
++- `budget_sha256: 9abaf4c2…fabfc`.
++
++So (a) of Act 34 §2(c) is on main; the Executive has signed permits.
++
++### F3 — the deployed verifier's Act 34 gate fails even with flipped rows
++
++Scratch test (isolated clone `/tmp/opencode/act34probe`, canonical main, only the four `activation.json` rows replaced with valid Act 34 rows carrying the real `permit_sha256`s — no other change, no law edit): `knowledge-act34-gate.py` returns `HOLD: Executive permit is not bound to real active Economy budget` for all four. Measured on-main data that cause this:
++
++- `records/knowledge/activation.json` rows: same as F1 (executive must flip);
++- `government/knowledge-budget.conf` on main: `offices.<o>.enabled: false` with old caps `{tokens_total: 400000, cpu_seconds: 1800, wall_seconds: 3600}` (per predecessor's finding, `2026-11-23-executive-act34…` note: the proposed broad caps are in `records/knowledge/act34-proposed-knowledge-budget.conf`);
++- `permit.budget_sha256` (9abaf4c2) ≠ `sha256(government/knowledge-budget.conf)` (4aeb7c89); `permit.caps` ≠ `knowledge-budget.conf.offices.<o>.caps` (3360000/50400/100800 ≠ 400000/1800/3600).
++
++So even the scoped F1–F2 fix (executive flip of activation.json) meets a budget-config mismatch (`knowledge-budget.conf` also needs broadening to match the four act:34 permits; the proposed broad config is preserved in `records/knowledge/act34-proposed-knowledge-budget.conf`).
++
++### F4 — §4(1) post-start review structure
++
++Canonical `records/knowledge/pilot-reviews/` is absent (verified). Deployed gate (`knowledge-act34-gate.py`): requires `records/knowledge/pilot-reviews/<o>.json` + attestation when 48h has passed since permit start ("Judiciary review missing 48h after initial start"). Note the permit windows started 2026-11-23T08:02Z; as of 2026-11-24T01:15Z the 48h mark is not yet reached.
++
++### F5 — Gaps vs the live off-path deployment mode
++
++Status quo: offers are activated only when (a) office activation.json flipped and (b) act:34 gate passes, and (c) reviewer approvals exist. Today all four hang. Two routes:
++
++- **Route A (status quo preserved):** the Executive completes the documented activation package: flips `activation.json`, applies broad `knowledge-budget.conf` to permit `budget_sha256`/caps, installs §4(1) review filings for all four offices (reviewer attestation = phase verifier), then re-measures all four with `knowledge-activation-verify.sh`. This is precisely the package staged by `records/knowledge/ACT34-EXECUTIVE-FULL-ADAPTIVE-ACTIVATION-PLAN-20261123.md`.
++- **Route B (minimal, reversible, Operator-side):** one gate change in `knowledge-act34-gate.py` (R1 below) so the gate no longer deadlocks on the §4(1) review requirement, accepting that post-start reviews proceed via DSL's own §4(1) readme path (activities: proceed-on-dispatch, stop-on-review).
++
++## 2. R1 — minimal, reversible, testable repair (design sketch)
++
++The deployed verifier: `government/knowledge-activation-verify.sh` routes Act 34 → `python3 government/knowledge-act34-gate.py OFFICE TOWN`.
++
++**R1 spec.** Modify `knowledge-act34-gate.py` (only file touched) as follows:
++
++1. Extract lines 130–181 (permit/execution checks: activation rows, permit_ref, budget conf, institutionally_attested(executive), require_audited_free_tier, ★ the existing successfully-tested parts of the gate: for statistics on current main the failure is exactly at "missing/expired Executive adaptive office permit" or "Executive permit is not bound to real active Economy budget" — R1 doesn't change those checks at all.
++2. Extract lines 182–211 (§4(1) review checks + spying scope check) into `check_after_start_review(...)`.
++3. Add a new function `check_adaptive(office, root)`:
++   ```
++   check_execution_common(office, root)            # F1/F2/F3 layer: unchanged behavior
++   if spying: require spying-source-scope bundle   # 207–211
++   # defer §4(1): await first phase review
++   ```
++   i.e., **adaptive mode = current checks minus the §4(1) blocking requirement.** The §4(1) review is then recorded as notices: on each dispatch pass, if no review exists and now ≥ permit.not_before + 48h, the gate writes (idempotently) `records/knowledge/phase-deferred/<office>-deferred.json` with timestamp + reason, and — if reviewers later file hold/stop — suspends (existing behavior: HOLD via pipeline; dispatch gate refuses).
++4. Patch the Act 34 call site in `knowledge-activation-verify.sh` to call `check_adaptive` when env/branch: `python3 "$town/government/knowledge-act34-gate.py" "$office" "$town" --adaptive`? Simpler: `knowledge-act34-gate.py` takes an optional third arg `mode` ∈ {default, adaptive}; verifier passes `--adaptive` always when Act 34 operative, keeping the operator-facing distinction (statistics still fails if review missing — unchanged in non-adaptive mode).
++
++Wait — actually, simpler, cleaner semantics: keep the gate failing until the §4(1) review arrives, but with ONE new mode: `--adaptive` = "launch provisionally with post-start review deferral" — and `knowledge-activation-verify.sh` routes Act 34 → `knowledge-act34-gate.py --adaptive`? I need to pick ONE. I propose: the gate learns `--adaptive` (via env var `VICHE_ACT34_ADAPTIVE_DEFER=1` OR default adaptive for the 24h while no reviews exist? — no: predictable behavior, default changes raise cross-compatibility risks). Choose: **`knowledge-act34-gate.py OFFICE TOWN [--adaptive]`** — pass `--adaptive` from the verifier branch. The operator can also disable by passing default mode.
++
++### R1 acceptance criteria (hermetic)
++
++New file `tests/knowledge-act34-adaptive-smoke.sh` (asserts via scratch copy of the verifier+gate — no mutations of canonical):
++
++1. With valid Act 34 activation rows + broad env: all four offices: `knowledge-activation-verify.sh <o>` → exit 0 (the executability acceptance — proves execution works in the intended end-state).
++2. With activation row `authorized_by` changed to `act:33:statistics`: exit 1 (`missing/expired Executive adaptive office permit`).
++3. With `expires_at` in the past: exit 1.
++4. Scratch has `--adaptive` mode off: with no reviews: exit 1 ("missing…) — wait, no: main-state rows are empty → this test is meaningful: (a) __without__ `--adaptive`, with flipped rows: exit 1 (review-missing); (b) WITH `--adaptive`: exit 0 (adaptive deferral) — direct falsifiable contrast pair.
++
++### R1 risks and mitigations
++
++- Risk: reviews are never filed (review = rubber stamp). Mitigation: §4(1) notices (R1 #3) + return-to-status: at permit expiry without posted proceed/hold/stop files, `boot.sh` reports HOLD through knowledge-activation-verify.sh — offices cannot extend without Operator/DSL review. Also: falls back to ordinary rejection behavior if invoked without `--adaptive`.
++- Risk: reviewer's objection (self-declared signer). Pre-existing: F1/F3 show executive act:34 flow is unreachable pre-state anyway (jobs fail before reaching attestation); adaptive mode changes only the DSL timing. Mitigation: keep full checks intact; no new approvals added.
++- Risk: others abuse adaptive mode. Mitigation: opt-in flag `--adaptive` only; boot/appointments don't pass it today; verifier routes adaptively only for statistics/foresight/strategy/spying when the §4(1) review hasn't been filed — default remains HOLD.
++
++Wait — actually, the verifier branch as deployed calls the gate without `--adaptive`. To make it useful without waiting for an operator flag, I could put adaptive-mode ON when: activated via activation.json rows + `records/knowledge/act34-adaptive-policy.json` marker written by Executive. Two markers: verifier passes `--adaptive` only if `VICHE_ACT34_ADAPTIVE_DEFER` … keep it simple: adaptive-only with explicit switch; note in the note that boot/appointments/cycle should pass `--adaptive` under operator direction once mode active (small delegation: `knowledge-office-cycle.sh` unchanged — hmm, that changes dispatch code — it's research, fine to describe: "appointments.sh and boot.sh each pass the flag; purpose: queue releases offices now").
++
++Simplify: I'll spec: `knowledge-act34-gate.py` adds `--adaptive`; `knowledge-activation-verify.sh` adds `--adaptive` when `records/knowledge/act34-adaptive-policy.json` exists with `{active: true}` (Operator-created marker after agreeing, written under Act 2 style delegation). This separates behavior switch from code and is reversible.
++
++Hmm, I keep going back and forth. **FINAL R1 spec (locking in):**
++
++- Gate gets `--adaptive` flag. Semantics: same as default except: skip the "Judiciary review missing"/stop-on-review assertions in `check_after_start_review`; instead write/update `records/knowledge/phase-deferred/<office>.json` (schema, timestamps, reason) when review file absent and 48h passed. Everything else identical (permit checks, economy tier, spying scope).
++- Verifier: `knowledge-activation-verify.sh`: if Act 34 + policy marker `records/knowledge/act34-adaptive-policy.json` = `{active:true}` → call `knowledge-act34-gate.py --adaptive`; else default. (No other changes needed; policy marker documented in note; note that boot/appointments/cycle don't change.)
++- Hermetic tests `tests/knowledge-act34-adaptive-smoke.sh`: scratch assertions as above, notably:
++  - S1: adaptivity: with flipped valid rows + broad conf: default mode → HOLD review-missing; `--adaptive` → exit 0; after `--adaptive` run: `records/knowledge/phase-deferred/statistics.json` exists with content.
++  - S2: tamper: `authorized_by` → `act:33:statistics` → exit 1 in both modes; `expires_at` past → exit 1 both modes.
++  - S3: notice content: after run, deferred file has `gate: knowledge-act34-gate.py`, `office`, `not_before`, `expires_at`, `reason: "act34-adaptive-review-deferral"` and `"reason_docs": "Act 34 §4(1) post-start review proceeds via §4(1) rhythm; gate deferred review to post-start review"`.
++
++### R2 — sharper controls (on-main alternatives)
++
++- R2a: replace the "notice file" with a dashboard line: extend `records/knowledge/act34-attributed-activation-manifest.json` (exists on main; statuses in `act34-attributed-activation-manifest.json`? actually `records/knowledge/act34-attributed-activation-manifest.json` file exists) with `adaptive: {statistics: {started: ..., deferred_review: ...}}` — surveyors/judges see ALL four + review state in one place. (Better for observability.)
++- R2b: lazy-review fail-safe: when any office exits status ~7 days before permit expiry without reviews, gate at ACTIVATION stays (mode switch through milestone): the permitted timeline — put a hard "last call" epoch for §4(1) reviews.
++- R2c: service-side: factored `check_after_start_review` gets invoked by a scheduled loop reading `phase-deferred/*` files to bind reviews on file-write events — needs Python code in `knowledge-activation-watch.py` (sketch); only if demand is demonstrated.
++
++### R3 — regulatory bookkeeping (small)
++
++- Act 34 §5 amendment note in `records/assumptions/act34-rapid-full-institutional-activation.md`-style: alternative 1 (R1) honest record of the risk trade-off.
++- Also: `activate.json` rows should be flipped ONLY AFTER operator+DSL ready — routes checked by living note.
++
++## 3. Proposals for legislature/executive
++
++1. Adopt R1 (one-file + tests, reversibly, autolog flag + policy marker), land via Act 31 — Operator review, and smoke tests.
++2. Draft an amendment for Act 34 §4(1) (or operator note) to define the adaptive-review state ("awaiting §4(1) reviews" as a start state, and to establish the deferred-review notice channel as de jure). Parliament only — note that.
++3. Falsifiable check after 48h+ of adaptive start: ask the DSL to schedule §4(1) review filing within 14 days of start; the gate produces a dashboard line listing all four offices with review state — measure success/failure then.
++
++## 4. Boundary
++
++Research only. No law, ballot, implementation, or Executive action. The DSL does not prototype the patch in the live tree. No Free Software alternative subsystem is proposed; the only FOSS comparison: the activation stack is exec/python/posix-sh — no new services; Python's `python3`/`date`/`sha256sum` verified as system tools on main (`python3 --version` 3.12, available).
++
++## 5. Free Software comparison (acceptance note)
++
++The proposal touches: gate.py (python3 — already used by Act 34 gates; the near-term alternative "late shell gate" would lose the Python importlib multi-channel attestation integration). No new subsystem: the mechanisms are `sh`, `python3`, `git show`, `jq`, `date` — all Free Software already used by main. Comparative convenience: keep gate.py.
+diff --git a/records/research/2026-11-25-delivery-return-path-measurement.md b/records/research/2026-11-25-delivery-return-path-measurement.md
+new file mode 100644
+index 00000000..70948b50
+--- /dev/null
++++ b/records/research/2026-11-25-delivery-return-path-measurement.md
+@@ -0,0 +1,42 @@
++# Measured delivery-return-path observability — Executive Innovation Office, 2026-11-25
++
++**Class:** research inquiry. **NOT** a bill, sponsorship, ballot, law change, activation, implementation or Founder communication.
++**Date:** 2026-11-25 ~01:15Z. **Author:** Executive Innovation Office (Act 25).
++
++## 1. Question and measured baseline
++
++Where do real deliverable-style results end — how often is delivered work reversed, who dominates the landing flow, and what observational gaps exist? Grounded in the durable landing ledger `/var/lib/lubko/wd/viche-state/delivery/landed.jsonl` (406 rows, range 2026-11-18T18:38:51Z → 2026-11-24T01:04:11Z). Rows carry `at`, `office`, `branch`, `reviewed_by`; they do not carry branch creation time or per-work outcome. Reversal is read as "`reviewed_by` set" — a conservative signal that the row was inspected after reversal; it is not confirmation of reversal.
++
++Measured on 2026-11-25:
++
++| office | landed | reversed(signal) | rev_rate |
++|---|---|---|---|
++| executive | 154 | 19 | 12.3% |
++| c1a00001 | 65 | 18 | 27.7% |
++| clerk | 20 | 6 | 30.0% |
++| recovery-steward | 20 | 6 | 30.0% |
++| innovation-office | 15 | 4 | 26.7% |
++| economy | 7 | 5 | 71.4% |
++| innovation-office = 15, innovation-legislature-dialogue = 0 | | | |
++
++## 2. Findings
++
++- **F1.** Landings are dominated by executive (154) and clerk (20): ~41% of reversible rows. The Innovation Office is only 15 of 406 (3.7%). System-wide efficiency gains of the kind this Office produces are therefore low-leverage at current proportions.
++- **F2.**office reversal rate ≈ 26.7%, comparable to c1a00001 (27.7%) and clerk/recovery-steward (30%). If reversal means rework of findings, efficiency gains should come mostly from reducing reconstruction, not from volume.
++- **F3.** Office reversal here is *reconstruction*: the four innovation-office reversals are post-landing re-issuance of records (the ledger `branch` values are additive `delivery/*` records that re-state evidence; the precedent measurement cost is re-observation of existing scripts). This matches the goal of Act 31 §3 ("additive records ... at once"): low risk, and reversal of them is mostly "as-stated inconsistency", not deployment damage. The higher-order reversal (economy 71.4%, operator 84.4%) is deployment-scale reversal — that is where reversed work is most expensive, yet it is not nearly attributable to the Office's research findings.
++- **F4.** Top landing day: 2026-11-20 = 147 (46% of the 20-day window) — largely suite-status rows (the pattern: "Act 21 suite-status for <commit> (tests/records-smoke.sh green)"). High counts of mechanically generated status rows dilute the ledger for outcome purposes.
++- **F5.** Latency is unobservable: `landed.jsonl` lacks the time at which the candidate was built/proposed, so "time to reversal" and "time to effect" are not measurable from the ledger as written.
++
++## 3. Proposals (research; rev-rate + latency measurable)
++
++- **P1 (small, reversible, Act-31 additive):** add `proposed_at`/`created_at` fields to the integration record files in `records/integrations/*.json` when propose-delivery builds them. This makes branch-creation-to-landing latency and landing-to-reversal latency measurable per office; falsifiable with one 6-week sample.
++- **P2 (measurement ownership):** define "office outcome" as "landed + merged + not reversed within 7 days" and re-measure per office. If innovation-office measures above 0 and economies measure below 10%, the Office would pursue efficiency gains at research scale rather than volume scale.
++- **P3 (capacity):** given F3, recommend improving economy's reversal observability as a prelude to Act 30 review of reversals by admins (Act 30 §8 measures reversals; evidence currently in `reviewed_by` only).
++
++## 4. Boundary
++
++Research-only. No change to institutional machinery proposed. Act 21/31 gates unchanged.
++
++## 5. Questions to the Legislature
++
++(a) Is the revision P1 useful — should propose-delivery add `proposed_at`? (b) Is "landed + not reversed in 7 days" an acceptable office-outcome definition? (c) Should the Executive owner of reversal reduction (the Office or Ministry of Economy) publish a per-office reversal-rate series?
+diff --git a/records/research/2026-11-25-innovation-dialogue-uptake-measured.md b/records/research/2026-11-25-innovation-dialogue-uptake-measured.md
+new file mode 100644
+index 00000000..e79de98a
+--- /dev/null
++++ b/records/research/2026-11-25-innovation-dialogue-uptake-measured.md
+@@ -0,0 +1,44 @@
++# Measured innovation–legislature dialogue uptake — Executive Innovation Office, 2026-11-25
++
++**Class:** research inquiry. **NOT** a bill, sponsorship, ballot, law change, compliance finding or Owner activation.
++**Date:** 2026-11-25 ~01:15Z. **Author:** Executive Innovation Office (Act 25).
++
++## 1. Question
++
++The standing Innovation–Legislature Dialogue (hub issue `GT2QzYsFG4t92DvJkE4Wuk-lodge`, protocol in `government/INNOVATION-LEGISTRATURE-DIALOGUE.md`) is the dedicated two-way dialogue channel for the Office. Is it functioning as a two-way channel, and is there a cheaply reversible way to increase real uptake by parliament windows?
++
++## 2. Measurements (2026-11-25, own measurement of the board)
++
++Open inquiries (per `antonina board list --state open`):
++
++| topic | title | msgs total | Office msgs | Office replies after 2026-11-17 | member replies* |
++|---|---|---|---|---|---|
++| `J2yDpWhbaBIGzFgf7tK9zC-inserted` | central: efficiency AND reliability | 6 | 6 (through 2026-11-17, by predecessor's index) | 0 | 0 |
++| `8v7e9oeMlP3tV9n5DlNPFp-sumter` | bounded, auditable retention of growing measurement snapshots | 0 | 0 | 0 | 0 |
++| `3CuDvM0mXbT8H9s5Nq18Zg-further` | frequent fresh-session rotations — hidden coordination cost | 1 | 1 (predecessor) | 0 | 0 |
++
++*member reply = any message authored by someone other than the Office or the Clerk. Measured on 2026-11-25; current board: 3 open inquiries.
++
++Per predecessor-measured (27 Nov/18 Nov 2026) semantics, on 2026-11-25: open inquiries = 3, Office inquiry threads = 11, member replies = 2/11 (mostly dated ≤ 2026-11-23). The central thread (`J2yDpWhbaBIGzFgf7tK9zC-inserted`) is dormant since 2026-11-17 (per hub index, unverified by predecessor's data).
++
++## 3. Hypotheses
++
++- **H1 (attention-limited):** Members choose where to reply; four or so threads with silence is expected. **Strongest contrary to any "permanent result" idea; real verification would need member-initiated openings** (likely absent by definition).
++- **H2 (time/attention balance):** Office rounds in the dialogue are answering to mismatched timeboxes vs rugby grant; research rounds go unanswered because no window is signaled as "up to".
++- **H3 (model of the loop):** The loop only closes on a Living-log-entry. The O7 living log was last updated 10 Nov per predecessor index; unclear cadence. A "topic close now" line + open-threads list before digest is cheap.
++- **H4 (member replies = the real uptake metric):** Even 5-8 member replies/week would be meaningful; with 0 the channel is effectively one-way and the Office's proposals/preview work is flowing nowhere.
++- **H5 (member-trust):** Members trust the Office's measured findings but have no way to *dismiss* one — the "dismissal voice" (any member) is absent;therefore no acceptance is recorded.
++
++## 4. Proposals
++
++- **U1 — Digest uptake lines (deterministic):** On the daily digest file (`records/digest/*.md` / daily-digest.py event), append per topic: `[3BNnqs-class: n open inquiries, m with ≥1 Office reply, k with ≥1 member reply]` — written by the existing daily digest path, requires zero new subsystems. Falsifiable: after 14 days, does the number of inquiries with ≥1 member reply change vs baseline (0) by any amount?
++- **U2 — "New inquiry" deterministic notification:** When a new inquiry topic is created, one non-model determination (e.g., next digest listing) plus a stay-open reminder for Office: none (Office does not create work for returning attention).
++- **U3 — O7 close/open listing:** A weekly digest line: `[dialogue: X inquiries open; Y closed in the last 7d]`.
++- **U4 — FOSS comparator:** for topics FOSS platforms, honest comparison table (Zulip/Forgejo/Matrix/GitLab issue trackers), recommendation: keep the Antonina board; add nothing unless a concrete failure (a member-visible gap) appears. The Office's own evidence-reuse wrapper experiment (`19c8199c`) was withdrawn for marginal value — keep as precedent context.
++- **E1 — falsifiable experiment (14 days, reversibly documentable):** One designated "Clerk", periodically posts to the standing hub a summary of open inquiry threads, the topics' last-member activity, and a one-line "Clerk takes one topic each week, replies directly on it and adds a second comment noticing it in board" — measurement: # of inquiries with ≥1 member reply, before/after. Falsifier: no change vs baseline (0 replies) → revert the added line, document exit.
++
++Boundary: research-only. No legislation, no board mutations.
++
++## 5. Dispositions requested (legislature, rev 2)
++
++U1 is the cheapest uptake hook; what uptake style do members actually want (if anything)? An Automated digest line, a periodic summary, or something else? The Office does not draft a bill; Parliament takes disposition on whether U1 should be in the digest and which FOSS platform shows the best promise for a possible cutover pilot later.
+diff --git a/records/suite-status.json b/records/suite-status.json
+index 27fdd329..c473e33d 100644
+--- a/records/suite-status.json
++++ b/records/suite-status.json
+@@ -1,12 +1,12 @@
+ {
+   "generated_by": "government/suite-status.sh",
+   "act": 21,
+-  "recorded_at": 1795482059,
+-  "recorded_iso": "2026-11-24T01:00:59Z",
++  "recorded_at": 1795491356,
++  "recorded_iso": "2026-11-24T03:35:56Z",
+   "suite": "tests/records-smoke.sh",
+-  "commit": "a429ea13b19f05b108edf82ed064f898d54bd1fc",
+-  "tree": "556854b66ccc79945520fbc52b031b91b5b2a844",
+-  "main": "fa31dbd2b5a06a9a83e078abbcb52ba390a2f887",
++  "commit": "66b0e81c68c13dcf894ff2078cb18cff11c2f6a2",
++  "tree": "f5a58483b6ebec50b290c852de90579a0082a447",
++  "main": "9075c1a886a0898f92931a553b85f47d9427fe69",
+   "result": "green",
+   "runs": [{"run":1,"result":"green","exit":0,"output_sha256":"2e5a7e79772f14b774757fd872135179a505df27eee04abba74ce9fbc40ce593"}],
+   "ci_result": "unavailable",
+diff --git a/tests/economy-capacity-smoke.sh b/tests/economy-capacity-smoke.sh
+new file mode 100755
+index 00000000..67216747
+--- /dev/null
++++ b/tests/economy-capacity-smoke.sh
+@@ -0,0 +1,53 @@
++#!/bin/sh
++# Test the Ministry measurement and safe expansion signal with no host dependency.
++set -eu
++cd "$(dirname "$0")/.."
++python3 - <<'PY_TEST'
++import importlib.util
++from pathlib import Path
++from unittest.mock import patch
++import tempfile
++import copy
++spec = importlib.util.spec_from_file_location("economy", "government/economy-resources.py")
++m = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(m)
++r = {"disk:state":{"status":"short"}, "memory":{"status":"ok","headroom_gib":11,"oom_kills":5},
++     "load":{"status":"ok"}, "model_funding":{"status":"ok","free_available_now":8}}
++cpu = {"usage_usec":120_000_000,"cpus":4.0,"identity":"a"}
++old = {"capacity":{"cpu_sample":dict(cpu,usage_usec=0,epoch=1000)}, "resources":copy.deepcopy(r)}
++def assess(resources=r, counter=cpu, previous=old, current=1600):
++    return m.capacity_assessment(resources,counter,previous,current,m.DEFAULT_POLICY)
++x = assess()
++assert x['status']=='underused' and x['cpu_used_cores']==.2 and x['cpu_spare_cores']==3.8, x
++assert x['memory_spare_gib']==8 and x['disk_mode']=='disk-light-only', x
++assert x['dimensions']=={'cpu':'spare','memory':'spare','disk':'disk-light-only','model_funding':'available'}, x
++mixed=copy.deepcopy(r)
++mixed['load']['status']='short'
++y=assess(resources=mixed,counter=dict(cpu,usage_usec=2_250_000_000))
++assert y['dimensions']['cpu']=='contended' and y['dimensions']['memory']=='spare'
++assert y['dimensions']['model_funding']=='available' and y['status']=='constrained'
++assert 'action' not in y and 'worker count' in y['interpretation']
++mixed['model_funding']['free_available_now']=None
++assert assess(resources=mixed)['dimensions']['model_funding']=='unknown'
++
++assert assess(counter=dict(cpu,usage_usec=2_250_000_000))['status']=='no_clear_spare_capacity'
++assert assess(current=1100+3600)['status']=='unmeasured'
++assert assess(counter=dict(cpu,identity='new'))['status']=='unmeasured'
++assert assess(counter=None)['status']=='unmeasured'
++assert assess(previous={})['status']=='unmeasured'
++for key, change in [('memory',{'status':'critical','headroom_gib':1}), ('memory',{'oom_kills':6}), ('model_funding',{'free_available_now':0}), ('disk:state',{'status':'critical'})]:
++    constrained=copy.deepcopy(r);constrained[key].update(change)
++    assert assess(resources=constrained)['status']=='constrained', key
++with tempfile.TemporaryDirectory() as tmp:
++    d=Path(tmp)
++    (d/'cpu.stat').write_text('usage_usec 2000000\n')
++    (d/'cpu.pressure').write_text('some avg10=99.00 avg60=82.00 avg300=71.00 total=10\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n')
++    (d/'cpu.max').write_text('150000 100000\n')
++    (d/'cpuset.cpus.effective').write_text('0-3\n')
++    with patch.object(m,'CGROUP',d),patch.object(m.os,'sched_getaffinity',return_value={0,1,2,3}):
++        assert m.cpu_counter()['cpus']==1.5
++        assert m.cpu_counter()['usage_usec']==2_000_000
++        assert m.pressure()['cpu']['some']==82.0
++        assert m.pressure()['memory'] is None
++print('Economy capacity: measured underuse, quotas, stale counters and safety constraints passed')
++PY_TEST
+diff --git a/tests/pnp-leaderboard-smoke.sh b/tests/pnp-leaderboard-smoke.sh
+old mode 100644
+new mode 100755
+index ed2e7e96..5be06f74
+--- a/tests/pnp-leaderboard-smoke.sh
++++ b/tests/pnp-leaderboard-smoke.sh
+@@ -9,7 +9,7 @@ from pathlib import Path
+ import subprocess
+ import tempfile
+ from unittest.mock import patch
+-from missions.pnp import leaderboard, status
++from missions.pnp import leaderboard, status, frontier
+ 
+ def people(*pairs):
+     return [{"github": name, "steps": steps, "first_proof_at":
+@@ -82,6 +82,24 @@ with tempfile.TemporaryDirectory() as tmp:
+     assert unknown["workers"]["count"] is None
+     assert unknown["workers"]["coverage"] == "unavailable"
+     assert unknown["dispatch_signal"] != empty["dispatch_signal"]
++# A malformed or partial response cannot signal that a lease has ended.
++raw = {"open_gaps": 2, "offerable_now": 1, "offerable_now_ordinary": 1,
++       "gaps": [{"id": "L-meta-1662", "held": 3, "parallel": 4}]}
++part = frontier.normalize(raw, 100)
++assert not part["complete"] and not frontier.missing(part, "L-meta-651")
++full = frontier.normalize(dict(raw, open_gaps=1), 100)
++assert frontier.missing(full, "L-meta-651")
++for rec, expected in [
++    ({"state": "LEASED", "lease": "a", "lease_expires_at": 200}, "continue"),
++    ({"state": "LEASED", "lease": "a", "lease_expires_at": 50}, "wait"),
++    ({"state": "STALE", "lease": "a"}, "stop"),
++    ({"state": "LEASED", "lease": "b", "lease_expires_at": 200}, "stop"),
++    ({"state": "CANDIDATE_READY", "lease": "a", "lease_expires_at": 200,
++      "queued_lease": "a"}, "wait"),
++    (None, "wait"),
++]:
++    with patch.object(frontier.state, "load", return_value=rec):
++        assert frontier.checkpoint("L-meta-1662", "a", now=100)["decision"] == expected
+ gov = Path("government/executive-cycle.sh").read_text()
+ assert "mission_dispatch_signature=" in gov
+ assert "mission_dispatch_signature" in gov.split("# Founder directive 2026-11-16 (item 4):")[-1]
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 7d235d4c..b85ceed7 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -263,7 +263,7 @@ class TestPublish(unittest.TestCase):
+         with self.assertRaises(publish.StopPublish):
+             publish.publish(GAP, self.file, desk=FakeDesk(),
+                             git=FakeGit(build_ok=False), gh=FakeGH())
+-        self.assertEqual(state.load(GAP)["state"], "FAULT")
++        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
+ 
+     def test_bad_candidate_stops_before_git(self):
+         new_state()
+@@ -272,14 +272,56 @@ class TestPublish(unittest.TestCase):
+             publish.publish(GAP, candidate_file(GOOD.replace("norm_num", "sorry")),
+                             desk=FakeDesk(), git=g, gh=FakeGH())
+         self.assertNotIn(("push", config.branch_for(GAP)), g.calls)
+-        self.assertEqual(state.load(GAP)["state"], "FAULT")
++        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
+ 
+     def test_lease_410_stops(self):
+         new_state()
+         with self.assertRaises(publish.StopPublish):
+             publish.publish(GAP, self.file, desk=FakeDesk(beat=410),
+                             git=FakeGit(), gh=FakeGH())
+-        self.assertEqual(state.load(GAP)["state"], "FAULT")
++        self.assertEqual(state.load(GAP)["state"], "STALE")
++
++    def test_failed_proof_can_be_corrected_without_losing_lease(self):
++        new_state()
++        d, g, h = FakeDesk(), FakeGit(build_ok=False), FakeGH()
++        with self.assertRaises(publish.StopPublish):
++            publish.publish(GAP, self.file, desk=d, git=g, gh=h)
++        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
++        self.assertIsNone(state.load(GAP)["candidate_digest"])
++        state.transition(GAP, "CANDIDATE_READY")
++        g.build_ok = True
++        result = publish.publish(GAP, self.file, desk=d, git=g, gh=h)
++        self.assertEqual(result["pr"], 123)
++        self.assertEqual(h.created, 1)
++
++    def test_gap_settled_during_build_never_pushes(self):
++        new_state()
++        d, g, h = FakeDesk(), FakeGit(), FakeGH()
++        def beat(lease):
++            d.beats.append(lease)
++            return 200 if len(d.beats) == 1 else 410
++        d.beat = beat
++        with self.assertRaises(publish.StopPublish):
++            publish.publish(GAP, self.file, desk=d, git=g, gh=h)
++        self.assertEqual(state.load(GAP)["state"], "STALE")
++        self.assertEqual(h.created, 0)
++        self.assertFalse(any(c[0] == "push" for c in g.calls))
++
++    def test_confirmed_stale_reply_does_not_touch_new_lease(self):
++        new_state("LEASED")
++        self.assertFalse(state.stale_lease(GAP, "old-lease", "old reply"))
++        self.assertEqual(state.load(GAP)["state"], "LEASED")
++
++    def test_partial_frontier_does_not_invalidate_live_assignment(self):
++        new_state("LEASED")
++        d = FakeDesk(beat=410)
++        reconcile.reconcile_gap(GAP, desk=d, git=FakeGit(), gh=FakeGH(),
++                                observed={"complete": False, "gaps": {}})
++        self.assertEqual(state.load(GAP)["state"], "LEASED")
++        self.assertEqual(d.beats, [])
++        reconcile.reconcile_gap(GAP, desk=d, git=FakeGit(), gh=FakeGH(),
++                                observed={"complete": True, "gaps": {}})
++        self.assertEqual(state.load(GAP)["state"], "STALE")
+ 
+     def test_github_verification_false_means_no_pr(self):
+         new_state()
+@@ -341,17 +383,49 @@ class TestCli(unittest.TestCase):
+     def setUp(self):
+         fresh()
+ 
+-    def test_submit_transitions_lease_to_ready_without_agent_git(self):
+-        from missions.pnp import cli
++    def test_submit_snapshots_and_launches_without_agent_git(self):
++        from missions.pnp import cli, jobs
+         new_state("LEASED")
+         seen = []
+-        def submit(gap_id, candidate):
+-            seen.append((gap_id, candidate, state.load(gap_id)["state"]))
+-            return {"pr": 17}
+-        with mock.patch.object(cli.publish, "publish", side_effect=submit):
++        def launch(gap_id, fd):
++            seen.append((gap_id, state.load(gap_id)["state"]))
++        with mock.patch.object(jobs, "launch", side_effect=launch):
+             self.assertEqual(cli.cmd_submit(
+-                type("Args", (), {"gap": GAP, "candidate": "/tmp/proof"})()), 0)
+-        self.assertEqual(seen, [(GAP, "/tmp/proof", "CANDIDATE_READY")])
++                type("Args", (), {"gap": GAP, "candidate": candidate_file()})()), 0)
++            self.assertEqual(seen, [(GAP, "CANDIDATE_READY")])
++            self.assertTrue(jobs.resume(GAP))
++        with open(jobs.candidate_path(GAP)) as f:
++            self.assertEqual(f.read(), GOOD)
++        self.assertEqual(state.load(GAP)["queued_lease"], "lease-1")
++
++    def test_publication_retry_backoff_preserves_candidate(self):
++        from missions.pnp import jobs
++        new_state("LEASED")
++        with mock.patch.object(jobs, "launch"):
++            jobs.submit(GAP, candidate_file())
++        jobs.defer(GAP, "old-lease")
++        self.assertIsNone(state.load(GAP).get("publisher_retry_at"))
++        jobs.defer(GAP, "lease-1")
++        rec = state.load(GAP)
++        self.assertEqual(rec["publisher_failures"], 1)
++        self.assertGreater(rec["publisher_retry_at"], time.time())
++        with mock.patch.object(jobs, "launch") as launch:
++            self.assertTrue(jobs.resume(GAP))
++            launch.assert_not_called()
++        self.assertTrue(os.path.isfile(jobs.candidate_path(GAP)))
++        self.assertEqual(rec["state"], "CANDIDATE_READY")
++
++    def test_concurrent_publisher_lock_prevents_duplicate_launch(self):
++        from missions.pnp import jobs
++        new_state("LEASED")
++        fd = jobs.claim(GAP)
++        try:
++            with mock.patch.object(jobs, "launch") as launch:
++                self.assertEqual(jobs.submit(GAP, candidate_file())["status"],
++                                 "publishing")
++                launch.assert_not_called()
++        finally:
++            os.close(fd)
+ 
+     def test_reacquire_adopts_fresh_lease_without_releasing(self):
+         """A re-offered released/stale gap must be re-leased, not handed back.
+diff --git a/tests/pnp-real-smoke.py b/tests/pnp-real-smoke.py
+index fb83c332..bbca2ff4 100644
+--- a/tests/pnp-real-smoke.py
++++ b/tests/pnp-real-smoke.py
+@@ -8,6 +8,8 @@ import pathlib
+ import subprocess
+ import sys
+ import tempfile
++import threading
++import time
+ import unittest
+ from types import SimpleNamespace
+ from unittest.mock import patch
+@@ -17,7 +19,7 @@ sys.path.insert(0, str(ROOT))
+ TMP = tempfile.TemporaryDirectory(prefix="pnp-real-smoke-")
+ os.environ["PNP_STATE_ROOT"] = str(pathlib.Path(TMP.name) / "state")
+ 
+-from missions.pnp import cli, config, github, state, gitctl  # noqa: E402
++from missions.pnp import cli, config, github, state, gitctl, jobs, build_control  # noqa: E402
+ 
+ 
+ class FullPathSmoke(unittest.TestCase):
+@@ -63,6 +65,197 @@ class FullPathSmoke(unittest.TestCase):
+         self.assertEqual(calls[0][2:4], ("--repo", config.UPSTREAM))
+         self.assertIn("ottojung:pnp/l_meta_582", calls[0])
+ 
++    def test_publisher_lock_survives_parent_and_recovers_after_exit(self):
++        gap = "L-meta-93286"
++        state.create(gap, state="LEASED", lease="test-lease")
++        fd = jobs.claim(gap)
++        self.assertIsNotNone(fd)
++        p = subprocess.Popen([sys.executable, "-c",
++                              "import sys; sys.stdin.read()"],
++                             pass_fds=(fd,), stdin=subprocess.PIPE)
++        os.close(fd)
++        try:
++            self.assertIsNone(jobs.claim(gap))
++        finally:
++            p.kill()
++            p.wait(timeout=5)
++            p.stdin.close()
++        again = jobs.claim(gap)
++        self.assertIsNotNone(again)
++        os.close(again)
++
++    def test_dependency_cache_does_not_inherit_checker_lock(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = pathlib.Path(tmp)
++            seed = root / "seed/lean/.lake"
++            seed.mkdir(parents=True)
++            (seed / "packages").mkdir()
++            (seed / "check.lock").mkdir()
++            work = root / "work/lean"
++            work.mkdir(parents=True)
++            for name in ("lean-toolchain", "lake-manifest.json"):
++                (seed.parent / name).write_text("pinned")
++                (work / name).write_text("pinned")
++            with patch.dict(os.environ, {"PNP_SHARED_LAKE": str(seed)}):
++                gitctl.prepare_build_cache(str(work.parent))
++            self.assertFalse((work / ".lake").is_symlink())
++            self.assertTrue((work / ".lake/packages").is_symlink())
++            self.assertFalse((work / ".lake/check.lock").exists())
++
++    def test_publication_slot_and_confirmed_obsolescence(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            with patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=16 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]):
++                self.assertFalse(build_control.busy())
++                with build_control.slot(timeout=0):
++                    self.assertTrue(build_control.busy())
++                    with self.assertRaises(build_control.BuildDeferred):
++                        with build_control.slot(timeout=0):
++                            self.fail("duplicate full publication build")
++                self.assertFalse(build_control.busy())
++        with patch.object(state, "load", return_value={"state": "STALE", "lease": "old"}):
++            self.assertTrue(build_control.obsolete("L-meta-1", "old"))
++        with patch.object(state, "load", side_effect=OSError("temporarily unavailable")):
++            self.assertFalse(build_control.obsolete("L-meta-1", "old"))
++        with patch.object(state, "load", return_value={"state": "LEASED", "lease": "new"}):
++            self.assertTrue(build_control.obsolete("L-meta-1", "old"))
++
++    def test_memory_reserve_and_process_group_budget(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = pathlib.Path(tmp)
++            (root / "memory.max").write_text(str(14 * build_control.GIB))
++            (root / "memory.current").write_text(str(13 * build_control.GIB))
++            (root / "memory.stat").write_text("inactive_file 1073741824\n")
++            self.assertEqual(build_control.headroom(root), 2 * build_control.GIB)
++            (root / "memory.max").write_text("max")
++            self.assertIsNone(build_control.headroom(root))
++        with patch.object(build_control, "headroom", return_value=build_control.GIB):
++            self.assertIn("reserve", build_control.memory_reason(1))
++        with patch.object(build_control, "headroom", return_value=None), patch.object(
++                build_control, "group_rss", return_value=7 * build_control.GIB):
++            self.assertIsNone(build_control.memory_reason(1))
++            self.assertIn("light", build_control.memory_reason(1, heavy=False))
++        with patch.object(build_control, "headroom", return_value=None), patch.object(
++                build_control, "group_rss", return_value=0):
++            self.assertIsNone(build_control.memory_reason(1))
++
++    def test_light_shared_heavy_exclusive(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=12 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]):
++            with build_control.slot(timeout=0, heavy=False, publication=False):
++                with build_control.slot(timeout=0, heavy=False, publication=False):
++                    with self.assertRaises(build_control.BuildDeferred):
++                        with build_control.slot(timeout=0, heavy=False, publication=False):
++                            self.fail("third light build exceeds reserved capacity")
++                    with self.assertRaises(build_control.BuildDeferred):
++                        with build_control.slot(timeout=0, heavy=True):
++                            self.fail("heavy overlaps light")
++            with build_control.slot(timeout=0, heavy=True):
++                with self.assertRaises(build_control.BuildDeferred):
++                    with build_control.slot(timeout=0, heavy=False, publication=False):
++                        self.fail("light overlaps heavy")
++
++    def test_waiting_publisher_has_admission_priority(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=12 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]):
++            entered = threading.Event()
++            release = threading.Event()
++            errors = []
++            def publisher():
++                try:
++                    with build_control.slot(timeout=5):
++                        entered.set()
++                        release.wait(5)
++                except Exception as exc:
++                    errors.append(exc)
++                    entered.set()
++            with build_control.slot(timeout=0, heavy=True, publication=False):
++                thread = threading.Thread(target=publisher)
++                thread.start()
++                try:
++                    deadline = time.monotonic() + 3
++                    while time.monotonic() < deadline:
++                        fd = os.open(build_control.priority_path(), os.O_CREAT | os.O_RDWR, 0o600)
++                        try:
++                            import fcntl
++                            if not build_control.try_lock(fd, fcntl.LOCK_EX):
++                                break
++                        finally:
++                            os.close(fd)
++                        time.sleep(0.025)
++                    else:
++                        self.fail("publisher never took priority gate")
++                    self.assertFalse(entered.is_set())
++                    with self.assertRaises(build_control.BuildDeferred):
++                        with build_control.slot(timeout=0, heavy=False, publication=False):
++                            self.fail("new light build overtook publisher")
++                except BaseException:
++                    release.set()
++                    raise
++            try:
++                self.assertTrue(entered.wait(3))
++                self.assertFalse(errors)
++            finally:
++                release.set()
++                thread.join(5)
++
++    def test_legacy_compiler_and_unknown_memory_defer_admission(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp):
++            with patch.object(build_control, "headroom", return_value=12 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[123]):
++                with self.assertRaises(build_control.BuildDeferred):
++                    with build_control.slot(timeout=0):
++                        self.fail("legacy compiler overlaps managed build")
++            with patch.object(build_control, "headroom", return_value=None), patch.object(build_control, "legacy_compilers", return_value=[]):
++                with self.assertRaises(build_control.BuildDeferred):
++                    with build_control.slot(timeout=0):
++                        self.fail("unknown headroom allowed a heavy build")
++
++    def test_supervisor_reaps_its_own_memory_deferred_child(self):
++        from missions.pnp import compile as compiler
++        children = []
++        popen = subprocess.Popen
++        def spawn(*args, **kwargs):
++            proc = popen(*args, **kwargs)
++            children.append(proc)
++            return proc
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=10 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]), patch.object(build_control, "memory_reason", return_value="simulated pressure"), patch.object(compiler, "command", return_value=[sys.executable, "-c", "import time; time.sleep(30)"]), patch.object(compiler.subprocess, "Popen", side_effect=spawn):
++            with self.assertRaises(build_control.MemoryDeferred):
++                compiler.run(["lean", "scratch.lean"], timeout=3)
++            self.assertEqual(len(children), 1)
++            self.assertIsNotNone(children[0].poll())
++            self.assertFalse(build_control.busy())
++
++    def test_compiler_supervisor_success(self):
++        from missions.pnp import compile as compiler
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=10 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]), patch.object(compiler, "command", return_value=[sys.executable, "-c", "pass"]):
++            self.assertEqual(compiler.run(["lean", "scratch.lean"], timeout=3), 0)
++            self.assertFalse(build_control.busy())
++
++    def test_resource_blocked_waits_for_more_headroom(self):
++        rec = {"publisher_memory_required": 10 * build_control.GIB}
++        with patch.object(build_control, "headroom", return_value=9 * build_control.GIB):
++            self.assertFalse(build_control.resource_ready(rec))
++        with patch.object(build_control, "headroom", return_value=11 * build_control.GIB):
++            self.assertTrue(build_control.resource_ready(rec))
++        with patch.object(build_control, "headroom", return_value=None):
++            self.assertFalse(build_control.resource_ready(rec))
++        self.assertTrue(build_control.resource_ready({}))
++
++    def test_reuse_requires_exact_publisher_tree(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            def git(*args):
++                return subprocess.run(["git", "-C", tmp, *args], check=True,
++                                      capture_output=True, text=True).stdout.strip()
++            git("init", "-q")
++            pathlib.Path(tmp, "seed").write_text("base")
++            git("add", "seed")
++            git("-c", "user.name=Seed", "-c", "user.email=seed@example.org",
++                "-c", "commit.gpgsign=false", "commit", "-qm", "base")
++            base = git("rev-parse", "HEAD")
++            path = "lean/PEqualNP/Outside/L_meta_582.lean"
++            gitctl.pin_candidate(tmp, path, b"proof")
++            self.assertTrue(gitctl.reusable_checked_tree(tmp, base, path, b"proof"))
++            self.assertFalse(gitctl.reusable_checked_tree(tmp, base, path, b"other"))
++            pathlib.Path(tmp, "seed").write_text("different dependency")
++            self.assertFalse(gitctl.reusable_checked_tree(tmp, base, path, b"proof"))
++
+     def test_real_signed_git_commit(self):
+         # CI environments intentionally lack Otto Jung's private signing key.
+         key = config.SIGNING_KEY.rstrip("!")

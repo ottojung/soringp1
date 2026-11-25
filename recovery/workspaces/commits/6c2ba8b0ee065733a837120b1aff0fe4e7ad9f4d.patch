@@ -1,0 +1,193 @@
+commit 6c2ba8b0ee065733a837120b1aff0fe4e7ad9f4d
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 18:59:23 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 18:59:23 2026 +0000
+
+    Archive a replaced agent's unsafe hold on every Act 19 reset path
+    
+    The independent review of the integration candidate found that threshold
+    resets in branch-bootstrap.sh, clerk-liveness.sh and seat-liveness.sh replace
+    the agent without archiving its stale unsafe-hold line, so an office could stay
+    blocked after a lawful reset. terminal-continuity.sh did archive, but with a
+    blind mv that also moved other invocations' holds and could overwrite earlier
+    evidence.
+    
+    Add one shared POSIX helper, oc_archive_hold, that moves only the lines whose
+    tab-separated agent id matches the replaced agent, keeps unrelated holds, uses
+    a non-colliding archive name, and is idempotent. Call it on all four replace
+    paths. Archiving failure is reported but does not block recovery; the hold
+    stays in place as evidence.
+    
+    Regression coverage: the threshold-reset fixture now plants a stale hold and
+    asserts it is archived and removed; a unit block asserts another agent's hold
+    survives, a repeated archive does not duplicate, and an emptied hold file is
+    deleted. Focused appointment, continuity, institutional, branch-health and
+    Act 19 tests pass.
+
+diff --git a/government/branch-bootstrap.sh b/government/branch-bootstrap.sh
+index 3f397303..2178d49a 100755
+--- a/government/branch-bootstrap.sh
++++ b/government/branch-bootstrap.sh
+@@ -60,10 +60,13 @@ if [ "$reset_due" = true ]; then
+   antonina agent log --id "$id" --lines 200 > "$snapshot/log.txt" 2>&1 || :
+   git -C "$cwd" status --short > "$snapshot/worktree.txt"
+   oc_quiesce_for_reset "$id" || exit 1
++  oc_old_id=$id
+   id=$(/bin/sh "$town/government/appointments.sh" replace "$branch" "$id" branch-bootstrap act19_failure_threshold 'Act 19 threshold reset after durable failure evidence and quiescence')
+   printf '%s\n' "$now" > "$liv/last-reset-$branch"
+   meta=$(antonina agent status --id "$id" --json)
+   oc_clear_failures "$liv" "$branch"
++  oc_archive_hold "$liv" "$branch" "$oc_old_id" ||
++    echo "Viche: could not archive the old unsafe hold for $branch; evidence may remain" >&2
+   printf '%s branch=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+     "$(date -u +%FT%TZ)" "$branch" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" \
+     >> "$liv/recoveries.log"
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+index e894ebb3..60f8bb98 100644
+--- a/government/clerk-liveness.sh
++++ b/government/clerk-liveness.sh
+@@ -45,9 +45,12 @@ if [ "$reset_due" = true ]; then
+   git -C "$seats/$seat_id" rev-parse HEAD > "$snapshot/worktree-head.txt"
+   # Persist the attempted recovery before any destructive agent-metadata operation.
+   oc_quiesce_for_reset "$id" || exit 1
++  oc_old_id=$id
+   id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id" "$id" clerk-liveness act19_failure_threshold 'Act 19 threshold reset after durable failure evidence and quiescence')
+   printf '%s\n' "$now" > "$state/last-reset-$seat_id"
+   oc_clear_failures "$state" "$seat_id"
++  oc_archive_hold "$state" "$seat_id" "$oc_old_id" ||
++    echo "Viche: could not archive the old unsafe hold for $seat_id; evidence may remain" >&2
+   printf '%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+     "$(date -u +%FT%TZ)" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" \
+     >> "$state/recoveries.log"
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index 1927fbf6..fffdd579 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -144,6 +144,41 @@ oc_clear_failures() {
+   return 0
+ }
+ 
++# Archive the unsafe-hold lines that belong to ONE failed agent before its
++# appointment is replaced. Unlike a blind `mv`, this keeps holds belonging to
++# other invocations and never overwrites earlier archived evidence, so repeated
++# recovery is idempotent. A hold is evidence of the old request, not a veto on
++# the replacement agent.
++# $1 liveness dir, $2 office/seat key, $3 old agent id
++oc_archive_hold() {
++  oc_hold_id=${3:-}
++  [ -n "$oc_hold_id" ] || return 0
++  oc_hold_file=$1/unsafe-holds/$2
++  [ -s "$oc_hold_file" ] || return 0
++  awk -F '\t' -v id="$oc_hold_id" '$2==id {found=1} END {exit found?0:1}' \
++    "$oc_hold_file" || return 0
++  oc_hold_dir=$1/archived-unsafe-holds
++  mkdir -p "$oc_hold_dir" || return 1
++  oc_hold_backup=$oc_hold_dir/$2-$oc_hold_id
++  oc_hold_n=0
++  while [ -e "$oc_hold_backup" ]; do
++    oc_hold_n=$((oc_hold_n + 1))
++    oc_hold_backup=$oc_hold_dir/$2-$oc_hold_id.$oc_hold_n
++  done
++  awk -F '\t' -v id="$oc_hold_id" '$2==id' "$oc_hold_file" >> "$oc_hold_backup" || return 1
++  oc_hold_tmp=$oc_hold_file.tmp.$$
++  if ! awk -F '\t' -v id="$oc_hold_id" '$2!=id' "$oc_hold_file" > "$oc_hold_tmp"; then
++    rm -f "$oc_hold_tmp"
++    return 1
++  fi
++  if [ -s "$oc_hold_tmp" ]; then
++    mv -f "$oc_hold_tmp" "$oc_hold_file" || return 1
++  else
++    rm -f "$oc_hold_tmp" "$oc_hold_file"
++  fi
++  return 0
++}
++
+ # Surface a permanent or UNCLASSIFIED failure exactly once per agent and
+ # classification. An absent backend_error is NOT evidence of permanence.
+ # Durable incident records survive restart without flooding each sitting.
+diff --git a/government/seat-liveness.sh b/government/seat-liveness.sh
+index 61dd873a..69ea815d 100644
+--- a/government/seat-liveness.sh
++++ b/government/seat-liveness.sh
+@@ -54,8 +54,11 @@ antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1
+ git -C "$seat" status --short > "$snapshot/worktree-status.txt"
+ git -C "$seat" rev-parse HEAD > "$snapshot/worktree-head.txt"
+ oc_quiesce_for_reset "$id" || exit 1
++oc_old_id=$id
+ id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id" "$id" seat-liveness act19_failure_threshold 'Act 19 threshold reset after durable failure evidence and quiescence')
+ printf '%s\n' "$now" > "$root/last-reset-$seat_id"
+ oc_clear_failures "$root" "$seat_id"
++oc_archive_hold "$root" "$seat_id" "$oc_old_id" ||
++  echo "Viche: could not archive the old unsafe hold for $seat_id; evidence may remain" >&2
+ printf '%s seat=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+   "$(date -u +%FT%TZ)" "$seat_id" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" >> "$root/recoveries.log"
+diff --git a/government/terminal-continuity.sh b/government/terminal-continuity.sh
+index 83b396ea..427d29d2 100644
+--- a/government/terminal-continuity.sh
++++ b/government/terminal-continuity.sh
+@@ -98,11 +98,10 @@ tmp=$(mktemp "$root/reconciled.XXXXXXXX")
+ jq -c --arg new "$new" '. + {state:"awaiting_reconciliation",successor_agent:$new}' "$receipt" > "$tmp"
+ mv -f "$tmp" "$receipt"
+ # A hold on the OLD request is valid evidence, not a prohibition on a NEW
+-# reconciliatory appointment. Archive it instead of erasing it.
+-hold=$state/liveness/unsafe-holds/$office
+-if [ -s "$hold" ] && grep -Fq "$id" "$hold"; then
+-  mkdir -p "$state/liveness/archived-unsafe-holds"
+-  mv "$hold" "$state/liveness/archived-unsafe-holds/$office-$id" || :
+-fi
++# reconciliatory appointment. Archive only this agent's lines, preserving any
++# other invocation's holds and earlier archives.
++. "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/office-continuity.sh"
++oc_archive_hold "$state/liveness" "$office" "$id" ||
++  echo "Viche: could not archive the old unsafe hold for $office; evidence may remain" >&2
+ printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$office" "$id" "$new" >> "$root/reappointments.tsv"
+ echo "Viche continuity: $office reappointed from $id to $new; no prompt replay" >&2
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index dad30246..7b0a8326 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -100,7 +100,16 @@ run_branch
+ id3=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve "$office")
+ test "$id3" = "$id2"
+ set_status failed "$((base+2))" run-3 upstream_endpoint_unavailable true true "$id3"
++# A pre-existing hold for exactly this failed invocation must be archived by
++# the threshold reset, not left to block the office and not silently erased.
++mkdir -p "$VICHE_STATE_ROOT/liveness/unsafe-holds"
++printf 'executive\t%s\trun-3\n' "$id3" > "$VICHE_STATE_ROOT/liveness/unsafe-holds/executive"
+ MOCK_REVIVE_ON_LOG=$id3 run_branch
++test -s "$VICHE_STATE_ROOT/liveness/archived-unsafe-holds/executive-$id3" ||
++  { echo 'Threshold reset did not archive the old unsafe hold' >&2; exit 1; }
++grep -Fq "$id3" "$VICHE_STATE_ROOT/liveness/archived-unsafe-holds/executive-$id3"
++test ! -e "$VICHE_STATE_ROOT/liveness/unsafe-holds/executive" ||
++  { echo 'Archived unsafe hold still blocks the office' >&2; exit 1; }
+ test "$(grep -c -Fx "$id3" "$MOCK_ROOT/stops")" -eq 1 ||
+   { echo 'Running appointee was not stopped exactly once before reset' >&2; exit 1; }
+ id4=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve "$office")
+@@ -122,6 +131,26 @@ jq -e --arg prior "$id3" '.caller=="branch-bootstrap" and .trigger=="act19_failu
+ oc_quiesce_for_reset_test_id=$id4
+ set_status running "$((base+5))" run-running idle false true "$oc_quiesce_for_reset_test_id"
+ . "$repo/government/office-continuity.sh"
++# Archiving one agent's hold must preserve another invocation's hold and must
++# not overwrite evidence if recovery runs twice.
++holdtest=$d/holdtest/liveness
++mkdir -p "$holdtest/unsafe-holds"
++printf 'executive\told-a\trun-a\n' > "$holdtest/unsafe-holds/executive"
++printf 'executive\told-b\trun-b\n' >> "$holdtest/unsafe-holds/executive"
++oc_archive_hold "$holdtest" executive old-a
++test -s "$holdtest/archived-unsafe-holds/executive-old-a" ||
++  { echo 'Archive helper did not retain the old hold' >&2; exit 1; }
++grep -Fq old-a "$holdtest/archived-unsafe-holds/executive-old-a"
++! grep -Fq old-a "$holdtest/unsafe-holds/executive" ||
++  { echo 'Archived agent still appears in the live hold file' >&2; exit 1; }
++grep -Fq old-b "$holdtest/unsafe-holds/executive"
++oc_archive_hold "$holdtest" executive old-a
++test "$(find "$holdtest/archived-unsafe-holds" -name 'executive-old-a*' | wc -l | tr -d ' ')" -eq 1 ||
++  { echo 'Repeated archive created a duplicate record' >&2; exit 1; }
++oc_archive_hold "$holdtest" executive old-b
++test ! -e "$holdtest/unsafe-holds/executive" ||
++  { echo 'Empty hold file was not removed' >&2; exit 1; }
++test -s "$holdtest/archived-unsafe-holds/executive-old-b"
+ if MOCK_STOP_FAIL=yes oc_quiesce_for_reset "$oc_quiesce_for_reset_test_id"; then
+   echo 'Failed quiescence incorrectly reported success' >&2; exit 1
+ fi

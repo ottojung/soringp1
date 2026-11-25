@@ -1,0 +1,158 @@
+commit 65e06fcecf44b99259d4cc02117aa9f898169b34
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Wed Nov 25 00:09:11 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Wed Nov 25 00:09:11 2026 +0000
+
+    Improve executable research documentation from observed agent discovery failures
+
+diff --git a/missions/pnp/research/README.md b/missions/pnp/research/README.md
+index c21d0239..80b1a12d 100644
+--- a/missions/pnp/research/README.md
++++ b/missions/pnp/research/README.md
+@@ -24,6 +24,7 @@ pnp-research knowledge add obstruction --family graph-circuit \
+   --statement 'precise failed claim' --detail 'why it fails' \
+   --provenance 'original investigation' --file evidence.txt
+ pnp-research knowledge link COUNTEREXAMPLE OBSTRUCTION counterexample_to
++# Other relationships: supports, blocks, instantiates, reduces_to.
+ ```
+ 
+ Exact prior-gap records are prioritized in the work packet even across
+@@ -43,6 +44,7 @@ pnp-research obligations request --statement '∀ n : Nat, n + 0 = n' --import M
+ pnp-research obligations solve NODE_ID proof.body --async
+ # Keep investigating another obligation. Use CHECK_ID from the returned JSON.
+ pnp-research obligations collect CHECK_ID --poll
++pnp-research obligations pending # --all also lists terminal checks
+ # Exit 75 means pending; collect without --poll to wait.
+ pnp-research obligations assemble ROOT_ID --candidate --output Candidate.lean
+ # Submit the exact complete candidate through the ordinary submission pipeline.
+@@ -87,6 +89,9 @@ Method research is not an extra desk claim and cannot publish to arbitrary gaps.
+ `pnp-research certificate --output Candidate.lean` attempts the exact bound
+ assignment. Independently, provide `certificate GRAPH.json --output Test.lean`,
+ where the graph format is {"n":26,"edges":[[0,13],...],"bound":64}.
++Supported graphs have 2–256 vertices, nonempty simple edge sets and integer
++vertex indices starting at zero. Failure outside those limits is unsupported,
++not a mathematical obstruction.
+ The star-cover construction uses minimum bipartite vertex cover or bounded
+ branch-and-bound, and symbolic antichain verification. Its Lean certificate
+ uses a permutation of concrete edges rather than exhaustive enumeration of
+@@ -115,7 +120,8 @@ Benchmark implementation: `python3 -m missions.pnp.research.certificate_bench
+   dispatch: `pnp-research dispatch ROLE --agent ID --cwd WORKSPACE --task TASK`.
+   Only Executive may use agent-launch/steer actions.
+ - `pnp-research adoption` measures confirmed launches, discovery, substantive
+-  commands and time to first use using the actual agent environment.
++  commands, help calls before first use, and time to first successful use
++  using the actual agent environment.
+   These are adoption measurements, not proof success or leaderboard credit.
+ - `pnp-research yield` exposes censored historical family-level evidence,
+   shrinkage estimates, actual graph progress and competition. It is a
+diff --git a/missions/pnp/research/adoption.py b/missions/pnp/research/adoption.py
+index 42b483a3..bf6d64b8 100644
+--- a/missions/pnp/research/adoption.py
++++ b/missions/pnp/research/adoption.py
+@@ -98,6 +98,11 @@ def report(hours=24):
+         d["used"]=bool(actual)
+         d["successful_use"]=any(u["exit"]==0 for u in actual)
+         d["first_use_seconds"]=round(min(u["started"] for u in actual)-d["started"],2) if actual else None
++        successful=[u for u in actual if u["exit"]==0]
++        d["first_success_seconds"]=round(min(u["started"] for u in successful)-d["started"],2) if successful else None
++        first=min((u["started"] for u in actual),default=now)
++        d["help_calls_before_first_use"]=sum(u["command"].endswith(" help") and u["started"]<first for u in events)
++        d["substantive_failures"]=sum(u["exit"] not in (0,75) for u in actual)
+         d["commands"]=sorted(set(u["command"] for u in events))
+         role=by.setdefault(d["role"],{"launches":0,"discovered":0,"used":0,"successful_use":0})
+         role["launches"]+=1
+diff --git a/missions/pnp/research/knowledge.py b/missions/pnp/research/knowledge.py
+index c7ec9cd7..784d9e59 100644
+--- a/missions/pnp/research/knowledge.py
++++ b/missions/pnp/research/knowledge.py
+@@ -14,6 +14,7 @@ from .. import config, state
+ 
+ KINDS = ("lemma", "technique", "obstruction", "counterexample", "reduction",
+          "certificate", "obligation", "finding", "fragment")
++RELATIONS = ("supports","blocks","counterexample_to","instantiates","reduces_to")
+ MAX_ARTIFACT = 512 * 1024
+ def digest(x):
+     return hashlib.sha256(x).hexdigest()
+@@ -283,8 +284,8 @@ def relevant(rec):
+ 
+ 
+ def link(c, source, target, relation):
+-    if relation not in ("supports","blocks","counterexample_to","instantiates","reduces_to"):
+-        raise ValueError("invalid relationship")
++    if relation not in RELATIONS:
++        raise ValueError("invalid relationship; choose "+", ".join(RELATIONS))
+     if source==target:raise ValueError("self link")
+     with c:
+         c.execute("INSERT OR IGNORE INTO edge VALUES(?,?,?)",(source,target,relation))
+@@ -346,7 +347,7 @@ def main():
+     a=sub.add_parser("find");a.add_argument("query",nargs="?",default="");a.add_argument("--family")
+     a.add_argument("--kind",action="append",choices=KINDS);a.add_argument("--limit",type=int,default=12);a.add_argument("--full",action="store_true")
+     a=sub.add_parser("show");a.add_argument("id")
+-    a=sub.add_parser("link");a.add_argument("source");a.add_argument("target");a.add_argument("relation")
++    a=sub.add_parser("link");a.add_argument("source");a.add_argument("target");a.add_argument("relation",choices=RELATIONS)
+     sub.add_parser("ingest");sub.add_parser("stats")
+     args=p.parse_args()
+     with closing(db()) as c:
+diff --git a/missions/pnp/research/obligations.py b/missions/pnp/research/obligations.py
+index 1dcb747b..c5b33237 100644
+--- a/missions/pnp/research/obligations.py
++++ b/missions/pnp/research/obligations.py
+@@ -75,7 +75,7 @@ def checked_body(c,node,base):
+     for row in c.execute("SELECT artifact,result FROM proof WHERE node=? AND base=? ORDER BY checked DESC",(node,base)):
+         d=json.loads(row["result"])
+         if d.get("status")=="kernel_checked":return k.artifact(row["artifact"]).read_text()
+-    raise ValueError("unresolved dependency "+node)
++    raise ValueError("unresolved dependency "+node+"; inspect obligations show "+node+" and solve/check it before assembly")
+ 
+ def declaration_options(meta):
+     opts=meta.get("options",{})
+@@ -233,7 +233,7 @@ def main():
+     a=sub.add_parser("solve");a.add_argument("id");a.add_argument("body");a.add_argument("--local",action="store_true");a.add_argument("--method",action="store_true")
+     a.add_argument("--async",dest="asynchronous",action="store_true");a.add_argument("--wall",type=int,default=600);a.add_argument("--rss-mib",type=int,default=8192);a.add_argument("--retry",action="store_true",help="retry a terminal unsuccessful async check")
+     a=sub.add_parser("collect");a.add_argument("id");a.add_argument("--poll",action="store_true");a.add_argument("--timeout",type=int,default=1100)
+-    sub.add_parser("pending");sub.add_parser("reconcile")
++    a=sub.add_parser("pending",help="list in-flight checks, or all with --all");a.add_argument("--all",action="store_true");sub.add_parser("reconcile")
+     a=sub.add_parser("reuse");a.add_argument("old");a.add_argument("new");a.add_argument("--method",action="store_true");a.add_argument("--async",dest="asynchronous",action="store_true")
+     a=sub.add_parser("assemble");a.add_argument("id");a.add_argument("--output",required=True);a.add_argument("--candidate",action="store_true")
+     a=sub.add_parser("show");a.add_argument("id");a.add_argument("--full",action="store_true")
+@@ -303,6 +303,7 @@ def main():
+         elif a.cmd=="pending":
+             from . import async_check
+             out=async_check.pending(c)
++            if not a.all:out=[x for x in out if x["state"] in ("queued","submitting")]
+         elif a.cmd=="reconcile":
+             from . import async_check
+             out=async_check.reconcile(c)
+diff --git a/missions/pnp/research/playbook.py b/missions/pnp/research/playbook.py
+index 8a00b0be..0013059e 100644
+--- a/missions/pnp/research/playbook.py
++++ b/missions/pnp/research/playbook.py
+@@ -66,7 +66,7 @@ def guide(role):
+     elif role in DECISIONS:
+         lines += ["Use pnp-research yield (empirical baseline; not calibrated) and " + P + "portfolio inspect. Read current proof artifacts before deciding."]
+     elif role in {"knowledge","methods"}:
+-        lines += ["Use pnp-research knowledge find QUERY and knowledge show ID; knowledge add KIND --family FAMILY --statement TEXT --provenance SOURCE --file FILE. Deliver actionable evidence via support advise."]
++        lines += ["Use pnp-research knowledge find QUERY and knowledge show ID; knowledge add KIND --family FAMILY --statement TEXT --provenance SOURCE --file FILE. Link evidence with knowledge link SOURCE TARGET RELATION; --help lists valid relation names. Deliver actionable evidence via support advise."]
+     elif role in {"flow","transport"}:
+         lines += ["Use pnp-research adoption; marceline-request status; inspect actual outcomes and timings, not merely reports."]
+     lines += ["Detailed examples on demand: pnp-research guide " + role + ". No separate onboarding gate."]
+@@ -199,8 +199,8 @@ def packet(role, cwd=None):
+             "marceline-request status "+base if base else "marceline-request status"]
+         if role=="tool":
+             out["next_commands"].insert(0,"pnp-research certificate GRAPH.json --base "+(base or "BASE")+" --check")
+-            out["source_locations"]=["missions/pnp/research/certificate.py","missions/pnp/research/star.py",
+-                                     "missions/pnp/research/certificate_bench.py","missions/pnp/research/dnf_reflection.py","missions/pnp/proofs/"]
++            out["source_locations"]=[str(Path(__file__).resolve().parent/f) for f in ("certificate.py","star.py","certificate_bench.py","dnf_reflection.py","README.md")]
++            out["source_locations"].append("/var/lib/lubko/wd/viche/missions/pnp/proofs")
+         with knowledge.db() as c:
+             from . import obligations
+             out["open_method_nodes"]=[{"id":x["id"],"family":x["family"],"base":x["base"],"statement":x["statement"][:250]}
+@@ -226,6 +226,7 @@ def main():
+     else:
+         print("CURRENT WORK PACKET — "+role)
+         print("Purpose:",ROLES[role][0])
++        print("\n".join(data["instructions"].splitlines()[2:-1]))
+         for key in ("gap","family","base","latest_public_base","assignment_current","assigned_obligation"):
+             if key in data:print(key+":",data[key])
+         context=data.get("cumulative_research") or {}

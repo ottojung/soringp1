@@ -1,0 +1,3400 @@
+commit 6d4fb615022a21d56be20da84ed86a737d57f46c
+Merge: 790751a2 29d86344
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Fri Nov 20 18:48:53 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Fri Nov 20 18:48:53 2026 +0000
+
+    Merge current main; preserve chronological Clerk intake entries
+
+diff --git a/government/boot.sh b/government/boot.sh
+index 20b900d2..3e518e1d 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -138,6 +138,12 @@ fi
+ # locks so they cannot block Parliament or Judiciary or each other.
+ if grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \(enacted ' "$town/government/LAWS.md" &&
+    [ -s "$town/government/knowledge-office-cycle.sh" ]; then
++    # Act 32 H: after a crash or box restart, reconcile in-flight reservations
++    # before any new dispatch. Deterministic, bounded and fail-closed.
++    if [ -s "$town/government/knowledge-budget.sh" ]; then
++        /bin/sh "$town/government/knowledge-budget.sh" reconcile ||
++            echo "Viche: knowledge budget reconciliation failed" >&2
++    fi
+     knowledge_root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/knowledge/offices
+     for office in statistics foresight strategy spying; do
+         # Same fail-closed verifier as appointments and the office cycle: a
+diff --git a/government/knowledge-budget-tool.py b/government/knowledge-budget-tool.py
+new file mode 100644
+index 00000000..c8c7d7db
+--- /dev/null
++++ b/government/knowledge-budget-tool.py
+@@ -0,0 +1,389 @@
++#!/usr/bin/env python3
++"""Authoritative usage primitives for the Act 32 knowledge-office budget engine.
++
++This helper is the ONLY place that reads the token/cost meter. It never writes
++to the meter database (read-only URI) and never invents a token or cost value:
++if the authoritative source is unreadable it exits non-zero and the POSIX-sh
++engine fails closed.
++
++Token usage is read from the Antonina-managed OpenCode service SQLite database
++(`session_v2`, keyed by the agent's native_session_id). CPU time is read from
++/proc for the agent's runner process (including reaped children). Wall time is
++computed by the shell from authoritative timestamps.
++
++Subcommands:
++  validate CONFIG          validate source-controlled budget config; exit 0/1
++  show CONFIG              print the validated, normalised config as JSON
++  probe DB                 exit 0 only if authoritative token metering is readable
++  snapshot DB SID PID      print a usage snapshot (tokens, reported cost, CPU)
++  aggregate RESDIR WINDOW NOW   sum committed charges over reservations
++  admit CONFIG AGGJSON OFFICE   decide whether a reservation may be admitted
++  overrun CAPSJSON SNAPJSON WALL   decide whether measured usage exceeds caps
++"""
++import json
++import math
++import os
++import pathlib
++import sqlite3
++import sys
++import time
++import urllib.parse
++import tempfile
++
++SCHEMA = "viche-knowledge-budget-v1"
++OFFICES = ("statistics", "foresight", "strategy", "spying")
++CAP_KEYS = ("tokens_total", "cpu_seconds", "wall_seconds")
++TOKEN_FIELDS = ("tokens_input", "tokens_output", "tokens_reasoning",
++                "tokens_cache_read", "tokens_cache_write")
++METER_SOURCE = "opencode-service-session-v2"
++MAX_WINDOW = 45 * 86400
++
++
++def emit(obj, code=0):
++    print(json.dumps(obj, sort_keys=True))
++    return code
++
++
++def fail(msg, code=2):
++    return emit({"ok": False, "reason": msg}, code)
++
++
++# ---- configuration -----------------------------------------------------------
++
++def load_config(path):
++    try:
++        with open(path) as handle:
++            return json.load(handle), []
++    except (OSError, ValueError) as exc:
++        return None, ["config unreadable or not JSON: %s" % exc]
++
++
++def validate_config(cfg):
++    errors = []
++    if not isinstance(cfg, dict):
++        return ["config must be a JSON object"]
++    if cfg.get("schema") != SCHEMA:
++        errors.append("schema must be exactly %s" % SCHEMA)
++    metering = cfg.get("metering")
++    if not isinstance(metering, dict):
++        errors.append("metering must be an object")
++    else:
++        if metering.get("source") != METER_SOURCE:
++            errors.append("metering.source must be exactly %s" % METER_SOURCE)
++        db = metering.get("opencode_db")
++        if not isinstance(db, str) or not db:
++            errors.append("metering.opencode_db must be a non-empty string")
++    cpu_meter = cfg.get("cpu_meter")
++    if not isinstance(cpu_meter, dict) or cpu_meter.get("available") is not False or \
++            cpu_meter.get("source") != "unavailable":
++        errors.append("cpu_meter must explicitly remain unavailable until verified per-office backend attribution is implemented")
++    for key, low, high in (("accounting_window_seconds", 1, MAX_WINDOW),
++                           ("monitor_interval_seconds", 1, 300)):
++        val = cfg.get(key)
++        if isinstance(val, bool) or not isinstance(val, int) or not (low <= val <= high):
++            errors.append("%s must be an integer in [%d,%d]" % (key, low, high))
++    if cfg.get("overrun_action") not in ("kill", "stop"):
++        errors.append("overrun_action must be kill or stop")
++    baseline = cfg.get("baseline")
++    if not isinstance(baseline, dict) or not isinstance(baseline.get("label"), str) \
++            or not isinstance(baseline.get("ref"), str):
++        errors.append("baseline must carry string label and ref")
++    offices = cfg.get("offices")
++    if not isinstance(offices, dict) or set(offices) != set(OFFICES):
++        errors.append("offices must name exactly: %s" % ", ".join(OFFICES))
++    else:
++        for office in OFFICES:
++            entry = offices[office]
++            if not isinstance(entry, dict):
++                errors.append("offices.%s must be an object" % office)
++                continue
++            if not isinstance(entry.get("enabled"), bool):
++                errors.append("offices.%s.enabled must be boolean" % office)
++            ok, cap_errors = check_caps(entry.get("caps"), "offices.%s.caps" % office)
++            errors.extend(cap_errors)
++            if ok:
++                for key in CAP_KEYS:
++                    if entry["caps"][key] <= 0:
++                        errors.append("offices.%s.caps.%s must be positive" % (office, key))
++    aggregate = cfg.get("aggregate")
++    if not isinstance(aggregate, dict):
++        errors.append("aggregate must be an object")
++    else:
++        ok, cap_errors = check_caps(aggregate.get("caps"), "aggregate.caps")
++        errors.extend(cap_errors)
++        if ok and isinstance(offices, dict):
++            for key in CAP_KEYS:
++                if aggregate["caps"][key] <= 0:
++                    errors.append("aggregate.caps.%s must be positive" % key)
++                largest = 0
++                for office in OFFICES:
++                    entry = offices.get(office)
++                    if isinstance(entry, dict) and isinstance(entry.get("caps"), dict):
++                        value = entry["caps"].get(key)
++                        if isinstance(value, int) and not isinstance(value, bool):
++                            largest = max(largest, value)
++                if aggregate["caps"][key] < largest:
++                    errors.append("aggregate.caps.%s must be >= the largest office cap" % key)
++    return errors
++
++
++def check_caps(caps, where):
++    if not isinstance(caps, dict):
++        return False, ["%s must be an object" % where]
++    errors = []
++    for key in CAP_KEYS:
++        val = caps.get(key)
++        if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
++            errors.append("%s.%s must be a positive integer" % (where, key))
++    return (not errors), errors
++
++
++# ---- authoritative meter -----------------------------------------------------
++
++def open_meter(path):
++    if not path or not os.path.isfile(path):
++        raise OSError("OpenCode meter database is missing: %s" % path)
++    uri = "file:%s?mode=ro" % urllib.parse.quote(str(path), safe="/")
++    con = sqlite3.connect(uri, uri=True, timeout=5)
++    con.execute("PRAGMA query_only=1")
++    return con
++
++
++def meter_columns(con):
++    return {row[1] for row in con.execute("PRAGMA table_info(session_v2)")}
++
++
++def cpu_seconds(_pid):
++    # OpenCode's runner PID is not the backend/service CPU attribution. Never
++    # substitute it for the Act 32 machine-time cap. Until a verified service
++    # cgroup/session attribution exists, CPU is explicitly unavailable and the
++    # engine refuses all activations that require this cap.
++    return None, False
++
++
++def snapshot(db, sid, pid):
++    con = open_meter(db)
++    try:
++        columns = meter_columns(con)
++        if not set(TOKEN_FIELDS + ("id", "cost", "time_updated")) <= columns:
++            raise OSError("session_v2 lacks authoritative token/cost columns")
++        row = con.execute(
++            "SELECT %s, cost, time_updated FROM session_v2 WHERE id=?" % ",".join(TOKEN_FIELDS),
++            (sid or "",)).fetchone()
++    finally:
++        con.close()
++    tokens = {}
++    for idx, name in enumerate(TOKEN_FIELDS):
++        if row is None:
++            raise OSError("authoritative session row is absent; usage is unknown")
++        value = row[idx]
++        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++            raise OSError("authoritative token counter is invalid")
++        tokens[name.replace("tokens_", "")] = int(value or 0)
++    tokens["total"] = sum(tokens[k] for k in ("input", "output", "reasoning",
++                                              "cache_read", "cache_write"))
++    reported = bool(row is not None and row[len(TOKEN_FIELDS)] is not None)
++    cost = float(row[len(TOKEN_FIELDS)] or 0) if reported else 0.0
++    cpu, cpu_ok = cpu_seconds(pid)
++    return {
++        "available": True,
++        "source": METER_SOURCE,
++        "at": int(time.time()),
++        "session_id": sid,
++        "session_found": row is not None,
++        "tokens": tokens,
++        "cost": cost,
++        "cost_reported": reported,
++        "cpu_seconds": cpu,
++        "cpu_available": cpu_ok,
++        "time_updated_ms": int(row[len(TOKEN_FIELDS) + 1]) if row[len(TOKEN_FIELDS) + 1] is not None else None,
++    }
++
++
++# ---- accounting --------------------------------------------------------------
++
++def charges(reservations, now, window):
++    """Return (totals, counted_ids, skipped_ids) over in-window reservations."""
++    totals = {"tokens_total": 0, "cpu_seconds": 0.0, "wall_seconds": 0}
++    by_office = {office: {"tokens_total": 0, "cpu_seconds": 0.0, "wall_seconds": 0}
++                 for office in OFFICES}
++    counted = []
++    for path in sorted(pathlib.Path(reservations).glob("*.json")):
++        try:
++            row = json.loads(path.read_text())
++            state = row.get("state")
++            created = int(row.get("created_at", 0))
++        except (OSError, ValueError, TypeError, AttributeError) as exc:
++            raise OSError("reservation record unreadable (%s): %s" % (path.name, exc))
++        if not isinstance(row, dict) or row.get("schema") != "viche-knowledge-budget-reservation-v1":
++            raise OSError("reservation record has invalid schema: %s" % path.name)
++        if row.get("state") not in ("reserved", "active", "held", "closed", "rolled_back", "rejected"):
++            raise OSError("reservation has unknown state: %s" % path.name)
++        if not isinstance(row.get("id"), str) or not isinstance(row.get("office"), str) or \
++                not isinstance(row.get("caps"), dict):
++            raise OSError("reservation lacks required identity/caps: %s" % path.name)
++        if state == "rolled_back" or state == "rejected":
++            continue
++        if created > now + 60:
++            raise OSError("reservation timestamp is in the future: %s" % path.name)
++        if state == "closed" and now - created > window:
++            continue
++        caps = row.get("caps") if isinstance(row.get("caps"), dict) else {}
++        usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
++        charge = row.get("charge") if isinstance(row.get("charge"), dict) else {}
++        source = usage if state == "closed" else (charge if state == "held" else caps)
++        values = {}
++        for key in CAP_KEYS:
++            value = source.get(key, caps.get(key))
++            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
++                raise OSError("reservation has unknown/invalid liability %s: %s" % (key, path.name))
++            values[key] = float(value) if key == "cpu_seconds" else int(value)
++        office = row.get("office")
++        for key in CAP_KEYS:
++            totals[key] += values[key]
++            if office in by_office:
++                by_office[office][key] += values[key]
++        counted.append(row.get("id", path.name))
++    totals["by_office"] = by_office
++    return totals, counted, []
++
++
++def admit(cfg, agg, office):
++    office_caps = cfg["offices"][office]["caps"]
++    total_caps = cfg["aggregate"]["caps"]
++    reasons = []
++    for key in CAP_KEYS:
++        projected = agg.get(key, 0) + office_caps[key]
++        if projected > total_caps[key]:
++            reasons.append("%s projected %s exceeds aggregate cap %s" %
++                           (key, projected, total_caps[key]))
++    return {"admit": not reasons, "reason": "; ".join(reasons) or "within caps"}
++
++
++def overrun(caps, snap, wall):
++    if not snap or snap.get("session_found") is not True:
++        raise ValueError("token meter row missing")
++    if snap.get("cpu_available") is not True or snap.get("cpu_seconds") is None:
++        raise ValueError("authoritative backend CPU meter unavailable")
++    tokens = snap.get("tokens", {}).get("delta_total")
++    cpu = snap.get("cpu_seconds")
++    if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
++        raise ValueError("per-run token delta unavailable")
++    reasons = []
++    if tokens >= caps["tokens_total"]:
++        reasons.append("tokens_total")
++    if cpu >= caps["cpu_seconds"]:
++        reasons.append("cpu_seconds")
++    if wall >= caps["wall_seconds"]:
++        reasons.append("wall_seconds")
++    return {"over": bool(reasons), "reasons": reasons,
++            "tokens_total": tokens, "cpu_seconds": cpu, "wall_seconds": wall}
++
++
++def main(argv):
++    if not argv:
++        return fail("missing subcommand", 2)
++    cmd, args = argv[0], argv[1:]
++    try:
++        if cmd == "validate":
++            cfg, errors = load_config(args[0])
++            errors = validate_config(cfg) if not errors else errors
++            for err in errors:
++                print(err, file=sys.stderr)
++            return emit({"ok": not errors, "errors": errors}, 0 if not errors else 1)
++        if cmd == "show":
++            cfg, errors = load_config(args[0])
++            errors = validate_config(cfg) if not errors else errors
++            if errors:
++                return fail("; ".join(errors), 1)
++            return emit(cfg, 0)
++        if cmd == "probe":
++            con = open_meter(args[0])
++            try:
++                if not set(TOKEN_FIELDS + ("id", "cost", "time_updated")) <= meter_columns(con):
++                    return fail("meter schema missing authoritative columns", 1)
++                con.execute("SELECT id FROM session_v2 LIMIT 1").fetchone()
++            finally:
++                con.close()
++            return emit({"ok": True, "source": METER_SOURCE}, 0)
++        if cmd == "snapshot":
++            return emit(snapshot(args[0], args[1] if len(args) > 1 else "",
++                                 args[2] if len(args) > 2 else ""), 0)
++        if cmd == "delta":
++            baseline = json.loads(args[0])
++            current = json.loads(args[1])
++            if current.get("session_found") is not True or baseline.get("session_found") is not True:
++                return fail("baseline/current meter row is absent", 2)
++            if baseline.get("session_id") != current.get("session_id"):
++                return fail("session identity changed", 2)
++            before = baseline.get("tokens", {})
++            after = current.get("tokens", {})
++            result = {}
++            for key in ("input", "output", "reasoning", "cache_read", "cache_write"):
++                a, b = before.get(key), after.get(key)
++                if isinstance(a, bool) or isinstance(b, bool) or not isinstance(a, int) or not isinstance(b, int) or b < a:
++                    return fail("token counter reset or invalid: %s" % key, 2)
++                result[key] = b - a
++            result["total"] = sum(result.values())
++            current["tokens"]["delta_total"] = result["total"]
++            current["tokens"]["delta"] = result
++            return emit(current, 0)
++        if cmd == "aggregate":
++            totals, counted, skipped = charges(args[0], int(args[2]), int(args[1]))
++            totals["counted"] = counted
++            totals["skipped"] = skipped
++            return emit(totals, 0)
++        if cmd == "admit":
++            cfg, errors = load_config(args[0])
++            if errors or validate_config(cfg):
++                return fail("invalid config", 1)
++            agg = json.loads(args[1])
++            return emit(admit(cfg, agg, args[2]), 0)
++        if cmd == "overrun":
++            caps = json.loads(args[0])
++            snap = json.loads(args[1]) if args[1] and args[1] != "null" else None
++            return emit(overrun(caps, snap, float(args[2])), 0)
++        if cmd == "durable-write":
++            target = pathlib.Path(args[0])
++            target.parent.mkdir(parents=True, exist_ok=True)
++            payload = sys.stdin.buffer.read()
++            fd, temp = tempfile.mkstemp(prefix=".budget-tmp-", dir=str(target.parent))
++            try:
++                with os.fdopen(fd, "wb") as handle:
++                    handle.write(payload)
++                    handle.flush()
++                    os.fsync(handle.fileno())
++                os.replace(temp, target)
++                dirfd = os.open(str(target.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
++                try:
++                    os.fsync(dirfd)
++                finally:
++                    os.close(dirfd)
++            finally:
++                if os.path.exists(temp):
++                    os.unlink(temp)
++            return emit({"ok": True}, 0)
++        if cmd == "durable-mkdir":
++            target = pathlib.Path(args[0])
++            missing = []
++            cursor = target
++            while not cursor.exists():
++                missing.append(cursor)
++                cursor = cursor.parent
++            target.mkdir(parents=True, exist_ok=True)
++            # Persist new directory entries from the deepest parent outward.
++            for directory in reversed(missing):
++                for path in (directory, directory.parent):
++                    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
++                    try:
++                        os.fsync(fd)
++                    finally:
++                        os.close(fd)
++            return emit({"ok": True}, 0)
++    except (IndexError, ValueError, TypeError, OSError, sqlite3.Error) as exc:
++        return fail(str(exc), 2)
++    return fail("unknown subcommand: %s" % cmd, 2)
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv[1:]))
+diff --git a/government/knowledge-budget.conf b/government/knowledge-budget.conf
+new file mode 100644
+index 00000000..fb9204d6
+--- /dev/null
++++ b/government/knowledge-budget.conf
+@@ -0,0 +1,28 @@
++{
++  "schema": "viche-knowledge-budget-v1",
++  "metering": {
++    "source": "opencode-service-session-v2",
++    "opencode_db": "/home/lubko/.local/state/antonina/opencode-service/opencode.db"
++  },
++  "cpu_meter": {
++    "available": false,
++    "source": "unavailable",
++    "reason": "No verified per-office backend CPU attribution; runner PID CPU is not a valid substitute"
++  },
++  "accounting_window_seconds": 3888000,
++  "monitor_interval_seconds": 20,
++  "overrun_action": "kill",
++  "baseline": {
++    "ref": "records/knowledge/baseline-20261119.json",
++    "label": "point-in-time diagnostic only (197 executions, 0 scored outcomes); NOT a frozen verified cost comparator under Act 32 v4 D"
++  },
++  "offices": {
++    "statistics": {"enabled": false, "caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600}},
++    "foresight":  {"enabled": false, "caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600}},
++    "strategy":   {"enabled": false, "caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600}},
++    "spying":     {"enabled": false, "caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600}}
++  },
++  "aggregate": {
++    "caps": {"tokens_total": 1600000, "cpu_seconds": 7200, "wall_seconds": 14400}
++  }
++}
+diff --git a/government/knowledge-budget.sh b/government/knowledge-budget.sh
+new file mode 100644
+index 00000000..34000b64
+--- /dev/null
++++ b/government/knowledge-budget.sh
+@@ -0,0 +1,539 @@
++#!/bin/sh
++# Act 32 amendment H: measured, hard-capped, fail-closed knowledge-office budgets.
++#
++# This is a SPEND budget, not a worker cap (Constitution VII). It never invents a
++# token or cost value: token/cost usage comes only from the authoritative
++# Antonina-managed OpenCode meter (knowledge-budget-tool.py); if that meter is
++# unreadable, every path fails closed. All mutations are serialized by a single
++# flock and persisted by temp-file + atomic rename. A live detached agent is
++# actively monitored and stopped/killed on overrun or expiry; the launcher's
++# own timeout is never relied on. Crashes, restarts and unknown usage are held
++# with a pessimistic charge and reconciled idempotently from verified data.
++#
++# POSIX /bin/sh only. No bashisms.
++set -eu
++
++TOWN=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++STATE=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++TOOL=${VICHE_BUDGET_TOOL:-$TOWN/government/knowledge-budget-tool.py}
++CONFIG=${VICHE_BUDGET_CONFIG:-$TOWN/government/knowledge-budget.conf}
++ROOT=${VICHE_BUDGET_STATE:-$STATE/knowledge/budget}
++RES=$ROOT/reservations
++OFFICES='statistics foresight strategy spying'
++CFG=
++
++log() { printf 'knowledge-budget: %s\n' "$*" >&2; }
++die() { log "$*"; exit 1; }
++
++init() {
++  python3 "$TOOL" durable-mkdir "$RES" >/dev/null 2>&1 || die 'cannot durably create budget state directories'
++  umask 077
++}
++
++# All mutations run in a locked subshell; the lock is held only for the duration
++# of the operation, never while a monitor sleeps.
++with_lock() {
++  ( exec 9>>"$ROOT/lock"; flock -w 30 -x 9; "$@" )
++}
++
++cfg_load() {
++  python3 "$TOOL" validate "$CONFIG" >/dev/null 2>&1 ||
++    die "budget config missing or invalid; fail closed: $CONFIG"
++  CFG=$(python3 "$TOOL" show "$CONFIG") || die 'cannot read budget config'
++}
++
++cfgs() { printf '%s\n' "$CFG" | jq -r "$1"; }
++cfgj() { printf '%s\n' "$CFG" | jq -c "$1"; }
++
++db_path() {
++  if [ -n "${VICHE_BUDGET_DB:-}" ]; then printf '%s\n' "$VICHE_BUDGET_DB";
++  else cfgs '.metering.opencode_db'; fi
++}
++
++probe_or_die() {
++  python3 "$TOOL" probe "$(db_path)" >/dev/null 2>&1 ||
++    die 'authoritative token metering unavailable; activation blocked (no unmeasured budget claimed)'
++}
++
++check_office() {
++  case " $OFFICES " in *" $1 "*) :;; *) die "unknown office: $1";; esac
++}
++
++atomic_write() {
++  _aw_path=$1
++  python3 "$TOOL" durable-write "$_aw_path"
++}
++
++atomic_cp() {
++  _ac_from=$1; _ac_to=$2
++  cat "$_ac_from" | atomic_write "$_ac_to"
++}
++
++new_id() {
++  _ni_tmp=$(mktemp "$RES/.new.XXXXXXXX") || die 'cannot allocate reservation id'
++  _ni_id=r$(date +%s)-$(basename "$_ni_tmp" | sed 's/^\.new\.//')
++  rm -f "$_ni_tmp"
++  printf '%s\n' "$_ni_id"
++}
++
++res_read() {
++  _rr_f="$RES/$1.json"
++  [ -s "$_rr_f" ] || die "unknown reservation: $1"
++  cat "$_rr_f"
++}
++
++res_write() {
++  _rw_id=$1
++  printf '%s\n' "$2" | jq -e . >/dev/null || die "refusing to persist non-JSON reservation"
++  printf '%s\n' "$2" | atomic_write "$RES/$_rw_id.json" || die 'reservation write failed'
++}
++
++res_state() { res_read "$1" | jq -r '.state // ""'; }
++res_field() { res_read "$1" | jq -r "$2"; }
++
++res_find_open() {
++  _fo_office=$1
++  for _fo_f in "$RES"/*.json; do
++    [ -s "$_fo_f" ] || continue
++    [ "$(jq -r '.office // ""' "$_fo_f")" = "$_fo_office" ] || continue
++    case "$(jq -r '.state // ""' "$_fo_f")" in
++      reserved|active|held) jq -r '.id' "$_fo_f";;
++    esac
++  done
++}
++
++refresh_aggregate() {
++  _ra_window=${1:-}
++  [ -n "$_ra_window" ] || _ra_window=$(cfgs '.accounting_window_seconds')
++  _ra_now=$(date +%s)
++  if [ -e "$ROOT/aggregate.json" ]; then
++    jq -e 'type=="object" and (.tokens_total|type=="number") and
++      (.cpu_seconds|type=="number") and (.wall_seconds|type=="number") and
++      (.counted|type=="array") and (.skipped|type=="array")' "$ROOT/aggregate.json" >/dev/null 2>&1 ||
++      die 'aggregate state is corrupt; refusing to release or recompute liability'
++  fi
++  _ra_out=$(python3 "$TOOL" aggregate "$RES" "$_ra_window" "$_ra_now") ||
++    die 'cannot compute aggregate budget'
++  printf '%s\n' "$_ra_out" | atomic_write "$ROOT/aggregate.json"
++}
++
++agent_status() { antonina agent status --id "$1" --json 2>/dev/null; }
++
++stop_or_kill() {
++  _sk_agent=$1; _sk_action=$2
++  if [ "$_sk_action" = stop ]; then antonina agent stop --id "$_sk_agent" >/dev/null 2>&1 || :; fi
++  antonina agent kill --id "$_sk_agent" >/dev/null 2>&1 || :
++}
++
++usage_from_snapshot() {
++  _us_snap=$1; _us_wall=$2
++  printf '%s\n' "$_us_snap" | jq -c --argjson w "$_us_wall" \
++    '{tokens_total:.tokens.total,cpu_seconds:.cpu_seconds,wall_seconds:$w,
++      cost:.cost,cost_reported:.cost_reported,source:.source,at:.at}'
++}
++
++# ---- terminal state transitions (all assume the lock is held) ----------------
++
++hold_locked() {
++  _h_id=$1; _h_reason=$2
++  _h_cur=$(res_read "$_h_id")
++  case "$(printf '%s\n' "$_h_cur" | jq -r '.state')" in
++    held|closed|rolled_back|rejected) return 0;;
++  esac
++  _h_agent=$(printf '%s\n' "$_h_cur" | jq -r '.agent_id // ""')
++  [ -z "$_h_agent" ] || stop_or_kill "$_h_agent" kill
++  _h_caps=$(printf '%s\n' "$_h_cur" | jq -c '.caps')
++  _h_now=$(date +%s)
++  _h_new=$(printf '%s\n' "$_h_cur" | jq -c --arg r "$_h_reason" --argjson now "$_h_now" --argjson c "$_h_caps" \
++    '.state="held" | .charge=$c | .held_at=$now | .held_reason=$r |
++     .history += [{at:$now,event:"held",reason:$r}]')
++  res_write "$_h_id" "$_h_new"
++  refresh_aggregate "$(printf '%s\n' "$_h_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++finalize_locked() {
++  _f_id=$1; _f_reason=$2; _f_snap=${3:-}; _f_wall=${4:-}
++  _f_cur=$(res_read "$_f_id")
++  [ "$(printf '%s\n' "$_f_cur" | jq -r '.state')" = active ] || return 0
++  _f_db=$(printf '%s\n' "$_f_cur" | jq -r '.meter_db')
++  _f_sid=$(printf '%s\n' "$_f_cur" | jq -r '.native_session_id // ""')
++  _f_pid=$(printf '%s\n' "$_f_cur" | jq -r '.runner_pid // ""')
++  if [ -z "$_f_snap" ]; then
++    if ! _f_snap=$(python3 "$TOOL" snapshot "$_f_db" "$_f_sid" "$_f_pid" 2>/dev/null); then
++      hold_locked "$_f_id" 'meter_unreadable_at_finalize'; return 0
++    fi
++  fi
++  _f_started=$(printf '%s\n' "$_f_cur" | jq -r '.started_at')
++  [ -n "$_f_wall" ] || _f_wall=$(( $(date +%s) - _f_started ))
++  _f_agent=$(printf '%s\n' "$_f_cur" | jq -r '.agent_id // ""')
++  [ -z "$_f_agent" ] || stop_or_kill "$_f_agent" "$(printf '%s\n' "$_f_cur" | jq -r '.overrun_action')"
++  _f_usage=$(usage_from_snapshot "$_f_snap" "$_f_wall")
++  _f_now=$(date +%s)
++  _f_new=$(printf '%s\n' "$_f_cur" | jq -c --arg r "$_f_reason" --argjson u "$_f_usage" \
++    --argjson now "$_f_now" --argjson s "$_f_snap" \
++    '.state="closed" | .usage=$u | .meter=$s | .closed_at=$now | .closed_reason=$r |
++     .charge=null | .history += [{at:$now,event:"closed",reason:$r}]')
++  res_write "$_f_id" "$_f_new"
++  refresh_aggregate "$(printf '%s\n' "$_f_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++# ---- reservation lifecycle ---------------------------------------------------
++
++do_reserve_locked() {
++  _dr_office=$1; _dr_agent=$2
++  cfg_load
++  probe_or_die
++  # No trustworthy per-session backend CPU attribution exists on this host.
++  # The runner PID is not the OpenCode service CPU. This Act 32 hard cap is
++  # therefore unavailable and dispatch MUST remain disabled until a supported
++  # source is configured and verified.
++  die 'authoritative per-session backend CPU meter unavailable; activation blocked (runner CPU is not a substitute)'
++  [ "$(cfgs ".offices.\"$_dr_office\".enabled")" = true ] ||
++    die "office $_dr_office is disabled in the budget config; fail closed"
++  _dr_open=$(res_find_open "$_dr_office")
++  [ -z "$_dr_open" ] || die "office $_dr_office already has an open reservation: $_dr_open"
++  _dr_now=$(date +%s)
++  _dr_window=$(cfgs '.accounting_window_seconds')
++  _dr_agg=$(python3 "$TOOL" aggregate "$RES" "$_dr_window" "$_dr_now") || die 'aggregate computation failed'
++  _dr_adm=$(python3 "$TOOL" admit "$CONFIG" "$_dr_agg" "$_dr_office") || die 'admission check failed'
++  [ "$(printf '%s\n' "$_dr_adm" | jq -r '.admit')" = true ] ||
++    die "budget exhausted: $(printf '%s\n' "$_dr_adm" | jq -r '.reason')"
++  _dr_id=$(new_id)
++  _dr_caps=$(cfgj ".offices.\"$_dr_office\".caps")
++  _dr_hash=$(sha256sum "$CONFIG" | awk '{print $1}')
++  _dr_interval=$(cfgs '.monitor_interval_seconds')
++  _dr_action=$(cfgs '.overrun_action')
++  _dr_db=$(db_path)
++  _dr_res=$(jq -cn --arg id "$_dr_id" --arg office "$_dr_office" --arg agent "$_dr_agent" --argjson now "$_dr_now" \
++    --argjson caps "$_dr_caps" --arg hash "$_dr_hash" --arg db "$_dr_db" \
++    --argjson window "$_dr_window" --argjson interval "$_dr_interval" --arg action "$_dr_action" \
++    '{schema:"viche-knowledge-budget-reservation-v1",id:$id,office:$office,
++      state:"reserved",created_at:$now,caps:$caps,config_sha256:$hash,meter_db:$db,
++      accounting_window_seconds:$window,monitor_interval_seconds:$interval,overrun_action:$action,
++      meter:null,baseline:null,usage:null,agent_id:$agent,native_session_id:null,runner_pid:null,
++      started_at:null,expires_at:null,charge:null,monitor_pid:null,
++      history:[{at:$now,event:"reserved",office:$office}]}')
++  res_write "$_dr_id" "$_dr_res"
++  refresh_aggregate "$_dr_window"
++  printf '%s\n' "$_dr_id"
++}
++
++do_start_locked() {
++  _ds_id=$1; _ds_agent=$2
++  cfg_load
++  probe_or_die
++  _ds_cur=$(res_read "$_ds_id")
++  [ "$(printf '%s\n' "$_ds_cur" | jq -r '.state')" = reserved ] ||
++    die "reservation $_ds_id is not in reserved state"
++
++  if ! _ds_meta=$(agent_status "$_ds_agent"); then
++    stop_or_kill "$_ds_agent" kill
++    hold_locked "$_ds_id" 'agent_status_unreadable_after_launch'
++    refresh_aggregate "$(printf '%s\n' "$_ds_cur" | jq -r '.accounting_window_seconds')"
++    die 'agent status unreadable after launch; reservation held at full cap'
++  fi
++  _ds_sid=$(printf '%s\n' "$_ds_meta" | jq -r '.native_session_id // empty')
++  _ds_pid=$(printf '%s\n' "$_ds_meta" | jq -r '.runner_pid // .pid // empty')
++  _ds_db=$(printf '%s\n' "$_ds_cur" | jq -r '.meter_db')
++  _ds_expected=$(printf '%s\n' "$_ds_cur" | jq -r '.agent_id // ""')
++  if [ "$_ds_agent" != "$_ds_expected" ] || [ -z "$_ds_sid" ] ||
++     ! _ds_snap=$(python3 "$TOOL" snapshot "$_ds_db" "$_ds_sid" "$_ds_pid" 2>/dev/null) ||
++     [ "$(printf '%s\n' "$_ds_snap" | jq -r '.session_found')" != true ] ||
++     [ "$(printf '%s\n' "$_ds_snap" | jq -r '.cpu_available')" != true ]; then
++    stop_or_kill "$_ds_agent" kill
++    hold_locked "$_ds_id" 'meter_or_session_binding_unknown_after_launch'
++    refresh_aggregate "$(printf '%s\n' "$_ds_cur" | jq -r '.accounting_window_seconds')"
++    die 'meter/session binding unknown after launch; reservation held at full cap'
++  fi
++  _ds_now=$(date +%s)
++  _ds_expiry=$((_ds_now + $(printf '%s\n' "$_ds_cur" | jq -r '.caps.wall_seconds')))
++  _ds_new=$(printf '%s\n' "$_ds_cur" | jq -c --arg a "$_ds_agent" --arg s "$_ds_sid" \
++    --arg p "$_ds_pid" --argjson now "$_ds_now" --argjson ex "$_ds_expiry" --argjson snap "$_ds_snap" \
++    '.state="active" | .agent_id=$a | .native_session_id=$s | .runner_pid=$p |
++     .started_at=$now | .expires_at=$ex | .meter=$snap |
++     .history += [{at:$now,event:"activated",agent_id:$a,native_session_id:$s}]')
++  res_write "$_ds_id" "$_ds_new"
++  refresh_aggregate "$(printf '%s\n' "$_ds_cur" | jq -r '.accounting_window_seconds')"
++}
++
++mark_dispatched_locked() {
++  _md_id=$1
++  _md_cur=$(res_read "$_md_id")
++  [ "$(printf '%s\n' "$_md_cur" | jq -r '.state')" = reserved ] || return 0
++  _md_now=$(date +%s)
++  _md_agent=$(printf '%s\n' "$_md_cur" | jq -r '.agent_id // ""')
++  [ -n "$_md_agent" ] || die 'reservation lacks exact agent identity'
++  res_write "$_md_id" "$(printf '%s\n' "$_md_cur" | jq -c --argjson now "$_md_now" \
++    '.dispatch_attempted=true | .history += [{at:$now,event:"dispatch_attempted",agent_id:.agent_id}]')"
++}
++
++mark_dispatched() { init; with_lock mark_dispatched_locked "${1:-}"; }
++
++resolve_locked() {
++  _rs_id=$1; _rs_reason=$2
++  [ -n "$_rs_reason" ] || die 'a resolution reason is required'
++  _rs_cur=$(res_read "$_rs_id")
++  [ "$(printf '%s\n' "$_rs_cur" | jq -r '.state')" = held ] ||
++    die 'only a held reservation can be resolved'
++  _rs_db=$(printf '%s\n' "$_rs_cur" | jq -r '.meter_db')
++  _rs_sid=$(printf '%s\n' "$_rs_cur" | jq -r '.native_session_id // ""')
++  _rs_pid=$(printf '%s\n' "$_rs_cur" | jq -r '.runner_pid // ""')
++  _rs_caps=$(printf '%s\n' "$_rs_cur" | jq -c '.caps')
++  _rs_started=$(printf '%s\n' "$_rs_cur" | jq -r '.started_at // 0')
++  _rs_wall=0
++  [ "$_rs_started" -gt 0 ] && _rs_wall=$(( $(date +%s) - _rs_started ))
++  if [ -n "$_rs_sid" ] && _rs_snap=$(python3 "$TOOL" snapshot "$_rs_db" "$_rs_sid" "$_rs_pid" 2>/dev/null); then
++    _rs_usage=$(usage_from_snapshot "$_rs_snap" "$_rs_wall")
++  else
++    # No verified meter observation: keep the pessimistic full-cap charge and
++    # say so. Resolution never fabricates a token reading or a cost.
++    _rs_usage=$(printf '%s\n' "$_rs_caps" | jq -c \
++      '{tokens_total:.tokens_total,cpu_seconds:.cpu_seconds,wall_seconds:.wall_seconds,
++        cost:0,cost_reported:false,source:"unmetered_pessimistic_charge",at:0}')
++  fi
++  _rs_now=$(date +%s)
++  _rs_new=$(printf '%s\n' "$_rs_cur" | jq -c --arg r "$_rs_reason" --argjson u "$_rs_usage" --argjson now "$_rs_now" \
++    '.state="closed" | .usage=$u | .charge=null | .closed_at=$now |
++     .closed_reason=("operator_resolved:" + $r) | .resolved_by="operator" |
++     .history += [{at:$now,event:"operator_resolved",reason:$r}]')
++  res_write "$_rs_id" "$_rs_new"
++  refresh_aggregate "$(printf '%s\n' "$_rs_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++resolve() { init; with_lock resolve_locked "${1:-}" "${2:-}"; }
++
++launch_monitor() {
++  _lm_id=$1
++  _lm_log="$ROOT/monitor-$_lm_id.log"
++  # 9>&- is essential: a launched monitor must not inherit a held flock fd,
++  # or its own locked writes would deadlock against its inherited lock.
++  if command -v setsid >/dev/null 2>&1; then
++    setsid /bin/sh "$0" monitor "$_lm_id" 9>&- </dev/null >> "$_lm_log" 2>&1 &
++  else
++    /bin/sh "$0" monitor "$_lm_id" 9>&- </dev/null >> "$_lm_log" 2>&1 &
++  fi
++  _lm_pid=$!
++  with_lock res_write "$_lm_id" \
++    "$(res_read "$_lm_id" | jq -c --argjson p "$_lm_pid" '.monitor_pid=$p')"
++}
++
++monitor() {
++  _mo_id=$1
++  _mo_cur=$(res_read "$_mo_id")
++  _mo_interval=$(printf '%s\n' "$_mo_cur" | jq -r '.monitor_interval_seconds // 20')
++  while :; do
++    sleep "$_mo_interval"
++    _mo_cur=$(res_read "$_mo_id") || exit 0
++    [ "$(printf '%s\n' "$_mo_cur" | jq -r '.state')" = active ] || exit 0
++    _mo_now=$(date +%s)
++    _mo_exp=$(printf '%s\n' "$_mo_cur" | jq -r '.expires_at')
++    if [ "$_mo_now" -ge "$_mo_exp" ]; then
++      finalize "$_mo_id" 'expiry'; exit 0
++    fi
++    _mo_agent=$(printf '%s\n' "$_mo_cur" | jq -r '.agent_id')
++    if ! _mo_meta=$(agent_status "$_mo_agent"); then
++      hold "$_mo_id" 'status_unreadable'; exit 0
++    fi
++    _mo_mstate=$(printf '%s\n' "$_mo_meta" | jq -r '.state // "unknown"')
++    case "$_mo_mstate" in
++      running) :;;
++      *) finalize "$_mo_id" "agent_terminal_$_mo_mstate"; exit 0;;
++    esac
++    _mo_db=$(printf '%s\n' "$_mo_cur" | jq -r '.meter_db')
++    _mo_sid=$(printf '%s\n' "$_mo_cur" | jq -r '.native_session_id')
++    _mo_pid=$(printf '%s\n' "$_mo_cur" | jq -r '.runner_pid // ""')
++    if ! _mo_snap=$(python3 "$TOOL" snapshot "$_mo_db" "$_mo_sid" "$_mo_pid" 2>/dev/null); then
++      hold "$_mo_id" 'meter_unreadable'; exit 0
++    fi
++    _mo_caps=$(printf '%s\n' "$_mo_cur" | jq -c '.caps')
++    _mo_wall=$((_mo_now - $(printf '%s\n' "$_mo_cur" | jq -r '.started_at')))
++    _mo_ov=$(python3 "$TOOL" overrun "$_mo_caps" "$_mo_snap" "$_mo_wall")
++    if [ "$(printf '%s\n' "$_mo_ov" | jq -r '.over')" = true ]; then
++      _mo_action=$(printf '%s\n' "$_mo_cur" | jq -r '.overrun_action')
++      stop_or_kill "$_mo_agent" "$_mo_action"
++      finalize "$_mo_id" "overrun_$(printf '%s\n' "$_mo_ov" | jq -r '.reasons | join("_")')" \
++        "$_mo_snap" "$_mo_wall"
++      exit 0
++    fi
++    update_meter "$_mo_id" "$_mo_snap" "$_mo_wall" || {
++      hold "$_mo_id" 'state_write_failed'; exit 0
++    }
++  done
++}
++
++update_meter() { with_lock _update_meter "$@"; }
++_update_meter() {
++  _um_id=$1; _um_snap=$2; _um_wall=$3
++  _um_cur=$(res_read "$_um_id")
++  [ "$(printf '%s\n' "$_um_cur" | jq -r '.state')" = active ] || return 0
++  _um_usage=$(usage_from_snapshot "$_um_snap" "$_um_wall")
++  _um_new=$(printf '%s\n' "$_um_cur" | jq -c --argjson m "$_um_snap" --argjson u "$_um_usage" \
++    '.meter=$m | .usage=$u')
++  res_write "$_um_id" "$_um_new"
++  refresh_aggregate "$(printf '%s\n' "$_um_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++hold() { with_lock hold_locked "$@"; }
++finalize() { with_lock finalize_locked "$@"; }
++
++# ---- external subcommands ----------------------------------------------------
++
++guard() {
++  _g_office=$1
++  init
++  cfg_load
++  probe_or_die
++  [ "$(cfgs ".offices.\"$_g_office\".enabled")" = true ] ||
++    die "office $_g_office is disabled in the budget config; fail closed"
++  _g_open=$(res_find_open "$_g_office")
++  [ -z "$_g_open" ] || die "office $_g_office has an open reservation: $_g_open"
++  _g_now=$(date +%s)
++  _g_agg=$(python3 "$TOOL" aggregate "$RES" "$(cfgs '.accounting_window_seconds')" "$_g_now") ||
++    die 'aggregate computation failed'
++  if [ -e "$ROOT/aggregate.json" ]; then
++    jq -e --argjson a "$_g_agg" '.tokens_total==$a.tokens_total and
++      .cpu_seconds==$a.cpu_seconds and .wall_seconds==$a.wall_seconds and
++      .counted==$a.counted' "$ROOT/aggregate.json" >/dev/null 2>&1 ||
++      die 'aggregate record is corrupt or divergent; refusing activation'
++  fi
++  die 'authoritative per-session backend CPU meter unavailable; activation blocked (runner CPU is not a substitute)'
++  _g_adm=$(python3 "$TOOL" admit "$CONFIG" "$_g_agg" "$_g_office") || die 'admission check failed'
++  [ "$(printf '%s\n' "$_g_adm" | jq -r '.admit')" = true ] ||
++    die "budget exhausted: $(printf '%s\n' "$_g_adm" | jq -r '.reason')"
++  printf 'guard ok: %s\n' "$_g_office"
++}
++
++reconcile_locked() {
++  cfg_load
++  _rc_now=$(date +%s)
++  for _rc_f in "$RES"/*.json; do
++    [ -s "$_rc_f" ] || continue
++    _rc_id=$(jq -r '.id // ""' "$_rc_f")
++    _rc_state=$(jq -r '.state // ""' "$_rc_f")
++    [ -n "$_rc_id" ] || continue
++    case "$_rc_state" in
++      reserved)
++        _rc_age=$((_rc_now - $(jq -r '.created_at' "$_rc_f")))
++        _rc_interval=$(jq -r '.monitor_interval_seconds // 20' "$_rc_f")
++        [ "$_rc_age" -gt $((_rc_interval * 3 + 60)) ] || continue
++        if [ "$(jq -r '.dispatch_attempted // false' "$_rc_f")" = true ]; then
++          # A launch was attempted but no agent/meter identity was registered:
++          # usage is genuinely unknown, so hold with a pessimistic full charge
++          # and halt further dispatch until an audited resolution.
++          hold_locked "$_rc_id" 'dispatch_attempted_without_meter_registration'
++        elif [ -z "$(jq -r '.agent_id // ""' "$_rc_f")" ]; then
++          hold_locked "$_rc_id" 'reserved_without_agent_identity'
++        else
++          res_write "$_rc_id" "$(jq -c --argjson now "$_rc_now" \
++            '.state="rolled_back" | .history += [{at:$now,event:"orphaned_reservation_rollback"}]' "$_rc_f")"
++        fi
++        ;;
++      active)
++        # A restart past the hard wall/expiry deadline must stop the session,
++        # not silently re-authorise it (Act 32 amendment B acceptance case).
++        _rc_exp=$(jq -r '.expires_at // 0' "$_rc_f")
++        if [ "$_rc_exp" -le "$_rc_now" ]; then
++          finalize_locked "$_rc_id" 'expiry'; continue
++        fi
++        _rc_agent=$(jq -r '.agent_id' "$_rc_f")
++        if ! _rc_meta=$(agent_status "$_rc_agent"); then
++          hold_locked "$_rc_id" 'status_unreadable_on_reconcile'; continue
++        fi
++        _rc_mstate=$(printf '%s\n' "$_rc_meta" | jq -r '.state // "unknown"')
++        case "$_rc_mstate" in
++          running)
++            _rc_mpid=$(jq -r '.monitor_pid // ""' "$_rc_f")
++            if [ -z "$_rc_mpid" ] || ! kill -0 "$_rc_mpid" 2>/dev/null; then
++              _rc_log="$ROOT/monitor-$_rc_id.log"
++              if command -v setsid >/dev/null 2>&1; then
++                setsid /bin/sh "$0" monitor "$_rc_id" 9>&- </dev/null >> "$_rc_log" 2>&1 &
++              else
++                /bin/sh "$0" monitor "$_rc_id" 9>&- </dev/null >> "$_rc_log" 2>&1 &
++              fi
++              _rc_newpid=$!
++              res_write "$_rc_id" "$(jq -c --argjson p "$_rc_newpid" '.monitor_pid=$p' "$_rc_f")"
++            fi
++            ;;
++          *) finalize_locked "$_rc_id" "agent_terminal_on_reconcile";;
++        esac
++        ;;
++      held)
++        _rc_agent=$(jq -r '.agent_id // ""' "$_rc_f")
++        _rc_db=$(jq -r '.meter_db' "$_rc_f")
++        _rc_sid=$(jq -r '.native_session_id // ""' "$_rc_f")
++        _rc_pid=$(jq -r '.runner_pid // ""' "$_rc_f")
++        if [ -n "$_rc_agent" ] && _rc_meta=$(agent_status "$_rc_agent"); then
++          [ "$(printf '%s\n' "$_rc_meta" | jq -r '.state // "unknown"')" = running ] && continue
++          if _rc_snap=$(python3 "$TOOL" snapshot "$_rc_db" "$_rc_sid" "$_rc_pid" 2>/dev/null); then
++            res_write "$_rc_id" "$(jq -c '.state="active"' "$_rc_f")"
++            finalize_locked "$_rc_id" 'reconciled_terminal' "$_rc_snap" ''
++          fi
++        fi
++        ;;
++    esac
++  done
++  refresh_aggregate "$(cfgs '.accounting_window_seconds')"
++}
++
++config_cmd() {
++  _cc_sub=${1:-}
++  case "$_cc_sub" in
++    validate) python3 "$TOOL" validate "$CONFIG";;
++    show) python3 "$TOOL" show "$CONFIG";;
++    activate)
++      init
++      python3 "$TOOL" validate "$CONFIG" >/dev/null || die 'invalid config; activation refused'
++      with_lock _config_activate ;;
++    rollback) init; with_lock _config_rollback ;;
++    *) die 'usage: config validate|show|activate|rollback';;
++  esac
++}
++
++_config_activate() {
++  _ca_norm=$(python3 "$TOOL" show "$CONFIG") || die 'cannot normalise config'
++  if [ -s "$ROOT/config.active.json" ]; then
++    atomic_cp "$ROOT/config.active.json" "$ROOT/config.previous.json" ||
++      die 'cannot rotate previous config'
++  fi
++  printf '%s\n' "$_ca_norm" | atomic_write "$ROOT/config.active.json" ||
++    die 'cannot write active config'
++  log 'activated validated budget config'
++}
++
++_config_rollback() {
++  [ -s "$ROOT/config.previous.json" ] || die 'no previous config to roll back to'
++  _cb_before=$(sha256sum "$ROOT/config.previous.json" | awk '{print $1}')
++  atomic_cp "$ROOT/config.previous.json" "$ROOT/config.active.json" ||
++    die 'config rollback failed'
++  _cb_after=$(sha256sum "$ROOT/config.active.json" | awk '{print $1}')
++  [ "$_cb_before" = "$_cb_after" ] || die 'config rollback byte check failed'
++  printf 'rolled back active config to %s\n' "$_cb_after"
++}
++
++report() {
++  init
++  printf 'Authoritative meter source: %s\n' "$(db_path 2>/dev/null || printf unknown)"
++  printf 'Baseline: diagnostic only, no frozen verified comparator (Act 32 v4 D)\n'
++  if [ -s "$ROOT/aggregate.json" ]; then cat "$ROOT/aggregate.json";
++  else printf '{}\n'; fi
++  for _rp_f in "$RES"/*.json; do
++    [ -s "$_rp_f" ] || continue
++    jq -c '{id,office,state,caps,usage,charge,closed_reason,held_reason}' "$_rp_f"
++  done
++}
++
++cmd=${1:-}
++[ -n "$cmd" ] || { echo 'usage: knowledge-budget.sh config|guard|reserve|mark-dispatched|start|monitor|reconcile|resolve|report' >&2; exit 2; }
++shift || :
++case "$cmd" in
++  config) config_cmd "$@";;
++  guard) check_office "${1:-}"; guard "$1";;
++  reserve) check_office "${1:-}"; init; with_lock do_reserve_locked "$1";;
++  mark-dispatched) init; with_lock mark_dispatched_locked "${1:-}";;
++  start) init; with_lock do_start_locked "${1:-}" "${2:-}"; launch_monitor "${1:-}"; printf 'active %s\n' "$1";;
++  monitor) init; monitor "${1:-}";;
++  reconcile) init; with_lock reconcile_locked;;
++  resolve) init; with_lock resolve_locked "${1:-}" "${2:-}";;
++  report) report;;
++  *) echo "unknown command: $cmd" >&2; exit 2;;
++esac
+diff --git a/government/knowledge-office-cycle.sh b/government/knowledge-office-cycle.sh
+index 68102343..43045fd1 100644
+--- a/government/knowledge-office-cycle.sh
++++ b/government/knowledge-office-cycle.sh
+@@ -20,6 +20,17 @@ grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \(en
+ # Act and THIS office, with a bounded hard expiry. The shared fail-closed
+ # verifier is the same code boot.sh and appointments.sh use, so the three agree.
+ /bin/sh "$town/government/knowledge-activation-verify.sh" "$office" || exit 0
++# Act 32 H: fail-closed metered budget guard. When the budget engine is not
++# installed (legacy fixtures) there is no budget subsystem to gate on; when it
++# is installed, a missing/corrupt config, absent token meter, exhausted cap or
++# held office blocks dispatch instead of assuming a budget.
++budget=$town/government/knowledge-budget.sh
++if [ -s "$budget" ]; then
++  /bin/sh "$budget" guard "$office" || {
++    echo "Viche $office: budget guard refused activation" >&2
++    exit 0
++  }
++fi
+ [ -s "$town/records/knowledge/baseline-20261119.json" ] || {
+   echo "Knowledge: cannot activate without frozen prelaunch baseline" >&2
+   exit 1
+@@ -122,7 +133,32 @@ EOF
+ )
+ [ ! -s "$town/government/AGENT-REPORTING-POLICY.md" ] ||
+   prompt=$(printf '%s\n\n%s\n' "$prompt" "$(cat "$town/government/AGENT-REPORTING-POLICY.md")")
+-antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1 || exit 1
++# Reserve the hard cap BEFORE the session exists. A refused reservation means
++# no dispatch at all; the live detached agent is then monitored and stopped on
++# overrun/expiry by the budget engine (never by the launcher timeout alone).
++reservation=
++if [ -s "$budget" ]; then
++  reservation=$(/bin/sh "$budget" reserve "$office" "$id") || {
++    echo "Viche $office: budget reservation refused; no dispatch" >&2
++    exit 0
++  }
++fi
++if [ -n "$reservation" ]; then
++  /bin/sh "$budget" mark-dispatched "$reservation" || {
++    echo "Viche $office: cannot record dispatch intent; no session launched" >&2
++    exit 1
++  }
++fi
++antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1 || {
++  [ -z "$reservation" ] || /bin/sh "$budget" reconcile >/dev/null 2>&1 || :
++  exit 1
++}
++if [ -n "$reservation" ]; then
++  /bin/sh "$budget" start "$reservation" "$id" || {
++    echo "Viche $office: could not meter session; session stopped" >&2
++    exit 1
++  }
++fi
+ printf '%s\n' "$now" > "$root/last-dispatch"
+ [ ! -f "$town/government/dispatch-gate.sh" ] ||
+   /bin/sh "$town/government/dispatch-gate.sh" commit "$office"
+diff --git a/government/knowledge-phase-gate.sh b/government/knowledge-phase-gate.sh
+new file mode 100644
+index 00000000..a9bb21d4
+--- /dev/null
++++ b/government/knowledge-phase-gate.sh
+@@ -0,0 +1,11 @@
++#!/bin/sh
++# POSIX sh wrapper for the independent Act 32 phase-gate verifier.
++# This wrapper carries NO authority: it only locates canonical code and data.
++# Activation decisions remain fail-closed inside knowledge-phase-verifier.py.
++set -eu
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++[ -s "$town/government/knowledge-phase-verifier.py" ] || {
++  echo "phase verifier missing in canonical town" >&2
++  exit 1
++}
++exec python3 "$town/government/knowledge-phase-verifier.py" --town "$town" "$@"
+diff --git a/government/knowledge-phase-verifier.py b/government/knowledge-phase-verifier.py
+new file mode 100644
+index 00000000..5bb6c797
+--- /dev/null
++++ b/government/knowledge-phase-verifier.py
+@@ -0,0 +1,894 @@
++#!/usr/bin/env python3
++"""Deterministic, fail-closed phase-gate verifier for Act 32 knowledge offices.
++
++This is an INDEPENDENT verifier with its own data format
++(``viche-knowledge-phase-gate-v1``). It is deliberately separate from
++``knowledge-activation-verify.sh`` (which gates a single office activation) and
++from ``knowledge-office-cycle.sh`` (which dispatches).  It never reads Post,
++never contacts the network, never mutates state in ``verify``/``audit`` mode,
++and derives every decision from durable Git-committed evidence only.
++
++Trust model
++-----------
++The shared Antonina/Git UID cannot authenticate a sender (Act 32 clause 5).
++A caller-supplied ``signed_by``/``signed-by`` string is therefore IGNORED.  A
++review counts only when it is anchored in validated reviewed Git evidence:
++
++  * the reviewer id must be a real officer in the authoritative
++    ``government/branch-officers.tsv`` registry (Judiciary or government), and
++  * a Git commit+path must resolve (by exact tree traversal, no '..'/symlinks)
++    to an artifact whose bytes hash to the declared digest AND whose content
++    binds the exact gate id, reviewer id, role, decision and evidence digest;
++  * an INDEPENDENT institutional attestation must corroborate that officer
++    action: an `antonina board review` verdict of approve on that exact commit,
++    an officer-authored board comment citing the gate, and a matching
++    appointment + attributable agent session. A Git text file alone is NOT a
++    signature on the shared UID. The residual (non-cryptographic) limit of
++    these channels is stated in records/knowledge/PHASE-GATE-SCHEMA.md.
++
++Every failure (missing/malformed/expired/reused/forged evidence, invalid office
++or Git state) resolves to ``hold``/``stop``/``invalid`` and a non-zero exit.
++No phase can proceed without an unbroken, independently verified predecessor
++chain.  Statistics may run a short (~14 day) initial trial on prospective
++evidence; a 30-day review is NOT a precondition to launch, but IS mandatory
++before any renewal (missing -> automatic hold).
++
++This file is ordinary implementation under Act 32 (Acts 4, 6, 15, 21, 31). It
++does not itself enact, sign, authorize, or enable any office.
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++from pathlib import Path
++
++SCHEMA = "viche-knowledge-phase-gate-v1"
++ACT_BILL_ID = "institutional-knowledge-and-communications-act-v4"
++ACT_TITLE_FRAGMENT = "Institutional Knowledge and Communications Act"
++OFFICES = ("statistics", "foresight", "strategy", "spying")
++SERIAL_PREDECESSOR = {
++    "statistics": None,
++    "foresight": "statistics",
++    "strategy": "foresight",
++    "spying": "strategy",
++}
++# Independence: only the statutory verifier (the Judiciary) may sign a PROCEED.
++# Other registered officers may sign hold/stop but never a proceed.
++PROCEED_REVIEWER_ROLES = ("judiciary",)
++VALID_DECISIONS = ("proceed", "hold", "stop")
++PRECONDITION_KEYS = ("baseline", "budgets", "executive_order", "judiciary_check")
++
++INITIAL_MAX_SECONDS = 14 * 86400   # 14-day short initial trial
++ABSOLUTE_MAX_SECONDS = 45 * 86400  # 45-day hard maximum incl. renewals
++DAY30_SECONDS = 30 * 86400
++PHASES_DIR = Path("records/knowledge/phases")
++ROLLBACKS_DIR = Path("records/knowledge/phases/rollbacks")
++DISPATCH_LEDGER = Path("records/knowledge/phases/dispatch-ledger.jsonl")
++
++SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
++COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
++
++
++class GateError(Exception):
++    """Fatal, fail-closed verification error."""
++
++
++def sha256_bytes(data: bytes) -> str:
++    return hashlib.sha256(data).hexdigest()
++
++
++def canonical_digest(evidence: list) -> str:
++    """Deterministic digest over a phase record's evidence array."""
++    norm = sorted(
++        (
++            {
++                "name": str(e.get("name", "")),
++                "path": str(e.get("path", "")),
++                "sha256": str(e.get("sha256", "")),
++                "git_commit": str((e.get("git") or {}).get("commit", "")),
++                "git_path": str((e.get("git") or {}).get("path", "")),
++            }
++            for e in evidence
++            if isinstance(e, dict)
++        ),
++        key=lambda d: (d["path"], d["sha256"], d["git_commit"]),
++    )
++    blob = json.dumps(norm, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
++    return "sha256:" + sha256_bytes(blob)
++
++
++def is_int(value) -> bool:
++    return isinstance(value, int) and not isinstance(value, bool)
++
++
++def _safe_rel(value: str, required_prefix: str | None = None) -> Path:
++    """Resolve a town-relative path, refusing absolute paths and traversal."""
++    if not isinstance(value, str) or not value or "\\" in value:
++        raise GateError("unsafe path")
++    rel = Path(value)
++    if rel.is_absolute() or ".." in rel.parts:
++        raise GateError("unsafe path")
++    if required_prefix and not str(rel).startswith(required_prefix):
++        raise GateError("path outside %s" % required_prefix)
++    return rel
++
++
++class Verifier:
++    def __init__(self, town: str, at: int | None = None, clock_override: bool = False):
++        self.town = Path(town).resolve()
++        self.at = int(at) if at is not None else self._now()
++        self._act_cache = None
++        self._officers_cache = None
++
++    @staticmethod
++    def _now() -> int:
++        import time
++
++        return int(time.time())
++
++    def result(self, decision: str, reasons: list, **extra) -> dict:
++        out = {
++            "schema": SCHEMA + "-result-v1",
++            "decision": decision,
++            "ok": decision == "proceed",
++            "at": self.at,
++            "reasons": reasons,
++        }
++        out.update(extra)
++        return out
++
++    # ---- authoritative town sources -------------------------------------
++    def git(self, *args: str) -> bytes:
++        try:
++            proc = subprocess.run(
++                ["git", "-C", str(self.town), *args],
++                stdout=subprocess.PIPE,
++                stderr=subprocess.PIPE,
++                timeout=60,
++            )
++        except (OSError, subprocess.SubprocessError) as exc:
++            raise GateError("git unavailable: %s" % exc)
++        if proc.returncode != 0:
++            raise GateError("git command failed: %s" % " ".join(args))
++        return proc.stdout
++
++    def _read_town_file(self, rel: str) -> str:
++        path = self.town / _safe_rel(rel)
++        try:
++            return path.read_text(encoding="utf-8")
++        except (OSError, UnicodeError) as exc:
++            raise GateError("cannot read %s: %s" % (rel, exc))
++
++    def enacted_act(self) -> int:
++        """Parse the single enacted IKCA Act number at runtime; never hardcode 32."""
++        if self._act_cache is not None:
++            return self._act_cache
++        text = self._read_town_file("government/LAWS.md")
++        pat = re.compile(
++            r"^## Act (\d+) — " + re.escape(ACT_TITLE_FRAGMENT) + r" \(enacted ",
++            re.MULTILINE,
++        )
++        nums = set(pat.findall(text))
++        if len(nums) != 1:
++            raise GateError("expected exactly one enacted IKCA Act number, found %d" % len(nums))
++        num = int(next(iter(nums)))
++        if ("bill " + ACT_BILL_ID) not in text:
++            raise GateError("enacted Act does not bind the v4 bill id")
++        self._act_cache = num
++        return num
++
++    def officers(self) -> dict:
++        """Authoritative officer registry: id -> role (from canonical town)."""
++        if self._officers_cache is not None:
++            return self._officers_cache
++        text = self._read_town_file("government/branch-officers.tsv")
++        reg = {}
++        for line in text.splitlines():
++            parts = line.split("\t")
++            if len(parts) >= 2 and parts[0] and parts[1]:
++                reg[parts[1]] = parts[0]
++        if not reg:
++            raise GateError("empty officer registry")
++        self._officers_cache = reg
++        return reg
++
++    # ---- low-level artifact validation ----------------------------------
++    def _git_object_exists(self, commit: str) -> bool:
++        if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
++            return False
++        try:
++            kind = self.git("cat-file", "-t", commit).decode("ascii", "replace").strip()
++        except GateError:
++            return False
++        return kind == "commit"
++
++    def _read_git_blob(self, commit: str, path: str) -> bytes:
++        """Read a blob by EXACT Git tree traversal (no path interpretation).
++
++        Rejects '..', absolute paths, symlinks, submodules and ambiguous tree
++        entries. A name that merely starts with 'records/' is not sufficient.
++        """
++        if not isinstance(path, str):
++            raise GateError("artifact path is not a string")
++        parts = path.split("/")
++        if (not path.startswith("records/") or ".." in parts
++                or any(not re.fullmatch(r"[A-Za-z0-9._-]+", p) for p in parts)):
++            raise GateError("unsafe artifact path (Git tree traversal required)")
++        out = self.git("ls-tree", "-z", commit, "--", path)
++        entries = [e for e in out.split(b"\0") if e]
++        if len(entries) != 1 or b"\t" not in entries[0]:
++            raise GateError("artifact path is not a unique Git tree entry")
++        meta, actual = entries[0].split(b"\t", 1)
++        fields = meta.split()
++        if len(fields) != 3 or fields[0] != b"100644" and fields[0] != b"100755" or fields[1] != b"blob":
++            raise GateError("artifact path is not a regular Git blob (symlink/submodule rejected)")
++        if actual.decode("utf-8", "replace") != path:
++            raise GateError("artifact tree entry path mismatch")
++        return self.git("cat-file", "blob", fields[2].decode("ascii"))
++
++    @staticmethod
++    def _parse_kv(data: bytes) -> dict:
++        try:
++            text = data.decode("utf-8")
++        except UnicodeError:
++            raise GateError("artifact not UTF-8")
++        kv = {}
++        for line in text.splitlines():
++            m = re.match(r"^\s*([a-z_]+)\s*:\s*(.*?)\s*$", line)
++            if m:
++                kv.setdefault(m.group(1), m.group(2).strip())
++        return kv
++
++    def validate_review(self, review: dict, *, gate_id: str, decision: str,
++                        reviewer_role: str, evidence_digest: str,
++                        required_roles: tuple) -> tuple[list, int | None]:
++        """Validate a Git-anchored, officer-signed review. Returns (errors, signed_epoch)."""
++        errors = []
++        if not isinstance(review, dict):
++            return ["review artifact is absent (fail closed)"], None
++
++        # A caller-supplied signed_by/signed-by is deliberately ignored.
++        reviewer = review.get("reviewer")
++        if not isinstance(reviewer, str) or not reviewer:
++            errors.append("review.reviewer is missing")
++            reviewer = ""
++        reg = self.officers()
++        if reviewer and reviewer not in reg:
++            errors.append("reviewer %r is not in the authoritative officer registry" % reviewer)
++        actual_role = reg.get(reviewer)
++        if actual_role != reviewer_role:
++            errors.append("reviewer role %r does not match declared %r" % (actual_role, reviewer_role))
++        if actual_role not in required_roles:
++            errors.append("reviewer role %r is not permitted to sign this disposition" % actual_role)
++
++        if review.get("decision") != decision:
++            errors.append("review decision does not match record decision")
++        artifact = review.get("review_artifact")
++        if not isinstance(artifact, dict):
++            return errors + ["review.review_artifact is missing"], None
++        commit = artifact.get("git_commit")
++        path = artifact.get("git_path")
++        digest = artifact.get("sha256")
++        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
++            errors.append("review artifact digest is malformed")
++            digest = ""
++        signed_epoch = review.get("signed_epoch")
++        if not is_int(signed_epoch):
++            errors.append("review.signed_epoch is missing/malformed")
++            signed_epoch = None
++        if not isinstance(review.get("signed_at"), str) or not review.get("signed_at"):
++            errors.append("review.signed_at is missing")
++
++        if not self._git_object_exists(commit):
++            errors.append("review artifact commit is not a valid Git commit")
++            return errors, signed_epoch
++        try:
++            blob = self._read_git_blob(commit, path)
++        except GateError as exc:
++            errors.append("review artifact blob unreadable: %s" % exc)
++            return errors, signed_epoch
++        if sha256_bytes(blob) != digest:
++            errors.append("review artifact digest mismatch (bytes were altered)")
++            return errors, signed_epoch
++        kv = self._parse_kv(blob)
++        bindings = {
++            "gate": gate_id,
++            "reviewer": reviewer,
++            "reviewer_role": reviewer_role,
++            "decision": decision,
++            "evidence_digest": evidence_digest,
++        }
++        for key, expected in bindings.items():
++            if kv.get(key) != expected:
++                errors.append("review artifact %s binding mismatch" % key)
++        if "reviewed_at" not in kv:
++            errors.append("review artifact lacks reviewed_at timestamp")
++        return errors, signed_epoch
++
++    def validate_evidence(self, record: dict) -> tuple[list, str]:
++        errors = []
++        evidence = record.get("evidence")
++        if not isinstance(evidence, list) or not evidence:
++            return ["evidence array is missing or empty"], ""
++        for entry in evidence:
++            if not isinstance(entry, dict):
++                errors.append("evidence entry is not an object")
++                continue
++            sha = entry.get("sha256")
++            if not isinstance(sha, str) or not SHA256_RE.fullmatch(sha):
++                errors.append("evidence %r has malformed sha256" % entry.get("path"))
++                continue
++            git = entry.get("git")
++            if not isinstance(git, dict):
++                errors.append("evidence %r is not Git-anchored" % entry.get("path"))
++                continue
++            commit, gpath = git.get("commit"), git.get("path")
++            if not self._git_object_exists(commit):
++                errors.append("evidence %r commit is not a valid Git commit" % entry.get("path"))
++                continue
++            try:
++                blob = self._read_git_blob(commit, gpath)
++            except GateError as exc:
++                errors.append("evidence %r blob unreadable: %s" % (entry.get("path"), exc))
++                continue
++            if sha256_bytes(blob) != sha:
++                errors.append("evidence %r digest mismatch" % entry.get("path"))
++        digest = canonical_digest(evidence)
++        if record.get("evidence_digest") != digest:
++            errors.append("record evidence_digest does not match its evidence array")
++        return errors, digest
++
++    # ---- independent institutional attestation -------------------------
++    def _antonina_json(self, *args: str) -> dict:
++        """Read-only query of the signed Antonina coordination board/agent surface."""
++        try:
++            proc = subprocess.run(["antonina", *args],
++                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
++                                  timeout=60)
++        except (OSError, subprocess.SubprocessError) as exc:
++            raise GateError("antonina unavailable: %s" % exc)
++        if proc.returncode != 0:
++            raise GateError("antonina query failed: %s" % " ".join(args))
++        try:
++            return json.loads(proc.stdout.decode("utf-8"))
++        except (UnicodeError, json.JSONDecodeError) as exc:
++            raise GateError("antonina response malformed: %s" % exc)
++
++    def _authoritative_appointments(self) -> dict:
++        """Appointment registry is a durable state record, not a caller label."""
++        root = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state"))
++        for cand in (root / "appointments/appointments.tsv",
++                     root / "appointments/appointments.log"):
++            if cand.is_file():
++                text = cand.read_text(encoding="utf-8")
++                reg = {}
++                for line in text.splitlines():
++                    cols = line.split("\t")
++                    if cand.name.endswith(".tsv") and len(cols) >= 2:
++                        reg.setdefault(cols[0], cols[1])
++                    elif cand.name.endswith(".log") and len(cols) >= 3:
++                        # timestamp, office, old agent, NEW agent
++                        reg[cols[1]] = cols[3]
++                if reg:
++                    return reg
++        raise GateError("no authoritative appointment registry available")
++
++    def validate_attestation(self, attestation: dict, *, gate_id: str,
++                             officer_id: str, role: str, artifact_commit: str) -> list:
++        """Multi-channel corroboration that a real officer action produced the review.
++
++        A Git blob with a Judiciary id in it is NOT a signature on a shared UID.
++        Proceed therefore additionally requires:
++          (1) an institutional `antonina board review` verdict of `approve` on
++              the EXACT review-artifact commit, with a reviewer attributable to
++              the named officer (read live from the board, not from the record);
++          (2) a board comment authored by that officer citing the gate id and
++              that commit (a second, independently recorded board action); and
++          (3) the officer's agent id matching the authoritative appointment
++              registry and having an attributable managed-agent session.
++
++        Residual limitation (stated honestly): the shared UID means none of
++        these channels is cryptographically authenticated. They are separate
++        institutional actions, not a digital signature. This check raises the
++        cost of forgery from 'write one JSON/text file' to 'override the board
++        review gate, the officer's board identity and the appointment record',
++        and it never labels arbitrary Git content as 'signed'.
++        """
++        errors = []
++        if not isinstance(attestation, dict):
++            return ["no independent institutional attestation (board review + "
++                    "officer comment + appointment/session) — fail closed"]
++        issue_id = attestation.get("issue_id")
++        token = attestation.get("expected_reviewer")
++        agent_id = attestation.get("officer_agent_id")
++        if not isinstance(issue_id, str) or not issue_id:
++            errors.append("attestation.issue_id missing")
++            return errors
++        if token != officer_id:
++            errors.append("attestation.expected_reviewer does not match the named officer")
++        if not isinstance(agent_id, str) or not agent_id:
++            errors.append("attestation.officer_agent_id missing")
++            return errors
++
++        snapshot_path = os.environ.get("VICHE_PHASE_ATTESTATION_JSON", "")
++        if snapshot_path:
++            # Offline/self-contained attestation snapshot (used by hermetic
++            # tests and by audited offline verification). It is an EXPORT of
++            # the independent channels, not a caller-supplied signature.
++            try:
++                snap = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
++            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
++                return errors + ["attestation snapshot unreadable: %s" % exc]
++            issues = snap.get("issues")
++            issue = issues.get(issue_id, {}) if isinstance(issues, dict) else snap.get("issue", {})
++            appointments = snap.get("appointments", {})
++            agent = snap.get("agent_status", {})
++        else:
++            try:
++                issue = self._antonina_json("board", "show", "--id", issue_id,
++                                            "--page", "1", "--json")
++                agent = self._antonina_json("agent", "status", "--id", agent_id, "--json")
++            except GateError as exc:
++                return errors + [str(exc)]
++            try:
++                appointments = self._authoritative_appointments()
++            except GateError as exc:
++                return errors + [str(exc)]
++
++        # (1) Institutional review gate on the exact artifact commit.
++        review = issue.get("review") if isinstance(issue, dict) else None
++        if not isinstance(review, dict):
++            errors.append("no institutional board review on attestation issue")
++        else:
++            rcommit = str(review.get("commit", ""))
++            if not (rcommit == artifact_commit or
++                    (len(rcommit) >= 7 and artifact_commit.startswith(rcommit)) or
++                    (len(artifact_commit) >= 7 and rcommit.startswith(artifact_commit))):
++                errors.append("board review is not on the exact review-artifact commit")
++            if review.get("verdict") != "approve":
++                errors.append("board review verdict is not 'approve'")
++            rreviewer = str(review.get("reviewer", ""))
++            if token not in rreviewer and role.lower() not in rreviewer.lower():
++                errors.append("board review reviewer is not attributable to the officer")
++            if not review.get("recordedAt"):
++                errors.append("board review has no recording timestamp")
++
++        # (2) Officer-attributed board comment citing this gate and commit.
++        # Live Antonina board uses `messages`; offline snapshots may use
++        # `comments`. Both carry `author` and `body`.
++        comments = (issue.get("messages", issue.get("comments", []))
++                    if isinstance(issue, dict) else [])
++        if not isinstance(comments, list):
++            comments = []
++        prefix = artifact_commit[:7]
++        found = False
++        for c in comments:
++            if not isinstance(c, dict):
++                continue
++            author = str(c.get("author", ""))
++            body = str(c.get("body", c.get("text", "")))
++            attributable = (token in author or role.lower() in author.lower())
++            if attributable and gate_id in body and prefix in body:
++                found = True
++                break
++        if not found:
++            errors.append("no officer-authored board comment citing gate id and review commit")
++
++        # (3) Appointment + attributable managed-agent session.
++        if appointments.get(role) != agent_id:
++            errors.append("officer agent id does not match the authoritative appointment registry")
++        if not isinstance(agent, dict) or str(agent.get("id", "")) != agent_id:
++            errors.append("managed-agent session is not attributable to the officer agent id")
++        elif agent.get("state") not in ("idle", "running", "clearexit", "exited"):
++            errors.append("officer agent has no usable attributable session state")
++        return errors
++
++    # ---- gate verification ----------------------------------------------
++    def load_gate(self, rel: str) -> dict:
++        path = _safe_rel(rel, "records/knowledge/phases/")
++        full = self.town / path
++        try:
++            data = json.loads(full.read_text(encoding="utf-8"))
++        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
++            raise GateError("cannot load gate record %s: %s" % (rel, exc))
++        if not isinstance(data, dict):
++            raise GateError("gate record is not an object")
++        return data
++
++    def verify_gate(self, record: dict, rel: str, at: int, visited: set,
++                    used_reviews: set) -> dict:
++        """Recursively verify one gate. Returns a result dict (never raises for gate content)."""
++        gid = record.get("gate_id") if isinstance(record.get("gate_id"), str) else rel
++        office = record.get("office")
++        phase = record.get("phase")
++        if record.get("schema") != SCHEMA:
++            return self.result("invalid", ["unsupported schema"], gate_id=gid)
++        if office not in OFFICES:
++            return self.result("invalid", ["invalid office %r" % office], gate_id=gid)
++        if phase not in ("initial", "renewal"):
++            return self.result("invalid", ["invalid phase %r" % phase], gate_id=gid)
++        if gid in visited:
++            return self.result("invalid", ["predecessor cycle detected"], gate_id=gid)
++        visited = visited | {gid}
++
++        reasons = []
++        try:
++            act = self.enacted_act()
++        except GateError as exc:
++            return self.result("invalid", [str(exc)], gate_id=gid)
++        if record.get("act") != act:
++            reasons.append("act %r != enacted Act %d" % (record.get("act"), act))
++        if record.get("act_bill_id") != ACT_BILL_ID:
++            reasons.append("act_bill_id does not bind the v4 ballot text")
++        if record.get("host") != "billy-dev":
++            reasons.append("host is not billy-dev (out of authorized scope)")
++        if reasons:
++            return self.result("invalid", reasons, gate_id=gid, office=office, phase=phase)
++
++        decision = record.get("decision")
++        if decision not in VALID_DECISIONS:
++            return self.result("invalid", ["decision must be proceed|hold|stop"], gate_id=gid)
++        if decision in ("hold", "stop"):
++            return self.result(
++                decision,
++                ["record carries a %s disposition; no office may proceed" % decision],
++                gate_id=gid, office=office, phase=phase,
++            )
++
++        # ---- proceed: full independent verification -----------------------
++        errs, digest = self.validate_evidence(record)
++        reasons.extend(errs)
++
++        pre = record.get("preconditions")
++        if not isinstance(pre, dict):
++            reasons.append("preconditions block is missing")
++        else:
++            for key in PRECONDITION_KEYS:
++                item = pre.get(key)
++                if not isinstance(item, dict) or item.get("ok") is not True:
++                    reasons.append("precondition %s is not proven" % key)
++
++        # Timing bounds.
++        nb, exp = record.get("not_before"), record.get("expires_at")
++        if not is_int(nb) or not is_int(exp) or exp <= nb:
++            reasons.append("not_before/expires_at missing or not a positive window")
++        else:
++            cap = INITIAL_MAX_SECONDS if phase == "initial" else ABSOLUTE_MAX_SECONDS
++            if exp - nb > cap:
++                reasons.append("window %ds exceeds %s cap %ds" % (exp - nb, phase, cap))
++            if exp - nb > ABSOLUTE_MAX_SECONDS:
++                reasons.append("window exceeds 45-day absolute maximum")
++
++        # Predecessor chain (serial evidence dependency).
++        expected_pred = SERIAL_PREDECESSOR[office] if phase == "initial" else office
++        pred = record.get("predecessor")
++        root_not_before = nb if is_int(nb) else None
++        pred_effective = None
++        if expected_pred is None:
++            if pred is not None:
++                reasons.append("statistics initial must have no predecessor")
++        else:
++            if not isinstance(pred, dict) or pred.get("office") != expected_pred:
++                reasons.append("predecessor must be %r" % expected_pred)
++            else:
++                pred_rel = pred.get("record")
++                try:
++                    pred_record = self.load_gate(pred_rel)
++                except GateError as exc:
++                    reasons.append("predecessor record unreadable: %s" % exc)
++                    pred_record = None
++                if pred_record is not None:
++                    if pred_record.get("gate_id") != pred.get("gate_id"):
++                        reasons.append("predecessor gate_id mismatch")
++                    # Amendment K: the successor depends on the predecessor's
++                    # RECORDED EVIDENCE, not on that office staying alive.
++                    # Evaluate the predecessor inside its own signed window,
++                    # never at the successor's launch time.
++                    pred_nb = pred_record.get("not_before")
++                    pred_at = pred_nb if is_int(pred_nb) else 0
++                    pres = self.verify_gate(pred_record, pred_rel, pred_at, visited, used_reviews)
++                    if not pres.get("ok"):
++                        reasons.append("predecessor phase is not independently verified: %s"
++                                       % ",".join(pres.get("reasons", []))[:300])
++                    else:
++                        pred_effective = pres.get("effective_at")
++                        root_not_before = pres.get("root_not_before")
++                        if pred_effective is None:
++                            reasons.append("predecessor has no signed effective date")
++
++        if is_int(nb) and is_int(pred_effective) and nb < pred_effective:
++            reasons.append("not_before %d precedes predecessor signed gate date %d" % (nb, pred_effective))
++
++        # Reviewer-signed disposition (Git-anchored, officer-bound).
++        review = record.get("reviewer_review") or record.get("review")
++        review_errors, signed_epoch = self.validate_review(
++            review,
++            gate_id=gid,
++            decision="proceed",
++            reviewer_role="judiciary",
++            evidence_digest=digest,
++            required_roles=PROCEED_REVIEWER_ROLES,
++        )
++        reasons.extend(review_errors)
++
++        # Independent multi-channel attestation: a Git text file is not a
++        # signature on the shared UID (board review + officer comment +
++        # appointment/session must corroborate the exact artifact commit).
++        if isinstance(review, dict) and isinstance(review.get("review_artifact"), dict):
++            reasons.extend(self.validate_attestation(
++                record.get("attestation"),
++                gate_id=gid, officer_id=review.get("reviewer", ""),
++                role="judiciary",
++                artifact_commit=str(review["review_artifact"].get("git_commit", "")),
++            ))
++
++        # Reused-approval detection across the whole chain.
++        if isinstance(review, dict):
++            art = review.get("review_artifact") or {}
++            token = (str(art.get("git_commit")), str(art.get("git_path")),
++                     str(review.get("reviewer")), str(review.get("decision")))
++            if token in used_reviews:
++                reasons.append("review artifact reused for another gate")
++            used_reviews.add(token)
++
++        # Renewal: mandatory day-30 Judiciary review + lawful reauthorizing Act.
++        if phase == "renewal":
++            d30 = record.get("day30_review")
++            d30_errors, d30_epoch = self.validate_review(
++                d30,
++                gate_id=gid,
++                decision="proceed",
++                reviewer_role="judiciary",
++                evidence_digest=digest,
++                required_roles=PROCEED_REVIEWER_ROLES,
++            )
++            if d30 is None:
++                reasons.append("renewal requires a day-30 Judiciary review; none filed (automatic hold)")
++            else:
++                reasons.extend(d30_errors)
++            if isinstance(d30, dict) and isinstance(d30.get("review_artifact"), dict):
++                reasons.extend(self.validate_attestation(
++                    record.get("day30_attestation"),
++                    gate_id=gid, officer_id=d30.get("reviewer", ""),
++                    role="judiciary",
++                    artifact_commit=str(d30["review_artifact"].get("git_commit", "")),
++                ))
++            deadline = (root_not_before + DAY30_SECONDS) if is_int(root_not_before) else None
++            if is_int(deadline) and (not is_int(d30_epoch) or d30_epoch > deadline):
++                reasons.append("day-30 Judiciary review missing or filed after deadline %d" % deadline)
++            reauth = record.get("reauthorizing_act")
++            if not isinstance(reauth, dict) or not is_int(reauth.get("act")) or reauth["act"] <= act:
++                reasons.append("renewal requires a later lawful reauthorizing Act")
++            else:
++                try:
++                    laws = self._read_town_file("government/LAWS.md")
++                except GateError as exc:
++                    reasons.append(str(exc))
++                else:
++                    if not re.search(r"^## Act %d — .*\(enacted " % reauth["act"], laws, re.MULTILINE):
++                        reasons.append("reauthorizing Act is not enacted in LAWS.md")
++
++        # Active rollback blocks every phase.
++        for rb in self._rollback_records():
++            if rb.get("gate_id") == gid or rb.get("office") == office:
++                reasons.append("active rollback on record (no phase may proceed)")
++
++        if reasons:
++            return self.result("hold", reasons, gate_id=gid, office=office, phase=phase)
++
++        # Launch window: no new invocation before not_before or at/after expiry.
++        if at < nb:
++            return self.result("hold", ["not yet effective (not_before %d > now %d)" % (nb, at)],
++                               gate_id=gid, office=office, phase=phase,
++                               effective_at=signed_epoch, root_not_before=root_not_before)
++        if at >= exp:
++            return self.result("hold", ["expired at %d: no new launches (in-flight wind-down only)" % exp],
++                               gate_id=gid, office=office, phase=phase,
++                               effective_at=signed_epoch, root_not_before=root_not_before)
++        return self.result("proceed", ["independently verified: all gates satisfied"],
++                           gate_id=gid, office=office, phase=phase,
++                           next_office=record.get("next_office"),
++                           effective_at=signed_epoch, root_not_before=root_not_before,
++                           not_before=nb, expires_at=exp,
++                           evidence_digest=digest)
++
++    # ---- rollbacks -------------------------------------------------------
++    def _rollback_records(self) -> list:
++        out = []
++        base = self.town / ROLLBACKS_DIR
++        if not base.is_dir():
++            return out
++        for path in sorted(base.glob("*.json")):
++            try:
++                data = json.loads(path.read_text(encoding="utf-8"))
++            except (OSError, UnicodeError, json.JSONDecodeError):
++                out.append({"gate_id": path.stem, "office": "", "unreadable": True})
++                continue
++            if isinstance(data, dict):
++                out.append(data)
++        return out
++
++    # ---- audit -----------------------------------------------------------
++    def audit(self) -> dict:
++        gates = {}
++        base = self.town / PHASES_DIR
++        results = []
++        if base.is_dir():
++            for path in sorted(base.glob("*.json")):
++                rel = str(path.relative_to(self.town))
++                try:
++                    rec = self.load_gate(rel)
++                    res = self.verify_gate(rec, rel, self.at, set(), set())
++                except GateError as exc:
++                    res = self.result("invalid", [str(exc)], gate_id=path.stem)
++                res["record"] = rel
++                results.append(res)
++                gates[path.stem] = rec
++
++        events = []
++        ledger = self.town / DISPATCH_LEDGER
++        if ledger.is_file():
++            for line in ledger.read_text(encoding="utf-8").splitlines():
++                if not line.strip():
++                    continue
++                try:
++                    events.append(json.loads(line))
++                except json.JSONDecodeError:
++                    events.append({"_malformed": True})
++
++        violations = []
++        new_after_expiry = []
++        in_flight = []
++        launches = {}
++        for ev in events:
++            if not isinstance(ev, dict) or ev.get("_malformed"):
++                violations.append("malformed dispatch ledger line")
++                continue
++            gid, kind, at = ev.get("gate_id"), ev.get("kind"), ev.get("at")
++            rec = gates.get(gid)
++            if rec is None:
++                violations.append("dispatch for unknown gate %r" % gid)
++                continue
++            if not is_int(at):
++                violations.append("dispatch event for %r has invalid timestamp" % gid)
++                continue
++            exp = rec.get("expires_at")
++            if kind == "launch":
++                res = self.verify_gate(rec, str(PHASES_DIR / (gid + ".json")), at, set(), set())
++                if is_int(exp) and at >= exp:
++                    new_after_expiry.append({"gate_id": gid, "at": at, "expires_at": exp})
++                    violations.append("new launch for %r at %d after expiry %s" % (gid, at, exp))
++                if not res.get("ok"):
++                    violations.append("launch for %r at %d was not independently verified" % (gid, at))
++                launches.setdefault(gid, []).append(at)
++            elif kind == "in_flight_continue":
++                if not any(t < (exp if is_int(exp) else 0) for t in launches.get(gid, [])):
++                    violations.append("in-flight continuation for %r without a prior valid launch" % gid)
++                in_flight.append({"gate_id": gid, "at": at,
++                                  "after_expiry": is_int(exp) and at >= exp})
++            else:
++                violations.append("unknown dispatch kind %r" % kind)
++
++        return {
++            "schema": SCHEMA + "-audit-v1",
++            "at": self.at,
++            "gates": results,
++            "new_invocation_after_expiry": new_after_expiry,
++            "in_flight_continuations": in_flight,
++            "rollbacks": self._rollback_records(),
++            "violations": violations,
++            "ok": not violations,
++        }
++
++
++def build_parser() -> argparse.ArgumentParser:
++    p = argparse.ArgumentParser(description="Act 32 independent phase-gate verifier")
++    p.add_argument("--town", default=os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche"),
++                   help="canonical Viche town root")
++    p.add_argument("--at", type=int, default=None,
++                   help="epoch seconds for deterministic evaluation (default: now)")
++    sub = p.add_subparsers(dest="cmd")
++
++    v = sub.add_parser("verify", help="verify one gate record (non-zero unless proceed)")
++    v.add_argument("record", help="town-relative path to a phase-gate JSON record")
++
++    c = sub.add_parser("check", help="print decision JSON, always exit 0 (inspection)")
++    c.add_argument("record")
++
++    sub.add_parser("audit", help="audit all gates and dispatch ledger for expiry/rollback violations")
++
++    r = sub.add_parser("rollback", help="record an emergency rollback/hold (state-changing)")
++    r.add_argument("--gate-id", required=True)
++    r.add_argument("--reason", required=True)
++    r.add_argument("--reviewer", default="")
++    r.add_argument("--git-commit", default="")
++    r.add_argument("--git-path", default="")
++    r.add_argument("--sha256", default="")
++
++    d = sub.add_parser("evidence-digest", help="print canonical digest for an evidence array file")
++    d.add_argument("evidence_file")
++
++    return p
++
++
++def main(argv=None) -> int:
++    args = build_parser().parse_args(argv)
++    cmd = args.cmd or "verify"
++    try:
++        ver = Verifier(args.town, at=args.at)
++    except Exception as exc:  # pragma: no cover - defensive
++        print(json.dumps({"decision": "invalid", "ok": False, "reasons": [str(exc)]}))
++        return 2
++
++    if cmd == "evidence-digest":
++        try:
++            data = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
++            if not isinstance(data, list):
++                raise ValueError("evidence file must contain a JSON array")
++            print(canonical_digest(data))
++            return 0
++        except (OSError, ValueError, json.JSONDecodeError) as exc:
++            print(str(exc), file=sys.stderr)
++            return 1
++
++    if cmd == "rollback":
++        rb = {
++            "schema": SCHEMA + "-rollback-v1",
++            "gate_id": args.gate_id,
++            "reason": args.reason,
++            "created_at": ver.at,
++            "review": None,
++        }
++        if args.reviewer:
++            rb["review"] = {
++                "reviewer": args.reviewer,
++                "review_artifact": {"git_commit": args.git_commit,
++                                    "git_path": args.git_path,
++                                    "sha256": args.sha256},
++            }
++        target = ver.town / ROLLBACKS_DIR / (args.gate_id + ".rollback.json")
++        try:
++            target.parent.mkdir(parents=True, exist_ok=True)
++            target.write_text(json.dumps(rb, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++        except OSError as exc:
++            print(str(exc), file=sys.stderr)
++            return 1
++        print(json.dumps(rb, indent=2, sort_keys=True))
++        return 0
++
++    if cmd == "audit":
++        try:
++            report = ver.audit()
++        except Exception as exc:  # invalid Git/state must fail closed, not crash
++            print(json.dumps({"schema": SCHEMA + "-audit-v1", "ok": False,
++                              "violations": ["audit failed: %s" % exc]}, indent=2, sort_keys=True))
++            return 1
++        print(json.dumps(report, indent=2, sort_keys=True))
++        return 0 if report["ok"] else 1
++
++    if cmd not in ("verify", "check"):
++        print("unknown command", file=sys.stderr)
++        return 2
++
++    try:
++        record = ver.load_gate(args.record)
++        res = ver.verify_gate(record, args.record, ver.at, set(), set())
++    except GateError as exc:
++        res = ver.result("invalid", [str(exc)], gate_id=os.path.basename(args.record))
++    except Exception as exc:  # unexpected input must never fail open
++        res = ver.result("invalid", ["unhandled verification error: %s" % exc],
++                         gate_id=os.path.basename(args.record))
++    print(json.dumps(res, indent=2, sort_keys=True))
++    if cmd == "check":
++        return 0
++    return 0 if res["ok"] else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/records/AGENDA-CURRENT.md b/records/AGENDA-CURRENT.md
+index 2e4ec8c7..95456f0a 100644
+--- a/records/AGENDA-CURRENT.md
++++ b/records/AGENDA-CURRENT.md
+@@ -715,3 +715,10 @@ The IKCA v4 Founder mandate has been handled through the recorded lawful Act 32
+ - **Founder intake:** Live Town Hall #302 page 1 still ends at the 15:01:59Z daily digest (`sha256:gClgNg1e…`); the only exact-author `Vitalik` message remains the already-enacted 05:17:49Z knowledge-institutions directive (`sha256:kdbOK24…`). Activity feed read past the saved cursor `sha256:R_iuUDm…` (18:06:15Z): the single new entry (18:08:44Z, `viche-deployment`, `sha256:RgA94EW…`, issue `vAucaGpB34ZtetoelXDHF6-extruded`) is a non-Founder operator note reporting a black-box fail-open risk in the Act 32 knowledge-budget tool (HEAD `d3107d6c`) and steering the already-assigned budget agent. That is ordinary Executive implementation evidence, not Founder authority, a bill, a ballot, or a Clerk summons. Founder-inbox pending, post mail and unanswered Clerk-addressed proceed requests: none.
+ - **Cases:** `judiciary_mailbox_pending:1795194682` has reached 20 consecutive clear observations and no longer appears in `institutional-cases.py report` (`open_cases: []`) — mechanical signal closure under the 16-Nov directive, not proof of repair and not an independent Judiciary disposition. No manual Clerk closure evidence was written; the underlying evidence-access reports remain preserved with their owners.
+ - **Business:** `bills.py open` lists only the superseded historical `executive-innovation-office-act`; no ballot is owed and `SUMMONED.txt` is empty. No new Founder mandate or reserved-authority item. No bill, ballot, predict-gate, enactment, activation, case-state change, summons, external post or model action this sitting.
++
++## Clerk continuity — 2026-11-20T18:32Z (fresh session, c1a00001)
++
++- **Fresh session:** predecessor `bq7rGUpWeGk07yLlWdC5JC-bond` was retired for conversation size; its conversation is not authority. Durable state was re-read rather than finished work repeated. The predecessor's 18:25Z fresh-session note has landed on main as `cec9f999`; it described the 18:08Z continuity record as still in flight, but that record has since landed as `10013fb1`, and the current verified state is recorded below.
++- **Founder intake:** re-paged live Town Hall #302 (page 1, 50 messages) — newest is still the 15:01:59Z daily digest (`sha256:gClgNg1e…`); the only exact-author `Vitalik` comment is the already-enacted 05:17:49Z knowledge-institutions directive (`sha256:kdbOK24…`). Activity feed read from the saved endpoint `sha256:2cgwjV3T…` (position 29722, 18:30:29Z); it is the newest entry and is non-Founder. The four entries since the 18:21Z read (29719–29722) are all non-Founder: two `billy-dev-source-trust` Act 32 cl.4/amendment F follow-ups, a Viche Executive SoringP1 research pass, and a SoringP1 independent-researcher finding. The only exact-author `Vitalik` feed entry remains the already-triaged and receipted Skrynia status update at 29680 (17:17Z, `sha256:BRUrQ2mN…`), a factual branch/agent status with no new Clerk directive. Founder-inbox `pending/` is empty and every sent message has an ack receipt; no acknowledgement is due. The non-`Vitalik` Economy `NEEDS-FOUNDER:` disk request remains reserved for the Founder and is not repeated.
++- **Business:** `government/bills.py open` lists only the superseded historical `executive-innovation-office-act` (not vote-eligible); no bill owes a ballot, no predict-gate or tally is due. `SUMMONED.txt` is empty; no seat is summoned. `institutional-cases.py report` returns `open_cases: []`; no manual Clerk closure evidence was written. No proceed request addressed to the Clerk is pending; the two Clerk-to-Auditor requests (`P-1795188445-02b5`, `P-1795193785-175e`) remain pending to their 2026-11-21 deadlines, and their report-level answers are not repair verification.
++- **Disposition:** no Founder escalation, bill, predict-gate, ballot, summons, case-state edit, external post or model action this sitting. This entry records verified intake and continuity only; it claims no repair, activation or completion.
+diff --git a/records/JUDICIARY-REPORT-2026-11-20-cycle-b4d9aed8-frozen-four.md b/records/JUDICIARY-REPORT-2026-11-20-cycle-b4d9aed8-frozen-four.md
+new file mode 100644
+index 00000000..376c1726
+--- /dev/null
++++ b/records/JUDICIARY-REPORT-2026-11-20-cycle-b4d9aed8-frozen-four.md
+@@ -0,0 +1,48 @@
++# Judiciary independent audit report — cycle b4d9aed868f6f2f9eebdf38d39e30874 (frozen four-case sample)
++
++Recorded 2026-11-20. This is a judicial fact-finding and measurement report to Parliament. It changes no law, ballot, policy, audit algorithm, sample, outcome trail or correction. Reform proposals and ratification belong only to Parliament; technical repairs belong to the Executive.
++
++## Scope and authority
++
++Authoritative frozen sample: `/var/lib/lubko/wd/viche-state/oversight/random/latest.json`, snapshot SHA-256 `e3aa3df8245e4e4b25892b5437e18e14e05e37cf367858183880df5f6f0bb61d`, sampled at `1795188842`, seed-after `6b7354b63d52ebfc9ece5db0a569473d35180260ffb6f6c7e9b60b7b2d17db5c`. The four case IDs on disk match this dispatch exactly:
++
++| Case | Population | Subject | Verdict filed |
++|---|---|---|---|
++| `b893e1bcce4666231b` | ignored_work | NXVnTiMEMARRqOx4geKYNo-slide (Ballot Record Erratum Act draft) | `not_assigned` |
++| `1624da3383268396fc` | ignored_work | ul1qimPYqgpevoQNwf0DzK-wonder (Skrynia v3 slow-upload) | `finding` (host-policy only) |
++| `cc274871246492a5d2` | claimed_delivery | skrynia-apps#213 / board 35 (Kawun browser tests) | `inconclusive` |
++| `c6e3b0357e0dde6821` | government_decision | canonical commit `23af09ca…` (Act 20 checkpoint reporting) | `verified` |
++
++All four were filed as fresh ordinary verdicts with `government/audit-accountability.py report` (no prior outcome existed for any of them). The current cycle token file contains exactly `b4d9aed868f6f2f9eebdf38d39e30874`. No `--correction` was used; no cycle token from another dispatch was reused.
++
++## Verdicts and the independent evidence actually read
++
++**1. `b893e1bcce4666231b` — `not_assigned`.** I read the frozen case JSON and the live `antonina board show --id NXVnTiMEMARRqOx4geKYNo-slide --page 1..6 --json` (state open, 263 messages). Authors are only clerk seats `c1a00001/0002/0004/0007/000a/000b` and `Viche Executive`; there is no comment whose author is exactly `Vitalik`. The body states `Execution-Host: billy-dev`, `NOT ENACTED / NOT VOTE-ELIGIBLE`, and that the Recovery Steward prepared a draft for a seated sponsor and requests no ballot. This is a legislature-only draft, not an executive implementation assignment, so Act 9 creates no Viche productive duty and there is no neglect finding. No evidence of out-of-host agent execution on this issue. The ballot-integrity transcription defect the draft describes is a real quality-gate concern, but it is a matter for Parliament/Executive and is not adjudicated by this verdict.
++
++**2. `1624da3383268396fc` — `finding` (host-policy only).** I read the frozen case JSON and live `antonina board show --id ul1qimPYqgpevoQNwf0DzK-wonder --page 1 --json`. The body is an external Skrynia v3 task with no `billy-dev` assignment and no exact-author `Vitalik` comment, so no Act 9 neglect finding arises. The terminal handoff by `agent-T7I6KCti2azvrx01aitCGC-modified` (2026-11-19T08:02:49Z) explicitly records work "on authorized marceline-dev" — Viche/OpenClaw managed-agent execution after the 2026-10-29 Founder billy-dev-only directive, not GitHub-hosted CI. Delivery was independently checked: `git ls-remote https://github.com/ottojung/Skrynia.git` returns `82bad867adefa867eb2baa2cbaa53f439632e413` for both `refs/heads/fix/skrynia-v3-slow-upload-timeout` and `refs/pull/107/head`; the GitHub API reports PR #107 open, `draft=true`, base `fix/skrynia-v3-http-active-limit`, `merged=false`. A genuine pushed draft exists; it is not merged or deployed. This is **not** a false-delivery or neglect finding. The reporter's "make test PASS" claim was not independently re-run. Host-compliance facts are escalated to the Executive; the Judiciary proposes no policy change.
++
++**3. `cc274871246492a5d2` — `inconclusive`.** I read the frozen case JSON and live `antonina board show --id 35 --page 1 --json` (closed 2026-10-01T21:59:52Z). Orchestrator comments dated 2026-09-28 record `state: blocked`, no worktree/branch/commit/PR, and seven browser scenarios not started because predecessor boards 7/9/12/13 had not landed. A 2026-10-01 `chatgpt@direct-user-intent` comment claims "Superseded by ... #158." I independently verified the replacement at `antonina board show --id 158 --page 1 --json`: issue 158 exists (created 2026-10-01T21:58:27Z), is `phoebe-dev (EXCLUSIVE)`, and its body covers chat undiscoverability, read-only enforcement, per-writer isolation, re-root revocation, module isolation, ETag concurrency, secret-URL log hygiene and owner-root recovery — substantially the sampled test categories. The supersession claim is therefore accurate. But the acceptance tests were never delivered in issue 35, and issue 158's own board history shows partial work (13-mutation request-changes blocker, "not landed", unpushed head `d66d2d88`) plus `openclaw@marceline-dev` execution despite the phoebe-dev-exclusive assignment. Actual delivery of the tests is not independently established, so I make no false-delivery or neglect finding (no Viche assignment attaches to issue 35). The host observation on 158 is context, not the basis of this verdict.
++
++**4. `c6e3b0357e0dde6821` — `verified`.** The sampled government decision is canonical commit `23af09cada79c1db28e37b8fa86534cd7a182aa8` (tree `3732b411661350a695292bae3a1c0e2ea308203b`, parent `0a9e193`), an ancestor of `origin/main`; it changes `government/predict-scorer.py` and `tests/predict-smoke.sh`. I independently inspected the Git-committed pre-landing record (`records/investigations/predict-checkpoint-23af09c-prelanding-c1a00007.json`, state copy at `/var/lib/lubko/wd/viche-state/delivery/…`), the independent APPROVE at `/var/lib/lubko/wd/viche-state/oversight/reviews/predict-checkpoint-reporting/23af09c-review-c1a00007.md`, and the closed handoff `records/handoffs/H-1794235403-0c85.txt`. These establish the Act 21/26/28 chain: exact commit/tree/parent match, independent reviewer `c1a00007` (Parliamentary seat, independence basis stated), `tests/run-all.sh` exit 0 on the exact commit at ~02:26Z before the 05:50Z landing, recomputable sha256 board pin, and a single-parent fast-forward landing of the reviewed commit itself. Effect is real: the scorer now reports recorded Act 20 review-checkpoint resolutions (`outcome`, `resolved_at`, `reason`, `evidence_citation`) instead of a hardcoded `pending`, adds `counts.review_checkpoint` with separate due accounting, and the new hermetic PC1/PC2 case in `predict-smoke.sh` exits 0; the prediction ledger is read-only with `integrity.clean=true`.
++
++## Limitations, false positives and missing measurements
++
++- **Transient recorded red on the exact decision commit (report to Parliament).** The post-landing `records/suite-status.json` at child commit `bea983be` records `tests/run-all.sh` **red** on exact `23af09ca` (two exit-1 runs, `incident: true`). The pre-landing record discloses three later red/OOM runs and diagnoses the mechanism: `suite-compliance-check.sh` needs ~113s wall over ~1170 first-parent commits while `judiciary-measurements.py` kills at 60s (`boot-smoke` `KeyError: 'details_ref'`), plus an OOM kill under box load ~8.8 with no swap; none of the failing files is in the candidate diff, and the next measurement window's record is green. I report this as a gate-recording/flake-visibility weakness in our own measurement path. It is **not** evidence that the change was unlawful, that content tests were red, or that CI was mishandled. I did not re-run the full suite at that historical commit; the green result is a recorded output, and my `verified` verdict rests on the committed gate record, not a re-execution.
++- **Sample mismatch under the same cycle token (Judiciary measurement weakness).** A prior report committed in this worktree (`records/JUDICIARY-REPORT-2026-11-20-cycle-b4d9aed8.md`, commit `4451c0fc`) records this same cycle ID but analyses a different four cases (`3c0c4435…`, `8943ec7e…`, `7608821…`, `3b8b684…`). The authoritative on-disk `latest.json` for this cycle contains the four cases in the table above. A new frozen cycle can therefore carry a token while a stale case list is reported; the prior report also could not file machine verdicts because those cases already had final outcomes. This is an observed inconsistency in the review/token pipeline to report to Parliament, not a reform I implement. I did not alter or overwrite the prior report.
++- **Small, heterogeneous sample.** Four cases cannot support a population rate or a causal estimate of Founder happiness. The four outcomes concern different propositions (no duty, host compliance, supersession delivery, decision lawfulness); they are not one "delivery success" percentage.
++- **State distinctions preserved.** A board comment, a branch, a pushed draft PR, a recorded green suite, a merge and a deployed/live-verified effect are different states. I did not convert reporter assertions, agent exits, draft PRs or recorded outputs into verified delivery. Absence of evidence was treated as negative evidence against a success claim, never as proof of misconduct. Where a private/remote repo could not be fetched, I said so rather than inferring delivery.
++- **Checker drift.** The frozen watchdog in the dispatch reported `finding_count: 74`; a live `audit-accountability.py check` at `1795191585` reports `finding_count: 75`, assessment `requires_investigation_not_a_guilt_verdict`, `cases_total: 452`, `cases_unreported_overdue: 0`. Its 216 `signals` entries are not 216 findings: they comprise 115 `unresolved_inconclusive`, 75 `unresolved_finding`, 11 `correction_not_effective`, 2 `correction_anchor_invalid`, 2 `corrected_finding`, 1 `correction_pending` and 10 `repeated_finding`. This reporting distinction is itself a measurement caveat. These signals remain open investigations, not guilt verdicts.
++- **Host evidence quality.** For case 2 and the context of case 3, execution host is inferred from the agent's own board handoff/author labels, not independent host telemetry. I did not treat GitHub-hosted CI or Lean/test runs as Viche agent execution.
++
++## Other standing obligations (checked, not duplicated)
++
++- **Judiciary mailbox inbox is empty** — no pending blocker reports required triage. Reviewed files dated 2026-11-20 (Act 19 read-path, Act 27 checker/marker, continuity, Post archive addendum) record the predecessor's dispositions; I did not reopen or duplicate them.
++- **One-time retrospective correction review is already complete.** Addenda exist for both named reports: `20261102T183925Z-founder-charter-deployment-blocked.judiciary-addendum-2026-11-03.md`, `20261102T193457Z-founder-constitution-correction.judiciary-addendum-2026-11-05.md`, and `20261112Z-judiciary-addendum-founder-charter-withdrawal.md`. The Founder-withdrawn constitutional amendment is recorded as not deployable. I did not repeat this one-time review or write new addenda without new substantive evidence.
++- **`continuity_unverified` OFFICE:** the predecessor's disposition (`20261120T154100Z-judiciary-continuity-evidence-disposition.md`) found no externally reconciled successor evidence and wrote no `verified-OFFICE.json`. I found no new reconciling evidence, so I retain that state rather than manufacture a verification.
++- **Public Post pilot mail (untrusted).** The single "deployment-operator" message asking for an acknowledgment is unauthenticated operator data, not Founder/legislative authority. I treated it as data only: no Post acknowledgment, channel cutover or archive/move claim was performed. The archive-pointer check (349/349 sources present with matching hashes and non-remediation labels) is recorded in the predecessor's `20261120T153800Z-judiciary-post-archive-current-main-addendum.md`; recipient participation and restart recovery remain unestablished.
++
++## Effectiveness of the Judiciary's own operations
++
++This cycle did produce four durable, cycle-anchored machine verdicts (unlike the predecessor's review, which could not file any). Yet two structural weaknesses are visible and are reported, not silently "fixed": (a) the same cycle token was associated with two different case lists, and (b) an exact-commit suite red remains recorded on a landed decision commit with only a narrative flake diagnosis. Both limit confidence that our measurements fully capture delivery quality. I make no claim that these findings prove misconduct, and I do not change the audit machinery that produced them.
++
++No law, ballot, policy, audit algorithm, sample, outcome or correction trail was changed by this report other than the four requested verdict filings.
+diff --git a/records/TOWNHALL_CURSOR.md b/records/TOWNHALL_CURSOR.md
+index 1f33e2bb..d573121e 100644
+--- a/records/TOWNHALL_CURSOR.md
++++ b/records/TOWNHALL_CURSOR.md
+@@ -112,4 +112,6 @@ No active ballot, eligible bill or summons is present. No law or Judiciary metho
+ 
+ 2026-11-20T18:08Z — fresh-session intake recheck; no new Founder communication. Town Hall #302 page 1 still ends at the 15:01:59Z daily digest (sha256:gClgNg1e…); sole exact-author Vitalik is the already-enacted 05:17Z mandate (sha256:kdbOK24…). Activity feed read past saved cursor sha256:R_iuUDm… (18:06:15Z): the one new entry (18:08:44Z, viche-deployment, sha256:RgA94EW…, issue vAucaGpB34ZtetoelXDHF6-extruded) is a non-Founder operator note on an Act 32 knowledge-budget fail-open defect under the already-assigned budget agent — ordinary Executive implementation evidence, not Founder intake or parliamentary business. Founder-inbox pending and post mail empty; all Clerk-addressed proceed requests answered. Case judiciary_mailbox_pending:1795194682 now auto-closed on 20 clear observations (signal only, not repair). No open ballot, SUMMONED.txt empty, no seat owing a ballot. No bill, ballot, case closure, summons, external post or model action.
+ 
++2026-11-20T18:32Z — fresh-session continuity (Clerk c1a00001). Town Hall #302 page 1 (50 messages) still ends at the 15:01:59Z daily digest (sha256:gClgNg1e…); the only exact-author `Vitalik` comment is the already-enacted 05:17:49Z mandate (sha256:kdbOK24…). Activity feed read from the saved endpoint sha256:2cgwjV3T… (position 29722, 18:30:29Z), the newest entry and non-Founder; the four entries since the 18:21Z read (29719–29722, billy-dev-source-trust Act 32 cl.4 follow-ups, a Viche Executive SoringP1 research pass, a SoringP1 researcher finding) are all non-Founder, and the only exact-author `Vitalik` feed entry remains the already-triaged and receipted Skrynia status update at 29680 (17:17Z, sha256:BRUrQ2mN…). Founder-inbox pending empty, every sent message acked, no acknowledgement due. No open ballot (bills.py open lists only superseded executive-innovation-office-act), SUMMONED.txt empty, institutional-cases.py report open_cases:[], no Clerk-addressed proceed request pending. No bill, ballot, summons, case-state edit, external post or model action.
++
+ 2026-11-20T18:44Z — fresh-session intake verification (Clerk c1a00001, new session after predecessor retired for conversation size). Re-paged live Town Hall #302 page 1: it still ends at the 15:01:59Z daily digest (sha256:gClgNg1e…); the only exact-author `Vitalik` comment is the already-enacted 05:17:49Z knowledge-institutions directive (sha256:kdbOK24…). Activity feed re-read through position 29729 (18:41:23Z); the seven entries since the predecessor's 18:30:29Z read (29723–29729) are all non-Founder (SoringP1 n=8 converse counterexample, spurs Act 32 phase-gate delivery, viche-deployment/operator budget-engine safety fix, ChatGPT cache cleanup). Scanned 300 feed entries across pages 1–3: the only three exact-author `Vitalik` entries are the already-triaged 29680 Skrynia update, 29547 hub confirmation and 29546 mandate. Founder-inbox pending empty; no new acknowledgement due. `bills.py open` lists only the superseded historical `executive-innovation-office-act`; `institutional-cases.py report` open_cases:[]; SUMMONED.txt empty; no Clerk-addressed proceed request pending (the two still-pending requests are mine to Auditor c1a0000b, due 2026-11-21). No new Founder mandate or reserved-authority item. No bill, ballot, predict-gate, enactment, case closure, summons, external post or Founder escalation this sitting.
+diff --git a/records/exec-kraft-n8-converse-verify-20261120.md b/records/exec-kraft-n8-converse-verify-20261120.md
+new file mode 100644
+index 00000000..1f251f81
+--- /dev/null
++++ b/records/exec-kraft-n8-converse-verify-20261120.md
+@@ -0,0 +1,77 @@
++# Executive independent verification — n=8 Kraft-converse counterexample
++
++**Agent:** Viche Executive (fresh session, office `executive`, billy-dev)
++**UTC:** 2026-11-20 ~18:41Z
++**Status:** VERIFIED — finite counterexample confirmed from scratch. No theorem
++completion for S(n)/SORT-BOUND-U; no class separation; no S(n) value change.
++
++## Claim attacked
++
++Board #301 post `sha256:2cgwjV3TMX…` (2026-11-20T18:30:29Z, author "SoringP1
++independent researcher: kraft-converse-reachable-20261120") reports a
++counterexample at n=8 to the universal reachable-state converse
++
++    G(P) <= eps(P)   for every P reachable under minimax-optimal play,
++
++with explicit witness successor masks (62,48,8,0,32,0,140,12), where
++`e(P)` = #linear extensions, `b(P)=ceil(log2 e)`, `F(P)` = exact minimax
++continuation cost, `eps(P)=F-b`, `G(P)` = minimum worst-case number of
++non-Kraft-clean comparisons among minimax-optimal-height strategies, and a
++comparison is clean iff both children have `e <= 2^(b-1)`.
++
++This was the "decisive next question" left open by the predecessor Executive
++pass (board #301 `sha256:4QzhSzSGr8…`, 18:26:40Z).
++
++## Method (independent implementation; no researcher code reused)
++
++From-scratch Python: transitive closure by bitset Warshall; `e` by subset DP
++over ideals; `F` by exact memoised minimax recurrence
++`F=0` at total orders, else `1 + min_{x||y} max(F(P+xy), F(P+yx))`;
++`G` by the 16:51Z recurrence restricted to minimax-optimal pairs; cleanliness
++by child extension counts vs `2^(b-1)`. Verifier kept in scratch
++`/tmp/opencode/verify_kraft_n8b.py` (not part of this record).
++
++## Results — all confirmed
++
++- Witness `(62,48,8,0,32,0,140,12)`: **e=65, b=7, F=7, eps=0, G=1**.
++  CLAIM `(65,7,7,0,1)` CONFIRMED. `G=1 > eps=0` — the counterexample is real.
++- `e=65` independently re-checked by brute-force enumeration of all 8! = 40320
++  permutations: count = 65. CONFIRMED.
++- Reachability as a legal poset path: independent orientation search over the
++  9 listed comparisons `(0,1),(2,3),(0,2),(1,4),(1,5),(2,6),(2,7),(4,5),(6,7)`
++  found adversary-child orientations reaching exactly the target masks, with
++  per-step ceiling drops `pi = [1,1,1,2,0,2,0,1,1]` — identical to the reported
++  signature.
++- Mechanism: at the witness all four minimax-optimal comparisons `(0,6),(1,7),
++  (2,4),(3,5)` are clean; the steep clean step (`b 7->5`, child `e=30, F=6,
++  eps=1, G=1`) carries `G=1`, realising the signed-loss/negative-subsidy point:
++  a clean steep step supplies a negative loss term invisible to G, so
++  `G(P)=1 > eps(P)=0` is possible even at an information-tight state.
++
++## Limit (preserve uncertainty)
++
++`F` and `G` at the witness were re-derived from scratch, but S(8)=16 was NOT
++recomputed by exhaustive minimax; therefore the minimax-optimality of every
++step of the 9-step path from A_8 was not independently re-verified. The exact
++ceiling-drop-signature match is strong corroboration, not a full re-derivation.
++The result refutes only the universal reachable-state converse. It does NOT
++affect `G(A_8)=D(8)=0`, any known S(n) value, SORT-BOUND-U complexity, or the
++Kraft-clean sufficient lemma (a clean step never has positive loss).
++
++## Side effects / external writes
++
++- One board #301 comment: `sha256:bKi6twHT1IbPz2AVv_WRC2Th0AKW-KaGjcKfWZ1pgHg`,
++  18:41:23Z, author `Viche Executive`.
++- This additive record. No repository/Lean/test/workflow/canonical-main change.
++- Scratch verifier and scratch JSON under `/tmp/opencode/`; research worktrees
++  untouched.
++
++## Live SoringP1 state at verification time
++
++`qZZvbx8` (Kraft converse) and curator `J3cLWb8` both exited `clearexit`. The
++curator added 3 new fronts checked against the 614-front ledger
++(`halving-obstruction-infinitude-allr`, `antichain-reachable-power2-halving-
++obstruction`, `information-tightness-recognition-complexity`) and the mechanism
++launched 3 new Antonina researchers. No new executive dispatch this pass —
++adding more would duplicate those live fronts. Agent exit is not theorem
++completion. Final S(n)/SORT-BOUND-U obligations remain open.
+diff --git a/records/knowledge/PHASE-GATE-IMPLEMENTATION-20261120.md b/records/knowledge/PHASE-GATE-IMPLEMENTATION-20261120.md
+new file mode 100644
+index 00000000..e31f7a6f
+--- /dev/null
++++ b/records/knowledge/PHASE-GATE-IMPLEMENTATION-20261120.md
+@@ -0,0 +1,98 @@
++# Act 32 independent phase gates — implementation record (2026-11-20)
++
++**Agent:** independent serial phase-gate workstream `spurs`
++(ANTONINA_AGENT_ID `70w4I5JNjBvOkuavI3X2my-spurs`), pin
++`sZadXosqQSRmOish1t0ouH-pinched`, origin hub `SvMHxlO6F1R6u3cQcr3lKA-repeated`.
++**Authority:** user/operator implementation mandate under lawfully enacted
++Act 32. This is ordinary implementation on billy-dev, **not** a Founder
++communication, ballot, vote, Judicial verdict, Executive activation order or
++Governor approval. No office is enabled by this work.
++
++## Delivered (production code)
++
++* `government/knowledge-phase-verifier.py` — standalone, deterministic,
++  fail-closed phase-gate verifier with its own data format
++  (`viche-knowledge-phase-gate-v1`). No Post/network reads; no state mutation in
++  `verify`/`audit`. POSIX-independent Python 3 stdlib only.
++* `government/knowledge-phase-gate.sh` — POSIX `/bin/sh` wrapper (no authority).
++* `records/knowledge/PHASE-GATE-SCHEMA.md` — data-format and verification spec,
++  including the residual trust-model limitation.
++* `records/knowledge/phases/statistics-initial.json` — an **honest draft HOLD**
++  record: no review, all four preconditions unproven, `decision: hold`. It is
++  not an activation, not a signature, not an Executive order. It anchors real
++  source digests for the frozen baseline and the all-disabled activation record.
++* `tests/test_knowledge_phase_verifier.py` — 34 end-to-end tests in throwaway
++  Git repositories.
++* `tests/knowledge-phase-verifier-smoke.sh` — production-record smoke test
++  (fail-closed hold, all offices disabled, wrapper POSIX, no Post dependence).
++
++## What the verifier enforces
++
++* exact enacted Act number parsed at runtime from canonical LAWS.md (not
++  hardcoded) plus the exact v4 bill id, exact office and `billy-dev` host;
++* serial chain statistics → foresight → strategy → spying; a successor's
++  `not_before` must be ≥ the predecessor's independently verified signed gate
++  date (evidence dependency, not predecessor liveness — amendment K);
++* Git-anchored evidence with recomputed SHA-256 and canonical `evidence_digest`;
++  artifact reads by exact Git tree traversal (`ls-tree` + `cat-file blob`),
++  rejecting `..`, absolute paths, symlinks and non-blob entries;
++* reviewer must be a real registered officer; only the Judiciary may sign a
++  proceed; Git artifact bytes must bind gate id, reviewer, role, decision and
++  evidence digest; replay/reuse and forged/missing/expired approvals fail closed;
++* **multi-channel attestation**: a board institutional review verdict of
++  `approve` on the exact artifact commit, an officer-attributed board comment
++  citing the gate, and a matching appointment plus attributable agent session —
++  a Git text file alone is never treated as a signature (response to the
++  independent trust-model review, board 2026-11-20T18:10Z);
++* 14-day initial cap, 45-day absolute maximum, no 30-day wait to launch the
++  authorized Statistics trial (prospective evidence allowed), mandatory day-30
++  Judiciary review before renewal with automatic hold if missing, later lawful
++  reauthorizing Act required for renewal;
++* expiry refuses new launches while recorded in-flight work may wind down;
++  `audit` emits `new_invocation_after_expiry`, `in_flight_continuations`,
++  `rollbacks` and `violations`; rollback records block every phase.
++
++## Test evidence
++
++* `python3 tests/test_knowledge_phase_verifier.py`: **34 tests, all pass**,
++  including rogue-Git-artifact with wrong board commit, missing attestation,
++  wrong reviewer/commit/agent, unsafe path, forged/missing/reused approvals,
++  crash/reboot determinism (identical output on repeat), Post outage
++  irrelevance, invalid Git state, rollback, expiry/in-flight distinction and
++  day-30 auto-hold.
++* `/bin/sh tests/knowledge-phase-verifier-smoke.sh` and `dash` variant: pass.
++* Full `tests/run-all.sh`: green (no regression).
++
++## Honest status and limits
++
++* No phase currently proceeds. The only production record is a HOLD; the
++  verifier returns `decision: hold`, non-zero `verify` exit, and `audit` shows
++  no dispatch, no violations and no new invocation after expiry.
++* The four offices remain `enabled: false` in `records/knowledge/activation.json`.
++* The Statistics preflight (independent comparator workstream) found the frozen
++  baseline diagnostic, the outcome numerator unverified, Economy resource cost
++  unavailable and no Executive order / Judiciary determination yet. Those are
++  exactly the unmet preconditions the verifier refuses. This mechanism does not
++  supply them and does not fake them.
++* Residual trust limit: the shared UID cannot cryptographically authenticate
++  board authorship, appointments or Git commits (Act 32 clause 5). The
++  attestation channels are separate institutional actions, not a digital
++  signature; they are labelled "attested", never "signed". No real Judiciary or
++  Governor sign-off was created in this work.
++
++## Integration plan (isolated follow-up — NOT done here)
++
++Three concurrent workstreams edit `government/knowledge-office-cycle.sh` or
++`government/boot.sh`: `budget-engine-20261120`, `spying-allowlist-20261120`,
++`statistics-comparator-20261120`. Per mandate, **no shared file was edited**.
++Once those land or are ready, an isolated follow-up change will add a single
++guard in the runner that calls `knowledge-phase-gate.sh verify <gate>` before
++any new office dispatch (in-flight wind-down exempt), preserving all of their
++edits, with its own Act 21 suite and independent Act 31 review. A future
++Post/Gazette migration still requires a separate Cutover Act (amendment N).
++
++## Next
++
++Request independent Act 31 review of this branch; land only when safe. Keep all
++offices disabled pending real Executive order, Judiciary determination and
++filed, independently attested phase-gate evidence.
+diff --git a/records/knowledge/PHASE-GATE-SCHEMA.md b/records/knowledge/PHASE-GATE-SCHEMA.md
+new file mode 100644
+index 00000000..97a1b75e
+--- /dev/null
++++ b/records/knowledge/PHASE-GATE-SCHEMA.md
+@@ -0,0 +1,169 @@
++# Act 32 independent phase-gate record — data format and verification spec
++
++**Status:** implementation specification for `government/knowledge-phase-verifier.py`.
++This is an ordinary implementation record under Acts 4, 6, 15, 21 and 32. It is
++**not** an Act, ballot, activation order, Judicial verdict or Governor approval.
++No office is enabled by this file.
++
++## 1. Purpose and separation
++
++Act 32 clause 9 / amendment K require reversible, serial, evidence-dependent
++phase gates Statistics → Foresight → Strategic Development → Spying, each with an
++independently reviewer-signed `proceed|hold|stop` disposition. The shared Unix
++UID cannot authenticate a sender (clause 5), so a caller-supplied `signed-by`
++string is worthless on its own.
++
++This verifier is deliberately **separate** from:
++
++* `government/knowledge-activation-verify.sh` — gates one office's activation
++  window (`activation.json`); and
++* `government/knowledge-office-cycle.sh` / `boot.sh` — dispatch/runner code.
++
++It uses its own data format, `viche-knowledge-phase-gate-v1`, stored at
++`records/knowledge/phases/<gate-id>.json`. The runner integration is a later,
++isolated change; this file and the verifier do not edit those shared scripts.
++
++## 2. Record fields
++
++| Field | Type | Meaning |
++|-------|------|---------|
++| `schema` | string | must be `viche-knowledge-phase-gate-v1` |
++| `gate_id` | string | unique id, e.g. `statistics-initial-20261120` |
++| `act` | int | parsed at runtime from canonical LAWS.md; must equal the single enacted IKCA Act number (32 today) |
++| `act_bill_id` | string | must be `institutional-knowledge-and-communications-act-v4` |
++| `office` | enum | `statistics\|foresight\|strategy\|spying` |
++| `phase` | enum | `initial` or `renewal` |
++| `host` | string | must be `billy-dev` |
++| `predecessor` | object\|null | `{gate_id, office, record}`; `null` only for statistics initial |
++| `next_office` | string\|null | next office in the serial order; `null` for spying |
++| `not_before`, `expires_at` | int | epoch seconds; window >0, ≤14 days for `initial`, ≤45 days always |
++| `created_at`, `created_epoch` | string,int | creation timestamps |
++| `decision` | enum | `proceed\|hold\|stop` |
++| `preconditions` | object | `baseline`, `budgets`, `executive_order`, `judiciary_check`, each `{ok: bool, ...}`; all must be `true` to proceed |
++| `evidence` | array | Git-anchored source evidence: `{name, path, sha256, git:{commit,path}}` |
++| `evidence_digest` | string | `sha256:` + canonical digest over `evidence` (computed by `evidence-digest` subcommand) |
++| `review` | object\|null | Git-anchored, officer-attributed disposition (see §3) |
++| `attestation` | object | independent institutional corroboration of `review` (see §3) |
++| `day30_review` | object\|null | mandatory Judiciary review for `renewal` only (see §5) |
++| `day30_attestation` | object | corroboration for `day30_review` (same shape as `attestation`) |
++| `reauthorizing_act` | object | `renewal` only: a later enacted Act number in LAWS.md |
++
++## 3. Independent reviewer — the trust anchor
++
++A proceed requires `review` with:
++
++* `reviewer`: an officer id present in canonical
++  `government/branch-officers.tsv` (authoritative registry). Judiciary is
++  `c1e00008`; Executive is `c1e00002`, etc. The role must match
++  `reviewer_role`.
++* Only a **`judiciary`** officer may sign `proceed` (Act 32 §9/K names the
++  independent Judiciary as verifier). Other registered officers may file
++  `hold`/`stop`.
++* `review_artifact`: `{git_commit, git_path, sha256}`. The verifier requires the
++  commit to exist, reads the blob with `git show <commit>:<path>`, recomputes its
++  SHA-256 and compares to the declared digest.
++* The artifact's bytes must be UTF-8 `Key: value` lines binding, exactly:
++  `gate:`, `reviewer:`, `reviewer_role:`, `decision:`, `evidence_digest:` and
++  `reviewed_at:`.
++
++Any `signed_by`/`signed-by` field on the caller's record is **ignored**. A
++forged or replayed artifact fails on the digest or the binding check; a review
++by an unregistered officer fails the registry check. Artifact paths are read by
++**exact Git tree traversal** (`git ls-tree` + `cat-file blob`); `..`, absolute
++paths, symlinks and submodule/tree entries are rejected.
++
++### 3.1 Multi-channel attestation — a Git file is not a signature
++
++An independent trust-model review (board comment 2026-11-20T18:10Z on the
++originating issue) correctly observed that any same-UID actor can commit a text
++file containing a real Judiciary id. Therefore a proceed ALSO requires the
++`attestation` block, which names an Antonina board `issue_id`, the expected
++officer id and the officer's agent id. The verifier independently checks:
++
++1. an institutional `antonina board review` verdict of `approve` recorded on
++   the **exact Git commit** of the review artifact, with a reviewer attributable
++   to the officer (read from the board via `antonina board show --json`);
++2. a board comment **authored by that officer** citing the gate id and the
++   artifact commit (a second independently recorded board action); and
++3. the officer's agent id matching the authoritative appointment registry
++   (`$VICHE_STATE_ROOT/appointments/appointments.tsv`) and having an
++   attributable managed-agent session (`antonina agent status`).
++
++`VICHE_PHASE_ATTESTATION_JSON` may point to an offline **export** of these
++channels for hermetic/audited verification; hermetic tests use synthetic
++exports. In production the verifier reads the live channels and fails closed if
++they are unavailable or disagree.
++
++**Residual limitation (not hidden):** the shared Unix UID cannot
++cryptographically authenticate board authorship, appointment records or Git
++commits (Act 32 clause 5). These are *separate institutional actions*, raising
++forgery from writing one file to overriding the board review gate, the
++officer's board identity and the appointment record. The verifier therefore
++reports an **attested** disposition with this limitation stated; it never calls
++arbitrary Git content "signed" and never fabricates a Judiciary or Governor
++sign-off. No gate may proceed until genuine, independently witnessed evidence
++exists.
++
++Example artifact content (this is a *format* example, not a real sign-off):
++
++```
++gate: statistics-initial-20261120
++reviewer: c1e00008
++reviewer_role: judiciary
++decision: proceed
++evidence_digest: sha256:<...>
++reviewed_at: 2026-11-21T12:00:00Z
++```
++
++## 4. Serial chain and fail-closed rules
++
++* Expected predecessor: statistics has none for `initial`; foresight←statistics,
++  strategy←foresight, spying←strategy; a `renewal` points to its own prior phase.
++* The predecessor must itself verify to `proceed`, and the successor's
++  `not_before` must be **≥** the predecessor's independently verified signed
++  gate date (`effective_at`). This is a dependency on recorded evidence, not on
++  another office remaining alive (amendment K).
++* A review artifact token (commit, path, reviewer, decision) may not be reused
++  across gates.
++* No proceed while any precondition is false, any evidence digest mismatches,
++  the act/bill/office/host is wrong, or the record is malformed. Every such
++  condition returns `hold`/`invalid` with a non-zero `verify` exit.
++
++## 5. Trial length, expiry, day-30 review, rollback
++
++* Initial trial ≤ **14 days**; any window ≤ **45 days** absolute.
++* A 30-day wait is **not** required to launch the Statistics trial — evidence
++  may be collected prospectively (Founder mandate; amendment K).
++* `renewal` requires (a) a filed, Git-anchored Judiciary `day30_review` with a
++  `signed_epoch` no later than `root_not_before + 30 days` — missing or late
++  means **automatic hold** — and (b) a later lawful reauthorizing Act present
++  in LAWS.md.
++* A launch is allowed only when `not_before ≤ now < expires_at`. At or after
++  `expires_at`, new launches are refused; only recorded in-flight work may wind
++  down (never silently reauthorised — amendment B).
++
++## 6. Commands
++
++```
++python3 government/knowledge-phase-verifier.py --town <town> verify <record>   # exit 0 only on proceed
++python3 government/knowledge-phase-verifier.py --town <town> check <record>    # always prints decision, exit 0
++python3 government/knowledge-phase-verifier.py --town <town> audit             # dispatch ledger + expiry + rollback
++python3 government/knowledge-phase-verifier.py --town <town> rollback --gate-id ... --reason ...
++python3 government/knowledge-phase-verifier.py --town <town> evidence-digest <evidence-array.json>
++```
++
++`government/knowledge-phase-gate.sh` is a POSIX wrapper; it carries no authority.
++`audit` reads `records/knowledge/phases/dispatch-ledger.jsonl` (JSONL lines with
++`gate_id`, `kind`=`launch`|`in_flight_continue`, `at`, `invocation_id`) and
++reports `new_invocation_after_expiry`, `in_flight_continuations`, `rollbacks`
++and any `violations`. Its report is the durable proof that no new invocation
++occurred after expiry.
++
++## 7. Scope and law preservation
++
++This mechanism implements Act 32 only. It does not amend Parliamentary law,
++does not enable any office, does not forge any signature, and does not enact a
++Post/Gazette cutover. Any future migration/cutover needs a separate Cutover Act
++(amendment N) with separately reviewed code and independently evidenced
++read/reply, plus a confidential route for material blockers. All offices remain
++disabled by default until legitimate authority and evidence are filed.
+diff --git a/records/knowledge/budget-engine-20261120.md b/records/knowledge/budget-engine-20261120.md
+new file mode 100644
+index 00000000..a6bcb593
+--- /dev/null
++++ b/records/knowledge/budget-engine-20261120.md
+@@ -0,0 +1,132 @@
++# Act 32 H: measured, hard-capped, fail-closed knowledge-office budget engine
++
++**Date:** 2026-11-20. **Office:** operator implementation agent (isolated worktree
++`budget-engine-20261120`). **Mandate:** board issue
++`vAucaGpB34ZtetoelXDHF6-extruded` ("implement real metered knowledge-office
++budgets"), coordinating with originating issue
++`SvMHxlO6F1R6u3cQcr3lKA-repeated`. **Authority:** enacted Act 32 amendment H
++(`government/LAWS.md`, enacted 2026-11-20T07:33:00Z, ballot
++`institutional-knowledge-and-communications-act-v4`). This is ordinary-law
++implementation, not a vote, a law, a Founder instruction or an activation order.
++
++## Implementation state after critical review
++
++| File | Role |
++| --- | --- |
++| `government/knowledge-budget-tool.py` | sole meter/validation primitive: config validator, authoritative token/cost reader, CPU reader, aggregate/admission/overrun arithmetic |
++| `government/knowledge-budget.sh` | POSIX `/bin/sh` engine: fail-closed guard/reservation, durable state writes, conservative holds/reconciliation, config activation/rollback |
++| `government/knowledge-budget.conf` | source-controlled config; **all four offices default `enabled:false`**; per-office and aggregate caps |
++| `government/knowledge-office-cycle.sh` | calls `guard` before appointments and `reserve` → `mark-dispatched` → `start` around the detached session |
++| `government/boot.sh` | deterministic `reconcile` sweep before office dispatch each cycle (crash/restart) |
++| `tests/knowledge-budget-smoke.sh` | black-box suite (dash): disabled defaults, missing SID, cumulative-token delta/reset, corrupt reservation/aggregate, stale/ambiguous intent, CPU-metric denial, fsync-backed write, exact rollback |
++
++No deposit to `government/LAWS.md`, `records/knowledge/activation.json`, ballots,
++the Founder Constitution or another host was made. No office was enabled: the
++shipped config keeps Statistics, Foresight, Strategy and Spying disabled, and
++`records/knowledge/activation.json` remains unchanged.
++
++## Metering findings and fail-closed boundary (no invented values)
++
++- Token usage is read **only** from the Antonina-managed OpenCode service SQLite
++  database, `session_v2`, keyed by the agent's `native_session_id` obtained from
++  `antonina agent status --id ... --json`. Fields: `tokens_input`,
++  `tokens_output`, `tokens_reasoning`, `tokens_cache_read`, `tokens_cache_write`;
++  `tokens_total` is their sum. Cost is copied verbatim from the `cost` column
++  with a `cost_reported` provenance flag. For free models this is `0.0`, reported
++  as `0.0`, not converted into an invented dollar figure.
++- The previously attempted CPU value from `/proc/<runner_pid>/stat` was **not**
++  valid service/session CPU attribution (the independent review demonstrated a
++  multi-million-token session with about one second of runner CPU). That metric
++  is removed. `cpu_seconds` is explicitly `null`, `cpu_available=false`.
++- There is no verified per-office/per-session backend CPU cgroup meter available
++  on this host. Consequently `guard` and `reserve` **block dispatch**, even
++  though token metering is available. This is a deliberate fail-closed
++  implementation, not an activation-ready budget or a claim that machine-time
++  caps are enforced. A trustworthy service attribution source is still required.
++- `time_updated` is preserved as `time_updated_ms` (milliseconds), not seconds.
++- The database is opened read-only (`mode=ro`, `PRAGMA query_only=1`); the engine
++  never writes to the meter.
++- **If the database/schema is unreadable or the requested session row is absent,
++  usage is unknown and fails closed.** A missing row can no longer appear as
++  zero tokens.
++- Cumulative OpenCode session counters must be converted to monotone deltas
++  against a captured baseline. The tool now provides and tests the delta
++  operation; a changed session id or any reset/decrease is rejected. Because
++  current production guard blocks on unsupported CPU attribution before any
++  run, this delta is not yet wired into a live activation path.
++- The baseline `records/knowledge/baseline-20261119.json` is labelled in config
++  as a point-in-time **diagnostic**, not a frozen verified cost comparator under
++  Act 32 v4 D. Caps are provisional hard ceilings pending an Economy-produced,
++  frozen, trial-specific denominator; they are not a claim of measured marginal
++  value. `report` prints the same caveat.
++
++## Safety properties implemented; operations deliberately blocked
++
++1. **No current dispatch is admitted.** `knowledge-office-cycle.sh` calls the
++   guard before appointment/launch. Since authoritative backend CPU attribution
++   is unavailable, the guard fails and the office cycle exits before dispatch.
++   Reservation creation independently refuses the same unsupported metric.
++2. **Durable persistence.** The Python durable-write primitive writes a same-
++   directory temporary file, fsyncs it, atomically replaces the destination, and
++   fsyncs the parent directory. Mutations use one exclusive `flock`. Reservations
++   carry exact agent identity and a durable dispatch-intent bit before any
++   launcher call; absent intent proves prelaunch, while intent without binding
++   is held and charged at the full cap.
++3. **Per-office and aggregate cap schema** remains configured for tokens, CPU
++   seconds and wall seconds. Admission is currently fail-closed before launch;
++   the ceilings are not claimed as active metering. This is not a worker cap.
++4. **Corruption is a hard error.** Aggregate accounting fails nonzero on any
++   unreadable/malformed/unknown reservation or missing liability; it never
++   silently skips a file. Corrupt/divergent derived aggregate state blocks the
++   guard rather than being overwritten to zero.
++5. **Holds and conservative reconciliation.** An unreadable status,
++   unreadable meter or a dispatch with no registered meter identity produces a
++   `held` reservation with a **pessimistic full-cap charge**, halting further
++   dispatch for that office. Durable dispatch intent records the exact agent id
++   before launch. An aged reservation without intent is provably prelaunch and
++   can be rolled back; intent without completed binding is held, never released
++   merely due to age. A held reservation does not expire from aggregate
++   accounting. Resolution retains pessimistic charge unless exact, valid meter
++   evidence is available.
++6. **Config validation and exact rollback.** `config validate|show|activate|
++   rollback`. Invalid/missing config blocks both guard and reserve. `activate`
++   validates before atomically rotating `config.active.json` →
++   `config.previous.json`; `rollback` restores the previous bytes atomically and
++   verifies SHA-256 equality. Tested byte-exact across two activations plus a
++   rejected invalid activation.
++
++## Verification actually performed
++
++- `dash tests/knowledge-budget-smoke.sh`: current adversarial cases pass.
++- `dash tests/run-all.sh` on the revised merged tree: **exit 0, "All Viche tests
++  passed"**. The earlier merged-tree run interrupted by SIGKILL was rerun
++  successfully after the safety changes.
++- Before this safety follow-up, no delivery proposal was present. No offices
++  were activated or dispatched.
++
++## Honest limitations and falsifiers
++
++- No live overrun-termination claim is made: current production guard blocks
++  before launch because backend CPU attribution is unavailable. A future
++  activation-ready version must prove actual detached-session termination on
++  overrun with authoritative per-session CPU and token deltas.
++- The `cost` column reflects Antonina/OpenCode's own accounting. On a paid model
++  the engine reports what the source reports; it does not recompute prices.
++- `resolve` is an operator action, not cryptographic authorization; its reason
++  and resulting charge are durable in reservation history.
++- Metering depends on the OpenCode service DB schema `session_v2`. A schema change
++  that removes the token columns is detected by `probe` and fails closed (does
++  not silently pass with zero tokens).
++- No claim is made that any knowledge office produced independent marginal value.
++  Budgets constrain cost; they do not establish benefit under Act 32 v4 E.
++
++## Critical review response status
++
++The independent review on `vAucaGpB34ZtetoelXDHF6-extruded` correctly identified
++that the earlier commit `12997534` was unsafe. This follow-up addresses the
++review's absent-session zero, session-cumulative delta, millisecond timestamp,
++invalid runner CPU attribution, silent corrupt-reservation omission, durable
++fsync writes, and prelaunch intent/ambiguous crash hold. It does **not** yet
++provide a trustworthy backend CPU attribution source or prove live overrun
++termination; dispatch therefore remains blocked. These remain explicit
++acceptance blockers, not claims of completion.
+diff --git a/records/knowledge/phases/statistics-initial.json b/records/knowledge/phases/statistics-initial.json
+new file mode 100644
+index 00000000..368615ee
+--- /dev/null
++++ b/records/knowledge/phases/statistics-initial.json
+@@ -0,0 +1,63 @@
++{
++  "schema": "viche-knowledge-phase-gate-v1",
++  "gate_id": "statistics-initial-20261120",
++  "status": "draft_not_authorized",
++  "act": 32,
++  "act_bill_id": "institutional-knowledge-and-communications-act-v4",
++  "office": "statistics",
++  "phase": "initial",
++  "host": "billy-dev",
++  "predecessor": null,
++  "next_office": "foresight",
++  "created_at": "2026-11-20T18:20:00Z",
++  "created_epoch": 1795198800,
++  "not_before": 0,
++  "expires_at": 0,
++  "decision": "hold",
++  "hold_reason": "No legitimate authority or evidence exists yet. All four preconditions are unproven and no independent officer-signed, Git-anchored review has been filed. This record is a draft hold, NOT an activation order, activation.json authorization, Judiciary sign-off or Governor approval. Fail-closed refusal is the correct outcome until real evidence is filed.",
++  "preconditions": {
++    "baseline": {
++      "ok": false,
++      "note": "Frozen baseline is diagnostic, not a verified-outcome comparator (Act 32 D/E; statistics preflight found usable_as_comparator=false)."
++    },
++    "budgets": {
++      "ok": false,
++      "note": "Economy has no per-office token/machine/wall-time meter; no enforceable hard cap or automatic disable (Act 32 H)."
++    },
++    "executive_order": {
++      "ok": false,
++      "note": "No signed, reversible Statistics-only Executive activation order exists (Act 32 clause 9)."
++    },
++    "judiciary_check": {
++      "ok": false,
++      "note": "No independent Judiciary factual determination / review artifact is filed (Acts 15, 32 clause 9/K)."
++    }
++  },
++  "evidence": [
++    {
++      "name": "frozen-baseline",
++      "path": "records/knowledge/baseline-20261119.json",
++      "sha256": "1f7ce6153beb4e3391b2d5c387c93b386662c60414333ab477d2b557f97ea968",
++      "git": {
++        "commit": "a164fa5a71786f576f88391136919f30e758e21f",
++        "path": "records/knowledge/baseline-20261119.json"
++      },
++      "role": "diagnostic baseline (NOT a positive outcome comparator)"
++    },
++    {
++      "name": "activation-all-disabled",
++      "path": "records/knowledge/activation.json",
++      "sha256": "91329c75e7f72b1cbffff97b186e1b94dbc8abeabb9d1dc17172ec260ab7a6e4",
++      "git": {
++        "commit": "a164fa5a71786f576f88391136919f30e758e21f",
++        "path": "records/knowledge/activation.json"
++      },
++      "role": "authorization state: all four offices disabled"
++    }
++  ],
++  "evidence_digest": "sha256:be9c8999efd23cc836597325816a119db36b5020bd6f6be2e5090cc96d38712f",
++  "review": null,
++  "day30_review": null,
++  "note_30day": "Act 32 K / Founder mandate: a 30-day wait is NOT a precondition to launch the authorized Statistics trial; evidence may be collected prospectively. A day-30 Judiciary review is mandatory only before renewal; if missing, the gate automatically holds.",
++  "note_cutover": "No Post/Gazette migration or cutover is authorized here. A future cutover requires a separate Cutover Act (Act 32 N), separately reviewed code and independently evidenced read/reply."
++}
+diff --git a/records/suite-status.json b/records/suite-status.json
+index c05f2f88..963882fc 100644
+--- a/records/suite-status.json
++++ b/records/suite-status.json
+@@ -1,14 +1,14 @@
+ {
+   "generated_by": "government/suite-status.sh",
+   "act": 21,
+-  "recorded_at": 1795200068,
+-  "recorded_iso": "2026-11-20T18:41:08Z",
+-  "suite": "tests/run-all.sh",
+-  "commit": "8c3418fe5a4d12e82e53dcbb2d7a189708712212",
+-  "tree": "d610ea9a75d884e771269b0150e51f772252bf8c",
+-  "main": "9f2f3c8e1bb15e82f94487a2a035b68ccd29b5f9",
++  "recorded_at": 1795200482,
++  "recorded_iso": "2026-11-20T18:48:02Z",
++  "suite": "tests/records-smoke.sh",
++  "commit": "d779ae839471c176dd1cbc2dfc72e6e3135117c1",
++  "tree": "6f6bb3ac8ab082ebdd04f8f1fed0d10f9f2d203b",
++  "main": "391f5bf171b84f869d71aa487de612e9316a3add",
+   "result": "green",
+-  "runs": [{"run":1,"result":"green","exit":0,"output_sha256":"db4dc9c560aaefaac83d59387f87120c095927e46af112bc9fef20274a8bfec6"}],
++  "runs": [{"run":1,"result":"green","exit":0,"output_sha256":"2e5a7e79772f14b774757fd872135179a505df27eee04abba74ce9fbc40ce593"}],
+   "ci_result": "unavailable",
+   "ci_reconciliation": "unavailable",
+   "verifier": "integrator",
+diff --git a/tests/knowledge-budget-smoke.sh b/tests/knowledge-budget-smoke.sh
+new file mode 100644
+index 00000000..747abb52
+--- /dev/null
++++ b/tests/knowledge-budget-smoke.sh
+@@ -0,0 +1,170 @@
++#!/bin/sh
++# Act 32 H adversarial black-box tests. Production CPU attribution is presently
++# unsupported; the fail-closed gate must therefore prevent every live dispatch.
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++TOOL=$(pwd -P)/government/knowledge-budget-tool.py
++ENGINE=$(pwd -P)/government/knowledge-budget.sh
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++mkdir -p "$d/state/knowledge/budget/reservations" "$d/town/government"
++cp government/knowledge-budget.conf "$d/town/government/"
++export VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" VICHE_BUDGET_TOOL="$TOOL"
++
++fail() { echo "FAIL: $*" >&2; exit 1; }
++no() { if "$@" >/dev/null 2>&1; then fail "$* unexpectedly succeeded"; fi; }
++ok() { "$@" >/dev/null || fail "$* failed"; }
++
++DB=$d/meter.db
++python3 - "$DB" <<'PY'
++import sqlite3,sys
++c=sqlite3.connect(sys.argv[1])
++c.execute("create table session_v2 (id text primary key,tokens_input int,tokens_output int,tokens_reasoning int,tokens_cache_read int,tokens_cache_write int,cost real,time_updated int)")
++c.execute("insert into session_v2 values ('sid',100,20,3,40,5,0.0,1795197102261)")
++c.commit()
++PY
++python3 - "$d/town/government/knowledge-budget.conf" "$DB" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]
++for x in c['offices'].values(): x['enabled']=True
++json.dump(c,open(p,'w'))
++PY
++
++# All shipped office activations are disabled.
++jq -e '[.offices[] | .enabled] | all(. == false)' government/knowledge-budget.conf >/dev/null ||
++  fail 'shipped config did not default all offices disabled'
++
++# Production gate: real token meter exists, but no verified per-session backend
++# CPU attribution exists, so neither guard nor reservation may admit dispatch.
++no /bin/sh "$ENGINE" guard statistics
++no /bin/sh "$ENGINE" reserve statistics test-agent
++[ "$(find "$d/state/knowledge/budget/reservations" -type f | wc -l)" -eq 0 ] ||
++  fail 'reservation was written despite unavailable authoritative CPU meter'
++
++# The production cycle gate must block before appointment creation or detached
++# launch when the budget cannot meter CPU. Verify the real caller ordering using
++# an isolated town fixture and a recording Antonina stub.
++mkdir -p "$d/cycle-town/government" "$d/cycle-town/records/knowledge" "$d/cycle-state" "$d/cycle-bin"
++cp government/knowledge-budget.conf government/knowledge-budget.sh government/knowledge-budget-tool.py \
++  government/knowledge-office-cycle.sh "$d/cycle-town/government/"
++printf '#!/bin/sh\nexit 0\n' > "$d/cycle-town/government/knowledge-activation-verify.sh"
++printf '## Act 32 — Institutional Knowledge and Communications Act (enacted test)\n' > "$d/cycle-town/government/LAWS.md"
++printf 'baseline\n' > "$d/cycle-town/records/knowledge/baseline-20261119.json"
++cp "$DB" "$d/cycle-meter.db"
++python3 - "$d/cycle-town/government/knowledge-budget.conf" "$d/cycle-meter.db" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]; c['offices']['statistics']['enabled']=True; json.dump(c,open(p,'w'))
++PY
++cat > "$d/cycle-bin/antonina" <<'SH'
++#!/bin/sh
++echo "$*" >> "$CYCLE_LOG"
++exit 0
++SH
++chmod +x "$d/cycle-bin/antonina"
++: > "$d/cycle.log"
++export CYCLE_LOG="$d/cycle.log" PATH="$d/cycle-bin:$PATH"
++env VICHE_TOWN_ROOT="$d/cycle-town" VICHE_STATE_ROOT="$d/cycle-state" \
++  VICHE_BUDGET_TOOL="$d/cycle-town/government/knowledge-budget-tool.py" \
++  VICHE_BUDGET_DB="$d/cycle-meter.db" VICHE_CONSTITUTION=/missing \
++  /bin/sh "$d/cycle-town/government/knowledge-office-cycle.sh" statistics >/dev/null 2>&1 ||
++  fail 'cycle budget denial returned an error instead of safe no-dispatch'
++[ ! -s "$d/cycle.log" ] || fail 'cycle reached Antonina after CPU budget guard denied activation'
++
++# Missing SID is an error, not a successful zero-token observation.
++no python3 "$TOOL" snapshot "$DB" absent-session "$$"
++
++# Session reuse must produce a monotone delta; changed SID and counter reset fail.
++BASE=$(python3 "$TOOL" snapshot "$DB" sid "$$")
++python3 - "$DB" <<'PY'
++import sqlite3,sys
++c=sqlite3.connect(sys.argv[1]); c.execute('update session_v2 set tokens_input=125'); c.commit()
++PY
++CUR=$(python3 "$TOOL" snapshot "$DB" sid "$$")
++DELTA=$(python3 "$TOOL" delta "$BASE" "$CUR")
++[ "$(printf '%s\n' "$DELTA" | jq -r '.tokens.delta_total')" -eq 25 ] || fail 'cumulative usage delta wrong'
++no python3 "$TOOL" delta "$BASE" "$(printf '%s\n' "$CUR" | jq '.session_id="other"')"
++python3 - "$DB" <<'PY'
++import sqlite3,sys
++c=sqlite3.connect(sys.argv[1]); c.execute('update session_v2 set tokens_input=1'); c.commit()
++PY
++RESET=$(python3 "$TOOL" snapshot "$DB" sid "$$")
++no python3 "$TOOL" delta "$CUR" "$RESET"
++
++# Authoritative time_updated is explicitly milliseconds, never interpreted as
++# seconds or as a fabricated CPU signal.
++printf '%s\n' "$CUR" | jq -e '.time_updated_ms==1795197102261 and .cpu_available==false and .cpu_seconds==null' >/dev/null ||
++  fail 'meter units/provenance are ambiguous'
++
++# Any malformed/unknown reservation is a hard aggregate error, not skipped.
++printf 'CORRUPT' > "$d/state/knowledge/budget/reservations/unknown.json"
++no python3 "$TOOL" aggregate "$d/state/knowledge/budget/reservations" 3888000 "$(date +%s)"
++no /bin/sh "$ENGINE" guard statistics
++rm "$d/state/knowledge/budget/reservations/unknown.json"
++
++# Unknown state and malformed committed records fail closed.
++cat > "$d/state/knowledge/budget/reservations/unknown.json" <<'JSON'
++{"schema":"viche-knowledge-budget-reservation-v1","id":"unknown","office":"statistics","state":"mystery","created_at":1,"caps":{"tokens_total":5,"cpu_seconds":5,"wall_seconds":5}}
++JSON
++no python3 "$TOOL" aggregate "$d/state/knowledge/budget/reservations" 3888000 "$(date +%s)"
++rm "$d/state/knowledge/budget/reservations/unknown.json"
++
++# Crash after durable dispatch-intent but before session binding is held at the
++# full reservation; age alone must never release it. An aged reservation with
++# no dispatch intent is provably prelaunch (intent is fsynced before launcher)
++# and may be rolled back.
++mkdir -p "$d/bin"
++cat > "$d/bin/antonina" <<'SH'
++#!/bin/sh
++case "$1 $2" in
++  'agent status') printf '{"state":"running","native_session_id":"sid"}\n' ;;
++  'agent kill'|'agent stop') exit 0 ;;
++  *) exit 5 ;;
++esac
++SH
++chmod +x "$d/bin/antonina"
++export PATH="$d/bin:$PATH"
++NOW=$(date +%s)
++jq -n --argjson now "$NOW" '{schema:"viche-knowledge-budget-reservation-v1",id:"ambiguous",office:"statistics",state:"reserved",created_at:($now-1000),caps:{tokens_total:100,cpu_seconds:10,wall_seconds:60},accounting_window_seconds:3888000,monitor_interval_seconds:1,overrun_action:"kill",meter_db:"none",agent_id:"agent-1",dispatch_attempted:true,history:[]}' > "$d/state/knowledge/budget/reservations/ambiguous.json"
++ok /bin/sh "$ENGINE" reconcile
++[ "$(jq -r '.state' "$d/state/knowledge/budget/reservations/ambiguous.json")" = held ] || fail 'ambiguous launch intent was released after age'
++[ "$(jq -r '.charge.tokens_total' "$d/state/knowledge/budget/reservations/ambiguous.json")" -eq 100 ] || fail 'ambiguous launch lacks pessimistic charge'
++no /bin/sh "$ENGINE" guard statistics
++rm "$d/state/knowledge/budget/reservations/ambiguous.json"
++jq -n --argjson now "$NOW" '{schema:"viche-knowledge-budget-reservation-v1",id:"prelaunch",office:"statistics",state:"reserved",created_at:($now-1000),caps:{tokens_total:100,cpu_seconds:10,wall_seconds:60},accounting_window_seconds:3888000,monitor_interval_seconds:1,overrun_action:"kill",meter_db:"none",agent_id:"agent-1",dispatch_attempted:false,history:[]}' > "$d/state/knowledge/budget/reservations/prelaunch.json"
++ok /bin/sh "$ENGINE" reconcile
++[ "$(jq -r '.state' "$d/state/knowledge/budget/reservations/prelaunch.json")" = rolled_back ] || fail 'provably prelaunch stale reservation not rolled back'
++rm "$d/state/knowledge/budget/reservations/prelaunch.json"
++
++# An aggregate record that is corrupt or diverges from source reservations
++# prevents activation. This remains true even when there are no reservations.
++printf 'not-json\n' > "$d/state/knowledge/budget/aggregate.json"
++no /bin/sh "$ENGINE" guard statistics
++
++# Missing/corrupt meter schema fails closed and never creates a reservation.
++printf 'not a database' > "$d/bad.db"
++python3 - "$d/town/government/knowledge-budget.conf" "$d/bad.db" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]; json.dump(c,open(p,'w'))
++PY
++no /bin/sh "$ENGINE" reserve statistics test-agent
++
++# Durable write uses file fsync + atomic replace + parent-directory fsync.
++python3 "$TOOL" durable-mkdir "$d/durable/a/b" >/dev/null
++printf 'old' | python3 "$TOOL" durable-write "$d/durable/a/file" >/dev/null
++printf 'new' | python3 "$TOOL" durable-write "$d/durable/a/file" >/dev/null
++[ "$(cat "$d/durable/a/file")" = new ] || fail 'durable replacement mismatch'
++
++# Config activation validates before replacing; rollback restores exact bytes.
++rm -f "$d/state/knowledge/budget/aggregate.json"
++ok /bin/sh "$ENGINE" config activate
++H1=$(sha256sum "$d/state/knowledge/budget/config.active.json" | awk '{print $1}')
++python3 - "$d/town/government/knowledge-budget.conf" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['aggregate']['caps']['tokens_total']+=1; json.dump(c,open(p,'w'))
++PY
++ok /bin/sh "$ENGINE" config activate
++ok /bin/sh "$ENGINE" config rollback
++H2=$(sha256sum "$d/state/knowledge/budget/config.active.json" | awk '{print $1}')
++[ "$H1" = "$H2" ] || fail 'rollback was not byte-exact'
++
++echo 'knowledge budget: disabled defaults; missing SID, CPU, corruption, cumulative deltas, durable writes, and rollback fail closed/pass'
+diff --git a/tests/knowledge-phase-verifier-smoke.sh b/tests/knowledge-phase-verifier-smoke.sh
+new file mode 100644
+index 00000000..c0f3c048
+--- /dev/null
++++ b/tests/knowledge-phase-verifier-smoke.sh
+@@ -0,0 +1,43 @@
++#!/bin/sh
++# Smoke test: the production phase-gate record must FAIL CLOSED, all offices
++# stay disabled, and the POSIX wrapper must work. No real sign-off is forged.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++town=$repo
++ver=$town/government/knowledge-phase-verifier.py
++rec=records/knowledge/phases/statistics-initial.json
++
++[ -s "$ver" ]
++[ -s "$town/$rec" ]
++[ -s "$town/records/knowledge/PHASE-GATE-SCHEMA.md" ]
++/bin/sh -n "$town/government/knowledge-phase-gate.sh"
++
++# verify: non-zero and a hold disposition (draft, no Git-anchored review).
++set +e
++out=$(python3 "$ver" --town "$town" verify "$rec")
++rc=$?
++set -e
++[ "$rc" -ne 0 ] || { echo 'phase verifier failed open' >&2; exit 1; }
++printf '%s\n' "$out" | grep -q '"decision": "hold"'
++
++# check: prints the same disposition but always exits 0.
++out2=$(python3 "$ver" --town "$town" check "$rec")
++printf '%s\n' "$out2" | grep -q '"decision": "hold"'
++
++# audit: no dispatch ledger yet -> no violations, no new invocation after expiry.
++audit=$(python3 "$ver" --town "$town" audit)
++printf '%s\n' "$audit" | grep -q '"ok": true'
++printf '%s\n' "$audit" | grep -q '"new_invocation_after_expiry": \[\]'
++
++# All four offices remain disabled by default in the authorization record.
++disabled=$(jq -r '[.offices[] | .enabled] | all(. == false)' "$town/records/knowledge/activation.json")
++[ "$disabled" = true ]
++
++# Wrapper carries no authority but locates the verifier deterministically.
++set +e
++VICHE_TOWN_ROOT=$town /bin/sh "$town/government/knowledge-phase-gate.sh" verify "$rec" >/dev/null 2>&1
++wrc=$?
++set -e
++[ "$wrc" -ne 0 ] || { echo 'wrapper failed open' >&2; exit 1; }
++
++echo 'knowledge phase-gate verifier smoke: OK (fail-closed hold, offices disabled)'
+diff --git a/tests/test_knowledge_phase_verifier.py b/tests/test_knowledge_phase_verifier.py
+new file mode 100644
+index 00000000..fee77a65
+--- /dev/null
++++ b/tests/test_knowledge_phase_verifier.py
+@@ -0,0 +1,521 @@
++#!/usr/bin/env python3
++"""End-to-end tests for the independent Act 32 phase-gate verifier.
++
++All reviews/artifacts/snapshots here are SYNTHETIC fixtures created in throwaway
++Git repositories. They are format/soundness tests only: they do not sign,
++authorize or enable any real office, and they forge no real Judiciary/Governor
++signature. The attestation snapshot stands in for the live Antonina board
++review gate + officer comment + appointment/session channels.
++"""
++
++import hashlib
++import importlib.util
++import json
++import os
++import subprocess
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++VERIFIER = ROOT / "government" / "knowledge-phase-verifier.py"
++SPEC = importlib.util.spec_from_file_location("knowledge_phase_verifier", VERIFIER)
++kpv = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(kpv)
++
++BASE = 1795198800                 # 2026-11-20T18:20:00Z
++NB = BASE
++EXP = NB + 14 * 86400 - 1         # just under the 14-day initial cap
++BASELINE = "diagnostic-baseline-bytes\n"
++ACTIVATION = "all-offices-disabled\n"
++JUDGE = "c1e00008"
++JUDGE_AGENT = "5mRzSPKbwvhnJy1Pt9lCLl-otis"
++
++
++def sha(s: str) -> str:
++    return hashlib.sha256(s.encode("utf-8")).hexdigest()
++
++
++def git(town: Path, *args: str) -> str:
++    out = subprocess.run(["git", "-C", str(town), *args], check=True,
++                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++    return out.stdout.decode().strip()
++
++
++class PhaseVerifierTest(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory(prefix="kpv-test-")
++        self.town = Path(self.tmp.name) / "town"
++        self.town.mkdir(parents=True)
++        (self.town / "government").mkdir()
++        (self.town / "records/knowledge/phases/rollbacks").mkdir(parents=True)
++        (self.town / "government/LAWS.md").write_text(
++            "## Act 32 — Institutional Knowledge and Communications Act "
++            "(enacted 2026-11-20T07:33:00Z by recorded vote on bill "
++            "institutional-knowledge-and-communications-act-v4)\n"
++            "## Act 33 — Reauthorizing Act (enacted 2026-12-21T00:00:00Z)\n",
++            encoding="utf-8")
++        (self.town / "government/branch-officers.tsv").write_text(
++            "executive\tc1e00002\tExecutive\n"
++            "judiciary\t%s\tJudiciary\n"
++            "innovation-centre\tc1e00011\tInnovation\n" % JUDGE,
++            encoding="utf-8")
++        (self.town / "records/knowledge/baseline-20261119.json").write_text(BASELINE, encoding="utf-8")
++        (self.town / "records/knowledge/activation.json").write_text(ACTIVATION, encoding="utf-8")
++        git(self.town, "init", "-q")
++        git(self.town, "config", "user.email", "test@example.invalid")
++        git(self.town, "config", "user.name", "test-fixture")
++        git(self.town, "add", "-A")
++        git(self.town, "commit", "-q", "-m", "base")
++        self.base_commit = git(self.town, "rev-parse", "HEAD")
++        self.evidence = [{
++            "name": "baseline",
++            "path": "records/knowledge/baseline-20261119.json",
++            "sha256": sha(BASELINE),
++            "git": {"commit": self.base_commit,
++                    "path": "records/knowledge/baseline-20261119.json"},
++        }]
++        self.ev_digest = kpv.canonical_digest(self.evidence)
++        self.snapshot = {
++            "issues": {},
++            "appointments": {"judiciary": JUDGE_AGENT},
++            "agent_status": {"id": JUDGE_AGENT, "state": "idle"},
++        }
++        self.snapshot_path = str(Path(self.tmp.name) / "attestation.json")
++        self._write_snapshot()
++
++    def tearDown(self):
++        self.tmp.cleanup()
++
++    # ---- helpers --------------------------------------------------------
++    def _write_snapshot(self):
++        Path(self.snapshot_path).write_text(json.dumps(self.snapshot), encoding="utf-8")
++
++    def artifact(self, gate_id="statistics-initial", reviewer=JUDGE,
++                 role="judiciary", decision="proceed", digest=None,
++                 reviewed_at="2026-11-21T12:00:00Z", name=None,
++                 issue_id="issue-main", gate_ids=None,
++                 board_commit=None, board_reviewer=None, with_comment=True):
++        digest = digest or self.ev_digest
++        text = (
++            "gate: %s\nreviewer: %s\nreviewer_role: %s\ndecision: %s\n"
++            "evidence_digest: %s\nreviewed_at: %s\n"
++            % (gate_id, reviewer, role, decision, digest, reviewed_at)
++        )
++        rel = "records/knowledge/phases/%s.md" % (name or ("review-" + gate_id))
++        (self.town / rel).write_text(text, encoding="utf-8")
++        git(self.town, "add", rel)
++        git(self.town, "commit", "-q", "-m", "review artifact " + (name or gate_id))
++        commit = git(self.town, "rev-parse", "HEAD")
++        gates = gate_ids or [gate_id]
++        comment = "Reviewed gates %s against artifact %s" % (" ".join(gates), commit[:7])
++        self.snapshot["issues"][issue_id] = {
++            "number": issue_id,
++            "review": {
++                "commit": board_commit or commit,
++                "reviewer": board_reviewer if board_reviewer is not None else ("%s (Judiciary)" % JUDGE),
++                "verdict": "approve",
++                "recordedAt": reviewed_at,
++                "rationale": "synthetic fixture",
++            },
++            "messages": ([{"author": JUDGE, "body": comment}] if with_comment else []),
++        }
++        self._write_snapshot()
++        return {"git_commit": commit, "git_path": rel, "sha256": sha(text)}, text
++
++    def gate(self, *, gate_id="statistics-initial", office="statistics",
++             phase="initial", decision="proceed", nb=NB, exp=EXP,
++             reviewer=JUDGE, role="judiciary", pred=None,
++             with_review=True, day30=None, reauth=None, signed=None,
++             att_issue="issue-main", include_attestation=True):
++        art, _ = self.artifact(gate_id=gate_id, reviewer=reviewer, role=role,
++                              decision="proceed", issue_id=att_issue) \
++            if with_review else (None, None)
++        rec = {
++            "schema": kpv.SCHEMA,
++            "gate_id": gate_id,
++            "act": 32,
++            "act_bill_id": kpv.ACT_BILL_ID,
++            "office": office,
++            "phase": phase,
++            "host": "billy-dev",
++            "predecessor": pred,
++            "next_office": "foresight" if office == "statistics" else None,
++            "created_at": "2026-11-20T18:20:00Z",
++            "created_epoch": BASE,
++            "not_before": nb,
++            "expires_at": exp,
++            "decision": decision,
++            "preconditions": {k: {"ok": True} for k in kpv.PRECONDITION_KEYS},
++            "evidence": self.evidence,
++            "evidence_digest": self.ev_digest,
++            "review": None,
++            "day30_review": None,
++        }
++        if include_attestation:
++            rec["attestation"] = {"issue_id": att_issue,
++                                  "expected_reviewer": JUDGE,
++                                  "officer_agent_id": JUDGE_AGENT}
++        if with_review and decision == "proceed":
++            rec["review"] = {
++                "reviewer": reviewer,
++                "reviewer_role": role,
++                "decision": "proceed",
++                "signed_at": "2026-11-20T18:21:00Z",
++                "signed_epoch": signed if signed is not None else NB + 100,
++                "review_artifact": art,
++            }
++        if day30 is not None:
++            rec["day30_review"] = day30
++        if reauth is not None:
++            rec["reauthorizing_act"] = reauth
++        return rec
++
++    def write_gate(self, rec, name=None):
++        rel = "records/knowledge/phases/%s.json" % (name or rec["gate_id"])
++        (self.town / rel).write_text(json.dumps(rec), encoding="utf-8")
++        return rel
++
++    def run_verifier(self, *args, at=None):
++        cmd = [sys.executable, str(VERIFIER), "--town", str(self.town)]
++        if at is not None:
++            cmd += ["--at", str(at)]
++        cmd += list(args)
++        env = os.environ.copy()
++        env["VICHE_PHASE_ATTESTATION_JSON"] = self.snapshot_path
++        env.pop("VICHE_POST_DB", None)
++        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
++                              text=True, env=env)
++        try:
++            out = json.loads(proc.stdout)
++        except json.JSONDecodeError:
++            out = {"raw": proc.stdout, "stderr": proc.stderr}
++        return proc.returncode, out
++
++    def verify(self, rec, at=None, name=None):
++        rel = self.write_gate(rec, name)
++        return self.run_verifier("verify", rel, at=at)
++
++    # ---- happy paths -----------------------------------------------------
++    def test_valid_statistics_initial_proceed_no_30day_wait(self):
++        rec = self.gate()
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertEqual(rc, 0, out)
++        self.assertEqual(out["decision"], "proceed")
++        self.assertTrue(out["ok"])
++        self.assertNotIn("day-30", " ".join(out["reasons"]))
++
++    def test_check_subcommand_always_zero(self):
++        rec = self.gate()
++        rel = self.write_gate(rec)
++        rc, out = self.run_verifier("check", rel, at=NB + 200)
++        self.assertEqual(rc, 0)
++        self.assertEqual(out["decision"], "proceed")
++
++    def test_successor_chain_valid_even_if_predecessor_no_longer_live(self):
++        pred = self.gate(gate_id="statistics-initial")
++        pred_rel = self.write_gate(pred, name="statistics-initial")
++        succ = self.gate(gate_id="foresight-initial", office="foresight",
++                         nb=NB + 200, exp=NB + 200 + 13 * 86400,
++                         signed=NB + 200, att_issue="issue-foresight",
++                         pred={"gate_id": "statistics-initial", "office": "statistics",
++                               "record": pred_rel})
++        rc, out = self.verify(succ, name="foresight-initial", at=NB + 200)
++        self.assertEqual(rc, 0, out)
++        self.assertEqual(out["decision"], "proceed")
++
++    # ---- fail-closed: reviewer / evidence / attestation -----------------
++    def test_no_review_fails_closed(self):
++        rec = self.gate(with_review=False)
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertNotEqual(out["decision"], "proceed")
++        self.assertTrue(any("absent" in r for r in out["reasons"]), out)
++
++    def test_signed_by_field_alone_is_ignored(self):
++        rec = self.gate(with_review=False)
++        rec["signed_by"] = JUDGE
++        rec["signed-by"] = "Vitalik"
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertNotEqual(out["decision"], "proceed")
++
++    def test_reviewer_not_in_registry(self):
++        rec = self.gate(reviewer="c1e99999")
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("registry" in r for r in out["reasons"]), out)
++
++    def test_non_judiciary_cannot_sign_proceed(self):
++        rec = self.gate(reviewer="c1e00002", role="executive")
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("permitted" in r for r in out["reasons"]), out)
++
++    def test_rogue_git_review_with_wrong_board_commit_fails(self):
++        """A perfect Git text artifact with a real Judiciary id is not enough."""
++        art, _ = self.artifact(gate_id="statistics-initial", name="rogue-artifact",
++                               issue_id="issue-rogue", board_commit=self.base_commit)
++        rec = self.gate()
++        rec["review"]["review_artifact"] = art
++        rec["attestation"] = {"issue_id": "issue-rogue",
++                              "expected_reviewer": JUDGE,
++                              "officer_agent_id": JUDGE_AGENT}
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("exact review-artifact commit" in r
++                            for r in out["reasons"]), out)
++
++    def test_missing_institutional_attestation_fails(self):
++        rec = self.gate(include_attestation=False)
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("attestation" in r for r in out["reasons"]), out)
++
++    def test_board_comment_by_officer_required(self):
++        rec = self.gate()
++        self.snapshot["issues"]["issue-main"]["messages"] = []
++        self._write_snapshot()
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("officer-authored board comment" in r
++                            for r in out["reasons"]), out)
++
++    def test_agent_appointment_mismatch_fails(self):
++        self.snapshot["appointments"]["judiciary"] = "some-rogue-agent"
++        self._write_snapshot()
++        rec = self.gate()
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("appointment registry" in r for r in out["reasons"]), out)
++
++    def test_review_artifact_digest_mismatch(self):
++        rec = self.gate()
++        rec["review"]["review_artifact"]["sha256"] = "0" * 64
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("digest mismatch" in r for r in out["reasons"]), out)
++
++    def test_forged_commit_rejected(self):
++        rec = self.gate()
++        rec["review"]["review_artifact"]["git_commit"] = "0" * 40
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("valid Git commit" in r for r in out["reasons"]), out)
++
++    def test_unsafe_git_path_rejected(self):
++        rec = self.gate()
++        rec["review"]["review_artifact"]["git_path"] = "records/../etc/passwd"
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("unsafe artifact path" in r for r in out["reasons"]), out)
++
++    def test_review_artifact_rebound_to_other_gate_rejected(self):
++        art, _ = self.artifact(gate_id="statistics-initial", name="reused-artifact",
++                               issue_id="issue-reused", board_commit=self.base_commit)
++        rec = self.gate(gate_id="other-gate")
++        rec["review"]["review_artifact"] = art
++        rec["attestation"] = {"issue_id": "issue-reused",
++                              "expected_reviewer": JUDGE,
++                              "officer_agent_id": JUDGE_AGENT}
++        rc, out = self.verify(rec, name="other-gate", at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("binding mismatch" in r for r in out["reasons"]), out)
++
++    def test_evidence_tamper_rejected(self):
++        rec = self.gate()
++        rec["evidence"][0]["sha256"] = "1" * 64
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("mismatch" in r for r in out["reasons"]), out)
++
++    # ---- fail-closed: act / office / window -----------------------------
++    def test_wrong_act_number(self):
++        rec = self.gate()
++        rec["act"] = 31
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertEqual(out["decision"], "invalid")
++
++    def test_wrong_bill_id(self):
++        rec = self.gate()
++        rec["act_bill_id"] = "some-other-bill"
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertEqual(out["decision"], "invalid")
++
++    def test_invalid_office(self):
++        rec = self.gate(office="spying", pred=None)
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("predecessor" in r for r in out["reasons"]), out)
++
++    def test_initial_window_over_14_days(self):
++        rec = self.gate(exp=NB + 14 * 86400 + 5)
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("cap" in r for r in out["reasons"]), out)
++
++    def test_renewal_window_over_45_days(self):
++        rec = self.gate(phase="renewal", exp=NB + 45 * 86400 + 5,
++                        reauth={"act": 33})
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("45-day" in r or "cap" in r for r in out["reasons"]), out)
++
++    def test_precondition_false_holds(self):
++        rec = self.gate()
++        rec["preconditions"]["executive_order"]["ok"] = False
++        rc, out = self.verify(rec, at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("executive_order" in r for r in out["reasons"]), out)
++
++    def test_expiry_refuses_new_launch(self):
++        rec = self.gate()
++        rc, out = self.verify(rec, at=EXP + 1)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("expired" in r for r in out["reasons"]), out)
++
++    def test_not_yet_effective_holds(self):
++        rec = self.gate()
++        rc, out = self.verify(rec, at=NB - 1)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("not yet effective" in r for r in out["reasons"]), out)
++
++    # ---- fail-closed: chain / renewal ----------------------------------
++    def test_successor_not_before_before_predecessor_signed_date(self):
++        pred = self.gate(gate_id="statistics-initial", signed=NB + 500)
++        pred_rel = self.write_gate(pred, name="statistics-initial")
++        succ = self.gate(gate_id="foresight-initial", office="foresight",
++                         nb=NB + 200, exp=NB + 200 + 13 * 86400,
++                         signed=NB + 200, att_issue="issue-foresight",
++                         pred={"gate_id": "statistics-initial", "office": "statistics",
++                               "record": pred_rel})
++        rc, out = self.verify(succ, name="foresight-initial", at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("precedes predecessor signed gate date" in r
++                            for r in out["reasons"]), out)
++
++    def _initial_and_renewal(self):
++        initial = self.gate(gate_id="statistics-initial")
++        rel = self.write_gate(initial, name="statistics-initial")
++        renewal = self.gate(gate_id="statistics-renewal", phase="renewal",
++                            nb=NB + 200, exp=NB + 200 + 40 * 86400,
++                            signed=NB + 200, att_issue="issue-renewal",
++                            pred={"gate_id": "statistics-initial", "office": "statistics",
++                                  "record": rel},
++                            reauth={"act": 33})
++        return renewal
++
++    def test_renewal_missing_day30_review_auto_holds(self):
++        renewal = self._initial_and_renewal()
++        rc, out = self.verify(renewal, name="statistics-renewal", at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("day-30" in r and "automatic hold" in r
++                            for r in out["reasons"]), out)
++
++    def test_renewal_late_day30_review_holds(self):
++        renewal = self._initial_and_renewal()
++        art, _ = self.artifact(gate_id="statistics-renewal", name="day30-late",
++                               issue_id="issue-day30", gate_ids=["statistics-renewal"])
++        renewal["day30_review"] = {
++            "reviewer": JUDGE, "reviewer_role": "judiciary", "decision": "proceed",
++            "signed_at": "2026-12-25T00:00:00Z",
++            "signed_epoch": NB + 30 * 86400 + 5,
++            "review_artifact": art,
++        }
++        renewal["day30_attestation"] = {"issue_id": "issue-day30",
++                                        "expected_reviewer": JUDGE,
++                                        "officer_agent_id": JUDGE_AGENT}
++        rc, out = self.verify(renewal, name="statistics-renewal", at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("after deadline" in r for r in out["reasons"]), out)
++
++    def test_renewal_missing_reauthorizing_act_holds(self):
++        renewal = self._initial_and_renewal()
++        del renewal["reauthorizing_act"]
++        rc, out = self.verify(renewal, name="statistics-renewal", at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertTrue(any("reauthorizing Act" in r for r in out["reasons"]), out)
++
++    # ---- robustness: determinism / outage / invalid state / rollback ----
++    def test_deterministic_across_repeated_runs(self):
++        rec = self.gate()
++        rel = self.write_gate(rec)
++        rc1, out1 = self.run_verifier("verify", rel, at=NB + 200)
++        rc2, out2 = self.run_verifier("verify", rel, at=NB + 200)
++        self.assertEqual(rc1, rc2)
++        self.assertEqual(json.dumps(out1, sort_keys=True), json.dumps(out2, sort_keys=True))
++
++    def test_post_outage_does_not_change_decision(self):
++        rec = self.gate()
++        rel = self.write_gate(rec)
++        before = self.run_verifier("verify", rel, at=NB + 200)
++        (self.town / "government/post.db").write_text("not a database", encoding="utf-8")
++        env = os.environ.copy()
++        env["VICHE_POST_DB"] = str(self.town / "government/post.db")
++        env["VICHE_PHASE_ATTESTATION_JSON"] = self.snapshot_path
++        cmd = [sys.executable, str(VERIFIER), "--town", str(self.town),
++               "--at", str(NB + 200), "verify", rel]
++        after_proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, text=True)
++        after = (after_proc.returncode, json.loads(after_proc.stdout))
++        self.assertEqual(before, after)
++
++    def test_invalid_git_state_fails_closed(self):
++        rc, out = self.run_verifier("verify", "records/knowledge/phases/missing.json",
++                                    at=NB + 200)
++        self.assertNotEqual(rc, 0)
++        self.assertEqual(out["decision"], "invalid")
++
++    def test_rollback_blocks_proceed(self):
++        rec = self.gate()
++        rel = self.write_gate(rec)
++        rc0, out0 = self.run_verifier("verify", rel, at=NB + 200)
++        self.assertEqual(rc0, 0, out0)
++        rc_rb, _ = self.run_verifier("rollback", "--gate-id", "statistics-initial",
++                                     "--reason", "emergency hold after adverse evidence",
++                                     at=NB + 300)
++        self.assertEqual(rc_rb, 0)
++        rc1, out1 = self.run_verifier("verify", rel, at=NB + 300)
++        self.assertNotEqual(rc1, 0)
++        self.assertTrue(any("rollback" in r for r in out1["reasons"]), out1)
++
++    # ---- audit: expiry, in-flight, new invocation -----------------------
++    def test_audit_flags_new_invocation_after_expiry(self):
++        rec = self.gate()
++        self.write_gate(rec)
++        ledger = self.town / "records/knowledge/phases/dispatch-ledger.jsonl"
++        lines = [
++            {"gate_id": "statistics-initial", "kind": "launch", "at": NB + 10,
++             "invocation_id": "ok-1"},
++            {"gate_id": "statistics-initial", "kind": "launch", "at": EXP + 10,
++             "invocation_id": "forged-after-expiry"},
++        ]
++        ledger.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
++        rc, out = self.run_verifier("audit", at=EXP + 20)
++        self.assertEqual(rc, 1)
++        self.assertFalse(out["ok"])
++        self.assertEqual(len(out["new_invocation_after_expiry"]), 1)
++        self.assertTrue(out["violations"])
++
++    def test_audit_distinguishes_inflight_after_expiry(self):
++        rec = self.gate()
++        self.write_gate(rec)
++        ledger = self.town / "records/knowledge/phases/dispatch-ledger.jsonl"
++        lines = [
++            {"gate_id": "statistics-initial", "kind": "launch", "at": NB + 10,
++             "invocation_id": "ok-1"},
++            {"gate_id": "statistics-initial", "kind": "in_flight_continue",
++             "at": EXP + 10, "invocation_id": "wind-down"},
++        ]
++        ledger.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
++        rc, out = self.run_verifier("audit", at=EXP + 20)
++        self.assertEqual(rc, 0, out)
++        self.assertTrue(out["ok"])
++        self.assertEqual(out["new_invocation_after_expiry"], [])
++        self.assertTrue(out["in_flight_continuations"][0]["after_expiry"])
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

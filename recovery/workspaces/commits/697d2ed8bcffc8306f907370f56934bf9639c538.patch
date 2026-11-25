@@ -1,0 +1,184 @@
+commit 697d2ed8bcffc8306f907370f56934bf9639c538
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Mon Nov 23 08:38:22 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Mon Nov 23 08:38:22 2026 +0000
+
+    Integrate delivery/act34-cumulative-per-run-slices-20261123 (operator): Allow repeated broad adaptive office sessions within cumulative Economy budget
+    
+    Landed by the integration queue (Act 31) as one candidate on main 083b33423f76.
+    
+    Delivery-Branch: delivery/act34-cumulative-per-run-slices-20261123
+    Delivery-Head: 244eb66d5ab4de6e1005d6bcf9d4ec00378d602f
+    Proposed-By: operator
+    Reviewed-By: reviewer-isvtbyuarvsmscd3w2cc4u-kettle
+    Review-Reason: Adds optional per_run_caps so guard/reserve precharge only a session slice while cumulative 45-day office and aggregate caps still bound active/held liabilities and actual closed use; legacy configs behave unchanged. Scoped to the budget tool, engine and a new passing smoke test, with no law, roster
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/knowledge-budget-tool.py b/government/knowledge-budget-tool.py
+index 1bbad9f7..a8f0418c 100644
+--- a/government/knowledge-budget-tool.py
++++ b/government/knowledge-budget-tool.py
+@@ -103,10 +103,20 @@ def validate_config(cfg):
+                 errors.append("offices.%s.enabled must be boolean" % office)
+             ok, cap_errors = check_caps(entry.get("caps"), "offices.%s.caps" % office)
+             errors.extend(cap_errors)
+-            if ok:
+-                for key in CAP_KEYS:
+-                    if entry["caps"][key] <= 0:
+-                        errors.append("offices.%s.caps.%s must be positive" % (office, key))
++            # Distinguish per-dispatch exposure from the cumulative 45-day
++            # budget. An optional per_run_caps keeps older Act32 fixtures
++            # byte-for-byte compatible; Act34 adaptive offices set it lower
++            # so their real work can repeat without draining an entire office
++            # allowance for one invocation.
++            if "per_run_caps" in entry:
++                run_ok, run_errors = check_caps(
++                    entry["per_run_caps"], "offices.%s.per_run_caps" % office)
++                errors.extend(run_errors)
++                if ok and run_ok:
++                    for key in CAP_KEYS:
++                        if entry["per_run_caps"][key] > entry["caps"][key]:
++                            errors.append("offices.%s.per_run_caps.%s exceeds 45-day cap"
++                                          % (office, key))
+     aggregate = cfg.get("aggregate")
+     if not isinstance(aggregate, dict):
+         errors.append("aggregate must be an object")
+@@ -318,12 +328,14 @@ def charges(reservations, now, window):
+ def admit(cfg, agg, office):
+     """Reserve both per-office AND shared remaining liability, fail closed.
+ 
+-    A per-run cap is not a lifetime spend limit. At 399k tokens already spent,
+-    reserving another 400k would exceed the Statistics 400k allowance even
+-    though the global allowance of 1.6M remains. The reservation ledger
+-    counts held and active full liabilities, not optimistic observed usage.
++    A per-run cap is NOT the 45-day spend allowance. At 399k tokens already
++    charged, a second 120k-token slice exceeds Statistics' 400k cumulative
++    cap and is REFUSED. At 120k charged, another 120k slice is admitted.
++    Pending/held sessions count their entire per-run liabilities, never an
++    optimistic partial reading. Defaults preserve legacy full-cap reservation.
+     """
+     office_caps = cfg["offices"][office]["caps"]
++    run_caps = cfg["offices"][office].get("per_run_caps", office_caps)
+     total_caps = cfg["aggregate"]["caps"]
+     by_office = agg.get("by_office")
+     previous = by_office.get(office) if isinstance(by_office, dict) else None
+@@ -338,8 +350,8 @@ def admit(cfg, agg, office):
+                 for v in (global_used, office_used))):
+             reasons.append("%s accounting is missing or invalid" % key)
+             continue
+-        projected_global = global_used + office_caps[key]
+-        projected_office = office_used + office_caps[key]
++        projected_global = global_used + run_caps[key]
++        projected_office = office_used + run_caps[key]
+         if projected_global > total_caps[key]:
+             reasons.append("%s projected %s exceeds aggregate cap %s" %
+                            (key, projected_global, total_caps[key]))
+diff --git a/government/knowledge-budget.sh b/government/knowledge-budget.sh
+index 80998c1b..c45f90be 100644
+--- a/government/knowledge-budget.sh
++++ b/government/knowledge-budget.sh
+@@ -233,7 +233,7 @@ do_reserve_locked() {
+   [ "$(printf '%s\n' "$_dr_adm" | jq -r '.admit')" = true ] ||
+     die "budget exhausted: $(printf '%s\n' "$_dr_adm" | jq -r '.reason')"
+   _dr_id=$(new_id)
+-  _dr_caps=$(cfgj ".offices.\"$_dr_office\".caps")
++  _dr_caps=$(cfgj "(.offices.\"$_dr_office\".per_run_caps // .offices.\"$_dr_office\".caps)")
+   _dr_hash=$(sha256sum "$CONFIG" | awk '{print $1}')
+   _dr_interval=$(cfgs '.monitor_interval_seconds')
+   _dr_action=$(cfgs '.overrun_action')
+diff --git a/tests/knowledge-budget-run-slices-smoke.sh b/tests/knowledge-budget-run-slices-smoke.sh
+new file mode 100644
+index 00000000..caaed1e4
+--- /dev/null
++++ b/tests/knowledge-budget-run-slices-smoke.sh
+@@ -0,0 +1,89 @@
++#!/bin/sh
++# Act34 liveness: 45-day office allowance is NOT a one-session allowance.
++# Real Economy shell guard + reserve, genuine DB, host-CPU baseline,
++# durable receipts, cumulative liabilities and provider-overrun fail closed.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++town="$tmp/town"
++state="$tmp/state"
++mkdir -p "$town/government" "$state/knowledge/budget/reservations"
++tool="$repo/government/knowledge-budget-tool.py"
++engine="$repo/government/knowledge-budget.sh"
++cp "$repo/government/knowledge-budget.conf" "$town/government/"
++python3 - "$town/government/knowledge-budget.conf" "$tmp/meter.db" <<'PY'
++import json,sqlite3,sys
++from pathlib import Path
++p=Path(sys.argv[1])
++c=json.loads(p.read_text())
++c["metering"]["opencode_db"]=sys.argv[2]
++c["offices"]["statistics"]["enabled"]=True
++c["offices"]["statistics"]["per_run_caps"]={
++    "tokens_total":120000, "cpu_seconds":400,"wall_seconds":600}
++p.write_text(json.dumps(c))
++db=sqlite3.connect(sys.argv[2])
++db.execute("create table session_v2 (id text primary key,tokens_input int,tokens_output int,tokens_reasoning int,tokens_cache_read int,tokens_cache_write int,cost real,time_updated int)")
++db.execute("insert into session_v2 values ('fixture',1,1,0,0,0,0,1790000000000)")
++db.commit()
++PY
++export VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$state"
++export VICHE_BUDGET_TOOL="$tool"
++cfg="$town/government/knowledge-budget.conf"
++python3 "$tool" validate "$cfg" | jq -e '.ok==true' >/dev/null
++/bin/sh "$engine" guard statistics >/dev/null
++first=$(/bin/sh "$engine" reserve statistics agent-first)
++root="$state/knowledge/budget"
++jq -e '.caps.tokens_total==120000 and .caps.cpu_seconds==400 and
++       .caps.wall_seconds==600 and .state=="reserved"' \
++  "$root/reservations/$first.json" >/dev/null
++# First session used a tenth of its allowance. The remaining 45-day
++# cumulative budget must admit another full 120k slice instead of deadlocking.
++python3 - "$root/reservations/$first.json" <<'PY'
++import json,sys
++from pathlib import Path
++p=Path(sys.argv[1])
++a=json.loads(p.read_text())
++a["state"]="closed"
++a["usage"]={"tokens_total":10000,"cpu_seconds":3,"wall_seconds":12}
++a["charge"]=None
++p.write_text(json.dumps(a))
++PY
++now=$(date +%s)
++python3 "$tool" aggregate "$root/reservations" 3888000 "$now" >"$root/aggregate.json"
++/bin/sh "$engine" guard statistics >/dev/null
++second=$(/bin/sh "$engine" reserve statistics agent-second)
++[ "$first" != "$second" ] || { echo "FAIL: repeated reservation id" >&2; exit 1; }
++jq -e '.caps.tokens_total==120000 and .state=="reserved"' \
++  "$root/reservations/$second.json" >/dev/null
++python3 "$tool" aggregate "$root/reservations" 3888000 "$(date +%s)" |
++  jq -e '.tokens_total==130000 and
++         .by_office.statistics.tokens_total==130000' >/dev/null
++# An in-flight request may overrun the slice. Its ACTUAL cost is charged;
++# another full slice then cannot erase the excess or exceed cumulative cap.
++python3 - "$root/reservations/$first.json" <<'PY'
++import json,sys
++from pathlib import Path
++p=Path(sys.argv[1])
++a=json.loads(p.read_text())
++a["usage"]["tokens_total"]=310000
++p.write_text(json.dumps(a))
++PY
++python3 "$tool" aggregate "$root/reservations" 3888000 "$(date +%s)" >"$root/aggregate.json"
++if python3 "$tool" admit "$cfg" "$(cat "$root/aggregate.json")" statistics |
++      jq -e '.admit==true' >/dev/null; then
++  echo 'FAIL: overrun beyond cumulative cap admitted' >&2
++  exit 1
++fi
++# Optional per-run caps must themselves be valid and <= 45d office caps.
++python3 - "$cfg" <<'PY'
++import json,sys
++from pathlib import Path
++p=Path(sys.argv[1]);c=json.loads(p.read_text())
++c["offices"]["statistics"]["per_run_caps"]["tokens_total"]=400001
++p.write_text(json.dumps(c))
++PY
++if python3 "$tool" validate "$cfg" >/dev/null 2>&1; then
++  echo 'FAIL: per-run cap larger than 45d allowance validated' >&2; exit 1
++fi
++echo 'PASS: multiple Act34 model sessions use per-run 120k slices; real Economy guard, usage and cumulative 45d liability enforce overrun'

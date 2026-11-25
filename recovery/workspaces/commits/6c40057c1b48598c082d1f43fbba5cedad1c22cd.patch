@@ -1,0 +1,1667 @@
+commit 6c40057c1b48598c082d1f43fbba5cedad1c22cd
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 19:25:58 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 19:25:58 2026 +0000
+
+    Act 19: integrate appointment failure recovery
+
+diff --git a/government/APPOINTMENT-RECOVERY.md b/government/APPOINTMENT-RECOVERY.md
+new file mode 100644
+index 00000000..3bc666d9
+--- /dev/null
++++ b/government/APPOINTMENT-RECOVERY.md
+@@ -0,0 +1,45 @@
++# Terminal appointment recovery — Act 19 implementation note
++
++`appointments.sh ensure` is the serialization point for changing the durable
++logical-office → disposable-agent mapping. Before it replaces a terminal or
++unreadable ID, it persists the exact status response, bounded log tail,
++worktree HEAD and dirtiness under
++`$VICHE_STATE_ROOT/appointments/terminal-evidence/AGENT_ID/`. Its JSONL index
++is repaired idempotently if a prior process stopped after publishing the
++snapshot but before indexing it. Each invocation identity has its own
++`AGENT_ID/INVOCATION_ID/` snapshot, so a later failed run by the same Antonina
++ID cannot be hidden by an earlier terminal observation. Evidence failure
++blocks replacement.
++
++For a failed transient invocation, the same locked path appends one office
++event keyed by **(agent ID, invocation ID or finished identity)**. Repeated
++polling is idempotent; events survive replacement and are never truncated.
++Successful invocations and commits break the consecutive streak. The third
++distinct transient failure in 1800 seconds claims the Act 19 reset, subject to
++the 1800-second office cooldown and current-worktree-HEAD progress guard.
++`recoveries.log` and `last-reset-KEY` are written before the one replacement.
++
++**Interpretation of Act 19 §3.1.** An Antonina terminal agent cannot continue
++its session. Reappointing a usable session after preserving/classifying that
++terminal invocation is treated as operational continuity, not as the Act's
++failure-count reset. The §3.1 reset is separately recorded and is not claimed
++until the distinct-event threshold and guards pass. This reading preserves
++both terminal-agent safety and the enacted reset detector. If the Legislature
++intended every terminal reappointment itself to be prohibited before the
++third failure, the incompatible text is Act 19 §3.1, “are reset after a
++threshold of consecutive transient failures”; that intent is not explicit in
++the enacted sentence and would require legislative clarification, not an
++Executive code reinterpretation.
++
++`automatic_retry_safe=false` (and missing retry-safety evidence) creates a
++durable per-office redispatch hold. The appointment may be replaced, but the
++failed operation is not automatically rerun; the open durable handoff remains
++queued. Permanent authentication/configuration failures are surfaced and do
++not trigger appointment replacement. Interrupted sessions are captured and
++held unless explicitly classified safe. No model or variant is selected or
++checked by Viche.
++
++**Remaining operational limitation:** unsafe holds intentionally have no
++automatic expiry. They require review before dispatch can resume; silently
++replaying the handoff would violate the runtime retry classification. This
++implementation does not add an automated hold-release interface.
+diff --git a/government/appointments.sh b/government/appointments.sh
+index 9e6036b1..19678610 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -34,7 +34,7 @@ if [ "$action" != resolve ]; then
+     [ "$tries" -lt 20 ] || { echo 'appointment lock busy' >&2; exit 1; }
+     sleep 1
+   done
+-  trap 'rmdir "$root/lock"' EXIT HUP INT TERM
++  trap 'rmdir "$root/lock"' 0 HUP INT TERM
+ fi
+ old=
+ if [ -f "$registry" ]; then
+@@ -42,11 +42,16 @@ if [ -f "$registry" ]; then
+     { echo 'duplicate appointment record' >&2; exit 1; }
+ fi
+ live=false
++status=unreadable
++meta='{"state":"unreadable"}'
+ if [ -n "$old" ]; then
+   case "$old" in *[!a-zA-Z0-9_-]*|'') echo 'invalid stored ID' >&2; exit 1;; esac
+   if meta=$(antonina agent status --id "$old" --json 2>/dev/null); then
+-    status=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
+-    case "$status" in running|idle|succeeded) live=true;; failed|stopped|killed) :;; *) echo "unknown status $status" >&2; exit 1;; esac
++    status=$(printf '%s\n' "$meta" | jq -er '.state | strings' 2>/dev/null) || status=unknown
++    case "$status" in running|idle|succeeded) live=true;; failed|stopped|killed|unknown) :;; *) status=unknown;; esac
++  else
++    meta='{"state":"unreadable"}'
++    status=unreadable
+   fi
+ fi
+ if [ "$action" = resolve ]; then
+@@ -54,6 +59,59 @@ if [ "$action" = resolve ]; then
+   printf '%s\n' "$old"
+   exit 0
+ fi
++# Preserve terminal evidence and record Act 19's office event before changing
++# the registry's only reference to this disposable agent.
++if [ -n "$old" ] && [ "$live" != true ]; then
++  printf '%s\n' "$meta" | /bin/sh "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/terminal-appointment-evidence.sh" "$key" "$old" "$cwd" || {
++    echo "Cannot preserve evidence of departing agent $old" >&2
++    exit 1
++  }
++  state_root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++  evidence_identity=$(printf '%s\n' "$meta" | jq -r '.invocation_id // .run_id // .finished_at // "unreadable"')
++  evidence=$state_root/appointments/terminal-evidence/$old/$evidence_identity
++  case "$status" in failed|stopped|killed) failure_state=true;; *) failure_state=false;; esac
++  if [ "$failure_state" = true ]; then
++    . "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/office-continuity.sh"
++    reason=$(jq -r '.backend_error.classification // ""' "$evidence/status.json")
++    transient=$(jq -r '.backend_error.transient // false' "$evidence/status.json")
++    safe=$(jq -r 'if .backend_error.automatic_retry_safe == true then "yes" else "no" end' "$evidence/status.json")
++    now=$(date +%s)
++    if oc_is_transient "$reason" "$transient"; then
++      invocation=$(jq -r '.invocation_id // .run_id // .finished_at // empty' "$evidence/status.json")
++      [ -n "$invocation" ] || { echo "Failed appointment $old lacks stable invocation identity" >&2; exit 1; }
++      event_time=$(jq -r 'if (.finished_at|type)=="number" then (.finished_at|floor) else empty end' "$evidence/status.json")
++      case "$event_time" in ''|*[!0-9]*) event_time=$now;; esac
++      [ "$event_time" -le "$now" ] || event_time=$now
++      oc_record_failure "$state_root/liveness" "$key" "$old" "$invocation" "$reason" "$event_time" "$safe" "$cwd" || exit 1
++      [ "$safe" = yes ] || oc_mark_unsafe_hold "$state_root/liveness" "$key" "$old" "$invocation"
++      oc_worktree=$cwd
++      if oc_reset_due "$state_root/liveness" "$key" "$now"; then
++        oc_claim_reset "$state_root/liveness" "$key" "$now" "$evidence"
++      fi
++    elif [ "$status" = failed ]; then
++      permanent_identity=$(jq -r '.invocation_id // .run_id // .finished_at // "unknown"' "$evidence/status.json")
++      oc_surface_permanent "$state_root/liveness" "$old" "$reason" "$permanent_identity"
++      exit 1
++    fi
++    case "$status" in
++      stopped|killed)
++        interrupted_identity=$(jq -r '.invocation_id // .run_id // .finished_at // empty' "$evidence/status.json")
++        [ -n "$interrupted_identity" ] || interrupted_identity=$old
++        [ "$safe" = yes ] || oc_mark_unsafe_hold "$state_root/liveness" "$key" "$old" "$interrupted_identity" ;;
++    esac
++  elif [ "$status" = unknown ]; then
++    echo "Unrecognized appointment state for $old; evidence retained, replacement deferred" >&2
++    exit 1
++  fi
++fi
++if [ "$action" = ensure ] && [ "$status" = succeeded ] && [ -n "$old" ]; then
++  . "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/office-continuity.sh"
++  success_id=$(printf '%s\n' "$meta" | jq -r '.invocation_id // .run_id // .finished_at // empty')
++  success_time=$(printf '%s\n' "$meta" | jq -r 'if (.finished_at|type)=="number" then (.finished_at|floor) else empty end')
++  case "$success_time" in ''|*[!0-9]*) success_time=$(date +%s);; esac
++  oc_record_success "${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness" \
++    "$key" "$old" "$success_id" "$success_time" "$cwd"
++fi
+ # An old Git branch may carry a retired model or scope restriction.
+ # Refresh only idle appointees, not worktrees of currently running agents.
+ if [ -s "$town/AGENTS.md" ] && { [ -f "$cwd/.git" ] || [ -d "$cwd/.git" ]; } &&
+diff --git a/government/audit-cycle.sh b/government/audit-cycle.sh
+index a163e9ac..935a12f6 100644
+--- a/government/audit-cycle.sh
++++ b/government/audit-cycle.sh
+@@ -11,6 +11,10 @@ if [ "${VICHE_AUDIT_CHECKS:-1}" = 1 ]; then
+   python3 "$town/government/audit-accountability.py" check > "$root/random-check.log" || exit 1
+ fi
+ id=$(/bin/sh "$town/government/appointments.sh" ensure judiciary)
++[ ! -s "${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness/unsafe-holds/judiciary" ] || {
++  echo 'Judiciary unsafe redispatch hold; retain evidence for review' >&2
++  exit 1
++}
+ [ -s "$charter" ] && [ -d "$seats/branches/judiciary" ] || exit 1
+ [ -f "$root/observations.tsv" ] || exit 0
+ # The Judiciary has its own durable officer; parliamentary summons never gate it.
+diff --git a/government/boot.sh b/government/boot.sh
+index 6c6b0ab2..3215b30a 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -40,9 +40,8 @@ while IFS="$tab" read -r seat_id title focus; do
+         fi
+         git -C "$town" worktree add --detach "$seat_dir" HEAD
+     fi
+-    /bin/sh "$town/government/appointments.sh" ensure "$seat_id" >/dev/null
+-    # All seats have durable, independently recoverable sessions; don't let a
+-    # failed provider continuation permanently remove a future voter.
++    # seat-liveness owns the locked, evidence-first appointment check and keeps
++    # a single terminal failure from aborting reconciliation of other seats.
+     if [ -f "$town/government/seat-liveness.sh" ]; then
+         /bin/sh "$town/government/seat-liveness.sh" "$seat_id" ||
+             echo "Viche: seat $seat_id recovery failed" >&2
+diff --git a/government/branch-bootstrap.sh b/government/branch-bootstrap.sh
+index 1cb60ff4..f7e5e718 100755
+--- a/government/branch-bootstrap.sh
++++ b/government/branch-bootstrap.sh
+@@ -32,33 +32,6 @@ umask 077
+ id=$(/bin/sh "$town/government/appointments.sh" ensure "$branch")
+ meta=$(antonina agent status --id "$id" --json)
+ now=$(date +%s)
+-mode=$(printf '%s\n' "$meta" | jq -r '.state')
+-reason=$(printf '%s\n' "$meta" | jq -r '.backend_error.classification // ""')
+-tflag=$(printf '%s\n' "$meta" | jq -r '.backend_error.transient // false')
+-if [ "$mode" = failed ]; then
+-  if oc_is_transient "$reason" "$tflag"; then
+-    oc_record_failure "$liv" "$id" "$reason" "$now" "$cwd"
+-  else
+-    oc_surface_permanent "$liv" "$id" "$reason"
+-  fi
+-fi
+ oc_commit_age_signal "$liv" "$id" "$cwd" "$now"
+-# Act 19 §3.1: the reset decision is decidable from the failure record alone
+-# and does not depend on the currently-observed state. An oscillating agent
+-# (failed -> re-dispatched -> running) is reset once it accumulates the
+-# threshold of consecutive transient failures inside the window.
+-if oc_reset_due "$liv" "$id" "$now"; then
+-  snapshot=$(mktemp -d "$liv/branch-$id-recovery-XXXXXX")
+-  printf '%s\n' "$meta" > "$snapshot/status.json"
+-  antonina agent log --id "$id" --lines 200 > "$snapshot/log.txt" 2>&1 || :
+-  git -C "$cwd" status --short > "$snapshot/worktree.txt"
+-  printf '%s\n' "$now" > "$liv/last-reset-$id"
+-  id=$(/bin/sh "$town/government/appointments.sh" replace "$branch")
+-  meta=$(antonina agent status --id "$id" --json)
+-  oc_clear_failures "$liv" "$id"
+-  printf '%s branch=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+-    "$(date -u +%FT%TZ)" "$branch" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" \
+-    >> "$liv/recoveries.log"
+-fi
+ # Antonina owns model selection; freshly created agents have no model history.
+ # Do not gate readiness on a previously used model or a default variant.
+diff --git a/government/branch-liveness.sh b/government/branch-liveness.sh
+index b3544b5f..6a920959 100755
+--- a/government/branch-liveness.sh
++++ b/government/branch-liveness.sh
+@@ -30,6 +30,9 @@ bootstrap_ok=true
+ if [ "$branch" != legislature ]; then
+   /bin/sh "$town/government/branch-bootstrap.sh" "$branch" > "$root/$branch-bootstrap.log" 2>&1 || bootstrap_ok=false
+ fi
++if [ -s "$state/liveness/unsafe-holds/$key" ]; then
++  bootstrap_ok=false
++fi
+ id=
+ if [ "$bootstrap_ok" = true ]; then
+   id=$(/bin/sh "$town/government/appointments.sh" ensure "$key") || bootstrap_ok=false
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+index 4e950fea..96e49157 100644
+--- a/government/clerk-liveness.sh
++++ b/government/clerk-liveness.sh
+@@ -1,6 +1,5 @@
+ #!/bin/sh
+-# Recover a terminally failed Clerk while retaining all work and evidence.
+-# The only model remains the one configured by Antonina's constitutional boot.
++# Clerk readiness gate and commit-age signal; appointments.sh owns recovery.
+ set -eu
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+@@ -11,45 +10,26 @@ seat_id=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
+ id=$(/bin/sh "$town/government/appointments.sh" ensure "$seat_id")
+ [ -n "$id" ] || exit 1
+ metadata=$(antonina agent status --id "$id" --json)
+-kind=$(printf '%s\n' "$metadata" | jq -r '.state')
+-reason=$(printf '%s\n' "$metadata" | jq -r '.backend_error.classification // ""')
+-# The intake and sitting gates must never reuse a terminally failed
+-# continuation if Antonina classifies automatic retry as unsafe. A cooldown
+-# expiring authorizes supervisor recovery, NOT direct reuse of that session.
++kind=$(printf '%s\n' "$metadata" | jq -er '.state')
++case "$kind" in
++  failed|stopped|killed)
++    # A failure racing the first ensure is sent through the same locked,
++    # evidence-first appointment decision before either gate or intake proceeds.
++    id=$(/bin/sh "$town/government/appointments.sh" ensure "$seat_id")
++    metadata=$(antonina agent status --id "$id" --json)
++    kind=$(printf '%s\n' "$metadata" | jq -er '.state') ;;
++esac
+ if [ "${1:-}" = --gate ]; then
+-  unsafe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_safe == false then "yes" else "no" end')
+-  if [ "$kind" = failed ] && { [ "$reason" = upstream_endpoint_unavailable ] || [ "$unsafe" = yes ]; }; then
+-    echo "Viche: refusing failed Clerk continuation; supervisor recovery required" >&2
++  if [ -s "$state/unsafe-holds/$seat_id" ]; then
++    echo 'Viche: Clerk has an unsafe redispatch hold; preserve pending intake for review' >&2
+     exit 1
+   fi
++  case "$kind" in
++    failed|stopped|killed)
++      echo 'Viche: terminal Clerk appointment; liveness recovery required' >&2
++      exit 1 ;;
++  esac
+   exit 0
+ fi
+ . "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/office-continuity.sh"
+-now=$(date +%s)
+-tflag=$(printf '%s\n' "$metadata" | jq -r '.backend_error.transient // false')
+-if [ "$kind" = failed ]; then
+-  if oc_is_transient "$reason" "$tflag"; then
+-    oc_record_failure "$state" "$id" "$reason" "$now" "$seats/$seat_id"
+-  else
+-    oc_surface_permanent "$state" "$id" "$reason"
+-  fi
+-fi
+-oc_commit_age_signal "$state" "$id" "$seats/$seat_id" "$now"
+-# Act 19 §3.1: failure-count-based reset, decidable from the durable record
+-# regardless of the currently-observed state; §3.1.3: permanent failures are
+-# surfaced above, never silently reset.
+-if oc_reset_due "$state" "$id" "$now"; then
+-  [ -d "$seats/$seat_id" ] || exit 1
+-  snapshot=$(mktemp -d "$state/recovery-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+-  printf '%s\n' "$metadata" > "$snapshot/agent-status.json"
+-  antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1 || :
+-  git -C "$seats/$seat_id" status --short > "$snapshot/worktree-status.txt"
+-  git -C "$seats/$seat_id" rev-parse HEAD > "$snapshot/worktree-head.txt"
+-  # Persist the attempted recovery before any destructive agent-metadata operation.
+-  printf '%s\n' "$now" > "$state/last-reset-$id"
+-  id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id")
+-  oc_clear_failures "$state" "$id"
+-  printf '%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+-    "$(date -u +%FT%TZ)" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" \
+-    >> "$state/recoveries.log"
+-fi
++oc_commit_age_signal "$state" "$id" "$seats/$seat_id" "$(date +%s)"
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index e82cd870..4a3cbc78 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -16,6 +16,10 @@ id=$(/bin/sh "$town/government/appointments.sh" ensure executive)
+ # a pre-read failure; the open handoff remains and the next successful run
+ # honours it.
+ handoffs=$(/bin/sh "$town/government/handoff-queue.sh" list-open "$town") || exit 1
++if [ -s "$state/liveness/unsafe-holds/executive" ]; then
++  echo "Viche: unsafe failed invocation has an open redispatch hold; durable handoffs remain queued" >&2
++  exit 1
++fi
+ status=$(antonina agent status --id "$id" --json)
+ current=$(printf "%s\n" "$status" | jq -r ".state")
+ case "$current" in
+diff --git a/government/founder-intake.sh b/government/founder-intake.sh
+index 63a0efcf..9c39bbc7 100644
+--- a/government/founder-intake.sh
++++ b/government/founder-intake.sh
+@@ -112,7 +112,7 @@ charter_text=$(cat "$charter")
+ prompt=$(cat <<EOF
+ PRIORITY FOUNDER INTAKE. These independently retrieved messages are authored exactly Vitalik:
+ $body
+-Immediately read full linked issues, record a durable actionable mandate with owner and next action, and summon/delegate the appropriate Viche parliamentarians. Preserve existing in-flight work, avoid duplicate workers, and follow the existing Viche+Kawun exclusive scope. After publicly recording meaningful triage (not just reading), write an empty receipt file in $q/ack for every processed key:$keys. Missing receipts cause automatic retry in 10 minutes. The authoritative founder-controlled Constitution is reproduced below and has highest authority; parliament may NOT amend it or its S6 bootstrap. Use the required free model through Antonina only. Do not enact laws without actual votes.
++Immediately read full linked issues, record a durable actionable mandate with owner and next action, and summon/delegate the appropriate Viche parliamentarians. Preserve existing in-flight work, avoid duplicate workers, and follow current canonical operating scope. After publicly recording meaningful triage (not just reading), write an empty receipt file in $q/ack for every processed key:$keys. Missing receipts cause automatic retry in 10 minutes. The authoritative founder-controlled Constitution is reproduced below and has highest authority; parliament may NOT amend it or its S6 bootstrap. Antonina selects provider/model/variant under its current policy. Do not enact laws without actual votes.
+ 
+ === AUTHORITATIVE CONSTITUTION ===
+ $charter_text
+diff --git a/government/innovation-centre-cycle.sh b/government/innovation-centre-cycle.sh
+index d3573184..1b8fe8ee 100755
+--- a/government/innovation-centre-cycle.sh
++++ b/government/innovation-centre-cycle.sh
+@@ -21,6 +21,10 @@ case "$now:$interval" in *[!0-9:]*|:*|*:) exit 2;; esac
+ /bin/sh "$town/government/branch-bootstrap.sh" innovation-centre \
+     > "$root/bootstrap.log" 2>&1 || { echo 'Innovation Centre bootstrap failed' >&2; exit 1; }
+ id=$(/bin/sh "$town/government/appointments.sh" ensure innovation-centre)
++if [ -s "$state/liveness/unsafe-holds/innovation-centre" ]; then
++  echo 'Innovation Centre unsafe redispatch hold; preserve open proposal work for review' >&2
++  exit 1
++fi
+ status=$(antonina agent status --id "$id" --json)
+ mode=$(printf '%s\n' "$status" | jq -r '.state // "unknown"')
+ last=0
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index 0a429438..24830dd2 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -25,38 +25,71 @@ oc_is_transient() {
+   return 1
+ }
+ 
+-# Append one observed transient failure to the durable per-office record.
+-# Line format: "<unixtime> <classification> <worktree-head-sha>".
+-# Progress guard (§3.1.2): a durable commit since the previous failure breaks
+-# the consecutive streak, so the record is truncated before appending.
++# Append one distinct failed invocation per durable office. Identity consists
++# of the disposable agent ID plus Antonina invocation/finished identity.
++# Progress guard filters by current HEAD; history is never truncated.
+ oc_record_failure() {
+-  # $1 liveness dir, $2 agent id, $3 classification, $4 now, $5 workdir
++  # $1 liveness dir, $2 office key, $3 agent ID, $4 invocation identity,
++  # $5 classification, $6 finished_at integer, $7 retry-safe yes/no, $8 workdir
+   mkdir -p "$1/failures" || return 1
+-  oc_log=$1/failures/$2
+-  oc_sha=$(git -C "$5" rev-parse HEAD 2>/dev/null || printf -- -)
+-  oc_last=$(tail -n 1 "$oc_log" 2>/dev/null || true)
+-  case "$oc_last" in
+-    *" $oc_sha") : ;;
+-    *) [ -z "$oc_last" ] || : > "$oc_log" ;;
+-  esac
+-  printf '%s %s %s\n' "$4" "$3" "$oc_sha" >> "$oc_log"
++  oc_log=$1/failures/events.tsv
++  oc_sha=$(git -C "$8" rev-parse HEAD 2>/dev/null || printf '%s' -)
++  [ -n "$4" ] || return 1
++  case "$4" in *[!a-zA-Z0-9_.:+-]*) return 1;; esac
++  case "$6" in ''|*[!0-9]*) return 1;; esac
++  if [ -s "$oc_log" ] && awk -F '\t' -v office="$2" -v agent="$3" -v inv="$4" \
++      '$2==office && $3==agent && $4==inv {found=1} END {exit !found}' "$oc_log"; then
++    return 0
++  fi
++  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
++    "$6" "$2" "$3" "$4" "$5" "$7" "$oc_sha" >> "$oc_log"
+   return 0
+ }
+ 
++oc_record_success() {
++  # A completed invocation ends the consecutive-failure streak, without
++  # altering the append-only failed-event audit history.
++  # $1 liveness dir, $2 office key, $3 agent ID, $4 invocation identity,
++  # $5 finished epoch, $6 worktree
++  mkdir -p "$1/failures" || return 1
++  [ -n "$4" ] || return 0
++  case "$4:$5" in *[!a-zA-Z0-9_.:+-]*) return 1;; esac
++  oc_success_sha=$(git -C "$6" rev-parse HEAD 2>/dev/null || printf '%s' -)
++  oc_success_log=$1/failures/events.tsv
++  if [ -s "$oc_success_log" ] && awk -F '\t' -v office="$2" -v agent="$3" -v inv="$4" \
++      '$2==office && $3==agent && $4==inv && $5=="success" {found=1} END {exit !found}' "$oc_success_log"; then
++    return 0
++  fi
++  printf '%s\t%s\t%s\t%s\tsuccess\tyes\t%s\n' \
++    "$5" "$2" "$3" "$4" "$oc_success_sha" >> "$oc_success_log"
++}
++
+ # Decide from the failure record alone (§3.1.5) whether a bounded reset is due:
+ # at least oc_threshold failures inside oc_window, cooldown expired. The
+ # currently-observed agent state is irrelevant to this decision.
+ oc_reset_due() {
+-  # $1 liveness dir, $2 agent id, $3 now; returns 0 when a reset is due
+-  oc_log=$1/failures/$2
++  # $1 liveness dir, $2 office key, $3 now; returns 0 when reset is due
++  oc_log=$1/failures/events.tsv
+   [ -s "$oc_log" ] || return 1
+   oc_count=0
+-  while read -r oc_ts oc_cls oc_sha; do
++  oc_now_sha=$(git -C "${oc_worktree:-.}" rev-parse HEAD 2>/dev/null || printf '%s' -)
++  oc_tab=$(printf '\t')
++  oc_events=$(awk -F '\t' -v office="$2" -v head="$oc_now_sha" \
++    -v now="$3" -v win="$oc_window" \
++    '$2==office && $7==head && $1+win>now' "$oc_log" | sort -t "$oc_tab" -k1,1n -k5,5)
++  while IFS="$(printf '\t')" read -r oc_ts oc_office oc_agent oc_inv oc_cls oc_safe oc_sha; do
+     case "$oc_ts" in ''|*[!0-9]*) continue ;; esac
++    [ "$oc_ts" -le "$3" ] || continue
++    if [ "$oc_cls" = success ]; then
++      oc_count=0
++      continue
++    fi
+     if [ $((oc_ts + oc_window)) -gt "$3" ]; then
+       oc_count=$((oc_count + 1))
+     fi
+-  done < "$oc_log"
++  done <<EOF
++$oc_events
++EOF
+   [ "$oc_count" -ge "$oc_threshold" ] || return 1
+   oc_last=0
+   if [ -s "$1/last-reset-$2" ]; then
+@@ -67,20 +100,44 @@ oc_reset_due() {
+   return 0
+ }
+ 
+-# Clear the consecutive-failure record after a reset so the next streak starts
+-# at zero. History remains auditable in recoveries.log and the incident log.
++# Preserve the legacy helper name for any branch callers. Reset markers,
++# successful invocations and the progress guard delimit streaks; the event
++# ledger itself is never truncated.
+ oc_clear_failures() {
+-  # $1 liveness dir, $2 agent id
+-  : > "$1/failures/$2" 2>/dev/null || true
++  # Kept as a compatibility no-op: durable failure evidence is append-only.
+   return 0
+ }
+ 
++oc_claim_reset() {
++  # $1 liveness directory, $2 office key, $3 now, $4 evidence directory
++  printf '%s\n' "$3" > "$1/last-reset-$2"
++  printf '%s office=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
++    "$(date -u +%FT%TZ)" "$2" "$oc_threshold" "$oc_window" "$oc_cooldown" "$4" \
++    >> "$1/recoveries.log"
++}
++
++oc_mark_unsafe_hold() {
++  # $1 liveness directory, $2 office key, $3 agent ID, $4 invocation identity
++  mkdir -p "$1/unsafe-holds"
++  if ! awk -F '\t' -v agent="$3" -v inv="$4" \
++      '$1==agent && $2==inv {found=1} END {exit !found}' "$1/unsafe-holds/$2" 2>/dev/null; then
++    printf '%s\t%s\t%s\n' "$3" "$4" "$(date -u +%FT%TZ)" >> "$1/unsafe-holds/$2"
++  fi
++}
++
+ # Surface a permanent failure (expired credential, invalid configuration)
+ # instead of resetting it (§3.1.3). Durable: survives the 24 h restart.
+ oc_surface_permanent() {
+-  # $1 liveness dir, $2 agent id, $3 classification
+-  printf '%s id=%s permanent_failure classification=%s surfaced-not-reset\n' \
+-    "$(date -u +%FT%TZ)" "$2" "$3" >> "$1/permanent-incidents.log"
++  # $1 liveness dir, $2 agent id, $3 classification, $4 invocation identity
++  mkdir -p "$1"
++  oc_permanent_inv=${4:-unknown}
++  if [ -s "$1/permanent-incidents.log" ] && awk -v id="$2" -v inv="$oc_permanent_inv" \
++      'index($0,"id=" id " ") && index($0,"invocation=" inv " ") {found=1} END {exit !found}' \
++      "$1/permanent-incidents.log"; then
++    return 0
++  fi
++  printf '%s id=%s permanent_failure classification=%s invocation=%s surfaced-not-reset\n' \
++    "$(date -u +%FT%TZ)" "$2" "$3" "$oc_permanent_inv" >> "$1/permanent-incidents.log"
+   echo "Viche: permanent failure id=$2 classification=$3 surfaced, not reset (Act 19 §3.1)" >&2
+   return 0
+ }
+diff --git a/government/seat-liveness.sh b/government/seat-liveness.sh
+index 93872ee8..1c2bdcab 100644
+--- a/government/seat-liveness.sh
++++ b/government/seat-liveness.sh
+@@ -1,36 +1,26 @@
+ #!/bin/sh
+-# Recover failed non-Clerk parliamentary sessions; retain their Git worktrees.
++# Parliamentary seat readiness; appointment recovery is centralized and locked.
+ set -eu
+ [ "$#" -eq 1 ] || exit 2
+ seat_id=$1
+-id=$(/bin/sh "${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}/government/appointments.sh" ensure "$seat_id")
+ case "$seat_id" in ''|*[!0123456789abcdef]*) exit 2;; esac
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness
++mkdir -p "$root"
+ clerk=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
+ [ "$seat_id" != "$clerk" ] || exit 0
+ title=$(awk -F '\t' -v id="$seat_id" '$1==id {print $2; found=1; exit} END {if(!found) exit 1}' "$town/government/seats.tsv")
+ [ -n "$title" ] || exit 1
++id=$(/bin/sh "$town/government/appointments.sh" ensure "$seat_id")
+ meta=$(antonina agent status --id "$id" --json)
+-mode=$(printf '%s\n' "$meta" | jq -r '.state')
+-reason=$(printf '%s\n' "$meta" | jq -r '.backend_error.classification // ""')
+-[ "$mode" = failed ] && [ "$reason" = upstream_endpoint_unavailable ] || exit 0
+-mkdir -p "$root"
+-umask 077
+-now=$(date +%s)
+-last=0
+-marker="$root/last-reset-$id"
+-[ ! -s "$marker" ] || last=$(cat "$marker")
+-case "$last" in ''|*[!0-9]*) last=0;; esac
+-[ $((now-last)) -ge 1800 ] || exit 0
+-seat="$seats/$seat_id"
+-[ -d "$seat" ] || exit 1
+-snapshot=$(mktemp -d "$root/recovery-$id-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+-printf '%s\n' "$meta" > "$snapshot/agent-status.json"
+-antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1 || :
+-git -C "$seat" status --short > "$snapshot/worktree-status.txt"
+-git -C "$seat" rev-parse HEAD > "$snapshot/worktree-head.txt"
+-printf '%s\n' "$now" > "$marker"
+-id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id")
+-printf '%s seat=%s session_reset=endpoint_unavailable evidence=%s\n' "$(date -u +%FT%TZ)" "$id" "$snapshot" >> "$root/recoveries.log"
++mode=$(printf '%s\n' "$meta" | jq -er '.state')
++case "$mode" in
++  failed|stopped|killed)
++    id=$(/bin/sh "$town/government/appointments.sh" ensure "$seat_id")
++    meta=$(antonina agent status --id "$id" --json)
++    mode=$(printf '%s\n' "$meta" | jq -er '.state') ;;
++esac
++case "$mode" in failed|stopped|killed) exit 1;; esac
++. "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/office-continuity.sh"
++oc_commit_age_signal "$root" "$id" "$seats/$seat_id" "$(date +%s)"
+diff --git a/government/sitting.sh b/government/sitting.sh
+index e0fd6cdf..615d4e25 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -6,12 +6,30 @@ seat=$1
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ tab=$(printf '\t')
+ clerk=$(sed -n "1s/$tab.*//p" "$town/government/seats.tsv")
++if [ -s "${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness/unsafe-holds/$seat" ]; then
++    echo "Viche: seat $seat has an unsafe redispatch hold; preserve handoff for review" >&2
++    exit 1
++fi
+ if [ "$seat" = "$clerk" ] && [ -f "$town/government/clerk-liveness.sh" ]; then
+     /bin/sh "$town/government/clerk-liveness.sh" --gate || {
+         echo "Viche: Clerk sitting deferred until endpoint retry cooldown" >&2
+         exit 1
+     }
+ fi
++agent_id=$(/bin/sh "$town/government/appointments.sh" ensure "$seat") || {
++    echo "Viche: appointment for $seat is not dispatchable" >&2
++    exit 1
++}
++agent_state=$(antonina agent status --id "$agent_id" --json | jq -er '.state') || exit 1
++case "$agent_state" in
++    failed|stopped|killed)
++        echo "Viche: refusing terminal appointment $agent_id before liveness recovery" >&2
++        exit 1 ;;
++esac
++if [ -s "${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness/unsafe-holds/$seat" ]; then
++    echo "Viche: seat $seat has an unsafe redispatch hold; preserve handoff for review" >&2
++    exit 1
++fi
+ # Resource Safety Act: defer convening when cgroup headroom is below the floor.
+ # A memory-safety gate, not a worker cap (Constitution VII); the boot defers the
+ # seat on non-zero exit, the same mechanism as the clerk-liveness gate.
+diff --git a/government/terminal-appointment-evidence.sh b/government/terminal-appointment-evidence.sh
+new file mode 100644
+index 00000000..23367c5e
+--- /dev/null
++++ b/government/terminal-appointment-evidence.sh
+@@ -0,0 +1,52 @@
++#!/bin/sh
++# Preserve a departing appointment's exact status and worktree evidence.
++set -eu
++[ "$#" -eq 3 ] || { echo 'Usage: terminal-appointment-evidence.sh KEY ID CWD' >&2; exit 2; }
++key=$1 id=$2 cwd=$3
++case "$key:$id" in *[!a-zA-Z0-9_:-]*|'') exit 2;; esac
++root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/appointments
++umask 077
++mkdir -p "$root/terminal-evidence/$id"
++incoming=$(mktemp "$root/.terminal-status-XXXXXXXX") || exit 1
++tmp=
++trap 'rm -f "$incoming"; if [ -n "${tmp:-}" ]; then rm -rf "$tmp"; fi' 0 HUP INT TERM
++cat > "$incoming"
++jq -e 'type=="object" and (.state | type=="string")' "$incoming" >/dev/null ||
++  { echo 'Malformed terminal appointment evidence' >&2; exit 1; }
++invocation=$(jq -r '.invocation_id // .run_id // .finished_at // "unreadable"' "$incoming")
++case "$invocation" in *[!a-zA-Z0-9_.:+-]*) echo 'Unsafe invocation identity in terminal status' >&2; exit 1;; esac
++dest=$root/terminal-evidence/$id/$invocation
++if [ ! -d "$dest" ]; then
++  tmp=$(mktemp -d "$root/.terminal-XXXXXXXX") || exit 1
++  cp "$incoming" "$tmp/status.json"
++  state=$(jq -r '.state' "$tmp/status.json")
++  antonina agent log --id "$id" --lines 80 > "$tmp/log-tail.txt" 2>&1 || :
++  git -C "$cwd" rev-parse HEAD > "$tmp/worktree-head.txt" 2>/dev/null || printf 'unavailable\n' > "$tmp/worktree-head.txt"
++  git -C "$cwd" status --short > "$tmp/worktree-status.txt" 2>/dev/null || :
++  jq -cn --arg key "$key" --arg id "$id" --arg cwd "$cwd" \
++    --arg at "$(date -u +%FT%TZ)" --slurpfile m "$tmp/status.json" \
++    '{at:$at, office:$key, agent_id:$id, cwd:$cwd, state:$m[0].state,
++      finished_at:($m[0].finished_at//null), prompts:($m[0].prompts//null),
++      failure_class:($m[0].backend_error.classification//null),
++      transient:$m[0].backend_error.transient,
++      automatic_retry_safe:$m[0].backend_error.automatic_retry_safe,
++      invocation_identity:($m[0].invocation_id//$m[0].run_id//$m[0].finished_at//"unreadable"|tostring),
++      evidence:("terminal-evidence/" + $id + "/" + (($m[0].invocation_id//$m[0].run_id//$m[0].finished_at//"unreadable")|tostring))}' > "$tmp/event.json"
++  mv "$tmp" "$dest"
++  tmp=
++fi
++# Repair the convenience index after a crash between snapshot publication and
++# indexing. The appointment lock serializes callers; checking by agent ID also
++# makes a crash after append but before return idempotent.
++index=$root/terminal-events.jsonl
++if [ -s "$index" ]; then
++  found=$(jq -s --arg id "$id" --arg inv "$invocation" \
++    'any(.[]; .agent_id==$id and (.invocation_identity|tostring)==$inv)' "$index") || exit 1
++else
++  found=false
++fi
++if [ "$found" != true ]; then
++  cat "$dest/event.json" >> "$index"
++fi
++rm -f "$incoming"
++trap - 0 HUP INT TERM
+diff --git a/tests/act19-office-continuity-smoke.sh b/tests/act19-office-continuity-smoke.sh
+index 6721aade..ea69dba2 100644
+--- a/tests/act19-office-continuity-smoke.sh
++++ b/tests/act19-office-continuity-smoke.sh
+@@ -1,266 +1,71 @@
+ #!/bin/sh
+-# Hermetic Act 19 (Office Continuity and Handoff Integrity Act) smoke:
+-# failure-count reset regardless of observed state, transient-class coverage,
+-# permanent-failure surfacing, progress guard, cooldown, durable handoff queue
+-# non-supersession, no-dispatch-on-pre-read-failure, and the commit-age signal.
++# Act 19 event identity, threshold, progress guard, cooldown and handoff queue.
+ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+-
+-# --- Part 1: failure-count-based office reset (branch-bootstrap, §3.1/§3.3) ---
+ d=$(mktemp -d)
+-trap 'rm -rf "$d"' EXIT HUP INT TERM
+-mkdir -p "$d/bin" "$d/town/government" "$d/seats/branches/executive" "$d/state/liveness" "$d/mock"
+-printf 'c1a00001\tClerk\tlegislature\n' > "$d/town/government/seats.tsv"
+-cp "$repo/government/branch-bootstrap.sh" "$d/town/government/branch-bootstrap.sh"
+-cp "$repo/government/office-continuity.sh" "$d/town/government/office-continuity.sh"
+-git -C "$d/seats/branches/executive" init -q
+-git -C "$d/seats/branches/executive" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
+-printf 'valuable uncommitted work\n' > "$d/seats/branches/executive/uncommitted.txt"
+-cat > "$d/bin/antonina" <<'MOCK'
+-#!/bin/sh
+-set -eu
+-case "$1 $2" in
+-  'agent status') cat "$MOCK_ROOT/status.json" ;;
+-  'agent log') echo 'Endpoint is unavailable' ;;
+-  'agent delete') echo delete >> "$MOCK_ROOT/recovery" ;;
+-  'agent new')
+-    echo new >> "$MOCK_ROOT/recovery"
+-    printf '{"state":"idle","model":"test-provider/example","variant":"low"}\n' > "$MOCK_ROOT/status.json"
+-    ;;
+-  *) exit 9 ;;
+-esac
+-MOCK
+-chmod +x "$d/bin/antonina"
+-set_status() {
+-  printf '{"state":"%s","model":"test-provider/example","variant":"low","backend_error":{"classification":"%s","transient":%s}}\n' \
+-    "$1" "${2:-upstream_endpoint_unavailable}" "${3:-true}" > "$d/mock/status.json"
+-}
+-wt=$d/seats/branches/executive
++trap 'rm -rf "$d"' 0 HUP INT TERM
++mkdir -p "$d/town/records/handoffs" "$d/seats/office" "$d/state/liveness"
++git -C "$d/seats/office" init -q
++git -C "$d/seats/office" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
++. "$repo/government/office-continuity.sh"
+ liv=$d/state/liveness
+-log=$liv/failures/c1e00002
+-PATH="$d/bin:$PATH"
+-MOCK_ROOT="$d/mock"
+-mkdir -p "$d/town/government"
+-cp "$repo/tests/appointment-id-stub.sh" "$d/town/government/appointments.sh"
+-VICHE_TOWN_ROOT="$d/town"
+-VICHE_SEATS_ROOT="$d/seats"
+-VICHE_STATE_ROOT="$d/state"
+-export PATH MOCK_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT
+-
+-run_bootstrap() { /bin/sh "$d/town/government/branch-bootstrap.sh" executive; }
+-
+-# Below threshold: two observed failures are recorded but do not reset.
+-set_status failed upstream_endpoint_unavailable true
+-run_bootstrap
+-run_bootstrap
+-test "$(wc -l < "$log")" -eq 2
+-test ! -e "$d/mock/recovery"
+-
+-# P1a detector / oscillation: failed->running->failed observations accumulate
+-# in the monotonic record; the reset fires on the third consecutive transient
+-# failure even though the supervisor keeps seeing "running" in between.
+-: > "$log"
+-set_status failed;  run_bootstrap
+-set_status running; run_bootstrap
+-set_status failed;  run_bootstrap
+-set_status running; run_bootstrap
+-set_status failed;  run_bootstrap
+-test "$(wc -l < "$d/mock/recovery")" -eq 2
+-test "$(wc -l < "$log")" -eq 0
+-test "$(find "$liv" -name 'status.json' | wc -l)" -eq 1
+-grep -Fq 'session_reset=failure_count threshold=3 window=1800 cooldown=1800' "$liv/recoveries.log"
+-test -f "$wt/uncommitted.txt"
+-# commit-age signal is emitted while the office has uncommitted work.
+-grep -Fq 'commit_age_seconds=' "$liv/commit-age.log"
+-grep -Fq "id=c1e00002" "$liv/commit-age.log"
+-
+-# P1: the reset is decidable from the failure record alone — the agent is
+-# observed "running" (healthy-looking) yet the recorded threshold still fires.
+-printf '0\n' > "$liv/last-reset-c1e00002"
++wt=$d/seats/office
+ now=$(date +%s)
+-sha=$(git -C "$wt" rev-parse HEAD)
+-for i in 1 2 3; do
+-  printf '%s upstream_endpoint_unavailable %s\n' "$now" "$sha" >> "$log"
+-done
+-set_status running
+-run_bootstrap
+-test "$(wc -l < "$d/mock/recovery")" -eq 4
+-
+-# P2: the non-endpoint transient class (2026-10-17 API-key expiry) is covered.
+-printf '0\n' > "$liv/last-reset-c1e00002"
+-set_status failed unrecognized_backend_failure true
+-run_bootstrap
+-run_bootstrap
+-run_bootstrap
+-test "$(wc -l < "$d/mock/recovery")" -eq 6
+-
+-# Permanent failures are surfaced, never silently reset, never counted.
+-incidents_before=0
+-if [ -f "$liv/permanent-incidents.log" ]; then
+-  incidents_before=$(wc -l < "$liv/permanent-incidents.log")
+-fi
+-set_status failed invalid_api_key false
+-run_bootstrap
+-run_bootstrap
+-run_bootstrap
+-test "$(wc -l < "$d/mock/recovery")" -eq 6
+-test "$(wc -l < "$log")" -eq 0
+-test "$(wc -l < "$liv/permanent-incidents.log")" -gt "$incidents_before"
+-grep -Fq 'permanent_failure classification=invalid_api_key surfaced-not-reset' "$liv/permanent-incidents.log"
+-
+-# Progress guard: durable work between failures breaks the streak.
+-set_status failed upstream_endpoint_unavailable true
+-run_bootstrap
+-run_bootstrap
+-test "$(wc -l < "$log")" -eq 2
+-git -C "$wt" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm 'durable progress'
+-printf '0\n' > "$liv/last-reset-c1e00002"
+-set_status failed upstream_endpoint_unavailable true
+-run_bootstrap
+-test "$(wc -l < "$log")" -eq 1
+-test "$(wc -l < "$d/mock/recovery")" -eq 6
+-set_status failed upstream_endpoint_unavailable true
+-run_bootstrap
+-set_status failed upstream_endpoint_unavailable true
+-run_bootstrap
+-test "$(wc -l < "$d/mock/recovery")" -eq 8
+-# A clean worktree (no uncommitted work) stops emitting the signal.
+-git -C "$wt" add -A
+-git -C "$wt" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm 'all work durable'
+-lines_before=$(wc -l < "$liv/commit-age.log")
+-set_status running
+-run_bootstrap
+-test "$(wc -l < "$liv/commit-age.log")" -eq "$lines_before"
+-printf 'new uncommitted work\n' > "$wt/later.txt"
+-set_status running
+-run_bootstrap
+-test "$(wc -l < "$liv/commit-age.log")" -gt "$lines_before"
+-
+-# Cooldown: three more failures cannot reset again inside 1800 s.
+-set_status failed upstream_endpoint_unavailable true
+-run_bootstrap
+-run_bootstrap
+-run_bootstrap
+-test "$(wc -l < "$d/mock/recovery")" -eq 8
+-printf '0\n' > "$liv/last-reset-c1e00002"
+-set_status failed upstream_endpoint_unavailable true
+-run_bootstrap
+-test "$(wc -l < "$d/mock/recovery")" -eq 10
+-
+-# --- Part 2: durable handoff queue and non-supersession (executive-cycle, §3.2) ---
+-d2=$(mktemp -d)
+-mkdir -p "$d2/bin" "$d2/town/government" "$d2/town/records" "$d2/seats/branches/executive" "$d2/state"
+-printf 'c1a00001\tClerk\tintake\nc1e00002\tExecutive\tdelivery\n' > "$d2/town/government/seats.tsv"
+-printf 'Founder charter fixture\n' > "$d2/charter"
+-printf '%s\n' c1e00002 > "$d2/town/records/SUMMONED.txt"
+-cp "$repo/government/eligible-work.py" "$d2/town/government/eligible-work.py"
+-cp "$repo/government/executive-cycle.sh" "$d2/town/government/executive-cycle.sh"
+-cp "$repo/government/handoff-queue.sh" "$d2/town/government/handoff-queue.sh"
+-cat > "$d2/bin/antonina" <<'MOCK'
+-#!/bin/sh
+-set -eu
+-case "$1 $2" in
+-  'board list')
+-    [ "${BOARD_DOWN:-no}" != yes ] || exit 3
+-    echo '[{"number":"301","title":"SoringP1"}]' ;;
+-  'board show')
+-    echo '{"body":"All agent execution and development work must happen on billy-dev.","messages":[]}' ;;
+-  'agent status')
+-    printf '{"state":"%s","model":"%s","variant":"low"}\n' "$MODE" "$MODEL" ;;
+-  'agent run')
+-    printf '%s\n' "$*" > "$PROMPT_FILE"
+-    printf 'accepted\n' >> "$OUTPUT" ;;
+-  *) echo "Unexpected: $*" >&2; exit 10 ;;
+-esac
+-MOCK
+-chmod +x "$d2/bin/antonina"
+-touch "$d2/state/inaugurated"
+-PATH="$d2/bin:$PATH"
+-mkdir -p "$d2/town/government"
+-cp "$repo/tests/appointment-id-stub.sh" "$d2/town/government/appointments.sh"
+-VICHE_TOWN_ROOT="$d2/town"
+-VICHE_SEATS_ROOT="$d2/seats"
+-VICHE_STATE_ROOT="$d2/state"
+-VICHE_CONSTITUTION="$d2/charter"
+-MODE=idle MODEL=test-provider/example
+-OUTPUT="$d2/dispatched"
+-PROMPT_FILE="$d2/prompt"
+-export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION MODE MODEL OUTPUT PROMPT_FILE
+-
+-# With no open handoffs the generic eligible-issue dispatch is unchanged.
+-/bin/sh "$d2/town/government/executive-cycle.sh"
+-test "$(wc -l < "$OUTPUT")" -eq 1
+-grep -Fq '301' "$PROMPT_FILE"
+-test -s "$d2/state/branches/eligible-issues.json"
++oc_worktree=$wt
++
++# Distinct terminal invocations are counted once across disposable IDs.
++oc_record_failure "$liv" executive agent-1 run-1 upstream_endpoint_unavailable "$now" yes "$wt"
++oc_record_failure "$liv" executive agent-1 run-1 upstream_endpoint_unavailable "$now" yes "$wt"
++test "$(wc -l < "$liv/failures/events.tsv")" -eq 1
++oc_reset_due "$liv" executive "$now" && { echo 'reset before threshold' >&2; exit 1; } || :
++oc_record_failure "$liv" executive agent-2 run-2 upstream_endpoint_unavailable "$now" yes "$wt"
++oc_record_failure "$liv" executive agent-3 run-3 upstream_endpoint_unavailable "$now" yes "$wt"
++test "$(wc -l < "$liv/failures/events.tsv")" -eq 3
++oc_reset_due "$liv" executive "$now"
++oc_claim_reset "$liv" executive "$now" evidence-snapshot
++test -s "$liv/last-reset-executive"
++grep -Fq 'threshold=3 window=1800 cooldown=1800 evidence=evidence-snapshot' "$liv/recoveries.log"
++
++# Cooldown survives changed IDs; durable commit progress starts a new streak
++# while retaining the prior audit events, and threshold fires once more.
++oc_record_failure "$liv" executive agent-4 run-4 upstream_endpoint_unavailable "$now" yes "$wt"
++if oc_reset_due "$liv" executive "$now"; then echo 'cooldown was bypassed' >&2; exit 1; fi
++git -C "$wt" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm progress
++now=$((now+1))
++oc_record_success "$liv" executive agent-4-success run-success "$now" "$wt"
++oc_record_failure "$liv" executive agent-5 run-5 upstream_endpoint_unavailable "$now" yes "$wt"
++oc_record_failure "$liv" executive agent-6 run-6 upstream_endpoint_unavailable "$now" yes "$wt"
++if oc_reset_due "$liv" executive "$now"; then echo 'progress guard counted older HEAD failures' >&2; exit 1; fi
++printf '0\n' > "$liv/last-reset-executive"
++oc_record_failure "$liv" executive agent-7 run-7 upstream_endpoint_unavailable "$now" yes "$wt"
++oc_reset_due "$liv" executive "$now"
++test "$(wc -l < "$liv/failures/events.tsv")" -eq 8
++
++# Unsafe retry is durably held, permanent auth is surfaced not counted/reset.
++oc_mark_unsafe_hold "$liv" executive agent-8 run-unsafe
++grep -Fq 'agent-8' "$liv/unsafe-holds/executive"
++oc_surface_permanent "$liv" agent-auth invalid_api_key
++grep -Fq 'permanent_failure classification=invalid_api_key' "$liv/permanent-incidents.log"
++test "$(wc -l < "$liv/failures/events.tsv")" -eq 8
++
++# Commit-age evidence is advisory and reflects dirty-worktree changes.
++printf 'uncommitted handoff\n' > "$wt/handoff.txt"
++oc_commit_age_signal "$liv" executive "$wt" "$now"
++grep -Fq 'commit_age_seconds=' "$liv/commit-age.log"
+ 
+-# Atomic steer: the steer writes the queue entry at steer time.
+-id1=$(/bin/sh "$d2/town/government/handoff-queue.sh" add "$d2/town" 'Viche Clerk c1a00001' 'board #313 2026-10-19T11:14Z' 'Deliver the Act 18 section 7 step: verify the tally and publish')
+-id2=$(/bin/sh "$d2/town/government/handoff-queue.sh" add "$d2/town" 'Viche Clerk c1a00001' 'board #313 2026-10-19T11:14Z' 'Second open handoff item')
+-test -n "$id1"
++# Durable handoff operations are atomic, non-superseding and list exact intent.
++mkdir -p "$d/town/government" "$d/town/records"
++cp "$repo/government/handoff-queue.sh" "$d/town/government/handoff-queue.sh"
++id1=$(/bin/sh "$d/town/government/handoff-queue.sh" add "$d/town" 'Clerk c1a00001' 'board #313' 'Preserve the newest handoff')
++id2=$(/bin/sh "$d/town/government/handoff-queue.sh" add "$d/town" 'Clerk c1a00001' 'board #313' 'Do not lose this second handoff')
+ test "$id1" != "$id2"
+-test -s "$d2/town/records/handoffs/$id1.txt"
+-grep -Fq 'status: open' "$d2/town/records/handoffs/$id1.txt"
+-# list-open is the dispatch input: one line per open handoff, id and work present.
+-listed=$(/bin/sh "$d2/town/government/handoff-queue.sh" list-open "$d2/town")
++listed=$(/bin/sh "$d/town/government/handoff-queue.sh" list-open "$d/town")
+ test "$(printf '%s\n' "$listed" | wc -l)" -eq 2
+-printf '%s\n' "$listed" | grep -Fq "$id1"
+-printf '%s\n' "$listed" | grep -Fq "$id2"
+-printf '%s\n' "$listed" | grep -Fq 'Deliver the Act 18 section 7 step'
+-test "$(printf '%s\n' "$listed" | head -n 1 | awk -F '\t' '{print NF}')" -eq 3
+-
+-# P3: with an open handoff the dispatch carries the handoff and MUST NOT run
+-# the generic eligible-issue prompt (no supersession of the specific steer).
+-rm -f "$d2/state/branches/eligible-issues.json"
+-/bin/sh "$d2/town/government/executive-cycle.sh"
+-test "$(wc -l < "$OUTPUT")" -eq 2
+-grep -Fq 'OPEN DURABLE HANDOFFS' "$PROMPT_FILE"
+-grep -Fq 'Act 18 section 7 step' "$PROMPT_FILE"
+-grep -Fq "$id1" "$PROMPT_FILE"
+-# Standing Founder research duty can mention #301 even when the generic
+-# eligible-issue dispatch is prohibited by a specific handoff.
+-if grep -Fq 'Verified issue assignments' "$PROMPT_FILE"; then echo "generic eligible-issue prompt ran while a handoff was open" >&2; exit 1; fi
+-test ! -e "$d2/state/branches/eligible-issues.json"
+-
+-# The steer's own evidence and assigning authority are durable in the entry.
+-grep -Fq 'assigned-by: Viche Clerk c1a00001' "$d2/town/records/handoffs/$id1.txt"
+-grep -Fq 'evidence: board #313 2026-10-19T11:14Z' "$d2/town/records/handoffs/$id1.txt"
+-
+-# Marking done is atomic and only open handoffs can transition.
+-/bin/sh "$d2/town/government/handoff-queue.sh" mark "$d2/town" "$id1" done 'Act 18 section 7 published, evidence in PROCEEDINGS.md'
+-grep -Fq 'status: done' "$d2/town/records/handoffs/$id1.txt"
+-if /bin/sh "$d2/town/government/handoff-queue.sh" mark "$d2/town" "$id1" done 'again' 2>/dev/null; then
+-  echo "re-closing a closed handoff must fail" >&2
+-  exit 1
+-fi
+-# One open handoff still blocks the generic dispatch.
+-/bin/sh "$d2/town/government/executive-cycle.sh"
+-test "$(wc -l < "$OUTPUT")" -eq 3
+-# The standing research mandate does not supersede the queued handoff.
+-/bin/sh "$d2/town/government/handoff-queue.sh" mark "$d2/town" "$id2" superseded 'newer durable handoff arrived'
+-# With no open handoffs the generic dispatch resumes.
+-/bin/sh "$d2/town/government/executive-cycle.sh"
+-test "$(wc -l < "$OUTPUT")" -eq 4
+-grep -Fq '301' "$PROMPT_FILE"
+-test -s "$d2/state/branches/eligible-issues.json"
+-
+-# No dispatch at all when the script fails before the queue read: a queue
+-# read crash exits non-zero and leaves the agent undispatched.
+-cat > "$d2/town/government/handoff-queue.sh" <<'BROKEN'
+-#!/bin/sh
+-echo "simulated queue read crash" >&2
+-exit 1
+-BROKEN
+-if /bin/sh "$d2/town/government/executive-cycle.sh" 2>/dev/null; then
+-  echo "dispatch must not occur when the queue read fails" >&2
+-  exit 1
+-fi
+-test "$(wc -l < "$OUTPUT")" -eq 4
+-# A missing charter is likewise a pre-read failure: no dispatch.
+-cp "$repo/government/handoff-queue.sh" "$d2/town/government/handoff-queue.sh"
+-if env -u VICHE_CONSTITUTION /bin/sh "$d2/town/government/executive-cycle.sh" 2>/dev/null; then
+-  echo "dispatch must not occur without the charter" >&2
+-  exit 1
++printf '%s\n' "$listed" | grep -Fq 'Preserve the newest handoff'
++/bin/sh "$d/town/government/handoff-queue.sh" mark "$d/town" "$id1" done 'verified'
++if /bin/sh "$d/town/government/handoff-queue.sh" mark "$d/town" "$id1" done 'again' 2>/dev/null; then
++  echo 'closed handoff transitioned twice' >&2; exit 1
+ fi
+-test "$(wc -l < "$OUTPUT")" -eq 4
++grep -Fq 'status: open' "$d/town/records/handoffs/$id2.txt"
+ 
+-echo 'Act 19 office-continuity and handoff smoke checks passed'
++echo 'Act 19 office-continuity smoke passed'
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+new file mode 100644
+index 00000000..a233c75f
+--- /dev/null
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -0,0 +1,178 @@
++#!/bin/sh
++# Real appointments/liveness/dispatch path with mocked managed Antonina CLI.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' 0 HUP INT TERM
++mkdir -p "$d/bin" "$d/town/government" "$d/town/records/handoffs" \
++  "$d/seats/branches/executive" "$d/seats/c1a00001" "$d/state" "$d/mock"
++mkdir -p "$d/seats/branches/judiciary"
++printf 'c1a00001\tClerk\tintake\n' > "$d/town/government/seats.tsv"
++cp "$repo/government/appointments.sh" "$repo/government/terminal-appointment-evidence.sh" \
++  "$repo/government/office-continuity.sh" "$repo/government/branch-bootstrap.sh" \
++  "$repo/government/branch-liveness.sh" "$repo/government/executive-cycle.sh" \
++  "$repo/government/handoff-queue.sh" "$repo/government/clerk-liveness.sh" \
++  "$repo/government/policy-sync.sh" "$d/town/government/"
++git -C "$d/seats/branches/executive" init -q
++git -C "$d/seats/branches/executive" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
++git -C "$d/seats/c1a00001" init -q
++git -C "$d/seats/c1a00001" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm clerk
++git -C "$d/seats/branches/judiciary" init -q
++git -C "$d/seats/branches/judiciary" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm judiciary
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  'agent status') id=$4; [ -s "$MOCK_ROOT/$id.json" ] || exit 3; cat "$MOCK_ROOT/$id.json" ;;
++  'agent new')
++    n=0; [ ! -s "$MOCK_ROOT/new-count" ] || n=$(cat "$MOCK_ROOT/new-count")
++    n=$((n+1)); printf '%s\n' "$n" > "$MOCK_ROOT/new-count"
++    id="agent-$n"
++    printf '{"state":"idle","model":null,"variant":"provider-chosen"}\n' > "$MOCK_ROOT/$id.json"
++    if [ -s "$MOCK_ROOT/expected-old" ]; then
++      old=$(cat "$MOCK_ROOT/expected-old")
++      identity=$(jq -r '.invocation_id // .run_id // .finished_at // "unreadable"' "$MOCK_ROOT/$old.json")
++      event=$VICHE_STATE_ROOT/appointments/terminal-evidence/$old/$identity
++      test -s "$event/status.json" && test -s "$event/event.json"
++      if jq -e '.state=="failed" and .backend_error.transient==true' "$event/status.json" >/dev/null; then
++        awk -F '\t' -v id="$old" '$3==id {found=1} END {exit !found}' \
++          "$VICHE_STATE_ROOT/liveness/failures/events.tsv"
++      fi
++    fi
++    printf '%s\n' "$id" ;;
++  'agent log') printf 'mocked completion log\n' ;;
++  'agent run')
++    id=$4
++    printf 'dispatch\n' >> "$MOCK_ROOT/run-count"
++    printf '%s\n' "$*" >> "$MOCK_ROOT/run-prompts"
++    printf '{"state":"running","model":null,"variant":null,"last_activity_at":1}\n' > "$MOCK_ROOT/$id.json"
++    printf 'accepted\n' ;;
++  *) echo "unexpected Antonina operation: $*" >&2; exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock" VICHE_TOWN_ROOT="$d/town" \
++  VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state" \
++  VICHE_CONSTITUTION="$d/charter" VICHE_BRANCH_NOW=$(date +%s)
++printf 'mock charter\n' > "$VICHE_CONSTITUTION"
++touch "$VICHE_STATE_ROOT/inaugurated"
++printf 'proposal remains an open durable handoff\n' > "$d/town/government/antonina-interface.md"
++printf 'current executive mandate\n' > "$d/town/government/executive-agenda.md"
++mkdir -p "$VICHE_STATE_ROOT/branches" "$VICHE_STATE_ROOT/appointments"
++printf '{"count":0}\n' > "$VICHE_STATE_ROOT/branches/eligible-issues.json"
++registry=$VICHE_STATE_ROOT/appointments/appointments.tsv
++ledger=$VICHE_STATE_ROOT/liveness/failures/events.tsv
++
++set_status() {
++  id=$1 state=$2 identity=$3 class=$4 transient=$5 safe=$6 finished=$7
++  printf '{"state":"%s","model":null,"variant":"arbitrary","finished_at":%s,"invocation_id":"%s","last_activity_at":1,"backend_error":{"classification":"%s","transient":%s,"automatic_retry_safe":%s}}\n' \
++    "$state" "$finished" "$identity" "$class" "$transient" "$safe" > "$MOCK_ROOT/$id.json"
++}
++base=$(date +%s)
++id=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure executive)
++test "$(cat "$MOCK_ROOT/new-count")" -eq 1
++printf 'newest unsaved handoff\n' > "$VICHE_SEATS_ROOT/branches/executive/handoff.txt"
++
++# Failed first invocation: evidence and the per-office ledger must exist
++# before Antonina is asked to create the replacement.
++printf '%s\n' "$id" > "$MOCK_ROOT/expected-old"
++set_status "$id" failed run-1 upstream_endpoint_unavailable true true "$base"
++/bin/sh "$VICHE_TOWN_ROOT/government/branch-bootstrap.sh" executive
++test -s "$VICHE_STATE_ROOT/appointments/terminal-evidence/$id/run-1/status.json"
++test -s "$VICHE_STATE_ROOT/appointments/terminal-evidence/$id/run-1/worktree-status.txt"
++grep -Fq 'handoff.txt' "$VICHE_STATE_ROOT/appointments/terminal-evidence/$id/run-1/worktree-status.txt"
++test -s "$ledger"
++test -f "$VICHE_SEATS_ROOT/branches/executive/handoff.txt"
++# Simulate a crash after the evidence directory was published but before its
++# JSONL index update; repeat must repair the missing index without duplication.
++: > "$VICHE_STATE_ROOT/appointments/terminal-events.jsonl"
++/bin/sh "$VICHE_TOWN_ROOT/government/terminal-appointment-evidence.sh" executive "$id" \
++  "$VICHE_SEATS_ROOT/branches/executive" < "$VICHE_STATE_ROOT/appointments/terminal-evidence/$id/run-1/status.json"
++test "$(wc -l < "$VICHE_STATE_ROOT/appointments/terminal-events.jsonl")" -eq 1
++id2=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve executive)
++test "$id2" != "$id"
++test "$(cat "$MOCK_ROOT/new-count")" -eq 2
++
++# Repeat observation is idempotent; it cannot count as a second failed run.
++/bin/sh "$VICHE_TOWN_ROOT/government/branch-bootstrap.sh" executive
++test "$(wc -l < "$ledger")" -eq 1
++test "$(cat "$MOCK_ROOT/new-count")" -eq 2
++
++# Second and third distinct invocations survive disposable-ID changes. The
++# threshold is claimed once under the appointment lock; ledger history stays.
++printf '%s\n' "$id2" > "$MOCK_ROOT/expected-old"
++set_status "$id2" failed run-2 upstream_endpoint_unavailable true true "$base"
++/bin/sh "$VICHE_TOWN_ROOT/government/branch-bootstrap.sh" executive
++id3=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve executive)
++test "$id3" != "$id2"
++printf '%s\n' "$id3" > "$MOCK_ROOT/expected-old"
++set_status "$id3" failed run-3 upstream_endpoint_unavailable true true "$base"
++/bin/sh "$VICHE_TOWN_ROOT/government/branch-bootstrap.sh" executive
++id4=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve executive)
++test "$id4" != "$id3"
++test "$(wc -l < "$ledger")" -eq 3
++test "$(wc -l < "$VICHE_STATE_ROOT/liveness/recoveries.log")" -eq 1
++test -s "$VICHE_STATE_ROOT/liveness/last-reset-executive"
++test "$(awk -F '\t' '$1=="executive" {n++} END {print n+0}' "$registry")" -eq 1
++
++# After the reset, the safe operation resumes from the latest open handoff.
++handoff=$(/bin/sh "$VICHE_TOWN_ROOT/government/handoff-queue.sh" add \
++  "$VICHE_TOWN_ROOT" 'test authority' 'evidence-1' 'resume latest open handoff safely')
++/bin/sh "$VICHE_TOWN_ROOT/government/branch-liveness.sh" executive
++test "$(wc -l < "$MOCK_ROOT/run-count")" -eq 1
++grep -Fq 'resume latest open handoff safely' "$MOCK_ROOT/run-prompts"
++grep -Fq "$handoff" "$MOCK_ROOT/run-prompts"
++grep -Fq 'status: open' "$VICHE_TOWN_ROOT/records/handoffs/$handoff.txt"
++
++# Stuck/silent running status is not a terminal failure and creates no extra
++# appointment or replay while Antonina still reports the same run as running.
++new_count=$(cat "$MOCK_ROOT/new-count")
++/bin/sh "$VICHE_TOWN_ROOT/government/branch-liveness.sh" executive
++test "$(cat "$MOCK_ROOT/new-count")" -eq "$new_count"
++test "$(wc -l < "$MOCK_ROOT/run-count")" -eq 1
++test "$(wc -l < "$ledger")" -eq 3
++jq -e '.agent_state=="running" and .readiness=="running"' \
++  "$VICHE_STATE_ROOT/branches/executive.json" >/dev/null
++
++# Unsafe retry: capture, count, replace once, but refuse any automatic run and
++# leave the exact open handoff intact for review.
++: > "$MOCK_ROOT/run-count"
++printf '%s\n' "$id4" > "$MOCK_ROOT/expected-old"
++set_status "$id4" failed run-unsafe upstream_endpoint_unavailable true false "$((base+3))"
++/bin/sh "$VICHE_TOWN_ROOT/government/branch-liveness.sh" executive || :
++test -s "$VICHE_STATE_ROOT/liveness/unsafe-holds/executive"
++test ! -s "$MOCK_ROOT/run-count"
++test "$(wc -l < "$ledger")" -eq 4
++grep -Fq 'status: open' "$VICHE_TOWN_ROOT/records/handoffs/$handoff.txt"
++
++# Interrupted appointment evidence is distinct and unsafe by default. A
++# permanent auth failure is surfaced and does not replace its failed ID.
++clerk=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure c1a00001)
++printf '%s\n' "$clerk" > "$MOCK_ROOT/expected-old"
++set_status "$clerk" stopped interrupted-run auth_interrupted false false "$((base+4))"
++clerk2=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure c1a00001)
++test "$clerk2" != "$clerk"
++jq -e '.state=="stopped"' "$VICHE_STATE_ROOT/appointments/terminal-evidence/$clerk/interrupted-run/event.json" >/dev/null
++test -s "$VICHE_STATE_ROOT/liveness/unsafe-holds/c1a00001"
++
++auth=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure judiciary)
++set_status "$auth" failed auth-run invalid_api_key false false "$((base+5))"
++before=$(cat "$MOCK_ROOT/new-count")
++if /bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure judiciary; then
++  echo 'permanent auth failure must not be silently replaced' >&2; exit 1
++fi
++test "$(cat "$MOCK_ROOT/new-count")" -eq "$before"
++grep -Fq 'permanent_failure classification=invalid_api_key' "$VICHE_STATE_ROOT/liveness/permanent-incidents.log"
++
++# Clerk gate goes through real appointments and observes the same terminal
++# event path before any protected sitting can run.
++set_status "$clerk2" failed clerk-run upstream_endpoint_unavailable true true "$((base+6))"
++printf '%s\n' "$clerk2" > "$MOCK_ROOT/expected-old"
++clerk3=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure c1a00001)
++test "$clerk3" != "$clerk2"
++if /bin/sh "$VICHE_TOWN_ROOT/government/clerk-liveness.sh" --gate; then
++  echo 'unsafe Clerk redispatch hold was ignored' >&2; exit 1
++fi
++test -s "$VICHE_STATE_ROOT/appointments/terminal-evidence/$clerk2/clerk-run/event.json"
++
++printf 'appointment recovery integration smoke passed\n'
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+index 03a2aa5a..a3c186c2 100644
+--- a/tests/appointments-smoke.sh
++++ b/tests/appointments-smoke.sh
+@@ -3,7 +3,7 @@
+ set -eu
+ town=${1:-$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)}
+ tmp=$(mktemp -d)
+-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++trap 'rm -rf "$tmp"' 0 HUP INT TERM
+ mkdir -p "$tmp/bin" "$tmp/town/government" "$tmp/seats/a1" "$tmp/seats/branches/executive" "$tmp/state" "$tmp/mock"
+ printf 'a1\tClerk\tFounder intake\n' > "$tmp/town/government/seats.tsv"
+ cat > "$tmp/bin/antonina" <<'EOF'
+@@ -18,7 +18,15 @@ elif [ "$1" = agent ] && [ "$2" = status ]; then
+   id=$4
+   [ -f "$MOCK/$id" ] || exit 1
+   status=$(cat "$MOCK/$id")
+-  printf '{"state":"%s","model":null,"variant":"low"}\n' "$status"
++  if [ "$status" = failed ]; then
++    printf '{"state":"failed","finished_at":1792781100,"invocation_id":"run-%s","backend_error":{"classification":"upstream_endpoint_unavailable","transient":true,"automatic_retry_safe":false},"model":null,"variant":"arbitrary"}\n' "$id"
++  elif [ "$status" = failed-permanent ]; then
++    printf '{"state":"failed","finished_at":1792781200,"invocation_id":"auth-%s","backend_error":{"classification":"invalid_api_key","transient":false,"automatic_retry_safe":false},"model":null,"variant":null}\n' "$id"
++  else
++    printf '{"state":"%s","model":null,"variant":"arbitrary"}\n' "$status"
++  fi
++elif [ "$1" = agent ] && [ "$2" = log ]; then
++  printf 'mock log\n'
+ else
+   echo 'unexpected mocked command' >&2; exit 7
+ fi
+@@ -40,13 +48,35 @@ rm "$MOCK/$a"
+ if /bin/sh "$script" resolve a1 >/dev/null 2>&1; then echo 'resolve invented missing agent' >&2; exit 1; fi
+ c=$(/bin/sh "$script" ensure a1)
+ [ "$c" = fresh-2 ] || exit 1
++jq -e '.state=="unreadable" and .agent_id=="fresh-1"' \
++  "$tmp/state/appointments/terminal-evidence/fresh-1/unreadable/event.json" >/dev/null
++test ! -s "$tmp/state/liveness/failures/events.tsv"
+ printf failed > "$MOCK/$c"
+ x=$(/bin/sh "$script" ensure a1)
+ [ "$x" = fresh-3 ] || exit 1
++jq -e '.state=="failed" and .failure_class=="upstream_endpoint_unavailable" and
++       .transient==true and .automatic_retry_safe==false and .finished_at==1792781100' \
++  "$tmp/state/appointments/terminal-evidence/fresh-2/run-fresh-2/event.json" >/dev/null
++[ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 2 ]
++[ "$(/bin/sh "$script" ensure a1)" = fresh-3 ]
++[ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 2 ]
+ y=$(/bin/sh "$script" replace a1)
+ [ "$y" = fresh-4 ] || exit 1
+ e=$(/bin/sh "$script" ensure executive)
+ [ "$e" = fresh-5 ] || exit 1
++printf failed-permanent > "$MOCK/$e"
++new_before=$(cat "$MOCK/counter")
++if /bin/sh "$script" ensure executive; then
++  echo 'permanent auth failure was silently replaced' >&2; exit 1
++fi
++[ "$(cat "$MOCK/counter")" -eq "$new_before" ]
++jq -e '.failure_class=="invalid_api_key" and .transient==false and
++       .automatic_retry_safe==false' \
++  "$tmp/state/appointments/terminal-evidence/fresh-5/auth-fresh-5/event.json" >/dev/null
++[ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 3 ]
++if /bin/sh "$script" ensure executive >/dev/null 2>&1; then exit 1; fi
++[ "$(cat "$MOCK/counter")" -eq "$new_before" ]
++[ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 3 ]
+ [ "$(wc -l < "$tmp/state/appointments/appointments.tsv")" -eq 2 ] || exit 1
+ # No secret powers granted by supplying an unknown role key.
+ if /bin/sh "$script" ensure a2 >/dev/null 2>&1; then exit 1; fi
+diff --git a/tests/clerk-liveness-smoke.sh b/tests/clerk-liveness-smoke.sh
+index 325a8c87..d3b16151 100644
+--- a/tests/clerk-liveness-smoke.sh
++++ b/tests/clerk-liveness-smoke.sh
+@@ -1,125 +1,33 @@
+ #!/bin/sh
+-# Hermetic Clerk recovery under Act 19 §3.1: failure-count reset (3
+-# consecutive transient failures / 30 min, 1800 s cooldown), progress guard,
+-# permanent failures surfaced not reset, evidence preserved.
++# Clerk sitting/intake gates reject terminal sessions and unsafe redispatch.
+ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ d=$(mktemp -d)
+-trap 'rm -rf "$d"' EXIT
++trap 'rm -rf "$d"' 0 HUP INT TERM
+ mkdir -p "$d/bin" "$d/town/government" "$d/seats/c1a00001" "$d/state/liveness" "$d/mock"
+ printf 'c1a00001\tClerk\tFounder intake\n' > "$d/town/government/seats.tsv"
+-cp "$repo/government/clerk-liveness.sh" "$d/town/government/clerk-liveness.sh"
+-cp "$repo/government/office-continuity.sh" "$d/town/government/office-continuity.sh"
++cp "$repo/government/clerk-liveness.sh" "$repo/government/office-continuity.sh" "$d/town/government/"
++cp "$repo/tests/appointment-id-stub.sh" "$d/town/government/appointments.sh"
+ git -C "$d/seats/c1a00001" init -q
+-git -C "$d/seats/c1a00001" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm initial
+-printf 'valuable uncommitted work\n' > "$d/seats/c1a00001/uncommitted.txt"
++git -C "$d/seats/c1a00001" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
+ cat > "$d/bin/antonina" <<'MOCK'
+ #!/bin/sh
+ set -eu
+-case "$1 $2" in
+-  'agent status') cat "$MOCK_ROOT/status" ;;
+-  'agent log') printf 'Endpoint is unavailable\n' ;;
+-  'agent delete') printf 'delete\n' >> "$MOCK_ROOT/actions" ;;
+-  'agent new')
+-    printf 'new\n' >> "$MOCK_ROOT/actions"
+-    printf '{"state":"idle"}\n' > "$MOCK_ROOT/status"
+-    ;;
+-  *) exit 9 ;;
+-esac
++[ "$1 $2" = 'agent status' ] || exit 9
++cat "$MOCK_ROOT/status.json"
+ MOCK
+ chmod +x "$d/bin/antonina"
+-set_status() {
+-  printf '{"state":"%s","model":"test-provider/example","backend_error":{"classification":"%s","transient":%s}}\n' \
+-    "$1" "$2" "$3" > "$d/mock/status"
+-}
+-PATH="$d/bin:$PATH"
+-MOCK_ROOT="$d/mock"
+-mkdir -p "$d/town/government"
+-cp "$repo/tests/appointment-id-stub.sh" "$d/town/government/appointments.sh"
+-VICHE_TOWN_ROOT="$d/town"
+-VICHE_SEATS_ROOT="$d/seats"
+-VICHE_STATE_ROOT="$d/state"
+-export PATH MOCK_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT
+-failures=$d/state/liveness/failures/c1a00001
+-
+-# Two observed transient failures are recorded but do not reset (threshold 3).
+-set_status failed upstream_endpoint_unavailable true
+-dash "$repo/government/clerk-liveness.sh"
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$failures")" -eq 2
+-test ! -e "$d/mock/actions"
+-
+-# The third consecutive failure fires one bounded reset; evidence is preserved.
+-set_status failed upstream_endpoint_unavailable true
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$d/mock/actions")" -eq 2
+-test -f "$d/seats/c1a00001/uncommitted.txt"
+-test -s "$d/state/liveness/recoveries.log"
+-grep -Fq 'session_reset=failure_count threshold=3 window=1800 cooldown=1800' "$d/state/liveness/recoveries.log"
+-test -s "$d/state/liveness/last-reset-c1a00001"
+-test "$(find "$d/state/liveness" -name agent-status.json | wc -l)" -eq 1
+-# The failure record is cleared after the reset: the next streak starts at zero.
+-test "$(wc -l < "$failures")" -eq 0
+-
+-# While the cooldown is unexpired, three fresh failures cannot reset again.
+-set_status failed upstream_endpoint_unavailable true
+-dash "$repo/government/clerk-liveness.sh"
+-dash "$repo/government/clerk-liveness.sh"
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$failures")" -eq 3
+-test "$(wc -l < "$d/mock/actions")" -eq 2
+-
+-# Once the cooldown expires, the third consecutive failure resets exactly once.
+-printf '0\n' > "$d/state/liveness/last-reset-c1a00001"
+-set_status failed upstream_endpoint_unavailable true
+-dash "$repo/government/clerk-liveness.sh"
+-dash "$repo/government/clerk-liveness.sh"
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$d/mock/actions")" -eq 4
+-test -f "$d/seats/c1a00001/uncommitted.txt"
+-
+-# Progress guard: with the cooldown expired, a durable commit between failures
+-# must be what prevents the reset of a healthy-but-slow office.
+-printf '0\n' > "$d/state/liveness/last-reset-c1a00001"
+-: > "$failures"
+-set_status failed upstream_endpoint_unavailable true
+-dash "$repo/government/clerk-liveness.sh"
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$failures")" -eq 2
+-git -C "$d/seats/c1a00001" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm durable
+-set_status failed upstream_endpoint_unavailable true
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$failures")" -eq 1
+-test "$(wc -l < "$d/mock/actions")" -eq 4
+-set_status failed upstream_endpoint_unavailable true
+-dash "$repo/government/clerk-liveness.sh"
+-set_status failed upstream_endpoint_unavailable true
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$d/mock/actions")" -eq 6
+-test "$(wc -l < "$failures")" -eq 0
+-
+-# A permanent failure is surfaced, never silently reset, never counted.
+-set_status failed invalid_api_key false
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$d/mock/actions")" -eq 6
+-test "$(wc -l < "$failures")" -eq 0
+-grep -Fq 'permanent_failure classification=invalid_api_key surfaced-not-reset' "$d/state/liveness/permanent-incidents.log"
+-
+-# A failed session must never be continued directly through the gate, and after
+-# a cooldown-expired reset the healthy session passes the gate again.
+-printf '0\n' > "$d/state/liveness/last-reset-c1a00001"
+-set_status failed upstream_endpoint_unavailable true
+-if dash "$repo/government/clerk-liveness.sh" --gate; then exit 1; fi
+-dash "$repo/government/clerk-liveness.sh"
+-dash "$repo/government/clerk-liveness.sh"
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$d/mock/actions")" -eq 8
+-test "$(wc -l < "$failures")" -eq 0
+-dash "$repo/government/clerk-liveness.sh" --gate
+-test -f "$d/seats/c1a00001/uncommitted.txt"
+-
+-# A healthy Clerk is never reset (the fresh session above is idle).
+-dash "$repo/government/clerk-liveness.sh"
+-test "$(wc -l < "$d/mock/actions")" -eq 8
+-test ! -s "$failures"
+-printf 'Viche Clerk liveness smoke passed\n'
++export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock" VICHE_TOWN_ROOT="$d/town" \
++  VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state"
++printf '{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable","transient":true,"automatic_retry_safe":false}}\n' > "$MOCK_ROOT/status.json"
++if /bin/sh "$repo/government/clerk-liveness.sh" --gate; then
++  echo 'terminal Clerk unexpectedly passed the sitting gate' >&2; exit 1
++fi
++printf '{"state":"idle","model":null,"variant":"arbitrary"}\n' > "$MOCK_ROOT/status.json"
++/bin/sh "$repo/government/clerk-liveness.sh" --gate
++mkdir -p "$VICHE_STATE_ROOT/liveness/unsafe-holds"
++printf 'old-agent\trun-unsafe\n' > "$VICHE_STATE_ROOT/liveness/unsafe-holds/c1a00001"
++if /bin/sh "$repo/government/clerk-liveness.sh" --gate; then
++  echo 'unsafe Clerk redispatch hold was ignored' >&2; exit 1
++fi
++printf 'Viche Clerk liveness gate smoke passed\n'
+diff --git a/tests/executive-recovery-timing-smoke.sh b/tests/executive-recovery-timing-smoke.sh
+deleted file mode 100644
+index a9707d1f..00000000
+--- a/tests/executive-recovery-timing-smoke.sh
++++ /dev/null
+@@ -1,93 +0,0 @@
+-#!/bin/sh
+-# A failed executive pauses visibly and delegates recovery to the office
+-# supervisor (branch-bootstrap via branch-liveness), which under Act 19 §3.1
+-# resets on a failure COUNT — 3 consecutive transient failures — regardless of
+-# the observed state, with a 1800 s cooldown: no dispatch, no reset outside
+-# the cooldown, no unbounded retry storm.
+-set -eu
+-repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+-scratch=$(mktemp -d)
+-trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+-mkdir -p "$scratch/bin" "$scratch/town/government" "$scratch/town/records" \
+-    "$scratch/seats/branches/executive" "$scratch/state" "$scratch/mock"
+-printf 'c1e00001\tClerk\tintake\n' > "$scratch/town/government/seats.tsv"
+-cp "$repo/government/branch-bootstrap.sh" "$scratch/town/government/branch-bootstrap.sh"
+-cp "$repo/government/office-continuity.sh" "$scratch/town/government/office-continuity.sh"
+-cp "$repo/government/executive-cycle.sh" "$scratch/town/government/executive-cycle.sh"
+-cp "$repo/government/eligible-work.py" "$scratch/town/government/eligible-work.py"
+-cp "$repo/government/handoff-queue.sh" "$scratch/town/government/handoff-queue.sh"
+-printf 'Founder charter fixture\n' > "$scratch/charter"
+-touch "$scratch/state/inaugurated"
+-printf '{"state":"failed","model":"test-provider/example","variant":"low","backend_error":{"classification":"upstream_endpoint_unavailable","transient":true}}\n' > "$scratch/mock/status.json"
+-cat > "$scratch/bin/antonina" <<'MOCK'
+-#!/bin/sh
+-set -eu
+-case "$1 $2" in
+-  'agent status') cat "$MOCK_ROOT/status.json" ;;
+-  'agent run') echo run >> "$MOCK_ROOT/dispatches" ;;
+-  'agent log') echo 'Endpoint is unavailable' ;;
+-  'agent delete') echo delete >> "$MOCK_ROOT/recovery" ;;
+-  'agent new')
+-    echo new >> "$MOCK_ROOT/recovery"
+-    printf '{"state":"idle","model":"test-provider/example","variant":"low"}\n' > "$MOCK_ROOT/status.json"
+-    ;;
+-  'board list') echo '[]' ;;
+-  'board show') echo '{"body":"","messages":[]}' ;;
+-  *) exit 9 ;;
+-esac
+-MOCK
+-chmod +x "$scratch/bin/antonina"
+-git -C "$scratch/seats/branches/executive" init -q
+-git -C "$scratch/seats/branches/executive" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
+-PATH="$scratch/bin:$PATH"
+-MOCK_ROOT="$scratch/mock"
+-mkdir -p "$scratch/town/government"
+-cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
+-VICHE_TOWN_ROOT="$scratch/town"
+-VICHE_SEATS_ROOT="$scratch/seats"
+-VICHE_STATE_ROOT="$scratch/state"
+-VICHE_CONSTITUTION="$scratch/charter"
+-export PATH MOCK_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION
+-failures=$scratch/state/liveness/failures/c1e00002
+-
+-# A failed executive must not dispatch and must not reset below the threshold.
+-/bin/sh "$scratch/town/government/executive-cycle.sh" 2>/dev/null || true
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-[ ! -e "$MOCK_ROOT/dispatches" ]
+-[ ! -e "$MOCK_ROOT/recovery" ]
+-[ "$(wc -l < "$failures")" -eq 1 ]
+-
+-# Three consecutive transient failures fire exactly one bounded reset, even
+-# though the oscillating agent is observed "running" between failures.
+-printf '{"state":"running","model":"test-provider/example","variant":"low"}\n' > "$scratch/mock/status.json"
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-[ ! -e "$MOCK_ROOT/recovery" ]
+-printf '{"state":"failed","model":"test-provider/example","variant":"low","backend_error":{"classification":"upstream_endpoint_unavailable","transient":true}}\n' > "$scratch/mock/status.json"
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-[ "$(wc -l < "$failures")" -eq 2 ]
+-printf '{"state":"running","model":"test-provider/example","variant":"low"}\n' > "$scratch/mock/status.json"
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-[ ! -e "$MOCK_ROOT/recovery" ]
+-printf '{"state":"failed","model":"test-provider/example","variant":"low","backend_error":{"classification":"upstream_endpoint_unavailable","transient":true}}\n' > "$scratch/mock/status.json"
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-[ "$(wc -l < "$MOCK_ROOT/recovery")" -eq 2 ]
+-[ ! -e "$MOCK_ROOT/dispatches" ]
+-[ "$(wc -l < "$failures")" -eq 0 ]
+-
+-# While the cooldown is unexpired, three more failures cannot reset again.
+-printf '{"state":"failed","model":"test-provider/example","variant":"low","backend_error":{"classification":"upstream_endpoint_unavailable","transient":true}}\n' > "$scratch/mock/status.json"
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-[ "$(wc -l < "$MOCK_ROOT/recovery")" -eq 2 ]
+-[ "$(wc -l < "$failures")" -eq 3 ]
+-[ ! -e "$MOCK_ROOT/dispatches" ]
+-
+-# Once the cooldown expires, the third consecutive failure resets exactly once
+-# more, never more.
+-printf '0\n' > "$scratch/state/liveness/last-reset-c1e00002"
+-printf '{"state":"failed","model":"test-provider/example","variant":"low","backend_error":{"classification":"upstream_endpoint_unavailable","transient":true}}\n' > "$scratch/mock/status.json"
+-/bin/sh "$scratch/town/government/branch-bootstrap.sh" executive
+-[ "$(wc -l < "$MOCK_ROOT/recovery")" -eq 4 ]
+-[ ! -e "$MOCK_ROOT/dispatches" ]
+-echo 'Executive recovery timing smoke checks passed'
+diff --git a/tests/resource-safety-smoke.sh b/tests/resource-safety-smoke.sh
+index 15733597..194d4a1d 100755
+--- a/tests/resource-safety-smoke.sh
++++ b/tests/resource-safety-smoke.sh
+@@ -12,11 +12,23 @@ trap 'rm -rf "$d"' 0
+ town=$d/town
+ state=$d/state
+ cgroup=$d/cgroup
+-mkdir -p "$town/government" "$state" "$cgroup"
++mkdir -p "$town/government" "$state" "$cgroup" "$d/bin" "$d/mock"
+ cp "$root/government/resource-safety.sh" "$town/government/resource-safety.sh"
+ cp "$root/government/sitting.sh" "$town/government/sitting.sh"
+ cp "$root/government/seats.tsv" "$town/government/seats.tsv"
++cp "$root/tests/appointment-id-stub.sh" "$town/government/appointments.sh"
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  'agent status') printf '{"state":"idle"}\n' ;;
++  *) exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
+ 
++PATH="$d/bin:$PATH"
++export PATH
+ export VICHE_TOWN_ROOT=$town
+ export VICHE_STATE_ROOT=$state
+ export RESOURCE_SAFETY_CGROUP_DIR=$cgroup
+diff --git a/tests/seat-liveness-smoke.sh b/tests/seat-liveness-smoke.sh
+index 45a32d25..ffe3fa5d 100644
+--- a/tests/seat-liveness-smoke.sh
++++ b/tests/seat-liveness-smoke.sh
+@@ -1,52 +1,86 @@
+ #!/bin/sh
++# Real appointments + non-Clerk seat supervisor integration.
+ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ d=$(mktemp -d)
+-trap 'rm -rf "$d"' EXIT
+-mkdir -p "$d/bin" "$d/town/government" "$d/seats/c1a00007" "$d/state" "$d/mock"
+-printf 'c1a00001\tClerk\tAgenda\nc1a00007\tConstitutional member\tLegality\n' > "$d/town/government/seats.tsv"
+-git -C "$d/seats/c1a00007" init -q
+-git -C "$d/seats/c1a00007" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
+-printf 'uncommitted material\n' > "$d/seats/c1a00007/valuable.txt"
+-cat > "$d/mock/status" <<'JSON'
+-{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable"}}
+-JSON
++trap 'rm -rf "$d"' 0 HUP INT TERM
++mkdir -p "$d/bin" "$d/town/government" "$d/seats/c1a00001" \
++  "$d/seats/c1a00007" "$d/state" "$d/mock"
++printf 'c1a00001\tClerk\tAgenda\nc1a00007\tMember\tLegality\n' > "$d/town/government/seats.tsv"
++cp "$repo/government/appointments.sh" "$repo/government/terminal-appointment-evidence.sh" \
++  "$repo/government/office-continuity.sh" "$repo/government/seat-liveness.sh" \
++  "$repo/government/policy-sync.sh" "$repo/government/sitting.sh" "$d/town/government/"
++for seat in c1a00001 c1a00007; do
++  git -C "$d/seats/$seat" init -q
++  git -C "$d/seats/$seat" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
++done
++printf 'valuable uncommitted handoff\n' > "$d/seats/c1a00007/valuable.txt"
+ cat > "$d/bin/antonina" <<'MOCK'
+ #!/bin/sh
+ set -eu
+ case "$1 $2" in
+- 'agent status') cat "$MOCK_ROOT/status" ;;
+- 'agent log') echo 'Endpoint is unavailable' ;;
+- 'agent delete') echo delete >> "$MOCK_ROOT/actions" ;;
+- 'agent new')
+-   echo new >> "$MOCK_ROOT/actions"
+-   printf '{"state":"idle"}\n' > "$MOCK_ROOT/status"
+-   ;;
+- *) exit 9 ;;
++  'agent status') id=$4; [ -s "$MOCK_ROOT/$id.json" ] || exit 3; cat "$MOCK_ROOT/$id.json" ;;
++  'agent new')
++    n=0; [ ! -s "$MOCK_ROOT/new-count" ] || n=$(cat "$MOCK_ROOT/new-count")
++    n=$((n+1)); printf '%s\n' "$n" > "$MOCK_ROOT/new-count"
++    id="seat-agent-$n"
++    printf '{"state":"idle","model":null,"variant":"arbitrary"}\n' > "$MOCK_ROOT/$id.json"
++    if [ -s "$MOCK_ROOT/expected-old" ]; then
++      old=$(cat "$MOCK_ROOT/expected-old")
++      identity=$(jq -r '.invocation_id // .run_id // .finished_at // "unreadable"' "$MOCK_ROOT/$old.json")
++      event=$VICHE_STATE_ROOT/appointments/terminal-evidence/$old/$identity
++      test -s "$event/status.json" && test -s "$event/event.json"
++      if jq -e '.state=="failed" and .backend_error.transient==true' "$event/status.json" >/dev/null; then
++        awk -F '\t' -v id="$old" '$3==id {found=1} END {exit !found}' \
++          "$VICHE_STATE_ROOT/liveness/failures/events.tsv"
++      fi
++    fi
++    printf '%s\n' "$id" ;;
++  'agent log') printf 'captured seat log\n' ;;
++  *) exit 9 ;;
+ esac
+ MOCK
+ chmod +x "$d/bin/antonina"
+-PATH="$d/bin:$PATH"
+-MOCK_ROOT="$d/mock"
+-mkdir -p "$d/town/government"
+-cp "$repo/tests/appointment-id-stub.sh" "$d/town/government/appointments.sh"
+-VICHE_TOWN_ROOT="$d/town"
+-VICHE_SEATS_ROOT="$d/seats"
+-VICHE_STATE_ROOT="$d/state"
+-export PATH MOCK_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT
+-dash "$repo/government/seat-liveness.sh" c1a00001
+-test ! -f "$d/mock/actions"
+-dash "$repo/government/seat-liveness.sh" c1a00007
+-test "$(wc -l < "$d/mock/actions")" -eq 2
+-test -f "$d/seats/c1a00007/valuable.txt"
+-test -s "$d/state/liveness/recoveries.log"
+-cat > "$d/mock/status" <<'JSON'
+-{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable"}}
+-JSON
+-dash "$repo/government/seat-liveness.sh" c1a00007
+-test "$(wc -l < "$d/mock/actions")" -eq 2
+-printf '0\n' > "$d/state/liveness/last-reset-c1a00007"
+-dash "$repo/government/seat-liveness.sh" c1a00007
+-test "$(wc -l < "$d/mock/actions")" -eq 4
++export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock" VICHE_TOWN_ROOT="$d/town" \
++  VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state"
++base=$(date +%s)
++set_status() {
++  printf '{"state":"%s","finished_at":%s,"invocation_id":"%s","backend_error":{"classification":"%s","transient":%s,"automatic_retry_safe":%s}}\n' \
++    "$2" "$4" "$3" "$5" "$6" "$7" > "$MOCK_ROOT/$1.json"
++}
++
++id=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure c1a00007)
++for n in 1 2 3; do
++  printf '%s\n' "$id" > "$MOCK_ROOT/expected-old"
++  set_status "$id" failed "seat-run-$n" "$base" upstream_endpoint_unavailable true true
++  /bin/sh "$VICHE_TOWN_ROOT/government/seat-liveness.sh" c1a00007
++  id=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve c1a00007)
++done
++ledger=$VICHE_STATE_ROOT/liveness/failures/events.tsv
++test "$(wc -l < "$ledger")" -eq 3
++test "$(wc -l < "$VICHE_STATE_ROOT/liveness/recoveries.log")" -eq 1
+ test -f "$d/seats/c1a00007/valuable.txt"
++grep -Fq 'valuable.txt' "$VICHE_STATE_ROOT/appointments/terminal-evidence/seat-agent-1/seat-run-1/worktree-status.txt"
++
++# Hold and duplicate prevention: unsafe failures are captured then replaced,
++# while the protected sitting hook refuses the replacement's redispatch.
++printf '%s\n' "$id" > "$MOCK_ROOT/expected-old"
++set_status "$id" failed seat-unsafe "$((base+4))" upstream_endpoint_unavailable true false
++next=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure c1a00007)
++test "$next" != "$id"
++test -s "$VICHE_STATE_ROOT/liveness/unsafe-holds/c1a00007"
++if /bin/sh "$VICHE_TOWN_ROOT/government/sitting.sh" c1a00007 >/dev/null 2>&1; then
++  echo 'unsafe seat redispatch was not held' >&2; exit 1
++fi
++test "$(wc -l < "$ledger")" -eq 4
++
++# Permanent authentication failure is archived and surfaced, never replaced.
++set_status "$next" failed auth-run "$((base+5))" invalid_api_key false false
++before=$(cat "$MOCK_ROOT/new-count")
++if /bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure c1a00007; then
++  echo 'permanent auth failure was silently replaced' >&2; exit 1
++fi
++test "$(cat "$MOCK_ROOT/new-count")" -eq "$before"
++grep -Fq 'permanent_failure classification=invalid_api_key' "$VICHE_STATE_ROOT/liveness/permanent-incidents.log"
++
+ echo 'Viche parliamentary seat liveness smoke passed'
+diff --git a/tests/summons-smoke.sh b/tests/summons-smoke.sh
+index 84b2f750..90021197 100644
+--- a/tests/summons-smoke.sh
++++ b/tests/summons-smoke.sh
+@@ -3,13 +3,25 @@
+ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ scratch=$(mktemp -d)
+-trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+-mkdir -p "$scratch/government" "$scratch/records/summons"
++trap 'rm -rf "$scratch"' 0 HUP INT TERM
++mkdir -p "$scratch/government" "$scratch/records/summons" "$scratch/bin" "$scratch/seats"
+ printf 'c1a00001\tClerk\tintake\nc1a00002\tExecutive\tdelivery\nc1a00004\tResearch\tmetrics\nc1a00005\tResource\taudit\n' > "$scratch/government/seats.tsv"
+ printf '%s\n' 'UNIQUE ACT 10 CGROUP ASSIGNMENT' > "$scratch/records/summons/c1a00004.md"
++cp "$repo/tests/appointment-id-stub.sh" "$scratch/government/appointments.sh"
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++[ "$1 $2" = 'agent status' ] || exit 9
++printf '{"state":"idle","model":null,"variant":null}\n'
++MOCK
++chmod +x "$scratch/bin/antonina"
++for seat in c1a00001 c1a00002 c1a00004 c1a00005; do mkdir -p "$scratch/seats/$seat"; done
+ VICHE_TOWN_ROOT=$scratch
++VICHE_SEATS_ROOT=$scratch/seats
++VICHE_STATE_ROOT=$scratch/state
+ VICHE_TOWNHALL_ID=302
+-export VICHE_TOWN_ROOT VICHE_TOWNHALL_ID
++PATH="$scratch/bin:$PATH"
++export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_TOWNHALL_ID
+ 
+ printf '%s\n' 'UNIQUE LIVE KAWUN EXECUTIVE ASSIGNMENT' > "$scratch/records/summons/c1a00002.md"
+ /bin/sh "$repo/government/sitting.sh" c1a00002 > "$scratch/executive.txt"

@@ -1,0 +1,261 @@
+commit 6f16fce78b2949342de9967352fc010603cc1d8b
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Thu Oct 15 11:02:50 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Thu Oct 15 11:02:50 2026 -0700
+
+    Restore Viche liveness: Clerk recovery, bounded retries, durable evidence (#11)
+    
+    * Add dedicated Viche Clerk health supervisor entrypoint
+    
+    * Reset acknowledgement retry clock on successful Founder dispatch
+    
+    * Durable exponential backoff and escalation for failed Founder intake dispatch
+    
+    * Normalize POSIX printf newline escapes in durable intake retry handling
+    
+    * Teach intake smoke test to advance durable retry deadline
+    
+    * Recover failed Clerk session with 30-minute cooldown and durable worktree evidence
+    
+    * Run ordinary Clerk liveness reconciliation during each constitutional sitting
+    
+    * Expose shared Clerk retry gate for sittings and Founder intake
+    
+    * Respect Clerk endpoint cooldown in government/sitting.sh
+    
+    * Respect Clerk endpoint cooldown in government/founder-intake.sh
+    
+    * Add hermetic Clerk recovery and cooldown regression
+    
+    * Run Clerk liveness recovery regression in CI
+    
+    * Use collision-safe durable recovery evidence directories
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index d557aec9..3be59a8f 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -25,6 +25,8 @@ jobs:
+           test "$(cut -f1 government/seats.tsv | sort -u | wc -l)" -eq "$(wc -l < government/seats.tsv)"
+       - name: Exercise constitutional launch and recovery
+         run: dash tests/boot-smoke.sh
++      - name: Exercise Clerk liveness recovery and cooldown
++        run: dash tests/clerk-liveness-smoke.sh
+       - name: Exercise legislative tally
+         run: dash tests/tally-smoke.sh
+       - name: Exercise urgent Founder intake independently of sittings
+diff --git a/government/boot.sh b/government/boot.sh
+index 58367690..6a53fe3e 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -45,6 +45,12 @@ while IFS="$tab" read -r agent_id title focus; do
+     fi
+ done < "$town/government/seats.tsv"
+ 
++# Restore a failed Clerk's independent Antonina session only after a cooldown.
++# Ordinary government owns this recovery; constitutional boot/model are unchanged.
++if [ -f "$town/government/clerk-liveness.sh" ]; then
++    /bin/sh "$town/government/clerk-liveness.sh" || echo "Viche: Clerk liveness reconciliation failed" >&2
++fi
++
+ # Janitor Office: observe disk health each cycle; safe reclamation is self-throttled and
+ # non-fatal so it can never block seat reconciliation. Authority and safeguards:
+ # records/bills/janitor-office-act.md (Act 12); observation is within Act 4.2.
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+new file mode 100644
+index 00000000..2b1bc72d
+--- /dev/null
++++ b/government/clerk-liveness.sh
+@@ -0,0 +1,41 @@
++#!/bin/sh
++# Recover a terminally failed Clerk while retaining all work and evidence.
++# The only model remains the one configured by Antonina's constitutional boot.
++set -eu
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness
++mkdir -p "$state"
++umask 077
++id=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
++[ -n "$id" ] || exit 1
++metadata=$(antonina agent status --id "$id" --json)
++kind=$(printf '%s\n' "$metadata" | jq -r '.state')
++reason=$(printf '%s\n' "$metadata" | jq -r '.backend_error.classification // ""')
++[ "$kind" = failed ] || exit 0
++[ "$reason" = upstream_endpoint_unavailable ] || exit 0
++now=$(date +%s)
++last=0
++[ ! -s "$state/last-reset" ] || last=$(cat "$state/last-reset")
++case "$last" in ''|*[!0-9]*) last=0;; esac
++# The ordinary sitting and independent Founder intake both honor this gate.
++# A failed session must not be retried with the same unsafe continuation.
++if [ "${1:-}" = --gate ]; then
++  if [ $((now-last)) -lt 1800 ]; then
++    echo "Viche: waiting for Clerk endpoint recovery cooldown" >&2
++    exit 1
++  fi
++  exit 0
++fi
++[ $((now-last)) -ge 1800 ] || exit 0
++[ -d "$seats/$id" ] || exit 1
++snapshot=$(mktemp -d "$state/recovery-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
++printf '%s\n' "$metadata" > "$snapshot/agent-status.json"
++antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1 || :
++git -C "$seats/$id" status --short > "$snapshot/worktree-status.txt"
++git -C "$seats/$id" rev-parse HEAD > "$snapshot/worktree-head.txt"
++# Persist the attempted recovery before any destructive agent-metadata operation.
++printf '%s\n' "$now" > "$state/last-reset"
++antonina agent delete --id "$id"
++antonina agent new --id "$id" --cwd "$seats/$id" --title 'Viche: Clerk'
++printf '%s session_reset=endpoint_unavailable evidence=%s\n' "$(date -u +%FT%TZ)" "$snapshot" >> "$state/recoveries.log"
+diff --git a/government/founder-intake.sh b/government/founder-intake.sh
+index bd2d6e6f..c5f5deb8 100644
+--- a/government/founder-intake.sh
++++ b/government/founder-intake.sh
+@@ -87,6 +87,12 @@ for f in "$q/sent"/*.json; do
+ done
+ set -- "$q/pending"/*.json
+ [ -f "$1" ] || exit 0
++retry="$q/next-dispatch"
++now=$(date +%s)
++next=0
++[ ! -s "$retry" ] || next=$(cat "$retry")
++case "$next" in ''|*[!0-9]*) next=0;; esac
++[ "$now" -ge "$next" ] || exit 0
+ clerk=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
+ seat=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}/$clerk
+ [ -d "$seat" ] || exit 1
+@@ -94,6 +100,11 @@ charter=${VICHE_CONSTITUTION_DIR:-/var/lib/lubko/from-host/viche-constitution}/C
+ [ -s "$charter" ] || exit 1
+ body=$(jq -rs 'sort_by(.createdAt)|map("Founder instruction "+(.id//"?")+" on issue #"+(.issueNumber//"?")+":\n"+(.body//""))|join("\n\n")' "$@")
+ mode=$(antonina agent status --id "$clerk" --json | jq -er '.state')
++# Founder instructions remain pending while a failed Clerk is cooling down.
++# Do not bypass the same liveness gate used by ordinary sittings.
++if [ -f "$town/government/clerk-liveness.sh" ]; then
++  /bin/sh "$town/government/clerk-liveness.sh" --gate || exit 0
++fi
+ keys=
+ for f in "$@"; do keys="$keys $(basename "$f" .json)"; done
+ charter_text=$(cat "$charter")
+@@ -108,9 +119,27 @@ $charter_text
+ EOF
+ )
+ if [ "$mode" = running ]; then
+-  antonina agent run --id "$clerk" --cwd "$seat" --prompt "$prompt" --steer --detach
++  accepted=0
++  antonina agent run --id "$clerk" --cwd "$seat" --prompt "$prompt" --steer --detach && accepted=1
+ else
+-  antonina agent run --id "$clerk" --cwd "$seat" --prompt "$prompt" --detach
++  accepted=0
++  antonina agent run --id "$clerk" --cwd "$seat" --prompt "$prompt" --detach && accepted=1
++fi
++if [ "$accepted" -ne 1 ]; then
++  n=0
++  [ ! -s "$q/failure-count" ] || n=$(cat "$q/failure-count")
++  case "$n" in ''|*[!0-9]*) n=0;; esac
++  n=$((n+1))
++  delay=60
++  i=1
++  while [ "$i" -lt "$n" ] && [ "$delay" -lt 1800 ]; do delay=$((delay*2)); i=$((i+1)); done
++  [ "$delay" -le 1800 ] || delay=1800
++  printf '%s\n' "$n" > "$q/failure-count"
++  printf '%s\n' "$((now+delay))" > "$retry"
++  printf '%s failures=%s retry_seconds=%s\n' "$(date -u +%FT%TZ)" "$n" "$delay" >> "$q/failures.log"
++  [ "$n" -lt 5 ] || printf 'Dispatch failure count %s; pending events retained; retry in %ss\n' "$n" "$delay" > "$q/ESCALATION"
++  exit 1
+ fi
+-for f in "$@"; do mv "$f" "$q/sent/$(basename "$f")"; done
++rm -f "$retry" "$q/failure-count" "$q/ESCALATION"
++for f in "$@"; do dest="$q/sent/$(basename "$f")"; mv "$f" "$dest"; touch "$dest"; done
+ printf 'Founder intake dispatched %s events to clerk (prior state %s)\n' "$#" "$mode"
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 4ba9ab93..8ea006a8 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -6,6 +6,12 @@ seat=$1
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ tab=$(printf '\t')
+ clerk=$(sed -n "1s/$tab.*//p" "$town/government/seats.tsv")
++if [ "$seat" = "$clerk" ] && [ -f "$town/government/clerk-liveness.sh" ]; then
++    /bin/sh "$town/government/clerk-liveness.sh" --gate || {
++        echo "Viche: Clerk sitting deferred until endpoint retry cooldown" >&2
++        exit 1
++    }
++fi
+ if [ "$seat" = "$clerk" ]; then
+     cat <<EOF
+ You are the provisional parliamentary clerk. Poll Town Hall issue
+diff --git a/tests/clerk-liveness-smoke.sh b/tests/clerk-liveness-smoke.sh
+new file mode 100644
+index 00000000..4c8bf359
+--- /dev/null
++++ b/tests/clerk-liveness-smoke.sh
+@@ -0,0 +1,55 @@
++#!/bin/sh
++# Hermetic Clerk recovery: preserve Git, evidence, cooldown, and retry gate.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT
++mkdir -p "$d/bin" "$d/town/government" "$d/seats/c1a00001" "$d/state" "$d/mock"
++printf 'c1a00001\tClerk\tFounder intake\n' > "$d/town/government/seats.tsv"
++git -C "$d/seats/c1a00001" init -q
++git -C "$d/seats/c1a00001" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm initial
++printf 'valuable uncommitted work\n' > "$d/seats/c1a00001/uncommitted.txt"
++cat > "$d/mock/status" <<'JSON'
++{"state":"failed","model":"opencode-go/longcat-2.5-preview-free","backend_error":{"classification":"upstream_endpoint_unavailable"}}
++JSON
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  'agent status') cat "$MOCK_ROOT/status" ;;
++  'agent log') printf 'Endpoint is unavailable\n' ;;
++  'agent delete') printf 'delete\n' >> "$MOCK_ROOT/actions" ;;
++  'agent new')
++    printf 'new\n' >> "$MOCK_ROOT/actions"
++    printf '{"state":"idle"}\n' > "$MOCK_ROOT/status"
++    ;;
++  *) exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++PATH="$d/bin:$PATH"
++MOCK_ROOT="$d/mock"
++VICHE_TOWN_ROOT="$d/town"
++VICHE_SEATS_ROOT="$d/seats"
++VICHE_STATE_ROOT="$d/state"
++export PATH MOCK_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT
++dash "$repo/government/clerk-liveness.sh"
++test "$(wc -l < "$d/mock/actions")" -eq 2
++test -f "$d/seats/c1a00001/uncommitted.txt"
++test -s "$d/state/liveness/recoveries.log"
++test -s "$d/state/liveness/last-reset"
++test "$(find "$d/state/liveness" -name agent-status.json | wc -l)" -eq 1
++# A newly failed session cannot be restarted again during cooldown.
++cat > "$d/mock/status" <<'JSON'
++{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable"}}
++JSON
++if dash "$repo/government/clerk-liveness.sh" --gate; then exit 1; fi
++dash "$repo/government/clerk-liveness.sh"
++test "$(wc -l < "$d/mock/actions")" -eq 2
++# Once the window expires, one fresh session is allowed.
++printf '0\n' > "$d/state/liveness/last-reset"
++dash "$repo/government/clerk-liveness.sh" --gate
++dash "$repo/government/clerk-liveness.sh"
++test "$(wc -l < "$d/mock/actions")" -eq 4
++test -f "$d/seats/c1a00001/uncommitted.txt"
++printf 'Viche Clerk liveness smoke passed\n'
+diff --git a/tests/intake-smoke.sh b/tests/intake-smoke.sh
+index f249a6a3..c234e1b4 100644
+--- a/tests/intake-smoke.sh
++++ b/tests/intake-smoke.sh
+@@ -58,6 +58,7 @@ if MOCK_FAIL=1 /bin/sh "$repo/government/founder-intake.sh" >/dev/null 2>&1; the
+   echo 'Expected backend failure' >&2; exit 1
+ fi
+ [ "$(find "$d/state/founder-inbox/pending" -name '*.json' | wc -l)" -eq 1 ]
++printf '0\n' > "$d/state/founder-inbox/next-dispatch"
+ printf 'failed\n' > "$d/mock/status"
+ /bin/sh "$repo/government/founder-intake.sh"
+ [ "$(wc -l < "$d/mock/calls")" -eq 2 ]

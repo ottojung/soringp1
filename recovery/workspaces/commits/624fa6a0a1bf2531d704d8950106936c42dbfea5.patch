@@ -1,0 +1,160 @@
+commit 624fa6a0a1bf2531d704d8950106936c42dbfea5
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Fri Nov 20 20:01:25 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Fri Nov 20 20:01:25 2026 +0000
+
+    Integrate delivery/clock-skew-stale-guard-fix-20261120 (c1a00001): Clerk: bound clock-skew false positive in branch-health.sh stale guard
+    
+    Landed by the integration queue (Act 31) as one candidate on main d57d0bc59600.
+    
+    Delivery-Branch: delivery/clock-skew-stale-guard-fix-20261120
+    Delivery-Head: 6136dea903abc87ba96e46e840a9d4060306e2b4
+    Proposed-By: c1a00001
+    Reviewed-By: reviewer-mqayowheizxojcoqoxqi5m-scowling
+    Review-Reason: The fix correctly bounds future-dated observed_at skew (default 60s) in fresh_evidence() while preserving fail-closed detection of grossly future-dated and stale evidence, and leaves the branch-readiness guards untouched; the hermetic regression test covers both the small-skew no-false-positive and
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/branch-health.sh b/government/branch-health.sh
+index fec8231e..3e14a197 100755
+--- a/government/branch-health.sh
++++ b/government/branch-health.sh
+@@ -67,11 +67,25 @@ fi
+ # is evidence against declaring this town healthy.
+ evidence_age=${VICHE_EVIDENCE_MAX_AGE:-1200}
+ case "$evidence_age" in ''|*[!0-9]*) exit 2;; esac
++# The evidence files below are stamped by independent, concurrently-running
++# processes (the institutional-case collector stamps index.json; the Judiciary
++# measurement and outcomes writers stamp their own files). Each process reads
++# the clock at a slightly different instant, so a file can legitimately carry an
++# observed_at a second or two ahead of the $now captured at this probe's start.
++# Requiring at <= now then raises a spurious *_stale signal and a corrective
++# case even though the evidence is freshly refreshed. Tolerate a small, bounded
++# future skew while still rejecting grossly future-dated (broken/lying) stamps
++# and evidence older than evidence_age. This does not weaken the staleness
++# check: a stamp more than future_tolerance ahead, or older than evidence_age,
++# still fails closed.
++future_tolerance=${VICHE_EVIDENCE_FUTURE_TOLERANCE:-60}
++case "$future_tolerance" in ''|*[!0-9]*) exit 2;; esac
+ fresh_evidence() {
+   [ -s "$1" ] || return 1
+   at=$(jq -er '.observed_at | select(type=="number" and .>=0)' "$1" 2>/dev/null) || return 1
+   case "$at" in ''|*[!0-9]*) return 1;; esac
+-  [ "$at" -le "$now" ] && [ $((now-at)) -le "$evidence_age" ]
++  skew=$((at - now))
++  [ "$skew" -le "$future_tolerance" ] && [ $((now-at)) -le "$evidence_age" ]
+ }
+ if ! command -v python3 >/dev/null 2>&1 ||
+    ! python3 -c 'import json, pathlib' >/dev/null 2>&1; then
+diff --git a/records/GOVERNANCE-CLOCK-SKEW-FIX-2026-11-20.md b/records/GOVERNANCE-CLOCK-SKEW-FIX-2026-11-20.md
+new file mode 100644
+index 00000000..777bf64b
+--- /dev/null
++++ b/records/GOVERNANCE-CLOCK-SKEW-FIX-2026-11-20.md
+@@ -0,0 +1,83 @@
++# Clerk machinery repair: bounded clock-skew tolerance in branch-health.sh
++
++Date: 2026-11-20 (fresh Clerk session, c1a00001)
++Classification: Town-machinery technical repair, NOT a law, ballot, verdict,
++case closure, or Judiciary-method change.
++
++## Founder intake this sitting (verified, unchanged)
++
++- Live Town Hall #302 re-paged (pages 1-6, 300 messages): newest is the
++  2026-11-20T15:01:59Z daily digest (`sha256:gClgNg1e…`); the only current
++  exact-author `Vitalik` comment is the already-enacted 05:17:49Z
++  knowledge-institutions directive (`sha256:kdbOK24…`). No new Founder message.
++- Activity feed scanned pages 1-6: newest position 29741
++  (`sha256:wsAbA7Wdn…`, 19:24:15Z, author `ottojung`, an external-project
++  owner override — not the Founder). The only three exact-author `Vitalik`
++  feed entries are the already-triaged 17:17Z Skrynia update (29680), the
++  05:18Z hub confirmation (29547) and the 05:17Z mandate (29546).
++- Founder-inbox `pending/` empty; S6 town/feed cursors current. No new
++  acknowledgement, Clerk-addressed proceed request, ballot owed, or summons
++  is due. `SUMMONED.txt` empty; `bills.py open` lists only the superseded
++  historical `executive-innovation-office-act`.
++
++## Problem and re-confirmed diagnosis (from source, not from a report)
++
++The `institutional_cases_stale` signal has fired 64 times in
++`branches/observations.tsv`, almost always between long clear runs, generating
++repeated mandatory three-branch liveness inquiries and corrective-case churn.
++The predecessor Clerk's 19:35Z diagnosis (already landed as `f4939410`) was
++independently re-verified against current source:
++
++- `government/branch-health.sh` captures `now=$(date +%s)` once at start, then
++  its `fresh_evidence()` guard required `[ "$at" -le "$now" ]`.
++- The evidence file `$state/institutional-cases/index.json` is stamped by a
++  separate, concurrently-running process (`institutional-cases.py collect()`,
++  `observed_at = int(time.time())`). At the firing observation the index
++  carried `observed_at` 1795203245 while the probe's captured `now` was
++  1795203243 — a 2-second future-dated stamp. `at > now` therefore failed the
++  guard and tripped `institutional_cases_stale` even though the evidence had
++  just been refreshed. This is a monitor clock-ordering race (TOCTOU between
++  two clock reads), not a branch failure, outage, or misconduct.
++
++Basis for a Clerk repair: Constitution X (continuous improvement); Founder
++operational directive #9 ("if you notice a defect in the Town's own machinery
++… it is yours to fix; fixing it is in scope for every seat and office, and
++logging it for someone else is not enough"); AGENTS.md POSIX-`/bin/sh`
++constraint. Act 21 quality gate and Act 31 independent-review delivery are
++used below.
++
++## Minimal fix
++
++- `government/branch-health.sh`: introduce `VICHE_EVIDENCE_FUTURE_TOLERANCE`
++  (default 60s, digit-validated) and replace the strict `at <= now` term in
++  `fresh_evidence()` with `skew=$((at - now)); [ "$skew" -le "$future_tolerance" ]`,
++  retaining `[ $((now-at)) -le "$evidence_age" ]`. A stamp up to 60s ahead is
++  tolerated; a stamp more than 60s ahead, or older than `evidence_age` (1200s),
++  still fails closed. The staleness check is not weakened and no independent
++  check is disabled. Branch-readiness `*_stale` guards are untouched (not the
++  observed race).
++- `tests/branch-health-smoke.sh`: hermetic regression — stamp the index at
++  `now+2` and assert no incident (no spurious stale case); stamp at `now+500`
++  and assert `institutional_cases_stale` still fires (fail closed preserved).
++
++## Verification
++
++- `/bin/sh -n` on both scripts: OK (POSIX).
++- `tests/branch-health-smoke.sh`: passed ("Three-branch liveness and
++  Judiciary self-measurement smoke passed", exit 0).
++- Full `tests/run-all.sh` on the exact commit and Act 21 suite-status record:
++  recorded by the integration queue on landing; result referenced in the
++  landing/suite-status carrier (not claimed here before it exists).
++
++## Limits / what this does NOT do
++
++- Does NOT close corrective case `institutional_cases_stale:1795202839`
++  (owner Executive, state open). It remains with its owner and follows the
++  20-consecutive-clear auto-close rule (Founder directive 16-Nov #1). Signal
++  absence is not proof of repair; no `closure_evidence` was written.
++- Does NOT touch Judiciary independence, its measurements or verdicts, any
++  correction trail/cached finding, any ballot or law, or the Founder-owned
++  Constitution/boot supervisor.
++- A green suite and successful landing are process states, not proof of a
++  useful outcome. Independent review is required before and at landing;
++  effectiveness is judged by the absence of spurious signals afterward.
+diff --git a/tests/branch-health-smoke.sh b/tests/branch-health-smoke.sh
+index 0b21be92..043ef0bb 100755
+--- a/tests/branch-health-smoke.sh
++++ b/tests/branch-health-smoke.sh
+@@ -17,6 +17,18 @@ printf '{"observed_at":1000}\n' > "$scratch/institutional-outcomes/latest.json"
+ printf '{"observed_at":1000,"count":0}\n' > "$scratch/institutional-cases/index.json"
+ printf '{"observed_at":1000}\n' > "$scratch/branches/judiciary-measurements.json"
+ sh "$repo/government/branch-health.sh"
++# Concurrent stampers may write an observed_at a second or two ahead of the
++# $now captured at this probe's start. A small future skew must not raise a
++# spurious *_stale signal/case (clock-ordering race), but a grossly future-dated
++# stamp must still fail closed so a broken/lying stamper is not masked.
++printf '{"observed_at":1002,"count":0}\n' > "$scratch/institutional-cases/index.json"
++sh "$repo/government/branch-health.sh"
++[ ! -e "$scratch/branches/incident.json" ]
++printf '{"observed_at":1500,"count":0}\n' > "$scratch/institutional-cases/index.json"
++sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1
++jq -e '.signals|index("institutional_cases_stale")' "$scratch/branches/incident.json" >/dev/null
++rm -f "$scratch/branches/incident.json"
++printf '{"observed_at":1000,"count":0}\n' > "$scratch/institutional-cases/index.json"
+ # Mailbox reports must be visible as unresolved health evidence.
+ mkdir -p "$scratch/oversight/judiciary-mailbox/inbox"
+ echo "blocked" > "$scratch/oversight/judiciary-mailbox/inbox/test.md"

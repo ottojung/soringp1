@@ -1,0 +1,61 @@
+commit 695fd538f23c984dc66911854cb28dec080899cb
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Thu Oct 29 06:28:19 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Thu Oct 29 06:28:19 2026 +0000
+
+    Refuse terminal or concurrent parliamentary seat redispatch
+
+diff --git a/government/sitting.sh b/government/sitting.sh
+index f2630194..0c5b38b6 100755
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -8,6 +8,20 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ [ -s "$town/government/AGENTIC-OPERATIONS.md" ] || exit 1
++# The protected constitutional bootstrap may call this for a terminal seat.
++# Refuse uncertain reuse; only a reconciled, independently appointed successor
++# may receive a fresh prompt. This is a safety invariant, not case diagnosis.
++id=$(/bin/sh "$town/government/appointments.sh" resolve "$seat") || exit 1
++meta=$(antonina agent status --id "$id" --json) || exit 1
++mode=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
++case "$mode" in
++    idle|clearexit) : ;;
++    running) echo "Seat $seat became active; refusing duplicate dispatch" >&2; exit 1 ;;
++    failed|stopped|killed)
++        echo "Seat $seat has terminal invocation $id; preserve effects for a fresh investigator" >&2
++        exit 1 ;;
++    *) echo "Seat $seat status unknown; refuse unsafe dispatch" >&2; exit 1 ;;
++esac
+ # A small deterministic physical safety gate is appropriate, not policy judgment.
+ if [ -f "$town/government/resource-safety.sh" ]; then
+     /bin/sh "$town/government/resource-safety.sh" "$seat" || exit 1
+diff --git a/tests/agentic-dispatch-smoke.sh b/tests/agentic-dispatch-smoke.sh
+index dbead97e..bbb8e74d 100755
+--- a/tests/agentic-dispatch-smoke.sh
++++ b/tests/agentic-dispatch-smoke.sh
+@@ -19,7 +19,7 @@ done
+ mkdir -p "$seats/c1a00001/.git"
+ cat > "$town/government/appointments.sh" <<'APPOINT'
+ #!/bin/sh
+-[ "$1" = ensure ] || exit 2
++case "$1" in ensure|resolve) : ;; *) exit 2 ;; esac
+ printf 'fixture-%s\n' "$2"
+ APPOINT
+ chmod +x "$town/government/appointments.sh"
+@@ -99,4 +99,14 @@ printf 'legal work\n' > "$town/records/AGENDA.md"
+ grep -Fq 'parliamentary seat c1a00001' "$scratch/clerk.prompt"
+ grep -Fq 'Read the Town Hall' "$scratch/clerk.prompt"
+ grep -Fq "$state/office-journals/c1a00001.md" "$scratch/clerk.prompt"
++printf 'failed\n' > "$MOCK_STATE/mode"
++if /bin/sh "$repo/government/sitting.sh" c1a00001 > /dev/null 2>&1; then
++    echo 'Failed parliamentary seat was unsafely redispatched' >&2
++    exit 1
++fi
++printf 'running\n' > "$MOCK_STATE/mode"
++if /bin/sh "$repo/government/sitting.sh" c1a00001 > /dev/null 2>&1; then
++    echo 'Running parliamentary seat was dispatched twice' >&2
++    exit 1
++fi
+ echo 'Agentic dispatch smoke passed'
