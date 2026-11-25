@@ -1,0 +1,11 @@
+package main
+// Focused enumeration: all ordinal-indecomposable posets with e<=12,
+// print count and max exact minimax, plus count by n.
+import ("fmt")
+const LIM=12; const NMAX=12
+var byN=map[int]int{}; var byE=map[int]int{}; var maxM=map[int]int{}; var maxByE=map[int]int{}
+func conn(pred []int,k int)bool{seen:=make([]bool,k);seen[0]=true;st:=[]int{0};for len(st)>0{i:=st[len(st)-1];st=st[:len(st)-1];for j:=0;j<k;j++{if !seen[j]&&(pred[i]>>uint(j))&1==0&&(pred[j]>>uint(i))&1==0{seen[j]=true;st=append(st,j)}}};for _,b:=range seen{if !b{return false}};return true}
+type key struct{s [12]uint32;n int}
+func mm(succ [12]uint32,n int,memo map[key]int)int{k:=key{n:n};for i:=0;i<n;i++{k.s[i]=succ[i]};if v,ok:=memo[k];ok{return v};type pr struct{i,j int};var inc []pr;for i:=0;i<n;i++{for j:=i+1;j<n;j++{if (succ[i]>>uint(j))&1==0&&(succ[j]>>uint(i))&1==0{inc=append(inc,pr{i,j})}}};if len(inc)==0{memo[k]=0;return 0};best:=99;for _,p:=range inc{i,j:=p.i,p.j;var t,u [12]uint32;for x:=0;x<n;x++{t[x]=succ[x];u[x]=succ[x]};dj:=t[j]|(1<<uint(j));t[i]|=dj;for x:=0;x<n;x++{if x==i||(t[x]>>uint(i))&1==1{t[x]|=dj}};a:=mm(t,n,memo);di:=u[i]|(1<<uint(i));u[j]|=di;for x:=0;x<n;x++{if x==j||(u[x]>>uint(j))&1==1{u[x]|=di}};b:=mm(u,n,memo);mx:=a;if b>mx{mx=b};v:=1+mx;if v<best{best=v};if best==1{break}};memo[k]=best;return best}
+func dfs(k int,pred []int,ext [][]int){if k>=1&&len(ext)<=LIM&&conn(pred,k){e:=len(ext);byN[k]++;byE[e]++;var succ [12]uint32;for i:=0;i<k;i++{for j:=0;j<k;j++{if (pred[i]>>uint(j))&1==1{succ[j]|=1<<uint(i)}}};m:=mm(succ,k,map[key]int{});if v,ok:=maxByE[e];!ok||m>v{maxByE[e]=m}};if k==NMAX{return};var Ds []int;var gen func(x,D int);gen=func(x,D int){if x<0{Ds=append(Ds,D);return};if (D>>uint(x))&1==1{gen(x-1,D);return};gen(x-1,D);gen(x-1,D|pred[x]|(1<<uint(x)))};gen(k-1,0);for _,D:=range Ds{var ne [][]int;ok:=true;for _,w:=range ext{mp:=-1;if D!=0{for p:=k-1;p>=0;p--{if (D>>uint(w[p]))&1==1{mp=p;break}}};for pos:=mp+1;pos<=k;pos++{v:=make([]int,len(w)+1);copy(v,w[:pos]);v[pos]=k;copy(v[pos+1:],w[pos:]);ne=append(ne,v);if len(ne)>LIM{ok=false;break}};if !ok{break}};if ok{dfs(k+1,append(append([]int(nil),pred...),D),ne)}}}
+func main(){dfs(0,[]int{},[][]int{{}});fmt.Println("connected cores e<=12, count by n:",byN);fmt.Println("count by e:",byE);fmt.Println("maxM by e:",maxByE)}
