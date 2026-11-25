@@ -1,0 +1,40 @@
+# antonina-XcF2yq8M5dNWdJaukIzqCt-scruples
+
+Session: ses_e19456b5effey6ET2dmxMhyAx4
+Workspace: /home/lubko/soring301-exec-root-composition-20261116
+Created: 1794872349893; updated: 1794873203257
+
+Assistant-visible text only. Tool calls, hidden reasoning, user messages and credentials are excluded. Historical assertions are not independently certified.
+
+## Output 168 (msg_1e6c5e956001gsBWAyYbXEJe2z)
+
+## Recovery / state check (no external side effects taken)
+- **Host/cwd:** `billy-dev`, `/home/lubko/soring301-exec-root-composition-20261116` (clean git tree on `exec/front-root-composition-20261116`, HEAD `6a96398`).
+- **Durable records inspected:** `AGENTS.md`, `docs/problem.md|research-plan|kernel-results|research-series-decomposition|research-compression-next|operations|research-frontier.json|research-packets.json`, board #301 recent pages (digest), and host ledger `~/.local/state/soringp1/frontier-ledger.json`.
+- **Prior related work:** ledger front `root-composition-exact-recurrence` (agent `OchERapJ6Ncb667p8f9GhX-radiantly`, status `investigated`) records a closely related negative finding and states it was posted to #301, but I could not locate that specific post text on board pages sampled (searched id/example terms). **I did not post to #301** to avoid a possible duplicate; proposed concise board update is included below for review/dispatch.
+
+## Question
+Falsifiable: is there a polynomial-state, **root-preserving** compositional interface/summary for exact optimal sorting (series/ordinal-product or other structured families) that determines `S` from the antichain root, **including both sibling branches**? Falsify by a minimal extensible counterexample family where candidate summaries agree but exact root minimax differs, or a concrete sibling-incompatibility obstruction for a specified summary class. (Unary/`S(n)`-relevant only; exact root value ≠ post-transcript `F(P)`.)
+
+## Findings (deduction / precise obstruction; no new theorem beyond stated scope)
+
+### 1. Specified summary class: target-state-only (any function of current poset/`F(P)`/extension-set, forgetting prefix history) — **sibling-incompatibility obstruction (general, all n)**
+- **Definition/deduction.** For a transcript prefix `h = (c1,o1),...,(cd,od)` from the antichain to poset `P_h`, with sibling states `Q_i` at step `i`, root-prefix viability at budget `k` is
+  `R_h(P_h, k) := [d + F(P_h) ≤ k] ∧ ⋀_{i<d} [i + F(Q_i) ≤ k]` (equivalently `R_h(P_h)=max(d+F(P_h), max_i(i+F(Q_i)))`). A comparison choice is root-optimal-feasible only if **both** outcome branches admit some feasible continuation; `F(P)` is the exact post-state value but does **not** encode sibling costs `F(Q_i)` incurred along the path used to reach `P`.
+- **Obstruction.** Any interface/summary `σ(P)` depending only on the target state (or any invariant equal for two different prefixes reaching summary-equivalent states) cannot determine `R_h` nor certify/select a root-optimal strategy, because there exist prefixes/states with equal `σ` (indeed equal `P,F(P)`) but different `max_i(i+F(Q_i))`. Hence no root-preserving decision procedure can be obtained from target-state composition alone; the summary class must carry prefix/sibling-viability information (a path property), not just post-transcript `F`.
+- **Evidence/anchor.** This is the standard minimax game-tree feasibility condition. `docs/research-packets.json` / `docs/research-frontier.json` record the motivating reported instance: `n=5`, target `C2 ⊕ A3`, `d+F(P)=S(5)=7` yet `min_h R_h(P)=8 > S(5)` (sibling obstruction). **Label:** deduction of the obstruction form from model; the specific `n=5` tuple is **literature/ledger-reported here, not independently recomputed in this pass**. Consequence: exact root composition ≠ exact post-state composition.
+
+### 2. Structured-family compositionality boundary (series/ordinal-sum) — **exact post-state, not a root-antichain reduction**
+- **Deduction (standard, cf. `docs/research-series-decomposition.md`, Jain–Klauck–Sántha direct-sum).** `F(A ⊕ B)=F(A)+F(B)` for ordinal sums and decomposable posets factor over `Inc(P)` components; this is an exact *state* recurrence but the antichain root is series-prime and reachable states need not become polynomially-factorable in a way that shrinks the exact DP frontier. Thus series/ordinal-sum interfaces are root-preserving only on families whose root/prefixes remain in that decomposable form (not general `S(n)`); they do not supply a polynomial-state root summary for the antichain.
+
+### 3. Candidate local block/profile summaries that forget cross-block correlation — **falsified on correlated subsets; realizability caveat for poset states**
+- **Construction (deduction).** Blocks `A={0,1}, B={2,3}`. `X={0123,1032}` and independent `Y=L(A)×L(B)` have identical per-block local summaries under “feasible local orders/profile/value” views: each projection is `{01,10}` with local minimax 1 and symmetric split. But joint exact values differ: `F(X)=1` (compare `0?1`: outcome fixes `2?3` inside `X`) vs `F(Y)=2` (independent product/direct-sum). Therefore any compositional interface that stores only per-block local order/value/split summaries and discards cross-block correlation cannot determine the joint minimax (and hence cannot be complete for families admitting such correlated interfaces).
+- **Model-fidelity limit.** `X` is a correlated subset not equal to `L(P)` of any single poset `P` (e.g. orders `0132,1023` consistent with pairwise constraints of `X` are absent), so this alone does **not** exhibit a poset-reachable counterexample from the antichain root. For disjoint-union poset states `P1 ⊔ P2`, `L(P)=L(P1)×L(P2)` (no correlation) but `F` is an interleaving minimax, not additive — a separate obstruction to naive product summaries. **Label:** subset-level falsifier = deduction; root-reachable/poset-realizable correlated-interface counterexample = **open/precise blocker**.
+
+## Net assessment
+- **No** polynomial-state root-preserving compositional summary established.
+- **Negative (conditional on class):** target-state-only summaries are ruled out for root preservation by the sibling-prefix obstruction (1); correlation-forgetting local summaries are ruled out for joint determination on correlated transcript subsets (3, with realizability caveat).
+- **Sharp blocker:** to be root-preserving, a candidate interface must simultaneously (a) certify both siblings/prefix viability (not just `F(P)`) and (b) track cross-component correlations/interleaving information sufficient for exact minimax; exhibiting such a summary with polynomially many states for all `n` (or a root-reachable poset family where all plausible polynomial summaries collide but `R_h`/root `S` differs) remains the decisive open step. No complexity-class claim follows (unary barriers per `problem.md`).
+
+## Proposed concise board #301 update (not posted — possible duplicate)
+> **Front (root-composition, independent):** negative/obstruction, no root-preserving poly-state summary found. (1) **Deduction, target-state-only class:** root feasibility `R_h=max(d+F(P_h), max_{i<d}(i+F(Q_i)))` depends on sibling costs along prefix, so any summary of current state/value alone (forgetting siblings) cannot preserve antichain-root optimality; ledger-reported anchor `n=5, C2⊕A3, d+F=S(5)=7, min_h R_h=8` (not recomputed here) exemplifies. (2) Series `F(A⊕B)=F(A)+F(B)` is exact post-state but root antichain is series-prime (no root reduction). (3) **Deduction, correlation-forgetting local block summaries:** `A={0,1},B={2,3}`, `X={0123,1032}` vs `Y=L(A)×L(B)` share local profiles but `F(X)=1, F(Y)=2`; *caveat:* `X` not shown realizable as `L(P)` from root, so poset-reachable collision remains open. **Blocker:** need summary carrying prefix/sibling viability + cross-block correlation/interleaving with poly states for all `n`, or a root-reachable collision family. No NP/P/separation claim; clean worktree, no repo/Lean changes, not posted earlier by me pending duplicate check.
