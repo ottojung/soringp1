@@ -1,0 +1,461 @@
+# FO(TC) strategy programs for exact optimal sorting
+
+**Status:** research note (paper-and-literature analysis; not Lean-checked).
+Coordinates with umbrella Antonina #301 and GitHub `ottojung/soringp1` issue #47 (forgetful
+framed-DAG certificates). No Lean formalization, no repository code change, no CI change,
+no branch delivery except this note. The note is a single consolidated deliverable for the
+assigned FO(TC) issue.
+
+Labels used below: **definition**, **literature**, **deduction**, **conjecture**,
+**experiment**, **paper proof**, **kernel-checked** (none here).
+
+## 0. Sharp question and consequence
+
+**Question Q.** For every `n`, is there an *optimal* adaptive comparison strategy for sorting
+`n` distinct labelled keys whose decision rule can be described by a program of size
+`poly(n + S(n))` and executed by a *uniform polynomial-time* interpreter, where the
+interpreter may inspect the unknown total order only through charged comparison oracle
+queries?
+
+**Consequence if true.** Let `SORT-BOUND-U = {1^n # 1^k : S(n) <= k}`. If for every
+`n` with `S(n) <= k` such a program exists, then the subclass of strategies so
+representable gives a `Sigma_2^P` upper bound for that subclass:
+`exists p (|p| <= poly(n,k)) forall total X in S_n  Verify(p,X,n,k)`. This would be a
+genuine upper-bound result for a nontrivial family of optimal sorters. It would **not**
+put unrestricted `SORT-BOUND-U` in `NP` or `coNP`: the existential program guess is
+second-order over a universal adversarial input, and no polynomial-size certificate for
+arbitrary optimal sorters is known.
+
+**Consequence if false.** A refutation of a *proposed restriction* (fixed variable count,
+fixed interpreter clock, fixed split schema, explicit tree storage) rules out that
+restriction as a general compiler. It does not automatically refute every possible
+program family. A decisive refutation would need a family of `n` for which every correct
+program has super-polynomial size or super-polynomial interpreter runtime.
+
+**Scope discipline.** The active target is the unary threshold language and its function
+counterpart. Binary encodings and sorting networks are out of scope unless an explicit
+decision is made. `S(n)` is a numeric function; `P`, `NP`, `EXPTIME` apply to explicitly
+defined decision languages, not to numeric functions. No unconditional super-polynomial
+lower bound for `SORT-BOUND-U` is sought; such a bound would imply `P != PSPACE`.
+
+## 1. Formally specified model
+
+### 1.1 Structures and hidden order
+
+- Domain. A state structure has domain of size `N = Theta(n + k + 1)`. It contains the
+  key set `[n]` as a distinguished subset, indices for registers, and (for the interpreter)
+  a step counter. All quantification ranges over this domain.
+- Hidden order. The input is an unknown total order `X` on `[n]`. The program has no free
+  access to `X`. The only interaction is the charged oracle `cmp(i,j;X)`, which returns
+  whether `i <_X j`.
+- State. A state is a tuple
+  `P = (Lt, Unk, H, Out, q, ell)`
+  where:
+  - `Lt` is a strict partial order on `[n]` (transitive closure of observed comparisons),
+    stored as a binary relation `Lt(a,b)` meaning `a < b` is known;
+  - `Unk(a,b)` means `a` and `b` are incomparable in `Lt`;
+  - `H` is the history of charged oracle answers (so a repeated query is charged again);
+  - `Out` is a partial permutation / output buffer;
+  - `q` is the number of charged comparisons so far;
+  - `ell` is the current control label.
+  The initial state is the `n`-antichain: no nontrivial `Lt` edges, `Unk` all distinct pairs,
+  empty `Out`, `q = 0`.
+
+### 1.2 Syntax
+
+We define two equivalent levels.
+
+**Logical level (FO(TC) rules).** A program `p` is a finite deterministic map from control
+labels to rules. Each rule is a pair `(psi, action)` where:
+
+- `psi` is a formula in a fixed fragment `FO(TC)_v` (first-order logic plus transitive
+  closure, with at most `v` variables and arity at most `v`) over the state vocabulary.
+  The formula may use equality, the stored relations `Lt`, `Unk`, `H`, `Out`, and (through
+  the interpreter) a clock relation. It may not mention `X`.
+- `action` is one of:
+  - `Ask(x,y; ell_LT, ell_GT)`: select an incomparable pair `(x,y)`; the guard must
+    ensure `Unk(x,y)`;
+  - `Emit(pos, val)` or `EmitPerm`: write to `Out` when `Lt` is total;
+  - `Goto(ell')`;
+  - `Halt`.
+
+The guard `psi` must denote a singleton action choice (or a unique enabled rule). The
+interpreter rejects `p` if a label has zero or multiple enabled rules.
+
+**Instruction level (ESP-style, concrete).** For implementation and combined-complexity
+testing, the same semantics can be given by a fixed register-machine instruction set:
+`HALT`, `EMIT`, `GOTO`, `JZ`, `INC`, `DEC`, `COPY`, `ADD`, `SUB`, `MUL`, `DIV`, `MOD`,
+`CMP`, `LOAD/STORE` (register-indirect), `PUSH/POP`, plus a charged `ASK i,j`. This
+level is used to make the interpreter cost an explicit, testable function. It is not
+claimed to be a logic fragment by itself; it is a lower-level witness for the accounting.
+
+### 1.3 Semantics
+
+`Run(p, X)`:
+
+1. Initialize `P` to the `n`-antichain, `q = 0`, `ell = entry`.
+2. Repeat:
+   - Evaluate the rule at `ell`.
+   - `Ask(i,j)`: require `i != j` and `Unk(i,j)`. Invoke `cmp(i,j;X)`; charge one
+     comparison; `q := q + 1`; update `Lt := tc(Lt ∪ {edge})`; set `ell` to the branch
+     label for the outcome.
+   - `Emit`: if `Lt` is total, write the unique linear extension to `Out`; otherwise reject.
+   - `Goto`: set `ell`.
+   - `Halt`: stop with success iff `Out` is a permutation of `[n]`, `q <= k`, and `Out`
+     is sorted according to `X`.
+3. If `q > k` or the step clock is exceeded, reject.
+
+The **worst-case comparison budget** is `k(p) = max_X q` over all total orders `X`.
+The **program size** `|p|` is the number of rules/symbols (or bits) in the chosen encoding.
+Polynomial-size certificates require `|p| = poly(n + k)`.
+
+### 1.4 Cost accounting
+
+- Oracle queries. Each `Ask` costs exactly one comparison. There is no free access to `X`:
+  `Lt` changes only by charged answers plus transitive closure. No formula may inspect `X`
+  directly.
+- Program size. `|p|` counts the description length of the strategy, not the size of its
+  implicit decision tree.
+- Interpreter cost. A uniform interpreter `IP` takes `(p, n, k, X-oracle)` and executes
+  `Run`. Its running time must be an explicit polynomial in `n, k, |p|`, and the number
+  of rule applications `T`, with fixed exponents. The interpreter must not have
+  instance-specific code paths whose cost is hidden.
+- Budget honesty. Any enumeration, search, or optimization performed during `Run` counts
+  toward `T` and toward the interpreter clock. A program that first searches for an
+  optimal decision tree and then executes it does not satisfy the runtime condition, even
+  if its description is short, because the search is exponential in `n`.
+
+## 2. Combined evaluation complexity
+
+### 2.1 Data complexity is not combined complexity
+
+`FO(TC)` captures `NL`: for a *fixed* formula `phi`, evaluating `phi` on a structure of
+size `N` is in nondeterministic logarithmic space, hence deterministic polynomial time.
+This is **data complexity**. It does not apply when the formula grows with `N`, as a program
+text does. The combined complexity of first-order logic is `PSPACE`-complete in general;
+with transitive closure it is at least as hard. Therefore writing a strategy as "FO(TC)
+source code" does not by itself give a polynomial-time verifier. The universal verification
+step is polynomial only after a uniform combined evaluator is proved.
+
+### 2.2 Bounded-variable fragment lemma
+
+**Lemma A (combined evaluation of FO(TC)_v).** Let `v` be fixed. For any structure of
+size `N` and any `FO(TC)_v` formula `phi` of size `m`, `phi` can be evaluated in time
+`O(m * N^{2v})` (and space `O(N^v)`), with the transitive-closure operator computed by
+iterating a fixed-point over `v`-tuples.
+
+*Proof sketch.* Evaluate subformulas bottom-up. Each subformula denotes a relation of arity
+at most `v`, represented as a boolean table of size `N^v`. First-order quantifiers are
+joins/projections costing `O(N^{a+1})` for `a` free variables. A transitive-closure
+subformula `TC_{x,y}^{z_1,...,z_a}(R)(u,v)` is computed by initializing the reachability
+table for context tuple `(z_1,...,z_a)` and closing under paths, costing `O(N^{a+2})` per
+context-free pair update; summed over all contexts this is `O(N^{a+2}) <= O(N^{v})` for
+`a + 2 <= v`, and iterating to fixed point adds at most a factor `N` only if naive; using
+standard dynamic programming for TC over `N^a` independent graphs costs `O(N^{a+2})` per
+graph, total `O(N^{a+2} * N^a) = O(N^{2a+2}) <= O(N^{2v})`. Constants depend only on `v`.
+
+**Corollary B (fixed interpreter clocks).** Let the interpreter use a fixed variable bound
+`v`, a fixed rule-application bound `d`, and a fixed machine-step bound `c`. Let
+`L = n + k + |p| + 2`. If every rule application costs at most `O(L^d)` steps and at most
+`L^c` rule applications occur, then `IP` runs in `O(L^{dc + 2v})` time. The exponents are
+fixed by the interpreter, not by the instance.
+
+**Corollary C (conditional class placement).** If there is a uniform polynomial interpreter
+with fixed `v,d,c` and a polynomial-size program family `p_n`, then the representable
+subclass
+
+`QWIN_v = { (n,k) : exists p with |p| <= poly(n,k), Run(p,X) sorts all X in <= k }`
+
+is in `Sigma_2^P`: guess `p` (polynomial size), then universally quantify `X` and verify
+in polynomial time using `IP`. Soundness (`Run` correct and within budget implies
+`S(n) <= k`) is immediate from the semantics.
+
+### 2.3 What is lost by fixing `v`
+
+- Fixed variable count. Properties that, in an unrestricted formula, would quantify over
+  tuples whose size grows with `n` must be encoded by transitive closure of fixed width.
+  This can increase formula size and may make some global conditions inexpressible without
+  a larger `v`.
+- Fixed arity. State relations have arity at most `v`. An `n x n` partial order is a binary
+  relation and is fine; higher-arity derived tables may need TC encodings.
+- Context width. A transitive closure `TC_{x,y}^{z_1,...,z_a}` consumes `a + 2` variables.
+  For `v = 2`, only context-free reachability (`a = 0`) is available. Larger `v` increases
+  the exponent `2v` but keeps evaluation polynomial.
+- Fixed clocks. The bounds `d` and `c` are part of the interpreter definition. A family of
+  programs whose natural runtime grows faster than `L^c` is not captured, even if it is
+  polynomial with a larger exponent. The interpreter must be chosen with enough slack, or
+  the family must be rewritten.
+
+### 2.4 Alternative concrete interpreter (ESP)
+
+The ESP-style register machine gives a fully explicit combined bound:
+`O(T * n^2 * polylog M)` where `T` is the number of executed instructions, `n` bounds the
+key domain, and `M` bounds register values. Its tests check interpreter determinism,
+comparison charging, and exact-budget acceptance for small `n`. This is a lower-level
+accounting witness: it shows the abstract cost model can be made machine-checkable, but it
+does not by itself prove a complexity-class result for FO(TC).
+
+## 3. Elementary examples
+
+### 3.1 Insertion sort
+
+Maintain a sorted prefix `S_m`. For each new element `x`, binary-search its position in
+`S_m` by comparing `x` with middle elements; insert and update the known order.
+
+- Comparison count. `B(n) = sum_{i=1}^{n-1} ceil(log_2 (i+1)) <= n log_2 n`.
+- Program size. In a parametric schema, the rule templates are `O(1)` and the parameter
+  encoding costs `O(log n)`; in an explicit per-`n` unfolding of the binary decision
+  structure, the size is exponential in the tree height and is not a polynomial compiler.
+  In the RAM-addressed extension, insertion sort runs in `O(n^2 log n)` interpreter steps.
+- Exactness. `B(n)` is an upper bound, not `S(n)`. It matches `S(n)` for very small `n`
+  but is not uniformly optimal (binary insertion is not optimal for `n >= 5` in the
+  worst case). It is an upper-envelope restricted family.
+
+### 3.2 Merge sort
+
+Divide the keys into two halves, sort each, then merge by pairwise comparisons.
+
+- Recurrence. `M(n) = M(floor(n/2)) + M(ceil(n/2)) + n - 1`.
+- Comparison counts for small `n`: `M(1..8) = 0,1,3,5,8,11,14,17`, while
+  `S(1..8) = 0,1,3,5,7,10,13,16`. Merge sort exceeds the optimum from `n = 5`.
+- Program size. A recursive schema is polynomial in `n`; an explicit unfolding of the
+  recursion tree is exponential in depth. State must track merge fronts and their known
+  orders.
+
+### 3.3 Small optimal sorters
+
+For a fixed `n`, an optimal decision tree of height `S(n)` can be encoded as a program
+with one label per tree node. This validates the semantics but is not a uniform compiler:
+a single optimal policy tree has `2 * n! - 1` nodes for `n >= 2`, and the all-optimal
+DAG still has super-polynomial size in the worst case. For `n <= 4` exact-budget programs
+were checked by the ESP tests. For `n >= 5`, exactness requires compression beyond explicit
+tree storage; this is the open compression question.
+
+## 4. All-n exact-completeness conjecture
+
+**Conjecture C (falsifiable, all-n).** For every `n`, there exists a strategy program
+`p_n` with `|p_n| = poly(n + S(n))` and a uniform polynomial interpreter such that
+`p_n` is an optimal `S(n)`-comparison sorter.
+
+If `C` holds with a fixed interpreter, then the representable subclass gives the
+`Sigma_2^P` upper bound of Corollary C. `C` is a statement about *existence of compact
+strategies*, not about `S(n)` itself.
+
+**What a proof would need.**
+
+1. A structural characterization of optimal play that avoids enumerating transcripts or
+   winning states. The winning-frontier barrier rules out full frontier enumeration even
+   at the exact optimum, so any proof must use a coarser invariant.
+2. A parametric schema whose size is polynomial in `n` and whose instantiated execution
+   follows an optimal path for every total order. The schema must not merely describe an
+   upper bound such as insertion or merge sort; it must hit `S(n)` exactly.
+3. A proof that the schema's interpreter cost is polynomial with fixed exponents, including
+   state updates and guard evaluation.
+
+**What would refute C or a proposed restriction.**
+
+- A family of `n` for which every correct program has super-polynomial size or
+  super-polynomial runtime. Candidate sources: communication-complexity lower bounds on
+  the universal input-order quantifier; asymmetry between branches; information-theoretic
+  arguments on the number of distinct optimal first moves.
+- The split-schema barrier: sorting a fixed `m`-subset first and then completing gives
+  lower bound `S(m) + ceil(log_2 (n!/m!))`. Phase coupling makes the counting bound
+  unachievable in cells such as `(m,n) = (4,6), (3,6), (4,7), (6,9)`, while `(5,8)` is
+  exact. Fixed split points are insufficient for all `n`.
+- The exact-reset obstruction: odd-`n` antichain-to-star reset families show that
+  extension-count divisibility conditions are not sufficient for realizability.
+- The exponential size of explicit optimal trees (`2*n! - 1` nodes) shows that direct
+  storage is impossible; any compact program must exploit symmetry or derived relations.
+- The winning-frontier lower bound is withdrawn for optimal play: reachable
+  budget-winning states are not necessarily on an optimal play. Hence frontier size alone
+  does not prove `C` false or true.
+
+**Runtime honesty.** A short program that first exhaustively searches for an optimal
+decision tree and then executes it does not satisfy the runtime condition. The search cost
+is exponential in `n`, and the budget `k` does not pay for it. Such a program is a
+description of a strategy, not a polynomial-time strategy.
+
+## 5. Forgetful framed DAGs and program compression
+
+### 5.1 Subsumption
+
+A framed DAG is a directed acyclic graph whose nodes are poset states and whose edges are
+charged comparisons, with joins where two paths meet. Programs subsume framed DAGs:
+
+- Each DAG node becomes a program label or block; each edge becomes an `Ask` followed by
+  `Goto`.
+- A join requires the program state to equal the intersection of the known orders from the
+  two paths. A program can achieve this by recomputing the intersection from its stored
+  state, or by storing the intersection explicitly, at cost polynomial in `n` and in the
+  DAG size.
+- Therefore, if a polynomial-size framed DAG exists for a family, a polynomial-size
+  program exists for the same family, with at most polynomial overhead.
+
+The converse is open: programs may be strictly more succinct because they can compute
+derived relations (transitive closure) and choose comparisons by formulas rather than by
+explicit node identity. Candidate compression sources are:
+
+- transitive-closure-derived comparisons that avoid storing intermediate posets;
+- symmetry quotienting over label permutations;
+- parametric schemas with `O(log n)` parameter encoding;
+- forgetful joins that identify states by derived invariants rather than full poset
+  isomorphism.
+
+Whether any of these yields an asymptotic reduction in description size for optimal
+strategies is not known. A useful small-`n` test is to compare, for `n = 4..8`, the
+minimum program size against the minimum framed-DAG size under a fixed cost model.
+
+### 5.2 Finite-model theory review
+
+- `FO(TC)` captures `NL` in data complexity for fixed formulas (Immerman). This is the
+  source of the temptation to treat logical programs as polynomial-time strategies; it is
+  not sufficient for growing program texts.
+- Combined complexity is the actual question. Without a uniform evaluator, evaluating a
+  growing `FO(TC)` text can be exponential.
+- Bounded-variable fragments `FO^k` and `TC^k` give explicit combined bounds (Lemma A) at
+  the cost of fixed variable count and context width.
+- Descriptive complexity. `SORT-BOUND-U in PSPACE` is consistent with an `FO(PFP)`
+  definition on ordered structures. An `FO(LFP)` definition would imply `P`; an existential
+  second-order definition would imply `NP`. Neither is known. Compact recursion alone does
+  not justify a smaller class.
+- No `FO(LFP)` or existential-second-order definition of `SORT-BOUND-U` is known.
+
+### 5.3 Comparator and adaptive-sorting literature
+
+- Hyafil and Rivest: optimal decision trees with arbitrary tests are `NP`-hard. The test
+  set here is not arbitrary; it is the fixed family of pairwise comparisons on `[n]`. The
+  hardness result does not transfer without a reduction.
+- Laber and Nogueira: inapproximability of minimum-height decision trees. Again, the
+  arbitrary-test model differs from fixed pairwise comparisons.
+- Parberry: sorting-network verification is `coNP`-complete. Adaptive decision trees and
+  sorting networks are different objects; do not conflate them.
+- Kahn and Saks, Kahn and Kim, Cardinal et al.: sorting under partial information can be
+  approximated in polynomial time up to constants, but the exact optimum is not known to be
+  polynomial-time computable.
+- Brightwell and Winkler: counting linear extensions is `#P`-complete. This is a barrier
+  to greedy selectors that use extension counts as a sufficient statistic.
+- Wells, Peczarski, Stober and Weiß: exact values up to `n = 22` by exhaustive
+  bidirectional search. These are data, not a uniform algorithm.
+- Sergeev: asymptotic surplus `S(n) - log_2 n! = O(n / (log n)^{1/5})`. This bounds the
+  gap an exact algorithm must close.
+- Framed DAGs (issue #47): sound polynomial-time verifier, merge-sort and rank-envelope
+  constructions, entropy and forgetting. These are the closest existing certificate family.
+
+## 6. Existential program choice versus universal adversarial outcomes
+
+Define the predicate
+
+`QWIN_v(n,k) := exists p (|p| <= poly(n,k)) such that for all total orders X on [n],
+Run(p,X) outputs the sorted order and uses at most k charged comparisons.`
+
+- **Soundness (deduction).** If `QWIN_v(n,k)` holds, then `S(n) <= k`, because `p` is a
+  valid adaptive sorter with worst-case budget `k`.
+- **Conditional class placement (deduction).** If there is a uniform polynomial interpreter
+  with fixed `v,d,c` and a polynomial-size program family, then `QWIN_v` is in
+  `Sigma_2^P`: guess `p`, then universally quantify `X` and verify in polynomial time.
+- **Why the universal step is polynomial only conditionally.** For a fixed `p` that fits the
+  interpreter clock, the statement "p sorts every X within k" has a polynomial-time
+  verification (run `IP` on each `X`; equivalently, its negation is in `NP` by guessing a
+  counterexample `X` or a consistent comparison path). Adding the existential guess of `p`
+  gives `Sigma_2^P`. If the interpreter is not uniformly polynomial -- for example, if
+  evaluating the growing `FO(TC)` text is exponential -- the verification step is not
+  polynomial, and the quantifier pattern lands in a larger class such as `NEXP`, not
+  `Sigma_2^P`. Writing `FO(TC)` source code alone does not guarantee the smaller class.
+- **No unrestricted membership claim.** `QWIN_v` is a subclass. It is not known whether
+  every optimal sorter is representable, so no membership claim for `SORT-BOUND-U` in
+  `NP`, `coNP`, or `Sigma_2^P` follows. `NP` would require a polynomial-size certificate
+  for arbitrary optimal sorters; `coNP` would require polynomial-size refutation
+  certificates. Mahaney's theorem rules out many-one `NP`-hardness for the unary language,
+  but it does not imply membership.
+- **Existential versus universal (task 6).** Keep the existential choice of `p` separate
+  from the universal adversarial outcome `X`. Conflating them -- for example, by saying
+  "there exists a formula, and FO(TC) is NL" -- is exactly the combined-complexity error.
+
+## 7. Failed approaches preserved
+
+1. **Winning-frontier enumeration.** `2^{(1/4 - o(1)) n log^2 n}` nonisomorphic winning
+   states at one depth, including at budget `S(n)` via Sergeev's bound. Full enumeration is
+   ruled out even at the optimum. The attempted transfer to optimal-play states was
+   withdrawn: reachable budget-winning states need not lie on an optimal play.
+2. **Linear extensions as sufficient statistic.** `e(P)` does not determine minimax value;
+   five scalar invariants were falsified. Extension counts can guide heuristics but cannot
+   certify optimal moves.
+3. **Balanced-greedy and simple split rules.** The balanced-greedy class returns 20
+   comparisons for `n = 9` where `S(9) = 19`. Fixed split points miss cells
+   `(4,6), (3,6), (4,7), (6,9)`.
+4. **Explicit optimal tree storage.** An explicit sorting-tree witness has `2*n! - 1` nodes,
+   so it is not a polynomial certificate.
+5. **Runtime search.** A program that searches for an optimal tree at runtime has
+   exponential cost and violates the budget.
+6. **Direct hardness transfer.** General-poset `CanSort(P,k)`, optimal binary trees with
+   arbitrary tests, expected-case identification, and linear-extension counting are
+   different problems. Hardness for them does not transfer to `S(n)` without a
+   uniform encoding-preserving reduction.
+7. **State compression without exponent gain.** Ordinal-sum decomposition is exact but does
+   not shrink the state space. Quotienting by poset isomorphism and other symmetry
+   reductions have not reduced the `2^{Theta(n^2)}` exponent.
+8. **Premature Lean formalization.** The minimax correspondence is complete; routine
+   small-`n` or helper proofs are not research priorities. No Lean is added here.
+
+## 8. Known versus conjectured versus open
+
+| Item | Status | Source |
+|---|---|---|
+| `S(n)` exact values for `n <= 22` | literature | Wells, Peczarski, Stober-Weiß |
+| `SORT-BOUND-U in PSPACE`, `SORT-BOUND-B in EXPSPACE` | paper proof | research-certificates-barriers.md |
+| Budgeted DFS `2^{O(n log^2 n)}` time, `O(n log^2 n)` bits | paper proof + code | research-budgeted-dfs.md |
+| Sparse unary threshold (Mahaney) | literature + deduction | research-hardness-boundaries.md |
+| Winning-frontier barrier `2^{(1/4-o(1)) n log^2 n}` states | paper theorem | research-winning-frontier-barrier.md |
+| Explicit tree witness `2*n! - 1` nodes | deduction | research-certificates-barriers.md |
+| `e(P)` not sufficient; invariants falsified | experiment | research-n12-nontightness.md |
+| Ordinal-sum exact, no state gain | deduction + experiment | research-series-decomposition.md |
+| Framed-DAG sound checker and constructions | code + paper | issue #47 |
+| FO(TC) data complexity `NL` | literature | Immerman |
+| Combined FO(TC) evaluation polynomial for fixed `v` | deduction (Lemma A) | this note |
+| `QWIN_v in Sigma_2^P` under uniform interpreter | deduction (Corollary C) | this note |
+| Existence of polynomial-size optimal programs (Conjecture C) | conjecture | this note |
+| `SORT-BOUND-U in NP` or `coNP` | open | -- |
+| `S(n)` computable in `2^{O(n log n)}` or `2^{O(n)}` | open | -- |
+| Space `O(N log N)` reducible to `O(N)` | open | -- |
+| Effective finite Sergeev bound | open | -- |
+
+## 9. Next decisive step
+
+The next useful work is not more finite enumeration or another agent. It is one of:
+
+1. Prove or refute Conjecture C for a restricted class (for example, fixed `v = 3` and a
+   specific schema) with an all-`n` argument.
+2. Produce a family of `n` for which every program needs super-polynomial size or runtime,
+   with a rigorous reduction or information-theoretic proof.
+3. Build the small-`n` program-versus-framed-DAG size comparison for `n = 4..8` under a
+   fixed cost model, to test whether programs actually compress.
+
+If none of these is achievable, report that explicitly on Antonina #301 and stop, rather than
+adding Lean, documentation, or agent activity.
+
+## Sources
+
+Primary sources relied on (see `docs/literature.md` for full bibliography):
+
+- Immerman, *Descriptive Complexity* (FO(TC) and NL).
+- Hyafil and Rivest, "Constructing optimal binary decision trees is NP-complete", 1976.
+- Laber and Nogueira, "On the hardness of approximating optimum decision trees", 2004.
+- Parberry, "The computational complexity of optimal sorting networks", 1989.
+- Kahn and Saks, "Balancing poset extensions", 1984; Kahn and Kim, 1995.
+- Cardinal, Fiorini, Joret, Theis, and Telle, "Minimum entropy combinatorial optimization
+  problems", 2010.
+- Brightwell and Winkler, "Counting linear extensions", 1991.
+- Wells, "A new bound for the initial (n-1)! permutations", 1999? (exact S(12)).
+- Peczarski, "New results in minimum-comparison sorting", 2004/2007.
+- Stober and Weiß, exact values S(16)-S(18), 2023.
+- Sergeev, asymptotic upper bounds for sorting.
+- Otto Jung / SoringP1 repository documents: `docs/problem.md`, `docs/upper-bound.md`,
+  `docs/research-certificates-barriers.md`, `docs/research-budgeted-dfs.md`,
+  `docs/research-framed-certificate-frontier.md`, `docs/research-strategy-certificates.md`,
+  `docs/research-state-compression.md`, `docs/research-winning-frontier-barrier.md`,
+  `docs/research-n12-nontightness.md`, `docs/research-series-decomposition.md`.
+- Antonina board #301 comments, 2026-11-19 (correction of winning-frontier transfer,
+  local-DAG versus global-tree distinction, independent audit).
+- Antonina board issue `JTsW4AnxTLzN18IBQibXea-fervor` (this issue).
+
+**No theorem completion is claimed for `S(n)` or `SORT-BOUND-U`.**
