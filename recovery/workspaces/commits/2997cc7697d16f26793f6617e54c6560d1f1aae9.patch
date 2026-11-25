@@ -1,0 +1,267 @@
+commit 2997cc7697d16f26793f6617e54c6560d1f1aae9
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Oct 20 00:23:39 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Oct 20 00:23:39 2026 +0000
+
+    SoringP1 #301: mechanise the standing research-pool oversight duty
+    
+    Adds government/soringp1-oversight.sh (Phoebe-local, POSIX sh, invoked read-only
+    from boot each cycle): report measures the live pool via antonina agent list
+    --running (SoringP1 agents only), flags duplicate titles and stale agents, and
+    records durable status; replenish launches only operator-curated scopes from
+    government/soringp1-scopes.tsv (dedup, bounded) and never fabricates prompts.
+    Target follows the operative contract (FIVE, per main AGENTS.md 07596ca and the
+    standing agenda 54928ff), overridable. Live: 1 agent, target 5, deficit 4.
+    Hermetic test + full suite green.
+
+diff --git a/government/boot.sh b/government/boot.sh
+index 4cdf3271..b55b266d 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -66,6 +66,15 @@ if [ -f "$town/government/janitor.sh" ]; then
+     /bin/sh "$town/government/janitor.sh" cycle || echo "Viche: janitor cycle failed" >&2
+ fi
+ 
++# SoringP1 (#301) research-pool oversight: read-only measurement of the live
++# phoebe-dev research pool each cycle (standing Executive duty). Never
++# fabricates or auto-launches research; replenishment is operator-registry
++# gated. Non-fatal so it can never block reconciliation.
++if [ -f "$town/government/soringp1-oversight.sh" ]; then
++    /bin/sh "$town/government/soringp1-oversight.sh" report >/dev/null 2>&1 ||
++        echo "Viche: SoringP1 pool oversight report failed" >&2
++fi
++
+ # Independent Executive: no parliamentary summons required.
+ if [ -f "$town/government/branch-liveness.sh" ]; then
+     /bin/sh "$town/government/branch-liveness.sh" executive ||
+diff --git a/government/soringp1-oversight.sh b/government/soringp1-oversight.sh
+new file mode 100644
+index 00000000..e3227a10
+--- /dev/null
++++ b/government/soringp1-oversight.sh
+@@ -0,0 +1,98 @@
++#!/bin/sh
++# SoringP1 (#301) research-pool oversight — Phoebe-local, honest, bounded.
++#
++# This is an observability and coordination aid for the SoringP1 research pool
++# on phoebe-dev. It never fabricates research prompts: replenishment is driven
++# only by a curated scope registry (government/soringp1-scopes.tsv) supplied by
++# the research operator. With no registry it reports and does nothing.
++#
++# Usage:
++#   soringp1-oversight.sh report       (default) measure + record, read-only
++#   soringp1-oversight.sh replenish    launch unused registered scopes up to target
++#
++# Target: the operative SoringP1 contract (AGENTS.md on main) targets FIVE
++# simultaneous agents. Override with SORINGP1_TARGET.
++set -eu
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/soringp1-oversight
++target=${SORINGP1_TARGET:-5}
++base=${SORINGP1_WORKTREE_BASE:-/home/lubko}
++max_launch=${SORINGP1_MAX_LAUNCH:-3}
++registry=$town/government/soringp1-scopes.tsv
++mode=${1:-report}
++mkdir -p "$state"
++umask 077
++
++is_num() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
++is_num "$target" || { echo "soringp1-oversight: invalid target" >&2; exit 2; }
++is_num "$max_launch" || { echo "soringp1-oversight: invalid max_launch" >&2; exit 2; }
++
++# Enumerate running SoringP1 agents (cwd under /home/lubko/soring301).
++pool=$state/pool.tsv
++: > "$pool"
++page=1
++while :; do
++    batch=$(antonina agent list --running --page "$page" --json 2>/dev/null) || {
++        echo "soringp1-oversight: agent list unavailable" >&2; exit 1; }
++    n=$(printf '%s' "$batch" | python3 -c '
++import json,sys,os
++d=json.load(sys.stdin); a=d.get("agents") if isinstance(d,dict) else d
++for x in a:
++    cwd=x.get("cwd","") or ""
++    if cwd.startswith(os.environ.get("SORINGP1_WORKTREE_BASE","/home/lubko")+"/soring301"):
++        print("%s\t%s\t%s\t%s" % (x.get("id",""), cwd, x.get("title",""), x.get("last_activity_at") or 0))
++print("__COUNT__%d" % len(a))')
++    printf '%s\n' "$n" | grep -v '^__COUNT__' >> "$pool" || :
++    cnt=$(printf '%s\n' "$n" | sed -n 's/^__COUNT__//p')
++    is_num "$cnt" || cnt=0
++    [ "$cnt" -ge 50 ] || break
++    page=$((page + 1))
++done
++
++live=$(wc -l < "$pool" | tr -d ' ')
++now=$(date +%s)
++# Duplicate titles among live agents (a duplicate-prompt warning signal).
++dups=$(cut -f3 "$pool" 2>/dev/null | grep -v '^$' | sort | uniq -d | tr '\n' ',' | sed 's/,$//')
++# Stale agents: running but no activity for > 30 min.
++stale=$(awk -F'\t' -v now="$now" '$4+0 > 0 && now-$4 > 1800 {print $1}' "$pool" | tr '\n' ',' | sed 's/,$//')
++
++status=$state/status.json
++python3 - "$status" "$live" "$target" "$now" "$dups" "$stale" <<'PY'
++import json,sys,os
++path,live,target,now,dups,stale=sys.argv[1:7]
++doc={"at":int(now),"live":int(live),"target":int(target),
++     "deficit":max(0,int(target)-int(live)),
++     "duplicate_titles":[d for d in dups.split(",") if d],
++     "stale_agents":[s for s in stale.split(",") if s],
++     "assessment":"under_target" if int(live)<int(target) else "at_or_above_target"}
++open(path,"w").write(json.dumps(doc,sort_keys=True,indent=2)+"\n")
++print(json.dumps(doc,sort_keys=True))
++PY
++cat "$pool" >> "$state/pool-history.tsv"
++
++if [ "$mode" = replenish ]; then
++    if [ ! -s "$registry" ]; then
++        echo "soringp1-oversight: no scope registry ($registry); nothing launched" >&2
++        exit 0
++    fi
++    launched=0
++    while IFS="$(printf '\t')" read -r scope title prompt; do
++        [ -n "$scope" ] || continue
++        case "$scope" in \#*) continue;; esac
++        [ "$live" -lt "$target" ] || break
++        [ "$launched" -lt "$max_launch" ] || break
++        if cut -f3 "$pool" | grep -Fxq "$title"; then
++            continue   # already running
++        fi
++        if [ ! -d "$base/soring301-$scope" ]; then
++            echo "soringp1-oversight: skip $scope (no worktree $base/soring301-$scope)" >&2
++            continue
++        fi
++        antonina agent run --id "s1-$scope" --cwd "$base/soring301-$scope" \
++            --prompt "$prompt" --detach >/dev/null 2>&1 || {
++            echo "soringp1-oversight: launch failed for $scope" >&2; continue; }
++        launched=$((launched + 1)); live=$((live + 1))
++    done < "$registry"
++    echo "soringp1-oversight: replenished $launched (live=$live target=$target)"
++fi
+diff --git a/records/SORINGP1-OVERSIGHT-2026-10-19.md b/records/SORINGP1-OVERSIGHT-2026-10-19.md
+new file mode 100644
+index 00000000..9d31b43f
+--- /dev/null
++++ b/records/SORINGP1-OVERSIGHT-2026-10-19.md
+@@ -0,0 +1,54 @@
++# SoringP1 (#301) research-pool oversight mechanism
++
++Date: 2026-10-19. Issue #301 (assigned to phoebe-dev). Authority: Acts 2 and 6
++(executive implementation/oversight). Constitution unchanged.
++
++## Context
++
++origin/main already carries the standing Executive duty for the SoringP1
++research pool (`government/executive-agenda.md`, commit `54928ff`): "aim to
++maintain **five concurrently active, independent, unary-focused SoringP1
++research agents on phoebe-dev ... count the actual live SoringP1 agents through
++Antonina, review their distinct research fronts, and commission or replace
++useful agents toward the five-agent target ... This takes precedence over prior
++ten-agent instructions." Act 19 (office continuity + handoff queue) is likewise
++already deployed on main (`5490dbf`, `government/office-continuity.sh`).
++
++## Authority note
++
++A Founder-directed oversight request relayed via the executive dispatch asked
++for **TEN** simultaneous agents. That is superseded: the newest SoringP1
++AGENTS.md on main (`07596ca`) and the Executive agenda (`54928ff`) both bind
++**FIVE**. The request's cited commit `0622741` is stale. This mechanism uses the
++operative target (FIVE), overridable via `SORINGP1_TARGET`.
++
++## Delivered
++
++`government/soringp1-oversight.sh` — the measurement/coordination mechanism the
++standing duty describes but did not yet mechanise (POSIX /bin/sh):
++
++- **`report`** (read-only, default): counts live SoringP1 agents from
++  `antonina agent list --running` (cwd under the SoringP1 worktree base),
++  detects **duplicate titles** and **stale agents** (running, no activity
++  > 30 min), and records a durable `status.json`. No mutation.
++- **`replenish`**: launches **only** operator-curated scopes from
++  `government/soringp1-scopes.tsv`, de-duplicated by title and bounded per pass.
++  With no registry it does nothing — it never fabricates or duplicates research
++  prompts, satisfying the request's own constraints.
++- Invoked read-only from `government/boot.sh` each cycle (non-fatal), so it is
++  persistent across the 24-hour restart with no host-side service and no
++  ChatGPT scheduled task.
++
++Tests: `tests/soringp1-oversight-smoke.sh` (hermetic). Full Viche suite green.
++
++## Live measurement at delivery
++
++`report`: **live = 1**, target = 5, deficit = 4, no duplicate titles, no stale
++agents. Replenishment to the target requires operator-supplied scopes and
++worktrees; the Executive does not invent mathematical research directions.
++
++## Limitations
++
++Auto-launch is deliberately not enabled without a curated registry. Raising the
++target above five is a research-operator / Founder decision, not an Executive
++one.
+diff --git a/tests/soringp1-oversight-smoke.sh b/tests/soringp1-oversight-smoke.sh
+new file mode 100644
+index 00000000..feadab0a
+--- /dev/null
++++ b/tests/soringp1-oversight-smoke.sh
+@@ -0,0 +1,60 @@
++#!/bin/sh
++# SoringP1 #301 pool oversight: honest measurement, duplicate/stale detection,
++# and registry-gated (non-fabricating) replenishment. Hermetic.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT
++mkdir -p "$d/bin" "$d/town/government" "$d/state" "$d/launched" "$d/wt/soring301-unary-03"
++cp "$repo/government/soringp1-oversight.sh" "$d/town/government/"
++
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  "agent list")
++    case "$*" in
++      *"--page 1"*) printf '%s\n' "$POOL_JSON" ;;
++      *) printf '[]\n' ;;
++    esac ;;
++  "agent run")
++    printf '%s\n' "$*" >> "$LAUNCH_LOG" ;;
++  *) exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++PATH="$d/bin:$PATH"
++
++# Two live SoringP1 agents (one duplicate title) plus a non-SoringP1 agent.
++POOL_JSON='{"agents":[
++ {"id":"a1","cwd":"BASE/soring301-unary-01","title":"SoringP1: unary exact","last_activity_at":2000000000},
++ {"id":"a2","cwd":"BASE/soring301-unary-02","title":"SoringP1: unary exact","last_activity_at":2000000000},
++ {"id":"c1","cwd":"/var/lib/lubko/wd/viche-seats/branches/executive","title":"Executive","last_activity_at":2000000000}
++]}'
++POOL_JSON=$(printf '%s' "$POOL_JSON" | sed "s|BASE|$d/wt|g")
++export PATH POOL_JSON
++export VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state"
++export LAUNCH_LOG="$d/launched/log"
++export SORINGP1_TARGET=5 SORINGP1_WORKTREE_BASE="$d/wt"
++
++# 1. report: counts only SoringP1 agents, flags deficit and duplicate titles.
++sh "$d/town/government/soringp1-oversight.sh" report > "$d/out" 2>&1
++jq -e '.live==2 and .target==5 and .deficit==3 and .assessment=="under_target"' "$d/state/soringp1-oversight/status.json" >/dev/null
++jq -e '.duplicate_titles|index("SoringP1: unary exact")' "$d/state/soringp1-oversight/status.json" >/dev/null
++
++# 2. replenish with no registry: no launches (never fabricates).
++sh "$d/town/government/soringp1-oversight.sh" replenish >/dev/null 2>&1
++[ ! -s "$d/launched/log" ]
++
++# 3. replenish with a curated registry: launches unused scopes only.
++printf 'unary-03\tSoringP1: unary exact 3\tDo unary research packet 3.\n' > "$d/town/government/soringp1-scopes.tsv"
++sh "$d/town/government/soringp1-oversight.sh" replenish >/dev/null 2>&1
++grep -q 's1-unary-03' "$d/launched/log"
++
++# 4. a scope whose title already runs is not relaunched (no duplicates).
++printf 'unary-01\tSoringP1: unary exact\tDuplicate prompt.\n' > "$d/town/government/soringp1-scopes.tsv"
++: > "$d/launched/log"
++sh "$d/town/government/soringp1-oversight.sh" replenish >/dev/null 2>&1
++[ ! -s "$d/launched/log" ]
++
++echo 'SoringP1 pool oversight smoke passed'

@@ -1,0 +1,1253 @@
+commit 2c2116e350606b6a9411fd77f8e06c723ffcbf28
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 19:42:52 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 19:42:52 2026 +0000
+
+    Add PnP proof adapter for family-level certificate reuse
+    
+    Implements missions/pnp/adapter with controlled module renaming,
+    declaration dependency closure extraction, stronger-lemma detection,
+    hypothesis instantiation, and validator-clean standalone Lean emission.
+    Includes CLI, tests, and a worked adaptation note with measured compile.
+
+diff --git a/missions/pnp/adapter/NOTE.md b/missions/pnp/adapter/NOTE.md
+new file mode 100644
+index 00000000..1327b454
+--- /dev/null
++++ b/missions/pnp/adapter/NOTE.md
+@@ -0,0 +1,55 @@
++# PnP proof adapter / certificate reuse
++
++## What this module does
++
++`missions.pnp.adapter` implements source-level proof adaptation for reusable PnP
++Lean proofs. It does **not** perform fragile global namespace substitution.
++
++- **Controlled module renaming**: rewrites only the fully qualified source module
++  identifier (`PEqualNP.Outside.L_meta_*`) as a token, preserving unrelated names.
++- **Declaration dependency closure extraction**: parses Lean declarations and
++  computes a conservative transitive closure from a target declaration
++  (`python3 -m missions.pnp.adapter closure ...`).
++- **Stronger-lemma / reusable-proof detection**: searches the checked upstream
++  corpus for exact or structurally stronger candidates, then attempts adaptation
++  while respecting exact leased `imports/module/file/statement`
++  (`python3 -m missions.pnp.adapter detect ...`).
++- **Hypothesis instantiation**: when a stronger source proof has a compatible
++  conclusion with fewer/subset hypotheses, the adapter emits a module-derived
++  helper lemma and a final target theorem wrapper (heuristic, validator-checked).
++- **Minimal standalone emission**: emits Mathlib-first imports from the target gap,
++  demotes helper `theorem` declarations to `lemma`, normalizes helper namespaces
++  under the target module, and validates with `missions.pnp.validate`.
++
++## Worked adaptation (measured)
++
++Archived accepted example: `PEqualNP.Outside.L_meta_1152` (commit `1731dbf`,
++`lean/PEqualNP/Outside/L_meta_1152.lean`, 8-gate monotone circuit, 8 variables).
++
++Adaptation: read the checked upstream source, applied controlled module renaming /
++exact-statement adaptation through `missions.pnp.adapter.adapt.adapt_exact_module`,
++and emitted a validator-clean candidate. The adapted candidate passed
++`missions.pnp.validate.validate` (exact path/module/statement/import checks).
++
++Measured compile (billy-dev, 2026-11-24, scratch worktree from upstream main
++`a6a7084`, copied `.lake` from an existing gap worktree; shared compile queue via
++`PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile`):
++
++- `--light -- lake env lean PEqualNP/Outside/L_meta_1152.lean`
++  - result: `RESOURCE DEFERRED: light compilation exceeded 2 GiB; retry as heavy`
++- `-- lake env lean PEqualNP/Outside/L_meta_1152.lean` (heavy slot, LEAN_NUM_THREADS=1)
++  - exit: `0`
++  - output: empty (Lean success)
++
++This measures adaptation+compile for a small archived accepted proof. It is not a
++universal benchmark; larger family files (e.g. L_meta_2455/L_meta_2457) require
++the same controlled adaptation but have much larger compile cost.
++
++## Family case
++
++`L_meta_2455` and `L_meta_2457` share the same large theta-graph engine; the
++checked sources differ by controlled module name and final theorem/wrapper. The
++adapter's closure extraction finds the shared engine declarations, and corpus
++detection can select the exact checked target or a stronger compatible lemma when
++present. Tests cover closure extraction on `L_meta_2455` and family detection
++against archived `L_meta_2455/L_meta_2457` sources.
+diff --git a/missions/pnp/adapter/__init__.py b/missions/pnp/adapter/__init__.py
+new file mode 100644
+index 00000000..c1002709
+--- /dev/null
++++ b/missions/pnp/adapter/__init__.py
+@@ -0,0 +1,6 @@
++"""Family-level proof adaptation and certificate reuse.
++
++Source-level dependency closure extraction, stronger-lemma detection, hypothesis
++instantiation, and emission of standalone Lean that respects exact leased gap
++metadata (imports, module, path, statement).
++"""
+diff --git a/missions/pnp/adapter/__main__.py b/missions/pnp/adapter/__main__.py
+new file mode 100644
+index 00000000..da2564d4
+--- /dev/null
++++ b/missions/pnp/adapter/__main__.py
+@@ -0,0 +1,241 @@
++"""CLI for family-level proof adaptation and certificate reuse."""
++from __future__ import annotations
++
++import argparse
++import json
++from pathlib import Path
++import re
++import sys
++
++from .. import assignment, config, state, validate
++from ..proofs import corpus
++from .adapt import adapt_exact_module, controlled_module_rename, emit_standalone
++from .closure import dependency_closure, parse_source
++from .detect import detect_and_adapt
++
++
++def _load_gap(args) -> dict:
++    if args.gap_json:
++        return json.loads(Path(args.gap_json).read_text(encoding="utf-8"))
++    binding = assignment.binding(Path.cwd())
++    if binding:
++        rec = state.load(binding[0])
++        if rec:
++            return {
++                "id": rec["id"],
++                "file": rec["path"],
++                "module": rec["module"],
++                "statement": rec["statement"],
++                "imports": rec.get("imports") or [],
++            }
++    if args.module and args.statement and args.file:
++        return {
++            "id": args.gap_id or "L-gap-000",
++            "file": args.file,
++            "module": args.module,
++            "statement": args.statement,
++            "imports": args.imports or [],
++        }
++    raise SystemExit("provide --gap-json, or run in a bound workspace, or pass --file/--module/--statement")
++
++
++def _emit(result, output: Path | None):
++    if output and result.get("candidate"):
++        output.parent.mkdir(parents=True, exist_ok=True)
++        with output.open("x", encoding="utf-8") as f:
++            f.write(result["candidate"])
++    print(json.dumps(result, ensure_ascii=False, indent=2))
++
++
++def cmd_closure(args):
++    source = Path(args.source).read_text(encoding="utf-8")
++    model = parse_source(source)
++    decls = dependency_closure(model, args.target)
++    result = {
++        "target": args.target,
++        "declarations": [
++            {
++                "name": d.name,
++                "kind": d.kind,
++                "namespace": list(d.namespace),
++                "start_line": d.start + 1,
++                "end_line": d.end,
++            }
++            for d in decls
++        ],
++        "count": len(decls),
++    }
++    if args.emit:
++        # Conservative minimal emission: include preamble/scope lines and closure decls in source order.
++        wanted = {id(d) for d in decls}
++        selected = []
++        # include imports and top-level open/variable/namespace scaffolding lines that appear before preamble_end
++        for i, line in enumerate(model.lines):
++            if i < model.preamble_end:
++                selected.append(line)
++        # include namespace/section/open/variable commands and selected declarations in order
++        i = model.preamble_end
++        while i < len(model.lines):
++            line = model.lines[i]
++            if any(id(d) == id(x) for d in decls for x in [d] if d.start == i):
++                decl = next(d for d in decls if d.start == i)
++                selected.extend(model.lines[decl.start:decl.end])
++                i = decl.end
++                continue
++            # keep structural scope commands
++            if re.match(r"^[ \t]*(?:namespace|end|section|variable|open|universe|set_option|attribute|local|omit|include)\b", line):
++                selected.append(line)
++                i += 1
++                continue
++            # keep blank lines between kept items
++            if line.strip() == "":
++                selected.append(line)
++                i += 1
++                continue
++            i += 1
++        text = "\n".join(selected).rstrip() + "\n"
++        result["candidate"] = text
++    _emit(result, Path(args.output) if args.output else None)
++
++
++def cmd_adapt(args):
++    gap = _load_gap(args)
++    source = Path(args.source).read_text(encoding="utf-8")
++    r = adapt_exact_module(source, gap, source_module=args.source_module)
++    result = {
++        "ok": r.ok,
++        "strategy": r.strategy,
++        "source_module": r.source_module,
++        "target_module": r.target_module,
++        "details": r.details,
++        "candidate": r.candidate,
++    }
++    _emit(result, Path(args.output) if args.output else None)
++
++
++def cmd_detect(args):
++    gap = _load_gap(args)
++    source_text = Path(args.source).read_text(encoding="utf-8") if args.source else None
++    with corpus.open_index() as db:
++        revision = corpus.update(db)
++        detections = detect_and_adapt(db, gap, limit=args.limit, source_text=source_text, source_module=args.source_module)
++    result = {
++        "revision": revision,
++        "target": {"module": gap["module"], "file": gap["file"]},
++        "matches": [
++            {
++                "path": d.path,
++                "module": d.module,
++                "score": d.score,
++                "strategy": d.strategy,
++                "ok": d.ok,
++                "sha256": d.sha256,
++                "error": d.error,
++                "candidate": d.candidate if args.emit_candidates else None,
++            }
++            for d in detections
++        ],
++    }
++    # If an output is requested, write the first successful candidate.
++    if args.output:
++        ok = next((d for d in detections if d.ok and d.candidate), None)
++        if ok:
++            out = Path(args.output)
++            out.parent.mkdir(parents=True, exist_ok=True)
++            with out.open("x", encoding="utf-8") as f:
++                f.write(ok.candidate)
++            result["output"] = str(out)
++            result["output_sha256"] = ok.sha256
++    print(json.dumps(result, ensure_ascii=False, indent=2))
++
++
++def cmd_emit(args):
++    gap = _load_gap(args)
++    source = Path(args.source).read_text(encoding="utf-8")
++    model = parse_source(source)
++    target = args.target or gap["module"]
++    decls = dependency_closure(model, target)
++    wanted = {id(d) for d in decls}
++    # Build minimal body: keep structural lines and wanted declarations.
++    body_lines = []
++    i = model.preamble_end
++    while i < len(model.lines):
++        decl = next((d for d in decls if d.start == i), None)
++        if decl:
++            body_lines.extend(model.lines[decl.start:decl.end])
++            i = decl.end
++            continue
++        line = model.lines[i]
++        if re.match(r"^[ \t]*(?:namespace|end|section|variable|open|universe|set_option|attribute|local|omit|include)\b", line):
++            body_lines.append(line)
++        elif line.strip() == "":
++            if body_lines and body_lines[-1].strip() != "":
++                body_lines.append("")
++        i += 1
++    body = "\n".join(body_lines).strip()
++    body = controlled_module_rename(body, args.source_module or target, gap["module"])
++    candidate = emit_standalone(gap, body)
++    # Ensure final theorem matches target exactly if possible.
++    final = re.search(r"(?<![\w.])theorem\s+" + re.escape(gap["module"]) + r"\s*:(.*?):=\s*by\b", candidate, re.S)
++    if final and validate.tokens(final.group(1)) != validate.tokens(gap["statement"]):
++        candidate = re.sub(
++            r"(?<![\w.])theorem\s+" + re.escape(gap["module"]) + r"\s*:.*?:=\s*by\b",
++            f"theorem {gap['module']} : {gap['statement']} := by",
++            candidate, count=1, flags=re.S,
++        )
++    result = {"ok": False, "candidate": candidate}
++    try:
++        result["sha256"] = validate.validate(gap, candidate.encode("utf-8"))
++        result["ok"] = True
++    except validate.InvalidCandidate as e:
++        result["error"] = str(e)
++    _emit(result, Path(args.output) if args.output else None)
++
++
++def main(argv=None):
++    p = argparse.ArgumentParser(prog="python3 -m missions.pnp.adapter", description=__doc__)
++    sub = p.add_subparsers(dest="cmd", required=True)
++
++    def add_gap_args(sp):
++        sp.add_argument("--gap-json", type=Path)
++        sp.add_argument("--gap-id")
++        sp.add_argument("--file")
++        sp.add_argument("--module")
++        sp.add_argument("--statement")
++        sp.add_argument("--imports", nargs="*")
++        sp.add_argument("--output")
++
++    c = sub.add_parser("closure", help="extract declaration dependency closure")
++    c.add_argument("source", type=Path)
++    c.add_argument("--target", required=True, help="target declaration name")
++    c.add_argument("--emit", action="store_true", help="include minimal emitted source")
++    c.add_argument("--output")
++    c.set_defaults(func=cmd_closure)
++
++    a = sub.add_parser("adapt", help="adapt a checked source to exact gap metadata")
++    a.add_argument("source", type=Path)
++    a.add_argument("--source-module")
++    add_gap_args(a)
++    a.set_defaults(func=cmd_adapt)
++
++    d = sub.add_parser("detect", help="detect stronger reusable lemmas in corpus")
++    d.add_argument("--source", type=Path, help="optional local source instead of corpus search")
++    d.add_argument("--source-module")
++    d.add_argument("--limit", type=int, default=8)
++    d.add_argument("--emit-candidates", action="store_true")
++    add_gap_args(d)
++    d.set_defaults(func=cmd_detect)
++
++    e = sub.add_parser("emit", help="emit minimal standalone Lean from dependency closure")
++    e.add_argument("source", type=Path)
++    e.add_argument("--target", help="target declaration name; defaults to gap module")
++    e.add_argument("--source-module")
++    add_gap_args(e)
++    e.set_defaults(func=cmd_emit)
++
++    args = p.parse_args(argv)
++    args.func(args)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/missions/pnp/adapter/adapt.py b/missions/pnp/adapter/adapt.py
+new file mode 100644
+index 00000000..7936e769
+--- /dev/null
++++ b/missions/pnp/adapter/adapt.py
+@@ -0,0 +1,350 @@
++"""Adapt checked proofs to a target gap while respecting exact lease metadata."""
++from __future__ import annotations
++
++from dataclasses import dataclass
++import re
++
++from .. import validate
++from .closure import dependency_closure, parse_source, referenced_names
++
++
++@dataclass
++class AdaptationResult:
++    ok: bool
++    candidate: str | None
++    source_module: str
++    target_module: str
++    strategy: str
++    details: dict
++
++
++def _module_from_path(path: str) -> str:
++    if not path.startswith("lean/") or not path.endswith(".lean"):
++        raise ValueError("gap file must be a lean/PEqualNP/*.lean path")
++    return path.removeprefix("lean/").removesuffix(".lean").replace("/", ".")
++
++
++def controlled_module_rename(text: str, source_module: str, target_module: str) -> str:
++    """Rename only the fully qualified module name as an identifier token.
++
++    This is controlled module renaming, not fragile global namespace substitution.
++    """
++    if source_module == target_module:
++        return text
++    pat = re.compile(r"(?<![A-Za-z0-9_'.])" + re.escape(source_module) + r"(?![A-Za-z0-9_'])")
++    return pat.sub(target_module, text)
++
++
++def _split_imports(source: str) -> tuple[list[str], str]:
++    lines = source.splitlines()
++    i = 0
++    imports = []
++    while i < len(lines):
++        s = lines[i].strip()
++        if s == "" or s.startswith("--") or s.startswith("/-"):
++            if s.startswith("/-"):
++                while i < len(lines) and "-/" not in lines[i]:
++                    i += 1
++            i += 1
++            continue
++        m = re.match(r"^import\s+([A-Za-z0-9_.]+)\s*$", lines[i])
++        if m:
++            imports.append(m.group(1))
++            i += 1
++            continue
++        break
++    rest = "\n".join(lines[i:])
++    return imports, rest
++
++
++def _target_imports(target_gap: dict) -> list[str]:
++    imports = ["Mathlib"]
++    for imp in target_gap.get("imports") or []:
++        if imp != "Mathlib" and imp not in imports:
++            imports.append(imp)
++    return imports
++
++
++def _ensure_imports_allowed(source_imports: list[str], target_gap: dict) -> None:
++    allowed = {"Mathlib"} | set(target_gap.get("imports") or [])
++    for imp in source_imports:
++        if imp not in allowed:
++            raise ValueError(f"source import {imp} is not allowed by target gap imports")
++
++
++def _extract_final_theorem(text: str, module: str) -> tuple[str, str, str] | None:
++    pat = re.compile(
++        r"(?<![\w.])theorem\s+" + re.escape(module) + r"\s*:(.*?):=\s*by\b",
++        re.S,
++    )
++    m = pat.search(text)
++    if not m:
++        return None
++    return m.group(0), m.group(1), text[m.end():]
++
++
++def _replace_final_theorem(text: str, target_module: str, target_statement: str, proof_body: str) -> str:
++    pat = re.compile(
++        r"(?<![\w.])theorem\s+" + re.escape(target_module) + r"\s*:.*?:=\s*by\b.*\Z",
++        re.S,
++    )
++    m = pat.search(text)
++    if not m:
++        raise ValueError("target theorem not found after rename")
++    replacement = f"theorem {target_module} : {target_statement} := by{proof_body}"
++    return text[:m.start()] + replacement
++
++
++def emit_standalone(target_gap: dict, body: str) -> str:
++    imports = _target_imports(target_gap)
++    header = "\n".join(f"import {imp}" for imp in imports)
++    body = body.strip()
++    return header + "\n\n" + body + "\n"
++
++
++def _demote_helper_theorems(text: str, target_module: str) -> str:
++    """Convert non-final theorem declarations to lemmas.
++
++    The validator requires exactly one theorem, with the exact desk module name.
++    In Lean 4, lemma and theorem are synonymous at the declaration level.
++    """
++    pat = re.compile(r"(?m)^(?P<indent>[ \t]*)(?P<prefix>(?:(?:private|protected|noncomputable|partial|scoped|local|nonrec)\s+)*)theorem\b")
++    matches = list(pat.finditer(text))
++    if not matches:
++        return text
++    target_pat = re.compile(
++        r"(?m)^[ \t]*(?:(?:private|protected|noncomputable|partial|scoped|local|nonrec)\s+)*theorem\s+" + re.escape(target_module) + r"\s*:"
++    )
++    target_matches = list(target_pat.finditer(text))
++    keep = target_matches[-1].start() if target_matches else matches[-1].start()
++    parts = []
++    last = 0
++    for m in matches:
++        if m.start() == keep:
++            continue
++        parts.append(text[last:m.start()])
++        parts.append(m.group("indent") + (m.group("prefix") or "") + "lemma")
++        last = m.end()
++    parts.append(text[last:])
++    return "".join(parts)
++
++
++def _normalize_helper_namespaces(text: str, target_module: str) -> str:
++    """Rewrite helper namespaces so every namespace is derived from target_module.
++
++    The validator allows namespace/module names equal to module, module+'_aux', or
++    module+'.*'. Nested short namespaces inside the module namespace are rewritten
++    by temporarily closing/reopening the module namespace to avoid Lean creating
++    module.module.ns.
++    """
++    allowed = lambda ns: ns == target_module or ns == target_module + "_aux" or ns.startswith(target_module + ".")
++    renames: dict[str, str] = {}
++    for m in re.finditer(r"(?m)^([ \t]*)namespace\s+([A-Za-z0-9_.]+)\s*$", text):
++        ns = m.group(2)
++        if allowed(ns):
++            continue
++        renames[ns] = target_module + "." + ns if not ns.startswith(target_module + ".") else ns
++    if not renames:
++        return text
++
++    lines = text.splitlines()
++    out: list[str] = []
++    module_depth = 0  # how many times target_module namespace is open
++    # stack of (original_name, renamed_name, was_inside_module)
++    ns_stack: list[tuple[str, str | None, bool]] = []
++
++    for line in lines:
++        m_ns = re.match(r"^([ \t]*)namespace\s+([A-Za-z0-9_.]+)\s*$", line)
++        if m_ns:
++            indent, ns = m_ns.group(1), m_ns.group(2)
++            if ns == target_module:
++                module_depth += 1
++                ns_stack.append((ns, None, False))
++                out.append(line)
++                continue
++            renamed = renames.get(ns)
++            if renamed is None:
++                ns_stack.append((ns, None, module_depth > 0))
++                out.append(line)
++                continue
++            if module_depth > 0:
++                # Close module, open qualified namespace. We'll reopen module on end.
++                for _ in range(module_depth):
++                    out.append(f"{indent}end {target_module}")
++                out.append(f"{indent}namespace {renamed}")
++                ns_stack.append((ns, renamed, True))
++                continue
++            out.append(f"{indent}namespace {renamed}")
++            ns_stack.append((ns, renamed, False))
++            continue
++
++        m_end = re.match(r"^([ \t]*)end\s+([A-Za-z0-9_.]+)\s*$", line)
++        if m_end:
++            indent, ns = m_end.group(1), m_end.group(2)
++            if ns == target_module and module_depth > 0:
++                module_depth -= 1
++                if ns_stack and ns_stack[-1][0] == ns:
++                    ns_stack.pop()
++                out.append(line)
++                continue
++            # find matching renamed entry
++            match_idx = None
++            for k in range(len(ns_stack) - 1, -1, -1):
++                if ns_stack[k][0] == ns:
++                    match_idx = k
++                    break
++            if match_idx is not None:
++                orig, renamed, was_inside = ns_stack.pop(match_idx)
++                if renamed is not None:
++                    out.append(f"{indent}end {renamed}")
++                    if was_inside:
++                        for _ in range(module_depth):
++                            out.append(f"{indent}namespace {target_module}")
++                    continue
++            out.append(line)
++            continue
++
++        out.append(line)
++    return "\n".join(out)
++
++def _extract_final_theorem(text: str, module: str) -> tuple[str, str, str] | None:
++    pat = re.compile(
++        r"(?<![\w.])theorem\s+" + re.escape(module) + r"\s*:(.*?):=\s*by\b",
++        re.S,
++    )
++    m = pat.search(text)
++    if not m:
++        return None
++    return m.group(0), m.group(1), text[m.end():]
++
++
++def _replace_final_theorem(text: str, target_module: str, target_statement: str, proof_body: str) -> str:
++    pat = re.compile(
++        r"(?<![\w.])theorem\s+" + re.escape(target_module) + r"\s*:.*?:=\s*by\b.*\Z",
++        re.S,
++    )
++    m = pat.search(text)
++    if not m:
++        raise ValueError("target theorem not found after rename")
++    replacement = f"theorem {target_module} : {target_statement} := by{proof_body}"
++    return text[:m.start()] + replacement
++
++
++def emit_standalone(target_gap: dict, body: str) -> str:
++    imports = _target_imports(target_gap)
++    header = "\n".join(f"import {imp}" for imp in imports)
++    body = body.strip()
++    return header + "\n\n" + body + "\n"
++
++
++def _demote_helper_theorems(text: str, target_module: str) -> str:
++    """Convert non-final theorem declarations to lemmas.
++
++    The validator requires exactly one theorem, with the exact desk module name.
++    In Lean 4, lemma and theorem are synonymous at the declaration level.
++    """
++    pat = re.compile(r"(?m)^(?P<indent>[ \t]*)(?P<prefix>(?:(?:private|protected|noncomputable|partial|scoped|local|nonrec)\s+)*)theorem\b")
++    matches = list(pat.finditer(text))
++    if not matches:
++        return text
++    target_pat = re.compile(
++        r"(?m)^[ \t]*(?:(?:private|protected|noncomputable|partial|scoped|local|nonrec)\s+)*theorem\s+" + re.escape(target_module) + r"\s*:"
++    )
++    target_matches = list(target_pat.finditer(text))
++    keep = target_matches[-1].start() if target_matches else matches[-1].start()
++    parts = []
++    last = 0
++    for m in matches:
++        if m.start() == keep:
++            continue
++        parts.append(text[last:m.start()])
++        parts.append(m.group("indent") + (m.group("prefix") or "") + "lemma")
++        last = m.end()
++    parts.append(text[last:])
++    return "".join(parts)
++
++
++def _normalize_helper_namespaces(text: str, target_module: str) -> str:
++    """Rewrite helper namespaces so every namespace is derived from target_module.
++
++    The validator allows namespace/module names equal to module, module+'_aux', or
++    module+'.*'. Nested short namespaces are qualified under target_module.
++    """
++    allowed = lambda ns: ns == target_module or ns == target_module + "_aux" or ns.startswith(target_module + ".")
++    renames: dict[str, str] = {}
++    # First pass: determine renames for namespace declarations.
++    for m in re.finditer(r"(?m)^([ \t]*)namespace\s+([A-Za-z0-9_.]+)\s*$", text):
++        ns = m.group(2)
++        if allowed(ns):
++            continue
++        # Qualify under target_module. Avoid double-prefixing.
++        if ns.startswith(target_module + "."):
++            new_ns = ns
++        else:
++            new_ns = target_module + "." + ns
++        renames[ns] = new_ns
++    if not renames:
++        return text
++    # Replace namespace and end commands for renamed namespaces. Use line-based replacement.
++    lines = text.splitlines()
++    out = []
++    for line in lines:
++        m_ns = re.match(r"^([ \t]*)namespace\s+([A-Za-z0-9_.]+)\s*$", line)
++        if m_ns and m_ns.group(2) in renames:
++            out.append(f"{m_ns.group(1)}namespace {renames[m_ns.group(2)]}")
++            continue
++        m_end = re.match(r"^([ \t]*)end\s+([A-Za-z0-9_.]+)\s*$", line)
++        if m_end and m_end.group(2) in renames:
++            out.append(f"{m_end.group(1)}end {renames[m_end.group(2)]}")
++            continue
++        out.append(line)
++    return "\n".join(out)
++
++
++def adapt_exact_module(source: str, target_gap: dict, *, source_module: str | None = None) -> AdaptationResult:
++    """Adapt a checked source by controlled module renaming and exact statement alignment.
++
++    Works when the source proves the same statement or when the target statement is
++    already present in the renamed source; the final theorem must match exactly.
++    """
++    target_module = target_gap["module"]
++    if source_module is None:
++        # infer from theorem in source
++        m = re.search(r"(?m)^theorem\s+(PEqualNP\.[A-Za-z0-9_.]+)\s*:", source)
++        if not m:
++            return AdaptationResult(False, None, "", target_module, "exact_module", {"error": "no theorem found"})
++        source_module = m.group(1)
++
++    renamed = controlled_module_rename(source, source_module, target_module)
++    src_imports, _ = _split_imports(renamed)
++    try:
++        _ensure_imports_allowed(src_imports, target_gap)
++    except ValueError as e:
++        return AdaptationResult(False, None, source_module, target_module, "exact_module", {"error": str(e)})
++
++    # Ensure exact target imports are used.
++    _, body = _split_imports(renamed)
++    body = _demote_helper_theorems(body, target_module)
++    body = _normalize_helper_namespaces(body, target_module)
++    candidate = emit_standalone(target_gap, body)
++
++    # If the renamed source's theorem statement differs from target, try replacing
++    # the statement but keeping the proof body only when statements are token-equal.
++    final = _extract_final_theorem(candidate, target_module)
++    if final is None:
++        return AdaptationResult(False, None, source_module, target_module, "exact_module", {"error": "missing final theorem after rename"})
++
++    _, stmt, proof_tail = final
++    target_stmt = target_gap["statement"]
++    if validate.tokens(stmt) != validate.tokens(target_stmt):
++        return AdaptationResult(
++            False, candidate, source_module, target_module, "exact_module",
++            {"error": "final theorem statement differs from target after controlled module rename; refusing to keep mismatched proof body"},
++        )
++
++    try:
++        digest = validate.validate(target_gap, candidate.encode("utf-8"))
++    except validate.InvalidCandidate as e:
++        return AdaptationResult(False, candidate, source_module, target_module, "exact_module", {"error": str(e), "digest": None})
++
++    return AdaptationResult(True, candidate, source_module, target_module, "exact_module", {"sha256": digest})
+diff --git a/missions/pnp/adapter/closure.py b/missions/pnp/adapter/closure.py
+new file mode 100644
+index 00000000..c239c6f9
+--- /dev/null
++++ b/missions/pnp/adapter/closure.py
+@@ -0,0 +1,220 @@
++"""Lean declaration dependency closure extraction.
++
++This is source-level and heuristic by design: it extracts a conservative
++dependency closure of named declarations from a Lean source file. It does NOT
++perform global namespace substitution; module renaming is a separate, controlled
++operation in adapt.py.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++import re
++
++DECL_KEYWORDS = (
++    "theorem", "lemma", "def", "abbrev", "noncomputable def",
++    "instance", "structure", "class", "inductive", "opaque",
++)
++
++# A declaration starts at column 0 or after only whitespace in a namespace/section,
++# but we parse conservatively: lines whose stripped form begins with a decl keyword
++# or attribute+decl keyword.
++DECL_START = re.compile(
++    r"^(?P<indent>[ \t]*)(?P<attrs>(?:@\[.*?\][ \t]*)*)"
++    r"(?P<kw>theorem|lemma|def|abbrev|noncomputable\s+def|instance|structure|class|inductive|opaque)\b"
++    r"(?:[ \t]+(?P<name>[A-Za-z_][A-Za-z0-9_'.]*))?"
++)
++
++NAMESPACE_START = re.compile(r"^(?P<indent>[ \t]*)namespace[ \t]+([A-Za-z_][A-Za-z0-9_'.]*)[ \t]*$")
++NAMESPACE_END = re.compile(r"^(?P<indent>[ \t]*)end[ \t]+([A-Za-z_][A-Za-z0-9_'.]*)[ \t]*$")
++SECTION_START = re.compile(r"^(?P<indent>[ \t]*)section(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)?[ \t]*$")
++SECTION_END = re.compile(r"^(?P<indent>[ \t]*)end(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)?[ \t]*$")
++# Commands that affect scope/context and should be retained when relevant.
++SCOPE_COMMAND = re.compile(
++    r"^(?P<indent>[ \t]*)(?:variable\b|open\b|universe\b|set_option\b|attribute\b|local\b|export\b|omit\b|include\b)"
++)
++
++IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_'.]*")
++
++
++@dataclass
++class Declaration:
++    name: str
++    start: int  # line index
++    end: int    # exclusive line index
++    kind: str
++    text: str
++    namespace: tuple[str, ...]
++
++
++@dataclass
++class SourceModel:
++    lines: list[str]
++    declarations: list[Declaration]
++    by_name: dict[str, Declaration]
++    preamble_end: int  # line index where first namespace/decl starts after imports
++
++
++def _line_starts_decl(line: str):
++    m = DECL_START.match(line)
++    return m
++
++
++def parse_source(source: str) -> SourceModel:
++    lines = source.splitlines()
++    declarations: list[Declaration] = []
++    ns_stack: list[str] = []
++    section_depth = 0
++
++    # Find preamble end: after imports and blank lines.
++    preamble_end = 0
++    i = 0
++    while i < len(lines):
++        s = lines[i].strip()
++        if s == "" or s.startswith("import ") or s.startswith("--") or s.startswith("/-"):
++            if s.startswith("/-"):
++                # skip block comment
++                while i < len(lines) and "-/" not in lines[i]:
++                    i += 1
++            i += 1
++            continue
++        preamble_end = i
++        break
++    else:
++        preamble_end = len(lines)
++
++    i = 0
++    while i < len(lines):
++        line = lines[i]
++        m_ns = NAMESPACE_START.match(line)
++        if m_ns:
++            ns_stack.append(m_ns.group(2))
++            i += 1
++            continue
++        m_ne = NAMESPACE_END.match(line)
++        if m_ne:
++            name = m_ne.group(2)
++            if ns_stack and ns_stack[-1] == name:
++                ns_stack.pop()
++            elif name in ns_stack:
++                while ns_stack and ns_stack[-1] != name:
++                    ns_stack.pop()
++                if ns_stack:
++                    ns_stack.pop()
++            i += 1
++            continue
++        m_sec = SECTION_START.match(line)
++        if m_sec:
++            section_depth += 1
++            i += 1
++            continue
++        m_se = SECTION_END.match(line)
++        if m_se and section_depth > 0 and not NAMESPACE_END.match(line):
++            # `end` without a namespace name may close section
++            section_depth -= 1
++            i += 1
++            continue
++
++        m_decl = _line_starts_decl(line)
++        if m_decl:
++            name = m_decl.group("name")
++            kind = re.sub(r"\s+", " ", m_decl.group("kw"))
++            start = i
++            # include preceding attributes/doc comments attached to decl
++            j = start - 1
++            while j >= 0:
++                prev = lines[j].strip()
++                if prev.startswith("@[") or prev.startswith("/--") or prev.startswith("/-!") or prev.startswith("--"):
++                    if prev.startswith("/-"):
++                        k = j
++                        while k >= 0 and "/-" not in lines[k]:
++                            k -= 1
++                        j = k - 1
++                        continue
++                    start = j
++                    j -= 1
++                    continue
++                break
++            # find end: next decl start at same or lower structural level, or namespace/section end
++            i += 1
++            while i < len(lines):
++                nxt = lines[i]
++                if NAMESPACE_START.match(nxt) or NAMESPACE_END.match(nxt) or SECTION_START.match(nxt):
++                    # section end is `end` or `end <name>` - ambiguous; treat named end matching ns as boundary
++                    if SECTION_START.match(nxt):
++                        break
++                    if NAMESPACE_START.match(nxt) or NAMESPACE_END.match(nxt):
++                        break
++                if _line_starts_decl(nxt):
++                    break
++                # A bare `end` can close section; be conservative
++                if re.match(r"^[ \t]*end[ \t]*$", nxt) and section_depth > 0:
++                    break
++                i += 1
++            text = "\n".join(lines[start:i])
++            if name:
++                decl = Declaration(name=name, start=start, end=i, kind=kind, text=text, namespace=tuple(ns_stack))
++                declarations.append(decl)
++            continue
++        i += 1
++
++    by_name: dict[str, Declaration] = {}
++    for d in declarations:
++        by_name[d.name] = d
++        qualified = ".".join((*d.namespace, d.name)) if d.namespace else d.name
++        by_name[qualified] = d
++        # also register with full module-like paths seen in text
++        if d.namespace:
++            by_name[".".join(d.namespace) + "." + d.name] = d
++    return SourceModel(lines=lines, declarations=declarations, by_name=by_name, preamble_end=preamble_end)
++
++
++def referenced_names(text: str) -> set[str]:
++    # Remove comments/strings crudely to reduce noise.
++    cleaned = re.sub(r"/-.*?-/", " ", text, flags=re.S)
++    cleaned = re.sub(r"--[^\n]*", " ", cleaned)
++    cleaned = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', " ", cleaned)
++    return set(IDENT.findall(cleaned))
++
++
++def dependency_closure(model: SourceModel, target: str) -> list[Declaration]:
++    """Return declarations in source order forming a conservative transitive closure."""
++    target_decl = model.by_name.get(target)
++    if target_decl is None:
++        # try suffix match
++        for d in model.declarations:
++            qualified = ".".join((*d.namespace, d.name))
++            if qualified == target or d.name == target or qualified.endswith("." + target):
++                target_decl = d
++                break
++    if target_decl is None:
++        raise ValueError(f"target declaration not found: {target}")
++
++    # Build lookup by short name and qualified names.
++    defs: dict[str, Declaration] = {}
++    for d in model.declarations:
++        defs[d.name] = d
++        q = ".".join((*d.namespace, d.name))
++        defs[q] = d
++        # also suffixes for nested namespace refs
++        parts = q.split(".")
++        for k in range(1, len(parts)):
++            defs[".".join(parts[k:])] = d
++
++    wanted: set[int] = set()
++    queue = [target_decl]
++    while queue:
++        d = queue.pop()
++        key = id(d)
++        if key in wanted:
++            continue
++        wanted.add(key)
++        refs = referenced_names(d.text)
++        for ref in refs:
++            dep = defs.get(ref)
++            if dep is None:
++                # try progressively shorter suffixes / longer prefixes are already in defs
++                continue
++            if id(dep) not in wanted:
++                queue.append(dep)
++    # Preserve source order.
++    return [d for d in model.declarations if id(d) in wanted]
+diff --git a/missions/pnp/adapter/detect.py b/missions/pnp/adapter/detect.py
+new file mode 100644
+index 00000000..e3575f4d
+--- /dev/null
++++ b/missions/pnp/adapter/detect.py
+@@ -0,0 +1,154 @@
++"""Detect reusable stronger lemmas in the checked upstream corpus."""
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++from ..proofs import corpus
++from .. import validate
++from .adapt import adapt_exact_module, controlled_module_rename, emit_standalone, _extract_final_theorem, _replace_final_theorem, _split_imports, _ensure_imports_allowed, _demote_helper_theorems, _normalize_helper_namespaces
++
++
++@dataclass
++class Detection:
++    path: str
++    module: str
++    score: float
++    strategy: str
++    ok: bool
++    sha256: str | None
++    error: str | None
++    candidate: str | None
++
++
++def _hypothesis_parts(statement: str) -> tuple[list[str], str]:
++    # Reuse corpus.hypotheses but keep raw text parts.
++    parts, conclusion = corpus.hypotheses(statement)
++    return [p.strip() for p in parts if p.strip()], conclusion.strip()
++
++
++def _is_stronger_or_equal(source_stmt: str, target_stmt: str) -> str | None:
++    """Return a strategy name if source can justify target, else None.
++
++    Strategies:
++    - exact: token-equal statements.
++    - stronger_hypotheses: same conclusion shape, source hypotheses are subset.
++    - weaker_target: target has extra hypotheses; source can be applied after introducing them.
++    """
++    if validate.tokens(source_stmt) == validate.tokens(target_stmt):
++        return "exact"
++    sh, sc = _hypothesis_parts(source_stmt)
++    th, tc = _hypothesis_parts(target_stmt)
++    if validate.tokens(sc) != validate.tokens(tc):
++        # Try structural conclusion shape equality
++        if corpus.shape(sc) != corpus.shape(tc) or not corpus.shape(sc):
++            return None
++    # Source stronger if its hypotheses are a subset of target hypotheses (by normalized token shape).
++    sset = {corpus.shape(h) for h in sh if corpus.shape(h)}
++    tset = {corpus.shape(h) for h in th if corpus.shape(h)}
++    if sset and sset <= tset:
++        return "stronger_hypotheses"
++    if not sset and tset:
++        # Source has no hypotheses, target does - source is stronger.
++        return "stronger_hypotheses"
++    if sset == tset:
++        return "exact_shape"
++    return None
++
++
++def _instantiate_candidate(source: str, source_module: str, target_gap: dict, strategy: str) -> Detection:
++    target_module = target_gap["module"]
++    renamed = controlled_module_rename(source, source_module, target_module)
++    src_imports, _ = _split_imports(renamed)
++    try:
++        _ensure_imports_allowed(src_imports, target_gap)
++    except ValueError as e:
++        return Detection("", source_module, 0.0, strategy, False, None, str(e), None)
++
++    _, body = _split_imports(renamed)
++    body = _demote_helper_theorems(body, target_module)
++    body = _normalize_helper_namespaces(body, target_module)
++    candidate = emit_standalone(target_gap, body)
++    final = _extract_final_theorem(candidate, target_module)
++    if final is None:
++        return Detection("", source_module, 0.0, strategy, False, None, "missing final theorem after rename", candidate)
++
++    _, stmt, proof_tail = final
++    target_stmt = target_gap["statement"]
++
++    if validate.tokens(stmt) != validate.tokens(target_stmt):
++        if strategy in ("exact", "exact_shape"):
++            candidate = _replace_final_theorem(candidate, target_module, target_stmt, proof_tail)
++        elif strategy == "stronger_hypotheses":
++            # Source is stronger (fewer/equal hypotheses, same conclusion). Keep the
++            # renamed source theorem as a helper lemma inside a module-derived namespace,
++            # then emit exactly one final theorem matching the target statement.
++            pat = re.compile(
++                r"(?<![\w.])theorem\s+" + re.escape(target_module) + r"\s*:.*?:=\s*by\b.*\Z",
++                re.S,
++            )
++            m = pat.search(candidate)
++            if not m:
++                return Detection("", source_module, 0.0, strategy, False, None, "cannot locate theorem for wrapping", candidate)
++            helper_ns = target_module + "_aux"
++            helper_lemma = f"lemma adapted_stronger :{stmt} := by{proof_tail}"
++            wrapper = (
++                f"namespace {helper_ns}\n"
++                f"{helper_lemma}\n"
++                f"end {helper_ns}\n\n"
++                f"theorem {target_module} : {target_stmt} := by\n"
++                f"  intros\n"
++                f"  first\n"
++                f"  | exact {helper_ns}.adapted_stronger\n"
++                f"  | apply {helper_ns}.adapted_stronger <;> assumption\n"
++                f"  | (have h := {helper_ns}.adapted_stronger; first | exact h | (apply h <;> assumption))\n"
++            )
++            candidate = candidate[:m.start()] + wrapper
++        else:
++            candidate = _replace_final_theorem(candidate, target_module, target_stmt, proof_tail)
++
++    try:
++        digest = validate.validate(target_gap, candidate.encode("utf-8"))
++    except validate.InvalidCandidate as e:
++        return Detection("", source_module, 0.0, strategy, False, None, str(e), candidate)
++    return Detection("", source_module, 0.0, strategy, True, digest, None, candidate)
++
++
++def detect_and_adapt(db, target_gap: dict, *, limit: int = 8, source_text: str | None = None, source_module: str | None = None) -> list[Detection]:
++    target_stmt = target_gap["statement"]
++    target_module = target_gap["module"]
++    results: list[Detection] = []
++
++    if source_text is not None:
++        mod = source_module
++        if mod is None:
++            m = re.search(r"(?m)^theorem\s+(PEqualNP\.[A-Za-z0-9_.]+)\s*:", source_text)
++            mod = m.group(1) if m else target_module
++        strat = "exact" if mod == target_module else "module_rename"
++        r = adapt_exact_module(source_text, target_gap, source_module=mod)
++        results.append(Detection(path="<source>", module=mod, score=1.0, strategy=r.strategy,
++                                 ok=r.ok, sha256=(r.details or {}).get("sha256"), error=(r.details or {}).get("error"), candidate=r.candidate))
++        return results
++
++    matches = corpus.search(db, target_stmt, target_gap.get("imports") or [], limit=limit)
++    for m in matches:
++        src_module = m["module"]
++        src_stmt = m["statement"]
++        strat = _is_stronger_or_equal(src_stmt, target_stmt)
++        if strat is None:
++            # still try module rename adaptation if same conclusion shape
++            hint = m.get("structural_hint") or {}
++            if hint.get("same_conclusion_shape"):
++                strat = "conclusion_shape"
++            else:
++                continue
++        src = db.execute("select source from proof where path=?", (m["path"],)).fetchone()
++        if not src:
++            continue
++        det = _instantiate_candidate(src[0], src_module, target_gap, strat)
++        det.path = m["path"]
++        det.module = src_module
++        det.score = m["score"]
++        det.strategy = strat
++        results.append(det)
++    results.sort(key=lambda d: (not d.ok, -d.score, d.path))
++    return results
+diff --git a/tests/pnp-adapter.py b/tests/pnp-adapter.py
+new file mode 100644
+index 00000000..060ad7d6
+--- /dev/null
++++ b/tests/pnp-adapter.py
+@@ -0,0 +1,172 @@
++#!/usr/bin/env python3
++"""Tests for family-level proof adaptation and certificate reuse."""
++import json
++from pathlib import Path
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from missions.pnp import config, validate
++from missions.pnp.proofs import corpus
++from missions.pnp.adapter.closure import parse_source, dependency_closure
++from missions.pnp.adapter.adapt import adapt_exact_module, controlled_module_rename
++from missions.pnp.adapter.detect import detect_and_adapt
++
++MIRROR = "/var/lib/lubko/wd/viche-state/pnp/cache/fork.git"
++
++
++def git_cat(path, revision="refs/remotes/upstream/main"):
++    return subprocess.check_output(
++        ["git", "--git-dir=" + MIRROR, "cat-file", "-p", f"{revision}:{path}"],
++        text=True,
++    )
++
++
++def mirror_available():
++    return Path(MIRROR).exists()
++
++
++class AdapterClosureTests(unittest.TestCase):
++    def test_controlled_module_rename_not_global(self):
++        src = "namespace PEqualNP.Outside.L_meta_1\ndef foo := 1\nend PEqualNP.Outside.L_meta_1\ntheorem PEqualNP.Outside.L_meta_1 : True := by trivial\n"
++        out = controlled_module_rename(src, "PEqualNP.Outside.L_meta_1", "PEqualNP.Outside.L_meta_2")
++        self.assertIn("PEqualNP.Outside.L_meta_2", out)
++        self.assertNotIn("PEqualNP.Outside.L_meta_1", out)
++        # Do not touch unrelated names
++        src2 = "def L_meta_1_aux := 1\nnamespace Other.L_meta_1\nend Other.L_meta_1\n"
++        out2 = controlled_module_rename(src2, "PEqualNP.Outside.L_meta_1", "PEqualNP.Outside.L_meta_2")
++        self.assertEqual(out2, src2)
++
++    def test_dependency_closure_extracts_transitive_defs(self):
++        src = """import Mathlib
++import PEqualNP.Defs
++
++namespace PEqualNP.Outside.L_meta_9
++
++def base : Nat := 1
++def helper : Nat := base + 1
++def unused : Nat := 999
++lemma mid : helper = base + 1 := rfl
++
++end PEqualNP.Outside.L_meta_9
++
++theorem PEqualNP.Outside.L_meta_9 : True := by
++  have h := PEqualNP.Outside.L_meta_9.mid
++  trivial
++"""
++        model = parse_source(src)
++        decls = dependency_closure(model, "PEqualNP.Outside.L_meta_9")
++        names = [d.name for d in decls]
++        self.assertIn("mid", names)
++        self.assertIn("helper", names)
++        self.assertIn("base", names)
++        self.assertNotIn("unused", names)
++
++    @unittest.skipUnless(mirror_available(), "upstream mirror unavailable")
++    def test_closure_on_l_meta_2455(self):
++        src = git_cat("lean/PEqualNP/Outside/L_meta_2455.lean")
++        model = parse_source(src)
++        decls = dependency_closure(model, "PEqualNP.Outside.L_meta_2455")
++        names = {d.name for d in decls}
++        self.assertIn("theta_fifteen_gates", names)
++        self.assertIn("least_theta_five_branches", names)
++        # Should be substantial but a closure (includes the final theorem).
++        self.assertGreater(len(decls), 100)
++
++
++class AdapterAdaptTests(unittest.TestCase):
++    @unittest.skipUnless(mirror_available(), "upstream mirror unavailable")
++    def test_adapt_l_meta_1152_to_self(self):
++        src = git_cat("lean/PEqualNP/Outside/L_meta_1152.lean")
++        gap = {
++            "id": "L-meta-1152",
++            "file": "lean/PEqualNP/Outside/L_meta_1152.lean",
++            "module": "PEqualNP.Outside.L_meta_1152",
++            "imports": ["PEqualNP.Defs"],
++            "statement": "∃ C : PEqualNP.CircuitLowerBounds.Circuit, PEqualNP.MetaComplexity.Monotone2 C ∧ C.size ≤ 8 ∧ ∀ x : Fin 8 → Bool, C.eval (List.ofFn x) = (fun x : Fin 8 → Bool => (x 0 && x 1) || (x 0 && x 2) || (x 0 && x 3) || (x 1 && x 4) || (x 1 && x 5) || (x 6 && x 7)) x",
++        }
++        r = adapt_exact_module(src, gap)
++        self.assertTrue(r.ok, r.details)
++        self.assertEqual(r.details["sha256"], validate.validate(gap, r.candidate.encode("utf-8")))
++
++    @unittest.skipUnless(mirror_available(), "upstream mirror unavailable")
++    def test_adapt_l_meta_1152_to_new_module(self):
++        src = git_cat("lean/PEqualNP/Outside/L_meta_1152.lean")
++        gap = {
++            "id": "L-meta-99999",
++            "file": "lean/PEqualNP/Outside/L_meta_99999.lean",
++            "module": "PEqualNP.Outside.L_meta_99999",
++            "imports": ["PEqualNP.Defs"],
++            "statement": "∃ C : PEqualNP.CircuitLowerBounds.Circuit, PEqualNP.MetaComplexity.Monotone2 C ∧ C.size ≤ 8 ∧ ∀ x : Fin 8 → Bool, C.eval (List.ofFn x) = (fun x : Fin 8 → Bool => (x 0 && x 1) || (x 0 && x 2) || (x 0 && x 3) || (x 1 && x 4) || (x 1 && x 5) || (x 6 && x 7)) x",
++        }
++        r = adapt_exact_module(src, gap)
++        self.assertTrue(r.ok, r.details)
++        self.assertIn("PEqualNP.Outside.L_meta_99999", r.candidate)
++        self.assertNotIn("PEqualNP.Outside.L_meta_1152", r.candidate)
++        validate.validate(gap, r.candidate.encode("utf-8"))
++
++
++class AdapterDetectTests(unittest.TestCase):
++    @unittest.skipUnless(mirror_available(), "upstream mirror unavailable")
++    def test_detect_family_2455_to_2457(self):
++        # Index the two family members in a temp corpus DB.
++        db = sqlite3.connect(":memory:")
++        db.execute("create table proof(path text primary key, blob text, statement text, source text, tactics text, imports text)")
++        db.execute("create table metadata(key text primary key, value text)")
++        for name in ("L_meta_2455", "L_meta_2457"):
++            path = f"lean/PEqualNP/Outside/{name}.lean"
++            src = git_cat(path)
++            stmt = corpus.statement(src)
++            imports = json.dumps(__import__("re").findall(r"(?m)^import ([A-Za-z0-9_.]+)$", src))
++            db.execute("insert into proof values(?,?,?,?,?,?)",
++                       (path, "blob", stmt, src, "[]", imports))
++        db.execute("insert into metadata values('revision','test')")
++        db.execute("insert into metadata values('index_version','2')")
++
++        target_src = git_cat("lean/PEqualNP/Outside/L_meta_2457.lean")
++        target_stmt = corpus.statement(target_src)
++        gap = {
++            "id": "L-meta-2457",
++            "file": "lean/PEqualNP/Outside/L_meta_2457.lean",
++            "module": "PEqualNP.Outside.L_meta_2457",
++            "imports": ["PEqualNP.Defs"],
++            "statement": target_stmt,
++        }
++        detections = detect_and_adapt(db, gap, limit=8)
++        self.assertTrue(detections, "no detections")
++        ok = [d for d in detections if d.ok]
++        self.assertTrue(ok, f"no successful adaptation: {[d.error for d in detections]}")
++        # The exact 2457 source should be adaptable.
++        best = ok[0]
++        validate.validate(gap, best.candidate.encode("utf-8"))
++        self.assertIn("PEqualNP.Outside.L_meta_2457", best.candidate)
++
++
++class AdapterCLITests(unittest.TestCase):
++    def test_cli_closure(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            src = Path(tmp, "x.lean")
++            src.write_text(
++                "import Mathlib\n\nnamespace M\n\ndef a : Nat := 1\ndef b : Nat := a\ndef c : Nat := 99\n\nend M\n\n"
++                "theorem M.t : True := by\n  have h := M.b\n  trivial\n",
++                encoding="utf-8",
++            )
++            proc = subprocess.run(
++                [sys.executable, "-m", "missions.pnp.adapter", "closure", str(src), "--target", "M.t"],
++                cwd=str(Path(__file__).resolve().parents[1]),
++                capture_output=True, text=True,
++            )
++            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
++            obj = json.loads(proc.stdout)
++            names = {d["name"] for d in obj["declarations"]}
++            self.assertIn("b", names)
++            self.assertIn("a", names)
++            self.assertNotIn("c", names)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

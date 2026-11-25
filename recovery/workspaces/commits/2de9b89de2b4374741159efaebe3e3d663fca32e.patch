@@ -1,0 +1,72 @@
+commit 2de9b89de2b4374741159efaebe3e3d663fca32e
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Mon Oct 19 08:24:50 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Oct 19 08:24:50 2026 +0000
+
+    Janitor: retain live Lean/elAN toolchains (J2 safety)
+    
+    classify() treated an aged, large, non-git toolchain install under
+    .elan/toolchains as a quarantine-candidate. That toolchain is the pinned
+    default for an active project (SoringP1 lean-toolchain = leanprover/lean4:v4.34.0);
+    quarantining it would break the Lean build until elan re-downloads it (failure
+    mode J2: live build dependency). The directory mtime ages after install, so age
+    is not an abandonment signal here.
+    
+    classify() now retains .elan/toolchains/* regardless of age/size, mirroring the
+    existing .lake liveness guard. Adds a hermetic regression; full suite green.
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index cefbba13..bb5d2231 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -415,6 +415,17 @@ classify() {
+                 fi
+             fi
+             ;;
++        */.elan/toolchains/*)
++            # Live Lean/elAN toolchain install (e.g. the pinned default for an
++            # active project). Quarantining it breaks the build until elan
++            # re-downloads it (failure mode J2: live build dependency). The
++            # directory mtime ages after install, so age is not a signal of
++            # abandonment here; retain it.
++            class=retain
++            ;;
++        */.elan/toolchains)
++            class=retain
++            ;;
+         *)
+             if [ "$is_git" -eq 1 ] && [ "${unpushed:-0}" -gt 0 ]; then
+                 class=retain-unpushed
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+index 04d98821..ca295cdd 100644
+--- a/tests/janitor-smoke.sh
++++ b/tests/janitor-smoke.sh
+@@ -122,4 +122,26 @@ aged_age=$(( (now - aged_mtime) / 86400 ))
+ awk -F'\t' 'NR>1 && $3=="'"$box"'/live-work/.lake" {print $10}' "$state/janitor/inventory.tsv" | grep -qx 'monitor'
+ awk -F'\t' 'NR>1 && $3=="'"$box"'/aged-work/.lake" {print $10}' "$state/janitor/inventory.tsv" | grep -qx 'quarantine-candidate'
+ 
+-printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, responds to critical capacity, reclaims only quarantined items past grace, and classifies build caches by liveness\n'
++# 8. build-toolchain classification: an aged, large Lean/elAN toolchain install is a
++#    live build dependency (the project's pinned toolchain), NOT clutter. It must be
++#    retained, never quarantined, even though it is non-git, old and >=1 GB (J2).
++tbox=$d/tbox
++mkdir -p "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0/bin"
++printf 'x\n' > "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0/bin/lean"
++touch -d '40 days ago' "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0" \
++    "$tbox/proj/.elan" "$tbox/proj"
++now=$(date -u +%s)
++tc_mtime=$(stat -c %Y "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0")
++tc_age=$(( (now - tc_mtime) / 86400 ))
++el_mtime=$(stat -c %Y "$tbox/proj/.elan/toolchains")
++{
++    printf 'ts\thost\tpath\tsize_kb\tmtime\tage_days\tis_git\tuncommitted\tunpushed\tclass\n'
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t1024\t%s\t40\t0\t0\t0\t\n' "$host" "$tbox/proj/.elan" "$el_mtime"
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t2097152\t%s\t%s\t0\t0\t0\t\n' "$host" \
++        "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0" "$tc_mtime" "$tc_age"
++} > "$state/janitor/inventory.tsv"
++/bin/sh "$town/government/janitor.sh" classify
++awk -F'\t' 'NR>1 && $3=="'"$tbox"'/proj/.elan/toolchains/leanprover--lean4---v4.34.0" {print $10}' \
++    "$state/janitor/inventory.tsv" | grep -qx 'retain'
++
++printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, responds to critical capacity, reclaims only quarantined items past grace, classifies build caches by liveness, and retains live build toolchains\n'

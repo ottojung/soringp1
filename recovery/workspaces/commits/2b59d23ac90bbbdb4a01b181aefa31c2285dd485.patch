@@ -1,0 +1,829 @@
+commit 2b59d23ac90bbbdb4a01b181aefa31c2285dd485
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Mon Oct 19 03:22:15 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Oct 19 03:22:15 2026 +0000
+
+    Add retrograde toy: backward layer DP for S(n) on n<=4
+    
+    Implement a genuinely backward dynamic program distinct from forward
+    minimax search: enumerate all labelled posets on n<=4 offline (A001035),
+    invert every legal comparison transition, and compute winning layers
+    bottom-up from the chains by requiring both children at budget-1.
+    
+    Validate against an independent forward CanSort(P,d) for every poset on
+    n<=4 and d<=5 (1458 checks), reproduce S(0..4)=0,0,1,3,5, and extract a
+    depth-5 backward certificate for the n=4 antichain. Explicitly distinguish
+    the offline all-poset graph construction from Stober-Weiss (ALENEX 2023,
+    arXiv:2206.05597) Hasse-edge predecessor enumeration (S4.1/S4.2/S5.7),
+    including the multiple-predecessors-per-comparison phenomenon, and qualify
+    the O(#states*n^2) storage as non-polynomial space. Finite experiment only;
+    no asymptotic or complexity-class claim.
+
+diff --git a/docs/research-retrograde-toy.md b/docs/research-retrograde-toy.md
+new file mode 100644
+index 0000000..bd82447
+--- /dev/null
++++ b/docs/research-retrograde-toy.md
+@@ -0,0 +1,204 @@
++# A small retrograde (backward) DP for exact sorting numbers: toy validation on n ≤ 4
++
++**Status:** research note + finite experiment. This is **not** Lean, **not** a
++complexity-class result, and **not** a proof of any asymptotic statement. Every
++claim below is labelled `[definition]`, `[literature]`, `[deduction]`,
++`[experiment]`, `[conjecture]` or `[open]`.
++
++Companion program: `scripts/retrograde_toy.py`.
++Regression test: `tests/test_retrograde_toy.py` (runs in ≈0.05 s).
++
++**Primary source:** F. Stober and A. Weiß, *Lower Bounds for Sorting 16, 17, and
++18 Elements*, **ALENEX 2023**, pp. 201–213, DOI `10.1137/1.9781611977561.ch17`,
++arXiv:2206.05597. The relevant parts are §4.1 (Lemma 4.1), §4.2 (Lemma 4.2) and
++§5.7 (Lemma 5.1, Lemma 5.2, Corollary 5.1). The venue correction to ALENEX 2023
++(not SEA) is already recorded in `docs/research-obstruction-next.md` §1.1.
++
++## 0. Model and notation
++
++`[definition]` From `docs/problem.md`. `S(n)` is the minimum height of a
++deterministic **adaptive** binary comparison decision tree that sorts every
++permutation of `n` distinct labelled keys, in the worst case. A state is a
++transitively closed strict partial order `P` on the labelled keys `{0,…,n−1}`.
++A legal move compares an **incomparable** pair `{i,j}` and, by the two possible
++answers, produces the children `P+i<j` and `P+j<i` (transitive closure). Write
++
++- `P0` for the antichain, `F(P)` for the minimum number of further worst-case
++  comparisons that suffices to finish sorting from `P` (so `F(P)=0` iff `P` is a
++  chain, and `F(P0)=S(n)`);
++- `CanSort(P,d)` for the predicate `F(P) ≤ d`.
++
++Posets are represented as tuples of successor bitmasks, exactly as in
++`scripts/state_compression.py` and `scripts/budgeted_dfs.py`.
++
++## 1. The backward layer recurrence
++
++`[definition]` Define the *winning layers*
++
++```
++W_0 = { P : P is a chain }
++W_d = W_{d-1} ∪ { P : there is a legal comparison whose BOTH children lie in W_{d-1} }.
++```
++
++`[deduction]` `W_d = { P : CanSort(P,d) } = { P : F(P) ≤ d }`.
++
++*Proof.* By induction on `d`. For `d=0` both sides are the chains. For `d>0`:
++`CanSort(P,d)` holds iff `P` is a chain or some comparison has both children
++`CanSort(·, d−1)`; by induction the children condition is "both children in
++`W_{d-1}`", giving exactly the definition of `W_d`. ∎
++
++`[deduction]` Hence `S(n)` is the least `d` with `P0 ∈ W_d`, and more generally
++`F(P) = min { d : P ∈ W_d }`.
++
++`[experiment]` The program evaluates these layers **bottom-up from the chains**
++over the inverted transition graph. Concretely: every legal move of every state
++gets a counter initialised to `2`; when a child enters a layer, the counters of
++all moves having that child are decremented; a move whose counter reaches `0`
++certifies its owner one layer later. One sweep assigns `F(P)` to every state.
++This is a *genuine layer-wise backward evaluation*: it never calls the forward
++recursion `CanSort`, and it certifies a state by the existence of a comparison
++whose two outcomes were certified at budget `−1` (the layer below).
++
++`[deduction]` The forward recursion
++
++```
++CanSort(P,d) = (P chain)  if d = 0
++             = ∃ legal {i,j}: CanSort(P+i<j,d−1) ∧ CanSort(P+j<i,d−1)   otherwise
++```
++
++is implemented **separately** in `make_forward_oracle` and used only as an
++independent cross-check. It shares the poset encoding but not the layer
++machinery; it is not the algorithm under test.
++
++## 2. What this toy is *not*: the source's predecessor enumeration
++
++`[literature]` The source performs a **backward search** (§4.1): it starts from a
++total order (level `C`, sortable in `0` remaining comparisons) and enumerates
++predecessors level by level. Its predecessor generation (§5.7) iterates over the
++edges of the Hasse diagram of the current poset `P` and calls
++`enumeratePredecessors` to list the posets `P'` with `P = P'+u v`. Lemma 5.2 and
++Corollary 5.1 characterise that set exactly, and §4.1 states the key subtlety:
++
++> even for one specific comparison `(u,v)` there might be **multiple** potential
++> predecessors `P'` such that `P = P'+u v`. Indeed, each combination of
++> transitive edges that would be implied by the comparison is a valid option.
++
++`[experiment]` Our toy deliberately does **not** implement that Hasse-edge
++enumeration. Instead it:
++
++1. enumerates *all* labelled posets on `n` elements offline by exhaustive
++   3-state relation generation (each unordered pair is `<`, `>` or
++   incomparable; keep the transitive assignments), obtaining exactly
++   `A001035(n)` states;
++2. builds *every* legal forward comparison transition and **inverts** the finite
++   graph.
++
++This is an honest **offline all-poset graph construction**, valid only because
++the state space is tiny (`A001035(4) = 219`). It is not the source's scalable
++method and does not claim to be.
++
++`[experiment]` The multiple-predecessor subtlety is nonetheless *present and
++handled* in the inverted graph: `pred[c]` lists every move id whose child is
++`c`, and several moves from different owners may share the same comparison pair.
++The test `test_one_comparison_can_have_two_predecessors` asserts `≥ 2`, and the
++concrete `n = 3` witness is: the chain `0<1<2` is obtained by comparing `(1,2)`
++from **two** predecessors, `{0<1}` and `{0<1, 0<2}`. On `n = 4` the program
++prints, e.g., the child `succ=(12,0,8,0)` reached by comparison `(0,2)` from
++`(0,0,8,0)` and from `(8,0,8,0)`. This is exactly why inverting a single Hasse
++edge is insufficient and why the source needs Lemma 5.1/5.2.
++
++`[deduction]` **Storage.** The reverse graph and counters cost
++`O(#states · n²)` (≤ `binom(n,2)` moves per state), with `#states = A001035(n) =
++1, 1, 3, 19, 219, 4231, …`. `A001035(n)` grows like `2^{n²/4 + o(n²)}`, so this
++is **not polynomial space**. The source reduces the state count by congruence
++classes, efficiency pruning, hashing and disk storage (§5.1–5.5); the toy does
++none of that. No speedup or space improvement over forward search is claimed
++here — the source itself reports that for `n = 12` the bidirectional search
++*increased* the explored space (their Table 2, footnote ‡).
++
++## 3. Results on n ≤ 4
++
++`[experiment]` Exhaustive 3-state generation reproduces the labelled-poset
++counts and the known sorting numbers, and the comparison-reachable set from the
++antichain equals the enumerated set (so the "219 states" fixture is correct):
++
++| n | states `A001035(n)` | moves | `S(n)` retrograde | `S(n)` known |
++|---|---|---|---|---|
++| 0 | 1 | 0 | 0 | 0 |
++| 1 | 1 | 0 | 0 | 0 |
++| 2 | 3 | 1 | 1 | 1 |
++| 3 | 19 | 21 | 3 | 3 |
++| 4 | 219 | 522 | 5 | 5 |
++
++`[experiment]` **Cross-check.** For *every* poset on `n ≤ 4` and *every*
++`d ≤ 5` (1458 `(poset, d)` pairs), the backward layer membership
++`F(P) ≤ d` agrees with the independent forward `CanSort(P,d)`. This is the
++validation required by the task; it is a finite identity on 242 states.
++
++`[experiment]` **Backward certificate for the `n = 4` antichain at depth
++`S(4) = 5`.** The program emits a nested certificate whose root is
++`P0 = (0,0,0,0)` with `F = 5`. Its first step is:
++
++```
++root succ=(0, 0, 0, 0) F=5   compare (0,1)
++  child 0<1: succ=(2,0,0,0) F=4
++  child 1<0: succ=(0,1,0,0) F=4
++```
++
++Each internal node stores a comparison and references to its two children, and
++recurses until chains (`F = 0`). `check_certificate` verifies that every stored
++comparison really produces the referenced children and that
++`F(parent) = 1 + max(F(children))`; the certificate height is exactly `5`. Thus
++the certificate is a complete depth-5 sorting decision tree for `n = 4`,
++extracted purely from the backward layers.
++
++## 4. Efficiency-threshold partial completeness (literature only)
++
++`[literature]` The source's §4.2 introduces the *partial backward search*: with a
++user threshold `E_thr ∈ [E_tot, 2·E_tot)`, only posets with efficiency
++`E(P) = n! / (2^c · e(P))` below the threshold are stored in the lower layers.
++Its **Lemma 4.2** states: for a poset `P` obtained by the forward search in `c`
++comparisons and sortable in at most `C−c` comparisons,
++
++1. if `c ≥ C_f` then `P ∈ ⋃_{d≥c} B'_d`;
++2. if `E(P) ≤ E_thr` then `P ∈ B'_c`.
++
++`[deduction]` The completeness guarantee is **conditional on those hypotheses**.
++Absence of a poset from a thresholded backward result does **not** mean it is
++unsortable; it may simply have `E(P) > E_thr` or have been pruned. We therefore
++do **not** use any absent-implies-`NO` reasoning.
++
++`[experiment]` We did **not** implement the thresholded partial backward search.
++The sweep reported in §3 is the *exact, unthresholded* full layer computation
++over all `n ≤ 4` states, which is complete for that range; consequently no
++threshold-absence question arises in the results above. The threshold variant is
++reported here as literature coverage only, not as a verified implementation.
++
++## 5. Scope, evidence labels, limitations
++
++- `[experiment]` All numbers above are exact finite computations on `n ≤ 4`.
++  They recompute known literature values (`S(4)=5`) and validate the backward
++  algorithm against a forward oracle; they are not new values and prove nothing
++  about larger `n`.
++- `[deduction]` No asymptotic, `P`/`NP`/`EXPTIME`, or separation claim is made or
++  implied. The state space is explicitly non-polynomial (§2).
++- `[open]` Whether the reverse-edge/layer machinery can be made competitive with
++  the source's bidirectional search at larger `n` is not addressed; the toy
++  only isolates the *backward layer evaluation* as a distinct, testable object.
++- The forward oracle is the standard memoized minimax recursion; it is a
++  reference, not a contribution.
++
++### Reproduction
++
++```
++python3 scripts/retrograde_toy.py            # tables + n=4 certificate
++python3 -m unittest tests.test_retrograde_toy -v
++```
++
++## References
++
++- F. Stober, A. Weiß. *Lower Bounds for Sorting 16, 17, and 18 Elements.*
++  ALENEX 2023, 201–213. arXiv:2206.05597. §4.1, §4.2, §5.7.
++- M. Peczarski. *Towards optimal sorting of 16 elements.* Acta Univ. Sapientiae
++  Informatica 4(2), 2012, 215–224.
++- OEIS A001035 (number of labelled partial orders), A036604 (sorting numbers).
+diff --git a/scripts/retrograde_toy.py b/scripts/retrograde_toy.py
+new file mode 100644
+index 0000000..33b95c2
+--- /dev/null
++++ b/scripts/retrograde_toy.py
+@@ -0,0 +1,417 @@
++#!/usr/bin/env python3
++"""Retrograde (backward) exact evaluation of the sorting number S(n) on tiny n.
++
++Model (matches docs/problem.md and scripts/state_compression.py):
++  * n distinct labelled keys; a state is a transitively closed strict partial
++    order on {0,...,n-1}, stored as a tuple ``succ`` of successor bitmasks
++    (bit j of succ[i] is set iff i < j).
++  * Comparing an incomparable pair {i,j} yields the two children
++    ``extend(P,i,j)`` and ``extend(P,j,i)`` (transitive closure).
++  * ``F(P)`` is the minimum number of remaining worst-case comparisons that
++    suffices to finish sorting from P; F(P)=0 iff P is a chain, and
++    F(antichain_n)=S(n).
++  * ``CanSort(P,d)`` means F(P) <= d.
++
++Algorithm: retrograde / layer-wise BACKWARD evaluation.
++  1. Enumerate every labelled poset on n elements by exhaustive 3-state
++     relation generation (each unordered pair is '<', '>' or incomparable) and
++     keep the transitive ones.  For n=4 this is the 219 states A001035(4).
++  2. Build every legal forward comparison transition and INVERT the finite
++     transition graph, storing predecessor lists plus a per-(state,
++     comparison) counter.
++  3. Evaluate winning layers bottom-up: W_0 = chains; a state enters W_d
++     exactly when some comparison has BOTH children in W_{d-1}.  A single
++     sweep over the reverse edges then gives F(P) for every state.
++
++This is NOT the source's algorithm.  Stober-Weiss (ALENEX 2023,
++arXiv:2206.05597) enumerate predecessors on the fly by iterating Hasse-diagram
++edges and running ``enumeratePredecessors`` (Section 4.1 Lemma 4.1, Section 4.2
++Lemma 4.2, Section 5.7 Lemma 5.1/5.2 and Corollary 5.1).  Their Section 4.1 and
++5.7 point is that for one fixed comparison (u,v) a child can have MULTIPLE
++predecessors P', because different subsets of the transitively implied edges may
++already be present in P'.  We sidestep that subtlety by enumerating all states
++offline; the price is storage O(A001035(n) * n^2), which is NOT polynomial
++space.  The paper's method is the scalable one; this is a transparent finite
++fixture.
++
++The forward recursion below is used ONLY as an independent cross-check and is
++separate from the retrograde machinery.  This is a finite n <= 4 experiment: it
++proves nothing asymptotic and says nothing about P, NP or EXPTIME.
++"""
++
++import argparse
++import itertools
++from functools import lru_cache
++
++
++# --------------------------------------------------------------------------
++# Poset representation: tuple of successor bitmasks, transitively closed.
++# --------------------------------------------------------------------------
++
++def extend(succ, i, j):
++    """Add i < j to an already transitively closed poset; return the closure."""
++    out = list(succ)
++    new_greater = succ[j] | (1 << j)
++    for x in range(len(succ)):
++        if x == i or (succ[x] & (1 << i)):
++            out[x] |= new_greater
++    return tuple(out)
++
++
++def incomparable_pairs(succ, n):
++    return [
++        (i, j)
++        for i in range(n)
++        for j in range(i + 1, n)
++        if not (succ[i] & (1 << j)) and not (succ[j] & (1 << i))
++    ]
++
++
++def is_chain(succ, n):
++    return not incomparable_pairs(succ, n)
++
++
++def _transitive(lt, n):
++    for a in range(n):
++        row_a = lt[a]
++        for b in range(n):
++            if row_a[b]:
++                row_b = lt[b]
++                for c in range(n):
++                    if row_b[c] and not row_a[c]:
++                        return False
++    return True
++
++
++def enumerate_posets(n):
++    """Every labelled poset on {0,...,n-1}, by exhaustive 3-state relation
++    generation.  Each unordered pair is '<', '>' or incomparable; keep the
++    transitive assignments.  Returns (posets, index) with posets a list of
++    successor tuples and index a dict succ -> position."""
++    pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
++    index = {}
++    posets = []
++    for choice in itertools.product((0, 1, 2), repeat=len(pairs)):
++        lt = [[False] * n for _ in range(n)]
++        for (i, j), c in zip(pairs, choice):
++            if c == 1:
++                lt[i][j] = True
++            elif c == 2:
++                lt[j][i] = True
++        if not _transitive(lt, n):
++            continue
++        succ = tuple(sum(1 << j for j in range(n) if lt[i][j]) for i in range(n))
++        if succ not in index:
++            index[succ] = len(posets)
++            posets.append(succ)
++    return posets, index
++
++
++def comparison_reachable(n):
++    """Forward breadth-first closure from the antichain under legal
++    comparisons.  Used as a fixture check that the exhaustive enumeration
++    equals the comparison-reachable set (which, on labelled states, is all
++    posets)."""
++    start = (0,) * n
++    seen = {start}
++    stack = [start]
++    while stack:
++        p = stack.pop()
++        for (i, j) in incomparable_pairs(p, n):
++            for child in (extend(p, i, j), extend(p, j, i)):
++                if child not in seen:
++                    seen.add(child)
++                    stack.append(child)
++    return seen
++
++
++# --------------------------------------------------------------------------
++# Retrograde layer sweep over the inverted finite transition graph.
++# --------------------------------------------------------------------------
++
++class Retrograde:
++    """Backward DP result for one n.
++
++    Attributes:
++      posets        list of all labelled poset states
++      index         succ -> position
++      F             list; F[p] = minimum remaining worst-case comparisons
++      S             F of the antichain = S(n)
++      moves_of      moves_of[p] = list of move ids available at state p
++      move_owner    move id -> state
++      move_pair     move id -> compared pair (i, j)
++      move_children move id -> (child_ij, child_ji)
++      pred          pred[c] = list of move ids whose child is c
++    """
++
++    def __init__(self, n):
++        self.n = n
++        self.posets, self.index = enumerate_posets(n)
++        N = len(self.posets)
++        self.moves_of = [[] for _ in range(N)]
++        self.pred = [[] for _ in range(N)]
++        self.move_owner = []
++        self.move_pair = []
++        self.move_children = []
++        for p in range(N):
++            for (i, j) in incomparable_pairs(self.posets[p], n):
++                c1 = self.index[extend(self.posets[p], i, j)]
++                c2 = self.index[extend(self.posets[p], j, i)]
++                mid = len(self.move_owner)
++                self.move_owner.append(p)
++                self.move_pair.append((i, j))
++                self.move_children.append((c1, c2))
++                self.moves_of[p].append(mid)
++                self.pred[c1].append(mid)
++                self.pred[c2].append(mid)
++        self.F = [None] * N
++        self._layer_sweep()
++        self.antichain = self.index[(0,) * n]
++        self.S = self.F[self.antichain]
++
++    def _layer_sweep(self):
++        remaining = [2] * len(self.move_owner)
++        layer = []
++        for p in range(len(self.posets)):
++            if not self.moves_of[p]:
++                self.F[p] = 0
++                layer.append(p)
++        d = 0
++        while layer:
++            nxt = []
++            for c in layer:
++                for mid in self.pred[c]:
++                    remaining[mid] -= 1
++                    if remaining[mid] == 0:
++                        p = self.move_owner[mid]
++                        if self.F[p] is None:
++                            self.F[p] = d + 1
++                            nxt.append(p)
++            d += 1
++            layer = nxt
++        if any(f is None for f in self.F):
++            raise AssertionError("retrograde sweep left states unassigned")
++
++    def state_count(self):
++        return len(self.posets)
++
++    def move_count(self):
++        return len(self.move_owner)
++
++    def witness_move(self, p):
++        """A move at p achieving F(p) = 1 + max(F(children))."""
++        target = self.F[p]
++        for mid in self.moves_of[p]:
++            c1, c2 = self.move_children[mid]
++            if 1 + max(self.F[c1], self.F[c2]) == target:
++                return mid
++        raise AssertionError("no witnessing move")
++
++    def certificate(self, p=None):
++        """Nested backward certificate: at each internal node, a comparison and
++        references to both children, recursively down to chains."""
++        if p is None:
++            p = self.antichain
++        counter = [0]
++
++        def build(q):
++            node = {
++                "id": counter[0],
++                "succ": self.posets[q],
++                "F": self.F[q],
++            }
++            counter[0] += 1
++            if self.F[q] == 0:
++                node["leaf"] = True
++                return node
++            mid = self.witness_move(q)
++            c1, c2 = self.move_children[mid]
++            node["leaf"] = False
++            node["compare"] = self.move_pair[mid]
++            node["children"] = [build(c1), build(c2)]
++            return node
++
++        return build(p)
++
++    def check_certificate(self, node):
++        """Verify the certificate is a genuine backward witness: leaves are
++        chains, each internal node's stored comparison really produces the two
++        referenced children, and F(parent) = 1 + max(F(children))."""
++        if node["leaf"]:
++            return self.F[self.index[node["succ"]]] == 0
++        if node["F"] == 0:
++            return False
++        c1, c2 = node["children"]
++        i, j = node["compare"]
++        if extend(node["succ"], i, j) != c1["succ"]:
++            return False
++        if extend(node["succ"], j, i) != c2["succ"]:
++            return False
++        if node["F"] != 1 + max(c1["F"], c2["F"]):
++            return False
++        return self.check_certificate(c1) and self.check_certificate(c2)
++
++    def certificate_height(self, node):
++        if node["leaf"]:
++            return 0
++        return 1 + max(self.certificate_height(c) for c in node["children"])
++
++
++# --------------------------------------------------------------------------
++# Independent forward oracle (validation only): recursive memoized minimax.
++# --------------------------------------------------------------------------
++
++def make_forward_oracle(n):
++    @lru_cache(maxsize=None)
++    def can_sort(succ, d):
++        pairs = incomparable_pairs(succ, n)
++        if not pairs:
++            return True
++        if d == 0:
++            return False
++        return any(
++            can_sort(extend(succ, i, j), d - 1) and can_sort(extend(succ, j, i), d - 1)
++            for (i, j) in pairs
++        )
++
++    return can_sort
++
++
++def predecessors_for_pair(posets, child_succ, i, j):
++    """All states P for which (i,j) is a legal (incomparable) comparison and
++    extend(P,i,j) == child_succ.  This directly exhibits the source's point
++    that one comparison can have several predecessors."""
++    return [
++        P
++        for P in posets
++        if not (P[i] & (1 << j))
++        and not (P[j] & (1 << i))
++        and extend(P, i, j) == child_succ
++    ]
++
++
++def find_multi_predecessor(R):
++    """Smallest example where a single comparison (i,j) leading to one child
++    has at least two distinct predecessors.  Returns (child, pair, preds) or
++    None."""
++    for mid in range(len(R.move_owner)):
++        c1, c2 = R.move_children[mid]
++        i, j = R.move_pair[mid]
++        for child, a, b in ((c1, i, j), (c2, j, i)):
++            preds = predecessors_for_pair(R.posets, R.posets[child], a, b)
++            if len(preds) >= 2:
++                return R.posets[child], (a, b), preds
++    return None
++
++
++# --------------------------------------------------------------------------
++# Validation and reporting.
++# --------------------------------------------------------------------------
++
++KNOWN_S = {0: 0, 1: 0, 2: 1, 3: 3, 4: 5}
++A001035 = {0: 1, 1: 1, 2: 3, 3: 19, 4: 219}
++
++
++def validate(n_max=4, d_max=5):
++    """Return (rows, cross_checks, all_ok).  rows summarizes each n; the
++    cross-check verifies, for EVERY poset and every d <= d_max, that
++    retrograde F and the independent forward CanSort agree."""
++    rows = []
++    cross_checks = 0
++    ok = True
++    for n in range(0, n_max + 1):
++        R = Retrograde(n)
++        rows.append(
++            {
++                "n": n,
++                "states": R.state_count(),
++                "moves": R.move_count(),
++                "S": R.S,
++                "known_S": KNOWN_S.get(n),
++                "a001035": A001035.get(n),
++            }
++        )
++        if R.state_count() != A001035.get(n):
++            ok = False
++        if R.S != KNOWN_S.get(n):
++            ok = False
++        if comparison_reachable(n) != set(R.posets):
++            ok = False
++        can_sort = make_forward_oracle(n)
++        for succ in R.posets:
++            f = R.F[R.index[succ]]
++            for d in range(0, d_max + 1):
++                cross_checks += 1
++                if can_sort(succ, d) != (f <= d):
++                    ok = False
++    return rows, cross_checks, ok
++
++
++def _print_tree(R, node, indent=0):
++    pad = "  " * indent
++    if node["leaf"]:
++        print(f"{pad}leaf succ={node['succ']} F={node['F']}")
++        return
++    i, j = node["compare"]
++    print(f"{pad}succ={node['succ']} F={node['F']}  compare ({i},{j})")
++    c1, c2 = node["children"]
++    print(f"{pad}  child {i}<{j}: id={c1['id']} succ={c1['succ']} F={c1['F']}")
++    print(f"{pad}  child {j}<{i}: id={c2['id']} succ={c2['succ']} F={c2['F']}")
++    _print_tree(R, c1, indent + 2)
++    _print_tree(R, c2, indent + 2)
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__)
++    ap.add_argument("--max-n", type=int, default=4)
++    ap.add_argument("--d-max", type=int, default=5)
++    args = ap.parse_args()
++
++    rows, checks, ok = validate(args.max_n, args.d_max)
++
++    print("Retrograde (backward) DP on labelled posets, n <= %d" % args.max_n)
++    print("n | states A001035 | moves | S(n) retrograde | S(n) known | match")
++    for r in rows:
++        match = r["S"] == r["known_S"] and r["states"] == r["a001035"]
++        print(
++            f"{r['n']} | {r['states']} (ref {r['a001035']}) | {r['moves']} "
++            f"| {r['S']} | {r['known_S']} | {match}"
++        )
++    print()
++    print(
++        "Forward cross-check: %d (poset, d) pairs with d <= %d agree with "
++        "independent CanSort: %s" % (checks, args.d_max, ok)
++    )
++    print(
++        "Storage note: reverse graph + counters are O(#states * n^2) = "
++        "non-polynomial space (A001035 grows super-polynomially)."
++    )
++
++    n = 4
++    R = Retrograde(n)
++    cert = R.certificate()
++    print()
++    print(f"Backward certificate for the antichain on n={n}, depth S({n})={R.S}:")
++    print(f"  root succ={R.posets[R.antichain]} F={R.F[R.antichain]}")
++    _print_tree(R, cert, indent=1)
++    print()
++    print(
++        "  certificate valid (children/compare/F consistent): "
++        f"{R.check_certificate(cert)}"
++    )
++    print(
++        f"  certificate height: {R.certificate_height(cert)} (must equal S({n})={R.S})"
++    )
++
++    found = find_multi_predecessor(R)
++    print()
++    print("Multiple predecessors for one comparison (source Section 4.1/5.7):")
++    if found is None:
++        print("  none found (unexpected)")
++    else:
++        child, pair, preds = found
++        print(f"  child succ={child}; comparison {pair}; predecessors={preds}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_retrograde_toy.py b/tests/test_retrograde_toy.py
+new file mode 100644
+index 0000000..414daab
+--- /dev/null
++++ b/tests/test_retrograde_toy.py
+@@ -0,0 +1,168 @@
++"""Regression checks for the retrograde toy (docs/research-retrograde-toy.md).
++
++These pin the finite, reproducible facts of the backward (retrograde) DP on
++n <= 4 labelled posets:
++
++  * the exhaustive 3-state relation generation yields exactly the labelled
++    posets A001035(n), and equals the comparison-reachable set from the
++    antichain (so the ``219 states`` fixture is correct for n = 4);
++  * the layer-wise backward F agrees with an INDEPENDENT forward memoized
++    ``CanSort(P, d)`` for every poset and every ``d <= 5``;
++  * the known values ``S(0..4) = 0,0,1,3,5`` are reproduced;
++  * a genuine backward certificate for the n = 4 antichain at depth 5 exists,
++    is internally consistent, and has height exactly ``S(4)``;
++  * one fixed comparison can have several predecessors (the source's Section
++    4.1/5.7 point).
++
++All assertions are exact finite results on n <= 4; none is asymptotic.
++
++Run with:  python3 -m unittest discover -s tests -v
++"""
++
++import sys
++import time
++import unittest
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
++from retrograde_toy import (  # noqa: E402
++    A001035,
++    KNOWN_S,
++    Retrograde,
++    comparison_reachable,
++    enumerate_posets,
++    find_multi_predecessor,
++    is_chain,
++    make_forward_oracle,
++    predecessors_for_pair,
++    validate,
++)
++
++
++class Fixture(unittest.TestCase):
++    def test_labelled_poset_counts(self) -> None:
++        for n, expected in A001035.items():
++            with self.subTest(n=n):
++                posets, index = enumerate_posets(n)
++                self.assertEqual(len(posets), expected)
++                self.assertEqual(len(index), expected)
++
++    def test_exhaustive_equals_comparison_reachable(self) -> None:
++        # From the antichain, legal comparisons reach every labelled poset.
++        for n in range(0, 5):
++            with self.subTest(n=n):
++                posets, _ = enumerate_posets(n)
++                self.assertEqual(comparison_reachable(n), set(posets))
++
++    def test_state_counts_n4(self) -> None:
++        R = Retrograde(4)
++        self.assertEqual(R.state_count(), 219)
++
++
++class BackwardMatchesForward(unittest.TestCase):
++    def test_all_posets_all_budgets(self) -> None:
++        rows, checks, ok = validate(n_max=4, d_max=5)
++        self.assertTrue(ok)
++        self.assertEqual(checks, (1 + 1 + 3 + 19 + 219) * 6)
++        for r in rows:
++            with self.subTest(n=r["n"]):
++                self.assertEqual(r["states"], r["a001035"])
++                self.assertEqual(r["S"], r["known_S"])
++
++    def test_known_small_values(self) -> None:
++        for n, expected in KNOWN_S.items():
++            with self.subTest(n=n):
++                self.assertEqual(Retrograde(n).S, expected)
++
++    def test_f_is_min_over_moves(self) -> None:
++        # F(P) = 1 + min over legal comparisons of max(F(children)), chains 0.
++        R = Retrograde(4)
++        for p in range(R.state_count()):
++            with self.subTest(p=p):
++                if not R.moves_of[p]:
++                    self.assertEqual(R.F[p], 0)
++                    continue
++                best = min(
++                    1 + max(R.F[c1], R.F[c2])
++                    for (c1, c2) in (R.move_children[m] for m in R.moves_of[p])
++                )
++                self.assertEqual(R.F[p], best)
++
++
++class BackwardCertificate(unittest.TestCase):
++    def test_certificate_for_antichain_n4_depth_5(self) -> None:
++        R = Retrograde(4)
++        cert = R.certificate()
++        self.assertEqual(R.S, 5)
++        self.assertEqual(cert["succ"], (0, 0, 0, 0))
++        self.assertEqual(cert["F"], 5)
++        self.assertFalse(cert["leaf"])
++        self.assertIn("compare", cert)
++        i, j = cert["compare"]
++        c1, c2 = cert["children"]
++        # The chosen comparison really produces the two referenced children.
++        from retrograde_toy import extend  # noqa: E402
++
++        self.assertEqual(extend(cert["succ"], i, j), c1["succ"])
++        self.assertEqual(extend(cert["succ"], j, i), c2["succ"])
++        # F = 1 + max(child F) and both children are certified within 4.
++        self.assertEqual(cert["F"], 1 + max(c1["F"], c2["F"]))
++        self.assertLessEqual(c1["F"], 4)
++        self.assertLessEqual(c2["F"], 4)
++        self.assertTrue(R.check_certificate(cert))
++        self.assertEqual(R.certificate_height(cert), 5)
++
++    def test_certificate_leaves_are_chains(self) -> None:
++        R = Retrograde(4)
++        cert = R.certificate()
++
++        def leaves(node):
++            if node["leaf"]:
++                yield node
++            else:
++                for c in node["children"]:
++                    yield from leaves(c)
++
++        found = list(leaves(cert))
++        self.assertGreater(len(found), 0)
++        for leaf in found:
++            self.assertTrue(is_chain(leaf["succ"], 4))
++            self.assertEqual(R.F[R.index[leaf["succ"]]], 0)
++            self.assertEqual(leaf["F"], 0)
++
++
++class MultiplePredecessors(unittest.TestCase):
++    def test_one_comparison_can_have_two_predecessors(self) -> None:
++        R = Retrograde(4)
++        found = find_multi_predecessor(R)
++        self.assertIsNotNone(found)
++        child, (i, j), preds = found
++        self.assertGreaterEqual(len(preds), 2)
++        self.assertEqual(len(set(preds)), len(preds))
++        from retrograde_toy import extend  # noqa: E402
++
++        for P in preds:
++            self.assertFalse(P[i] & (1 << j))
++            self.assertFalse(P[j] & (1 << i))
++            self.assertEqual(extend(P, i, j), child)
++
++    def test_chain_n3_witness(self) -> None:
++        # Chain 0<1<2 on n=3 arises from adding 1<2 to either 0<1 (only) or
++        # 0<1,0<2 -- two distinct predecessors for the same comparison.
++        R = Retrograde(3)
++        child = (6, 4, 0)
++        preds = predecessors_for_pair(R.posets, child, 1, 2)
++        self.assertEqual(set(preds), {(2, 0, 0), (6, 0, 0)})
++
++
++class Runtime(unittest.TestCase):
++    def test_full_validation_under_3s(self) -> None:
++        t0 = time.perf_counter()
++        _, _, ok = validate(n_max=4, d_max=5)
++        dt = time.perf_counter() - t0
++        self.assertTrue(ok)
++        self.assertLess(dt, 3.0, f"validation took {dt:.3f}s (>3s)")
++
++
++if __name__ == "__main__":
++    unittest.main()

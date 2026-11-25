@@ -1,0 +1,72 @@
+commit 28fcdd7d4e4307002861d6a0da111287d91ced19
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Mon Oct 19 09:49:22 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Oct 19 09:49:31 2026 +0000
+
+    Janitor: also retain top-level .elan dir (fix guard to match live inventory path)
+    
+    The live inventory records /home/lubko/.elan (the top-level elan home),
+    not the nested .elan/toolchains/*. Broaden the J2 guard to match */.elan so the
+    whole live Lean toolchain installation is retained, not flagged as a
+    quarantine-candidate. Test now covers both the top-level and nested paths.
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index bb5d2231..52ff8c08 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -415,15 +415,12 @@ classify() {
+                 fi
+             fi
+             ;;
+-        */.elan/toolchains/*)
+-            # Live Lean/elAN toolchain install (e.g. the pinned default for an
+-            # active project). Quarantining it breaks the build until elan
+-            # re-downloads it (failure mode J2: live build dependency). The
+-            # directory mtime ages after install, so age is not a signal of
+-            # abandonment here; retain it.
+-            class=retain
+-            ;;
+-        */.elan/toolchains)
++        */.elan)
++            # Live Lean/elAN toolchain installation (elan home: toolchains, the
++            # elan binary, settings). Quarantining it breaks the Lean build until
++            # elan re-downloads the pinned toolchain (failure mode J2: live build
++            # dependency). The directory mtime ages after install, so age is not
++            # an abandonment signal here; retain it.
+             class=retain
+             ;;
+         *)
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+index ca295cdd..d5f2d277 100644
+--- a/tests/janitor-smoke.sh
++++ b/tests/janitor-smoke.sh
+@@ -129,18 +129,23 @@ tbox=$d/tbox
+ mkdir -p "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0/bin"
+ printf 'x\n' > "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0/bin/lean"
+ touch -d '40 days ago' "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0" \
+-    "$tbox/proj/.elan" "$tbox/proj"
++    "$tbox/proj/.elan/toolchains" "$tbox/proj/.elan" "$tbox/proj"
+ now=$(date -u +%s)
+ tc_mtime=$(stat -c %Y "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0")
+-tc_age=$(( (now - tc_mtime) / 86400 ))
+ el_mtime=$(stat -c %Y "$tbox/proj/.elan/toolchains")
++top_mtime=$(stat -c %Y "$tbox/proj/.elan")
+ {
+     printf 'ts\thost\tpath\tsize_kb\tmtime\tage_days\tis_git\tuncommitted\tunpushed\tclass\n'
+-    printf '2026-01-01T00:00:00Z\t%s\t%s\t1024\t%s\t40\t0\t0\t0\t\n' "$host" "$tbox/proj/.elan" "$el_mtime"
+-    printf '2026-01-01T00:00:00Z\t%s\t%s\t2097152\t%s\t%s\t0\t0\t0\t\n' "$host" \
+-        "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0" "$tc_mtime" "$tc_age"
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t1024\t%s\t40\t0\t0\t0\t\n' "$host" "$tbox/proj/.elan" "$top_mtime"
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t1024\t%s\t40\t0\t0\t0\t\n' "$host" "$tbox/proj/.elan/toolchains" "$el_mtime"
++    printf '2026-01-01T00:00:00Z\t%s\t%s\t2097152\t%s\t40\t0\t0\t0\t\n' "$host" \
++        "$tbox/proj/.elan/toolchains/leanprover--lean4---v4.34.0" "$tc_mtime"
+ } > "$state/janitor/inventory.tsv"
+ /bin/sh "$town/government/janitor.sh" classify
++awk -F'\t' 'NR>1 && $3=="'"$tbox"'/proj/.elan" {print $10}' \
++    "$state/janitor/inventory.tsv" | grep -qx 'retain'
++awk -F'\t' 'NR>1 && $3=="'"$tbox"'/proj/.elan/toolchains" {print $10}' \
++    "$state/janitor/inventory.tsv" | grep -qx 'retain'
+ awk -F'\t' 'NR>1 && $3=="'"$tbox"'/proj/.elan/toolchains/leanprover--lean4---v4.34.0" {print $10}' \
+     "$state/janitor/inventory.tsv" | grep -qx 'retain'
+ 

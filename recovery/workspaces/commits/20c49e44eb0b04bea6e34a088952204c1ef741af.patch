@@ -1,0 +1,195 @@
+commit 20c49e44eb0b04bea6e34a088952204c1ef741af
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 23:00:34 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 23:00:34 2026 +0000
+
+    Stream exact-suite verification evidence and bound hung tests
+
+diff --git a/government/suite-status.sh b/government/suite-status.sh
+index 80b6b9ea..9cbf3eb0 100644
+--- a/government/suite-status.sh
++++ b/government/suite-status.sh
+@@ -78,20 +78,49 @@ git -C "$town" worktree add --quiet --detach "$checkout" "$sha" ||
+ [ "$(git -C "$checkout" rev-parse HEAD^{tree})" = "$tree" ] ||
+     { echo "suite-status: checkout tree mismatch" >&2; exit 2; }
+ 
+-# Run each replay in that immutable source checkout; emit an exit code and an
+-# output digest. Flaky-red reruns use the SAME original source revision.
++# A hung test must not own the integrator indefinitely. An explicit
++# deadline is a failed run, never a green result or an exemption. The
++# short records suite has a smaller default; test fixtures may shorten
++# either deadline but cannot remove the upper bound.
++case "$suite" in tests/records-smoke.sh) limit=120;; *) limit=1800;; esac
++seconds=${SUITE_STATUS_TIMEOUT_SECONDS:-$limit}
++case "$seconds" in ''|*[!0-9]*) echo 'suite-status: invalid deadline' >&2; exit 2;; esac
++[ "${#seconds}" -le 4 ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le "$limit" ] ||
++    { echo 'suite-status: deadline outside allowed bound' >&2; exit 2; }
++
++# Run each replay in the immutable source checkout. Stream output to a
++# unique attempt file so the failing test is observable before the suite
++# returns. Preserve the existing normalized output digest (command
++# substitution strips trailing newlines). Publish the completed log
++# atomically and retain unfinished progress evidence on interruption.
+ run_once() {
+-    out=$(cd "$checkout" && VICHE_TOWN_ROOT="$checkout" /bin/sh "$verifier_dir/suite-env.sh" /bin/sh "$suite" 2>&1) && rc=0 || rc=$?
++    attempt=$1
++    raw=$scratch/run-$attempt.log
++    if [ -n "${SUITE_STATUS_LOG_DIR:-}" ]; then
++        raw=$(mktemp "$SUITE_STATUS_LOG_DIR/progress-$sha-run$attempt.XXXXXXXX") ||
++            { echo 'suite-status: cannot retain live verification evidence' >&2; return 2; }
++    fi
++    rc=0
++    (cd "$checkout" && VICHE_TOWN_ROOT="$checkout" timeout -k 5 "$seconds" /bin/sh "$verifier_dir/suite-env.sh" /bin/sh "$suite") > "$raw" 2>&1 || rc=$?
++    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
++        printf '\nsuite-status: attempt %s ended with status %s (deadline %ss)\n' "$attempt" "$rc" "$seconds" >> "$raw"
++    fi
++    out=$(cat "$raw") || return 2
+     hash=$(printf '%s' "$out" | sha256sum | cut -d ' ' -f1)
+-    # Act 31: the integrator keeps the output so a proposer can see why a
+-    # candidate was red. The recorded digest is of this same output.
+     if [ -n "${SUITE_STATUS_LOG_DIR:-}" ]; then
+-        printf '%s\n' "$out" > "$SUITE_STATUS_LOG_DIR/suite-$hash.log" 2>/dev/null || :
++        logtmp=$(mktemp "$SUITE_STATUS_LOG_DIR/.suite-$hash.XXXXXXXX") || return 2
++        if ! printf '%s\n' "$out" > "$logtmp" ||
++           ! mv -f "$logtmp" "$SUITE_STATUS_LOG_DIR/suite-$hash.log"; then
++            rm -f "$logtmp"
++            echo 'suite-status: cannot retain complete verification evidence' >&2
++            return 2
++        fi
++        rm -f "$raw"
+     fi
+     printf '%s\t%s\n' "$rc" "$hash"
+ }
+ 
+-first=$(run_once)
++first=$(run_once 1)
+ rc1=$(printf '%s' "$first" | cut -f1)
+ h1=$(printf '%s' "$first" | cut -f2)
+ r1=red; [ "$rc1" -eq 0 ] && r1=green
+@@ -100,7 +129,7 @@ if [ "$rc1" -eq 0 ]; then
+     result=green
+     runs="[{\"run\":1,\"result\":\"$r1\",\"exit\":$rc1,\"output_sha256\":\"$h1\"}]"
+ else
+-    second=$(run_once)
++    second=$(run_once 2)
+     rc2=$(printf '%s' "$second" | cut -f1)
+     h2=$(printf '%s' "$second" | cut -f2)
+     r2=red; [ "$rc2" -eq 0 ] && r2=green
+diff --git a/tests/run-all.sh b/tests/run-all.sh
+index de4ad1fb..0d8b620f 100644
+--- a/tests/run-all.sh
++++ b/tests/run-all.sh
+@@ -17,19 +17,28 @@ test -s government/seats.tsv
+ awk -F '\t' 'NF != 3 || $1 !~ /^[0-9a-f]+$/ { exit 1 }' government/seats.tsv
+ test "$(cut -f1 government/seats.tsv | sort -u | wc -l)" -eq "$(wc -l < government/seats.tsv)"
+ 
+-printf '\nRunning tests/audit-act27-legacy-smoke.py\n'
+-python3 tests/audit-act27-legacy-smoke.py
++run_test() {
++    label=$1; shift
++    started=$(date +%s)
++    printf '\nRunning %s\n' "$label"
++    rc=0
++    "$@" || rc=$?
++    elapsed=$(($(date +%s) - started))
++    if [ "$rc" -ne 0 ]; then
++        printf 'FAIL: %s (exit=%s, elapsed=%ss)\n' "$label" "$rc" "$elapsed" >&2
++        exit "$rc"
++    fi
++    printf 'PASS: %s (elapsed=%ss)\n' "$label" "$elapsed"
++}
+ 
+-printf '\nRunning tests/test_spying_source_allowlist.py\n'
+-python3 tests/test_spying_source_allowlist.py
++run_test tests/audit-act27-legacy-smoke.py python3 tests/audit-act27-legacy-smoke.py
++run_test tests/test_spying_source_allowlist.py python3 tests/test_spying_source_allowlist.py
+ 
+ # Preserve the formerly excluded Economy 399k token regression in every
+ # exact-candidate suite, not just as a separately run characterization test.
+-printf '\nRunning tests/knowledge-budget-admit-negative-20261122.sh\n'
+-dash tests/knowledge-budget-admit-negative-20261122.sh
++run_test tests/knowledge-budget-admit-negative-20261122.sh dash tests/knowledge-budget-admit-negative-20261122.sh
+ 
+ for script in tests/*-smoke.sh tests/ballot-integrity.sh; do
+-    printf '\nRunning %s\n' "$script"
+-    dash "$script"
++    run_test "$script" dash "$script"
+ done
+ echo 'All Viche tests passed'
+diff --git a/tests/suite-status-smoke.sh b/tests/suite-status-smoke.sh
+index adb4fa3b..c8101a7d 100644
+--- a/tests/suite-status-smoke.sh
++++ b/tests/suite-status-smoke.sh
+@@ -41,6 +41,19 @@ n=$((n + 1))
+ printf '%s\n' "$n" > "$SUITE_STATUS_SMOKE_COUNTER"
+ [ "$n" -ge 2 ]
+ EOF
++cat > "$town/tests/stream.sh" <<'EOF'
++#!/bin/sh
++set -eu
++printf 'fixture started\n'
++IFS= read -r token < "$SUITE_STATUS_SMOKE_FIFO"
++[ "$token" = release ]
++printf 'fixture completed\n'
++EOF
++cat > "$town/tests/deadline.sh" <<'EOF'
++#!/bin/sh
++echo 'intentional hang fixture'
++sleep 20
++EOF
+ SUITE_STATUS_SMOKE_COUNTER=$scratch/flaky.count
+ export SUITE_STATUS_SMOKE_COUNTER
+ git -C "$town" add -A
+@@ -109,6 +122,51 @@ if run --suite tests/probe.sh --commit HEAD~2 >/dev/null 2>&1; then
+   echo "FAIL: accepted test absent from verified commit" >&2; exit 1
+ fi
+ 
++# Stream a real in-flight exact-revision attempt before allowing completion.
++mkdir -p "$scratch/suite-logs"
++SUITE_STATUS_LOG_DIR=$scratch/suite-logs
++SUITE_STATUS_SMOKE_FIFO=$scratch/stream.fifo
++export SUITE_STATUS_LOG_DIR SUITE_STATUS_SMOKE_FIFO
++mkfifo "$SUITE_STATUS_SMOKE_FIFO"
++run --suite tests/stream.sh >/dev/null &
++stream_pid=$!
++deadline=$(($(date +%s) + 30))
++seen=no
++while [ "$(date +%s)" -lt "$deadline" ]; do
++    for log in "$SUITE_STATUS_LOG_DIR"/progress-*; do
++        if [ -f "$log" ] && grep -Fxq 'fixture started' "$log"; then seen=yes; break; fi
++    done
++    [ "$seen" = no ] || break
++    kill -0 "$stream_pid" 2>/dev/null || break
++    sleep .05
++done
++if [ "$seen" != yes ]; then
++    kill "$stream_pid" 2>/dev/null || :
++    wait "$stream_pid" 2>/dev/null || :
++    echo 'FAIL: no live exact-suite progress file' >&2; exit 1
++fi
++printf 'release\n' > "$SUITE_STATUS_SMOKE_FIFO"
++wait "$stream_pid"
++check_result green
++hash=$(jq -r '.runs[0].output_sha256' "$town/records/suite-status.json")
++test "$hash" = "$(printf 'fixture started\nfixture completed' | sha256sum | cut -d' ' -f1)"
++grep -Fxq 'fixture completed' "$SUITE_STATUS_LOG_DIR/suite-$hash.log"
++test -z "$(find "$SUITE_STATUS_LOG_DIR" -name 'progress-*' -print -quit)"
++
++# A hanging test is bounded and cannot be recorded green. Both exact
++# attempts remain recorded under the existing flaky-red policy.
++if SUITE_STATUS_TIMEOUT_SECONDS=1 run --suite tests/deadline.sh >/dev/null 2>&1; then
++    echo 'FAIL: deadline treated as green' >&2; exit 1
++fi
++check_result red
++jq -e '(.runs|length)==2 and all(.runs[]; .result=="red" and (.exit==124 or .exit==137))' "$town/records/suite-status.json" >/dev/null
++hash=$(jq -r '.runs[-1].output_sha256' "$town/records/suite-status.json")
++grep -q 'deadline 1s' "$SUITE_STATUS_LOG_DIR/suite-$hash.log"
++if SUITE_STATUS_TIMEOUT_SECONDS=0 run --suite tests/green.sh >/dev/null 2>&1; then
++    echo 'FAIL: disabled deadline' >&2; exit 1
++fi
++unset SUITE_STATUS_LOG_DIR SUITE_STATUS_SMOKE_FIFO
++
+ test "$(git -C "$town" worktree list --porcelain | grep -c '^worktree ')" -eq 1
+ test "$(git -C "$town" status --porcelain -- tests/probe.sh)" = ' M tests/probe.sh'
+ echo 'Exact-commit quality-gate, flaky-red and isolation smoke passed'

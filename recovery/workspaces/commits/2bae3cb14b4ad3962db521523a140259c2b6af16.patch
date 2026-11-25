@@ -1,0 +1,128 @@
+commit 2bae3cb14b4ad3962db521523a140259c2b6af16
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Tue Nov 24 23:17:53 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Tue Nov 24 23:17:53 2026 +0000
+
+    Return Lean result directly from async wait and install role dispatch reproducibly
+
+diff --git a/missions/pnp/role_prompt.py b/missions/pnp/role_prompt.py
+index e19f44ac..043ffa0d 100644
+--- a/missions/pnp/role_prompt.py
++++ b/missions/pnp/role_prompt.py
+@@ -63,8 +63,8 @@ def instructions(role):
+             f"Remote Lean: run {RELAY} --availability once for this checkout. "
+             f"If available, use {RELAY} --async FILE.lean for a complete candidate or "
+             f"{RELAY} --scratch --async FILE.lean for an intermediate Lean check; "
+-            "continue mathematics while it runs, then ~/.local/bin/marceline-request wait ID 1100. "
+-            "Read nested result.status and diagnostics. Use local managed Lean for small checks or unavailable/busy remote; "
++            "continue mathematics while it runs, then ~/.local/bin/pnp-remote-check --wait ID. "
++            "Read compiler status and diagnostics. Use local managed Lean for small checks or unavailable/busy remote; "
+             "do not run the same build twice. Remote elaboration is not upstream acceptance and never delays submit."
+         )
+     return text
+diff --git a/missions/relay/README.md b/missions/relay/README.md
+index dbbe7f81..e028e209 100644
+--- a/missions/relay/README.md
++++ b/missions/relay/README.md
+@@ -36,12 +36,11 @@ pnp-remote-check --availability
+ pnp-remote-check path/to/candidate.lean
+ pnp-remote-check --async path/to/candidate.lean
+ pnp-remote-check --scratch --async path/to/Scratch.lean
+-marceline-request wait REQUEST_ID 1100
++pnp-remote-check --wait REQUEST_ID
+ ```
+ 
+ The helper checks your immutable live assignment, packs the exact source and
+-checks the advertised pinned base before transmitting anything. Use --scratch for intermediate files, including unfinished proofs; scratch success is not proof acceptance. A blocking
+-check exits 0 only for successful elaboration. Async submission exits 0
++checks the advertised pinned base before transmitting anything. Use --scratch for intermediate files, including unfinished proofs; scratch success is not proof acceptance. A blocking check or --wait exits 0 only for successful elaboration; --wait prints the compiler result directly. Async submission exits 0
+ when queued. If the packer or matching cache is unavailable, use the local
+ managed compiler; never wait for remote infrastructure before publishing a
+ complete candidate.
+@@ -55,7 +54,7 @@ marceline-dev.
+ 
+ ```sh
+ marceline-request submit lean-check /private/path/JOB.request
+-marceline-request wait REQUEST_ID 1100
++pnp-remote-check --wait REQUEST_ID
+ # or blocking:
+ marceline-request lean-check /private/path/JOB.request
+ ```
+diff --git a/missions/relay/install.sh b/missions/relay/install.sh
+index c407d688..3c95e61f 100755
+--- a/missions/relay/install.sh
++++ b/missions/relay/install.sh
+@@ -22,3 +22,18 @@ exec "$HOME/.local/bin/python3" "$HOME/.local/share/viche/relay/pnp-remote-check
+ EOF
+ chmod 700 "$HOME/.local/bin/pnp-remote-check.tmp"
+ mv "$HOME/.local/bin/pnp-remote-check.tmp" "$HOME/.local/bin/pnp-remote-check"
++# On billy-dev install the Executive role-dispatch entry point as well.
++if [ -f "$src/../pnp/role_prompt.py" ]; then
++  cp "$src/../pnp/role_prompt.py" "$dest/role_prompt.py.tmp"
++  chmod 600 "$dest/role_prompt.py.tmp"
++  mv "$dest/role_prompt.py.tmp" "$dest/role_prompt.py"
++  cat > "$HOME/.local/bin/pnp-role-dispatch.tmp" <<'EOF'
++#!/bin/sh
++if [ -f /var/lib/lubko/wd/viche/missions/pnp/role_prompt.py ]; then
++  exec "$HOME/.local/bin/python3" /var/lib/lubko/wd/viche/missions/pnp/role_prompt.py "$@"
++fi
++exec "$HOME/.local/bin/python3" "$HOME/.local/share/viche/relay/role_prompt.py" "$@"
++EOF
++  chmod 700 "$HOME/.local/bin/pnp-role-dispatch.tmp"
++  mv "$HOME/.local/bin/pnp-role-dispatch.tmp" "$HOME/.local/bin/pnp-role-dispatch"
++fi
+diff --git a/missions/relay/pnp-remote-check.py b/missions/relay/pnp-remote-check.py
+index 35c2e588..484a56c6 100644
+--- a/missions/relay/pnp-remote-check.py
++++ b/missions/relay/pnp-remote-check.py
+@@ -84,6 +84,8 @@ def record(name):
+ def main():
+     p = argparse.ArgumentParser(description=__doc__)
+     p.add_argument("file", type=Path, nargs="?")
++    p.add_argument("--wait", metavar="ID", help="retrieve a submitted Lean check; exit reflects elaboration")
++    p.add_argument("--timeout", type=int, default=1100, help="maximum wait in seconds for --wait")
+     p.add_argument("--availability", action="store_true", help="report current checkout's remote availability and queue")
+     p.add_argument("--scratch", action="store_true", help="check an intermediate Lean file (not a complete proof)")
+     p.add_argument("--async", dest="asynchronous", action="store_true")
+@@ -92,6 +94,15 @@ def main():
+     a = p.parse_args()
+     sys.path.insert(0,str(ROOT))
+     try:
++        if a.wait:
++            proc=subprocess.run([RELAY,"wait",a.wait,str(a.timeout)],stdout=subprocess.PIPE)
++            if proc.returncode:
++                sys.stdout.buffer.write(proc.stdout)
++                return proc.returncode
++            receipt=json.loads(proc.stdout)
++            result=receipt["result"]
++            print(json.dumps(result,ensure_ascii=False))
++            return 0 if result["status"]=="elaborated" and result["exit_code"]==0 else 1
+         binding=current()
+         status=availability(binding[2])
+         if a.availability:
+@@ -99,7 +110,7 @@ def main():
+             record("remote-availability")
+             return 0 if status.get("base_available") else 1
+         if a.file is None:
+-            p.error("FILE required (or --availability)")
++            p.error("FILE required (or --availability / --wait)")
+         if not status.get("base_available"):
+             p.exit(1, "Remote service or exact base unavailable; use local Lean.\n")
+         protocol=load_protocol()
+diff --git a/missions/relay/relay.mjs b/missions/relay/relay.mjs
+index 7de47f2a..5032ce44 100644
+--- a/missions/relay/relay.mjs
++++ b/missions/relay/relay.mjs
+@@ -323,7 +323,10 @@ async function main(){
+   if(arg){
+    if(!/^[0-9a-f]{40}$/.test(arg))throw Error('status base must be a 40-hex SHA');
+    summary.base=arg;summary.base_available=delta!==null&&delta>=-120&&delta<=180&&(r.capabilities?.lean_bases||[]).includes(arg);
+-   summary.queue=r.entries.filter(e=>['ack','running'].includes(e.state)).length;
++   summary.running=r.entries.filter(e=>e.state==='running').length;
++   summary.queued=r.entries.filter(e=>e.state==='ack').length;
++   summary.queue=summary.running+summary.queued;
++   summary.parallel=r.capabilities?.max_parallel_lean||1;
+   }else summary.capabilities=r.capabilities||null;
+   console.log(JSON.stringify(summary));return 0;
+  }

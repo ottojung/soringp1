@@ -1,0 +1,305 @@
+commit 25edd53d41141b8a4dfdfe8b86ac1a576cd5951f
+Merge: 636f938c eca7c35f
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 16 16:24:09 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 16 16:24:09 2026 +0000
+
+    Merge remote-tracking branch 'origin/main'
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index 071a55c2..7fcfdef2 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -23,6 +23,8 @@ jobs:
+           test -s government/seats.tsv
+           awk -F '\t' 'NF != 3 || $1 !~ /^[0-9a-f]+$/ { exit 1 }' government/seats.tsv
+           test "$(cut -f1 government/seats.tsv | sort -u | wc -l)" -eq "$(wc -l < government/seats.tsv)"
++      - name: Exercise independent Sentinel
++        run: dash tests/sentinel-smoke.sh
+       - name: Exercise constitutional launch and recovery
+         run: dash tests/boot-smoke.sh
+       - name: Exercise Clerk liveness recovery and cooldown
+diff --git a/deploy/install-sentinel.sh b/deploy/install-sentinel.sh
+new file mode 100644
+index 00000000..7e9089da
+--- /dev/null
++++ b/deploy/install-sentinel.sh
+@@ -0,0 +1,22 @@
++#!/bin/sh
++set -eu
++repo=${1:?Provide clean release checkout}
++: "${VICHE_TOWNHALL_ID:?Host Town Hall ID required}"
++[ -z "$(git -C "$repo" status --porcelain)" ] || exit 1
++sha=$(git -C "$repo" rev-parse HEAD)
++root=${VICHE_SENTINEL_ROOT:-/var/lib/lubko/wd/viche-sentinel}
++services=${VICHE_SENTINEL_SERVICES:-/etc/services.d}
++mkdir -p "$root/releases/$sha" "$services/viche-sentinel"
++for file in check.sh loop.sh; do
++  install -m 0555 "$repo/sentinel/$file" "$root/releases/$sha/$file"
++  cmp "$repo/sentinel/$file" "$root/releases/$sha/$file"
++done
++if [ -L "$root/current" ]; then
++  ln -s "$(readlink "$root/current")" "$root/previous.$sha"
++fi
++ln -s "releases/$sha" "$root/next.$$"
++mv -Tf "$root/next.$$" "$root/current"
++{ printf '#!/bin/sh\nexport VICHE_TOWNHALL_ID=%s\n' "$VICHE_TOWNHALL_ID"; sed '1d' "$repo/deploy/s6/viche-sentinel/run"; } > "$services/viche-sentinel/run.next"
++chmod 0755 "$services/viche-sentinel/run.next"
++mv -f "$services/viche-sentinel/run.next" "$services/viche-sentinel/run"
++printf 'Installed Sentinel %s\n' "$sha"
+diff --git a/deploy/s6/viche-sentinel/run b/deploy/s6/viche-sentinel/run
+new file mode 100755
+index 00000000..8ca0e074
+--- /dev/null
++++ b/deploy/s6/viche-sentinel/run
+@@ -0,0 +1,6 @@
++#!/bin/sh
++# S6 service entrypoint, independently versioned from the live government checkout.
++. /home/lubko/.profile
++export VICHE_SENTINEL_STATE=/var/lib/lubko/wd/viche-sentinel-state
++: "${VICHE_TOWNHALL_ID:?Host must configure Viche Town Hall}" 
++exec /bin/sh /var/lib/lubko/wd/viche-sentinel/current/loop.sh
+diff --git a/government/boot.sh b/government/boot.sh
+index 0ceea40e..c1c75984 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -79,3 +79,8 @@ if [ -f "$town/government/audit-cycle.sh" ]; then
+     /bin/sh "$town/government/audit-cycle.sh" ||
+         echo "Viche: independent audit scheduling failed" >&2
+ fi
++
++# Government setup completed; not proof of delivery.
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/health
++mkdir -p "$state"
++date +%s > "$state/government-setup.last"
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 3801d673..5843b58d 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -91,3 +91,20 @@ require Founder attention for routine technical corrections.
+ EOF
+     fi
+ fi
++
++# Independent Sentinel findings are mandatory oversight business, even when
++# ordinary Git reconciliation or executive delivery has previously failed.
++if [ "$seat" = "$clerk" ]; then
++    sentinel=${VICHE_SENTINEL_STATE:-/var/lib/lubko/wd/viche-sentinel-state}
++    if [ -s "$sentinel/incident.json" ]; then
++        cat <<EOF
++=== INDEPENDENT SENTINEL INCIDENT ===
++$(cat "$sentinel/incident.json")
++=== END SENTINEL INCIDENT ===
++Do not adjourn for lack of business. Investigate, acknowledge with evidence,
++identify the operational remedy and verify it. A service marked 'up' does NOT
++establish successful Git reconciliation, functioning oversight, or delivery.
++Do not ask the Founder to resolve ordinary Git conflicts or agent failures.
++EOF
++    fi
++fi
+diff --git a/sentinel/README.md b/sentinel/README.md
+new file mode 100644
+index 00000000..83830001
+--- /dev/null
++++ b/sentinel/README.md
+@@ -0,0 +1,28 @@
++# Hourly independent Sentinel
++
++The Sentinel is a **deterministic hourly S6 service** for Viche's supervisory infrastructure. It uses no AI model, does not run any script from the live government Git checkout, and cannot change Git or issue state. This is not an additional parliamentary office and does not amend the Founder-controlled Constitution.
++
++## Versioned deployment
++
++Merge reviewed changes into main. Clone main into a clean release checkout **separate from** `/var/lib/lubko/wd/viche`, and execute:
++
++```sh
++VICHE_TOWNHALL_ID=297 /bin/sh deploy/install-sentinel.sh /path/to/clean/viche
++ln -s /etc/services.d/viche-sentinel /run/service/viche-sentinel
++s6-svscanctl -a /run/service
++s6-svstat /run/service/viche-sentinel
++```
++
++The host-backed `/etc/services.d` survives recreation of Phoebe's container. The installer copies reviewed scripts into `/var/lib/lubko/wd/viche-sentinel/releases/COMMIT/`, verifies them, then atomically switches `current`; its previous target remains available for rollback. S6 launches `current/loop.sh` and restarts it after crashes. To roll back, atomically repoint `current` to the retained prior release, then restart the S6 service. No active government checkout needs to be clean or even readable for service startup.
++
++**Cadence:** one check immediately on startup, then every **3600 seconds**. `VICHE_SENTINEL_INTERVAL_SECONDS` may override for a controlled test. No fixed worker limits or additional paid models.
++
++## Signals and records
++
++Every check reads the S6 government status, Git unmerged index/merge markers and local divergence, age of `government/boot.sh`'s successful setup receipt, and age of the ordinary oversight watchdog's observations. It never fetches from a remote or runs town code. Locally tracked refs can be stale; Git divergence alone does not establish delivery failure.
++
++Persistent state at `/var/lib/lubko/wd/viche-sentinel-state/`: hourly `checks.tsv`, atomic `incident.json`, `history.jsonl`, `last-completed`, and an unsent `pending-message` outbox. Distinct findings update one continuous incident, not a new incident every hour. Outbox delivery uses Antonina board comments with bounded timeout; failed notifications remain pending for retry. A timed-out successful post could exceptionally yield a duplicate, so the incident ID appears in every message.
++
++When ordinary government reconciliation works, `government/sitting.sh` places an open Sentinel incident on the Clerk's mandatory agenda, and Parliament must investigate and verify any remedy. During reconciliation failure, the Sentinel continues logging and reports a material incident to Town Hall without AI. The Sentinel **does not repair Git conflicts**, delete work, reset history, change agent models, or treat live services/commits as proof of useful Kawun delivery. It cannot observe a total host/S6 shutdown from inside Phoebe: external host monitoring would be necessary for that guarantee.
++
++This service is independently scheduled and operationally isolated from the checkout, but it shares Phoebe's Unix user/storage; it is **not** a cryptographic or privilege isolation boundary against an intentionally malicious process on the same host.
+diff --git a/sentinel/check.sh b/sentinel/check.sh
+new file mode 100755
+index 00000000..3232c410
+--- /dev/null
++++ b/sentinel/check.sh
+@@ -0,0 +1,90 @@
++#!/bin/sh
++# Independent read-only health checks. Do not source or execute town code.
++set -eu
++state=${VICHE_SENTINEL_STATE:-/var/lib/lubko/wd/viche-sentinel-state}
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++watch=${VICHE_OVERSIGHT_STATE:-/var/lib/lubko/wd/viche-state/oversight}/observations.tsv
++govstamp=${VICHE_GOV_HEALTH_STATE:-/var/lib/lubko/wd/viche-state/health}/government-setup.last
++svc=${VICHE_GOV_SERVICE:-/run/service/viche}
++now=${VICHE_SENTINEL_NOW:-$(date +%s)}
++case "$now" in ''|*[!0-9]*) exit 2;; esac
++mkdir -p "$state"
++umask 077
++exec 9>"$state/check.lock"
++flock -n 9 || exit 0
++signals=
++add() { signals=${signals:+$signals,}$1; }
++service=unknown
++if live=$(timeout 12 s6-svstat "$svc" 2>/dev/null); then
++    case "$live" in 'up (pid '*) service=up;; *) service=down; add government_service_down;; esac
++else add government_service_unknown; fi
++git_status=ok
++ahead=-1; behind=-1
++if [ ! -d "$town/.git" ]; then
++    git_status=missing; add government_checkout_missing
++else
++    if conflicts=$(timeout 12 git -C "$town" ls-files -u 2>/dev/null); then
++        if [ -n "$conflicts" ]; then git_status=conflicted; add government_git_conflict; fi
++    else git_status=unreadable; add government_git_unreadable; fi
++    if [ -f "$town/.git/MERGE_HEAD" ]; then add government_merge_incomplete; fi
++    if counts=$(timeout 12 git -C "$town" rev-list --left-right --count HEAD...refs/remotes/origin/main 2>/dev/null); then
++        ahead=$(printf '%s\n' "$counts" | awk '{print $1}')
++        behind=$(printf '%s\n' "$counts" | awk '{print $2}')
++        case "$ahead:$behind" in *[!0-9:]*|'':*) add government_git_refs_invalid;; *)
++            if [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then add government_git_diverged
++            elif [ "$ahead" -gt 0 ]; then add government_unpublished_main
++            elif [ "$behind" -gt 0 ]; then add government_update_pending; fi
++        ;; esac
++    else add government_git_refs_unavailable; fi
++fi
++setup_age=-1
++if [ -s "$govstamp" ]; then
++    stamp=$(cat "$govstamp")
++    case "$stamp" in ''|*[!0-9]*) add government_setup_stamp_invalid;; *)
++        if [ "$stamp" -le "$now" ]; then
++            setup_age=$((now-stamp))
++            [ "$setup_age" -le 7200 ] || add government_setup_stale
++        else add government_setup_stamp_future; fi
++    ;; esac
++else add government_setup_stamp_missing; fi
++watch_age=-1
++if [ -s "$watch" ]; then
++    stamp=$(tail -n 1 "$watch" | cut -f1)
++    case "$stamp" in ''|*[!0-9]*) add oversight_stamp_invalid;; *)
++        if [ "$stamp" -le "$now" ]; then
++            watch_age=$((now-stamp))
++            [ "$watch_age" -le 7200 ] || add oversight_stale
++        else add oversight_stamp_future; fi
++    ;; esac
++else add oversight_missing; fi
++printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$service" "$git_status" "$ahead" "$behind" "$setup_age" "$watch_age" "${signals:-clear}" >> "$state/checks.tsv"
++if [ -z "$signals" ]; then
++    if [ -s "$state/incident.json" ]; then
++        jq -c --argjson now "$now" '. + {closed_at:$now,closure:"health_signals_clear_not_delivery_verified"}' "$state/incident.json" >> "$state/history.jsonl"
++        rm -f "$state/incident.json"
++    fi
++else
++    first=$now
++    if [ -s "$state/incident.json" ]; then
++        earlier=$(jq -r '.first_seen // 0' "$state/incident.json" 2>/dev/null) || earlier=0
++        case "$earlier" in ''|*[!0-9]*) :;; *) [ "$earlier" -gt 0 ] && [ "$earlier" -le "$now" ] && first=$earlier;; esac
++    fi
++    tmp=$(mktemp "$state/incident.XXXXXXXX")
++    jq -n --argjson first "$first" --argjson now "$now" --arg signals "$signals" --arg service "$service" --arg git "$git_status" --arg ahead "$ahead" --arg behind "$behind" --argjson setup "$setup_age" --argjson watch "$watch_age" '{first_seen:$first,observed_at:$now,signals:($signals|split(",")),service:$service,git:$git,local_ahead:$ahead,local_behind:$behind,government_setup_age_seconds:$setup,oversight_age_seconds:$watch,meaning:"health_inquiry_required_not_delivery_verdict"}' > "$tmp"
++    mv "$tmp" "$state/incident.json"
++    if [ ! -e "$state/sent-$first" ] && [ ! -s "$state/pending-message" ]; then
++        printf 'Viche Sentinel incident %s: %s. Service=%s, Git=%s, local ahead=%s behind=%s, government setup age=%ss, oversight age=%ss. Hourly deterministic health finding, not proof of Kawun delivery failure.\n' "$first" "$signals" "$service" "$git_status" "$ahead" "$behind" "$setup_age" "$watch_age" > "$state/pending-message"
++        printf '%s\n' "$first" > "$state/pending-id"
++    fi
++fi
++# Alert publication is optional; failed delivery stays in a durable outbox.
++if [ -s "$state/pending-message" ] && [ -n "${VICHE_TOWNHALL_ID:-}" ]; then
++    id=$(cat "$state/pending-id")
++    if timeout 20 antonina board comment --id "$VICHE_TOWNHALL_ID" --author "Viche Sentinel" --body "$(cat "$state/pending-message")" >/dev/null 2>&1; then
++        printf '%s\n' "$now" > "$state/sent-$id"
++        rm -f "$state/pending-message" "$state/pending-id"
++    else echo 'Sentinel: notification queued until Town Hall is reachable' >&2; fi
++fi
++printf '%s\n' "$now" > "$state/last-completed"
++printf 'Sentinel: %s\n' "${signals:-clear}"
++
+diff --git a/sentinel/loop.sh b/sentinel/loop.sh
+new file mode 100644
+index 00000000..a635a0bd
+--- /dev/null
++++ b/sentinel/loop.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++set -eu
++interval=${VICHE_SENTINEL_INTERVAL_SECONDS:-3600}
++case "$interval" in ''|*[!0-9]*|0) exit 2;; esac
++dir=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
++trap 'exit 0' TERM INT
++while :; do
++  /bin/sh "$dir/check.sh" || echo 'Sentinel: check failed; will retry' >&2
++  sleep "$interval" & wait "$!" || exit 0
++done
+diff --git a/tests/sentinel-smoke.sh b/tests/sentinel-smoke.sh
+new file mode 100644
+index 00000000..23b0e1ff
+--- /dev/null
++++ b/tests/sentinel-smoke.sh
+@@ -0,0 +1,53 @@
++#!/bin/sh
++set -eu
++root=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/state" "$scratch/oversight" "$scratch/health" "$scratch/town"
++cat > "$scratch/bin/s6-svstat" <<'MOCK'
++#!/bin/sh
++echo 'up (pid 10 pgid 10) 200 seconds'
++MOCK
++chmod +x "$scratch/bin/s6-svstat"
++git -C "$scratch/town" init -q
++git -C "$scratch/town" config user.name test
++git -C "$scratch/town" config user.email test@example.invalid
++printf 'hello\n' > "$scratch/town/file"
++git -C "$scratch/town" add file
++git -C "$scratch/town" commit -qm initial
++git -C "$scratch/town" update-ref refs/remotes/origin/main HEAD
++printf '100000\n' > "$scratch/health/government-setup.last"
++printf '100000\t0\tidle\t0\t0\tnone\tclear\n' > "$scratch/oversight/observations.tsv"
++PATH="$scratch/bin:$PATH"
++VICHE_SENTINEL_NOW=100000
++VICHE_SENTINEL_STATE=$scratch/state
++VICHE_TOWN_ROOT=$scratch/town
++VICHE_OVERSIGHT_STATE=$scratch/oversight
++VICHE_GOV_HEALTH_STATE=$scratch/health
++export PATH VICHE_SENTINEL_NOW VICHE_SENTINEL_STATE VICHE_TOWN_ROOT
++export VICHE_OVERSIGHT_STATE VICHE_GOV_HEALTH_STATE
++/bin/sh "$root/sentinel/check.sh"
++[ ! -e "$scratch/state/incident.json" ]
++# Inject a real unmerged index without losing committed fixture data.
++hash=$(printf 'conflict\n' | git -C "$scratch/town" hash-object -w --stdin)
++printf '100644 %s 2\tfile\n100644 %s 3\tfile\n' "$hash" "$hash" |
++    git -C "$scratch/town" update-index --index-info
++VICHE_SENTINEL_NOW=103601
++export VICHE_SENTINEL_NOW
++/bin/sh "$root/sentinel/check.sh"
++jq -e '.first_seen==103601 and (.signals|index("government_git_conflict"))' "$scratch/state/incident.json" >/dev/null
++[ -s "$scratch/state/pending-message" ]
++VICHE_SENTINEL_NOW=107201
++export VICHE_SENTINEL_NOW
++/bin/sh "$root/sentinel/check.sh"
++jq -e '.first_seen==103601 and (.signals|index("oversight_stale"))' "$scratch/state/incident.json" >/dev/null
++git -C "$scratch/town" reset --hard -q HEAD
++printf '107201\n' > "$scratch/health/government-setup.last"
++printf '107201\t0\tidle\t0\t0\tnone\tclear\n' >> "$scratch/oversight/observations.tsv"
++VICHE_SENTINEL_NOW=107202
++export VICHE_SENTINEL_NOW
++/bin/sh "$root/sentinel/check.sh"
++[ ! -e "$scratch/state/incident.json" ]
++[ -s "$scratch/state/history.jsonl" ]
++[ -s "$scratch/state/pending-message" ] # outbox preserved if external board unavailable
++echo 'Hourly Sentinel smoke checks passed'

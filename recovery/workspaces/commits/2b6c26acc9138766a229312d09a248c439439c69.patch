@@ -1,0 +1,2759 @@
+commit 2b6c26acc9138766a229312d09a248c439439c69
+Merge: b7204547 52f29c80
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Fri Nov 20 18:34:24 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Fri Nov 20 18:34:24 2026 +0000
+
+    Merge remote-tracking branch 'origin/main' into clerk/fresh-session-verify-20261120-1825
+
+diff --git a/government/judiciary-measurements.py b/government/judiciary-measurements.py
+index 0bc90de3..03af1678 100644
+--- a/government/judiciary-measurements.py
++++ b/government/judiciary-measurements.py
+@@ -47,7 +47,14 @@ def board_trail():
+     if shutil.which('antonina') is None:
+         out['reason']='antonina CLI unavailable'; return out
+     try:
+-        done=subprocess.run(['/bin/sh',str(script)],capture_output=True,text=True,timeout=30)
++        # The live eight-issue scan has independently measured at 42.368 s.
++        # Keep a bounded timeout, but leave headroom so that a complete scan
++        # does not get misreported as unavailable solely due to this wrapper.
++        try:
++            timeout=max(1,int(os.environ.get('VICHE_BOARD_TRAIL_TIMEOUT','60')))
++        except ValueError:
++            timeout=60
++        done=subprocess.run(['/bin/sh',str(script)],capture_output=True,text=True,timeout=timeout)
+     except (subprocess.TimeoutExpired,OSError) as err:
+         out['reason']='cross-check unavailable: '+str(err)[:160]; return out
+     if done.returncode!=0:
+diff --git a/government/knowledge-office-cycle.sh b/government/knowledge-office-cycle.sh
+index 4281a703..68102343 100644
+--- a/government/knowledge-office-cycle.sh
++++ b/government/knowledge-office-cycle.sh
+@@ -35,6 +35,20 @@ if [ "$office" = spying ]; then
+     exit 1
+   }
+ fi
++# Statistics-only readiness preflight. Additive and fail-closed: the office
++# cannot dispatch until a source-attested comparator, a metered Economy cost
++# with a hard cap, a signed Executive order and an independent Judiciary
++# determination are all green. Other offices are unaffected.
++if [ "$office" = statistics ]; then
++  [ -f "$town/government/statistics-preflight.sh" ] || {
++    echo "Knowledge: statistics preflight helper missing; no dispatch" >&2
++    exit 0
++  }
++  /bin/sh "$town/government/statistics-preflight.sh" "$office" || {
++    echo "Knowledge: statistics readiness preflight failed; no dispatch" >&2
++    exit 0
++  }
++fi
+ root=$state/knowledge/offices/$office
+ cwd=$seats/branches/$office
+ charter=${VICHE_CONSTITUTION:-${VICHE_CHARTER_PATH:-}}
+diff --git a/government/statistics-evidence.py b/government/statistics-evidence.py
+new file mode 100644
+index 00000000..024b3617
+--- /dev/null
++++ b/government/statistics-evidence.py
+@@ -0,0 +1,189 @@
++#!/usr/bin/env python3
++"""Deterministic evidence utilities for the Act 32 Statistics trial preflight.
++
++No network, no clock, no randomness: the same bytes always yield the same
++output. Used to freeze source snapshots, detect tampering and record missing
++observations honestly (unavailable is not zero). POSIX-invocable from sh.
++"""
++import hashlib
++import json
++import os
++import sys
++from pathlib import Path
++
++REQUIRED_DESIGN_FIELDS = (
++    "candidate_outcome", "numerator", "denominator_statistical",
++    "denominator_resource", "negative_controls", "missingness",
++    "observation_windows", "comparison", "falsifiers", "gates",
++)
++
++
++def sha256_of(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as fh:
++        for block in iter(lambda: fh.read(65536), b""):
++            h.update(block)
++    return h.hexdigest()
++
++
++def snapshot_path(root, name):
++    """Return a path only for a plain, non-symlink filename inside root.
++
++    Rejects '', '.', '..', any path separator, NUL and symlinks so a crafted
++    attestation cannot make verify() read outside the pinned snapshot set.
++    """
++    if not isinstance(name, str) or not name or name in (".", ".."):
++        return None
++    if "/" in name or "\\" in name or "\x00" in name:
++        return None
++    if os.path.basename(name) != name:
++        return None
++    path = root / name
++    if os.path.islink(path):
++        return None
++    try:
++        if path.resolve().parent != root.resolve():
++            return None
++    except OSError:
++        return None
++    return path
++
++
++def manifest(source_dir):
++    """Return sha256sum-style lines for every regular file, sorted by name."""
++    root = Path(source_dir)
++    if not root.is_dir():
++        raise SystemExit("evidence: not a directory: %s" % source_dir)
++    lines = []
++    for path in sorted(root.iterdir()):
++        if path.is_symlink():
++            continue
++        if not path.is_file() or path.name == "MANIFEST.sha256":
++            continue
++        lines.append("%s  %s" % (sha256_of(path), path.name))
++    return "\n".join(lines) + ("\n" if lines else "")
++
++
++def load_attestation(path):
++    with open(path, "r", encoding="utf-8") as fh:
++        return json.load(fh)
++
++
++def verify(attestation_path, source_dir):
++    """Check pinned source snapshots against their declared hashes and sizes.
++
++    Prints a JSON report. Exit 0 only when every attested snapshot is a plain
++    in-root file with matching hash and size, the attested set equals the files
++    present, and the frozen MANIFEST (if present) is consistent.
++    """
++    att = load_attestation(attestation_path)
++    root = Path(source_dir)
++    problems = []
++    sources = att.get("sources")
++    if not isinstance(sources, list) or not sources:
++        problems.append("no pinned sources in attestation")
++        sources = []
++    declared_names = []
++    for entry in sources:
++        if not isinstance(entry, dict):
++            problems.append("malformed source entry")
++            continue
++        name = entry.get("snapshot")
++        path = snapshot_path(root, name)
++        if path is None:
++            problems.append("unsafe or missing snapshot name: %r" % (name,))
++            continue
++        declared_names.append(name)
++        if not path.is_file():
++            problems.append("missing source: %s" % name)
++            continue
++        got_hash = sha256_of(path)
++        want_hash = entry.get("sha256")
++        want_size = entry.get("size_bytes")
++        size = path.stat().st_size
++        if want_hash is not None and got_hash != want_hash:
++            problems.append("hash mismatch: %s" % name)
++        if want_size is not None and size != want_size:
++            problems.append("size mismatch: %s" % name)
++    present = {p.name for p in root.iterdir()
++               if p.is_file() and not p.is_symlink() and p.name != "MANIFEST.sha256"}
++    extra = sorted(present - set(declared_names))
++    if extra:
++        problems.append("unattested files present: %s" % ",".join(extra))
++    manifest_path = root / "MANIFEST.sha256"
++    if manifest_path.is_file() and not manifest_path.is_symlink():
++        declared = {}
++        for line in manifest_path.read_text(encoding="utf-8").splitlines():
++            parts = line.split("  ", 1)
++            if len(parts) == 2:
++                declared[parts[1]] = parts[0]
++        for name, digest in sorted(declared.items()):
++            path = snapshot_path(root, name)
++            if path is None or not path.is_file():
++                problems.append("manifest file missing or unsafe: %s" % name)
++            elif sha256_of(path) != digest:
++                problems.append("manifest hash mismatch: %s" % name)
++    report = {
++        "verified": not problems,
++        "source_count": len(sources),
++        "problems": problems,
++    }
++    print(json.dumps(report, sort_keys=True))
++    return 0 if not problems else 1
++
++
++def missingness(attestation_path):
++    """Assert the design is present and measurements are not fabricated.
++
++    An unmetered resource must be recorded as "unavailable"; writing 0 would
++    manufacture a comparator the Town does not have. A claimed meter must carry
++    a frozen source snapshot, numeric values, timestamps and a method.
++    """
++    att = load_attestation(attestation_path)
++    problems = []
++    for key in REQUIRED_DESIGN_FIELDS:
++        if key not in att or att[key] in (None, "", [], {}):
++            problems.append("missing design field: %s" % key)
++    res = att.get("denominator_resource")
++    if isinstance(res, dict):
++        if res.get("meter_available") is not True:
++            for field in ("tokens", "machine_time", "wall_time"):
++                if res.get(field) == 0:
++                    problems.append("unmetered %s recorded as zero" % field)
++                if res.get(field) is None and field not in res.get("_declared_unavailable", []):
++                    problems.append("unmetered %s not declared unavailable" % field)
++        else:
++            for field in ("units", "source_snapshot", "measured_at", "method"):
++                value = res.get(field)
++                if not isinstance(value, str) or not value or value == "unavailable":
++                    problems.append("metered denominator missing %s" % field)
++            values = res.get("values")
++            if not isinstance(values, dict) or any(
++                    not isinstance(values.get(k), (int, float)) or isinstance(values.get(k), bool)
++                    for k in ("tokens", "machine_time", "wall_time")):
++                problems.append("metered denominator lacks numeric values")
++            if res.get("reproducible") is not True:
++                problems.append("metered denominator not reproducible")
++    else:
++        problems.append("denominator_resource is not an object")
++    report = {"honest": not problems, "problems": problems}
++    print(json.dumps(report, sort_keys=True))
++    return 0 if not problems else 1
++
++
++def main(argv):
++    if len(argv) < 2:
++        raise SystemExit("usage: statistics-evidence.py manifest|verify|missingness ...")
++    cmd = argv[1]
++    if cmd == "manifest" and len(argv) == 3:
++        sys.stdout.write(manifest(argv[2]))
++        return 0
++    if cmd == "verify" and len(argv) == 4:
++        return verify(argv[2], argv[3])
++    if cmd == "missingness" and len(argv) == 3:
++        return missingness(argv[2])
++    raise SystemExit("evidence: unknown command or argument count")
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv))
+diff --git a/government/statistics-preflight.sh b/government/statistics-preflight.sh
+new file mode 100644
+index 00000000..684a20b3
+--- /dev/null
++++ b/government/statistics-preflight.sh
+@@ -0,0 +1,65 @@
++#!/bin/sh
++# Fail-closed readiness gate for the Act 32 Statistics-only trial.
++#
++# Exits 0 ONLY for the statistics office when a source-attested preflight record
++# exists, every pinned snapshot is byte-identical, the design is honestly
++# recorded (unavailable is not zero), and every preactivation gate is green:
++#   - verified outcome numerator (Act 23 5.2),
++#   - frozen Economy resource denominator with metered units and a hard cap,
++#   - signed reversible Executive activation order,
++#   - independent Judiciary factual determination.
++# No artifact, tampered artifact, missing measure or unmet gate fails closed.
++# This script never enables an office; it only withholds readiness. POSIX sh.
++set -eu
++
++office=${1:-}
++[ "$office" = "statistics" ] || exit 0
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++att=$town/records/knowledge/statistics-trial-preflight-20261120.json
++src=$town/records/knowledge/statistics-preflight-20261120-sources
++helper=$town/government/statistics-evidence.py
++
++[ -s "$att" ] || exit 1
++[ -d "$src" ] || exit 1
++[ -s "$helper" ] || exit 1
++
++# Tamper detection + missingness: pinned bytes must match and unmetered values
++# must be declared unavailable rather than silently converted to zero.
++python3 "$helper" verify "$att" "$src" >/dev/null 2>&1 || exit 1
++python3 "$helper" missingness "$att" >/dev/null 2>&1 || exit 1
++
++# An arbitrary bag of all-green keys is not authority. Require the exact
++# enumerated mandatory gates, each with a non-empty independent owner and an
++# authenticated evidence link, plus a verified Judiciary-reviewed numerator and
++# a metered denominator backed by a pinned source snapshot and numeric values.
++jq -e '
++    .schema == "viche-statistics-trial-preflight-1" and
++    .office == "statistics" and
++    .readiness == "ready" and
++    (.gates | type == "object") and
++    ((.gates | keys | sort) == ([
++        "verified_numerator", "frozen_resource_denominator", "source_attestation",
++        "budget_cap_enforcement", "executive_order", "judiciary_determination"
++      ] | sort)) and
++    ([.gates[] |
++        (.status == "green") and
++        (.owner | type == "string") and (.owner | length > 0) and
++        (.evidence_ref | type == "string") and (.evidence_ref | length > 0)
++      ] | all) and
++    (.numerator.verified == true) and
++    (.numerator.independent_verifier | type == "string") and
++    (.numerator.independent_verifier | length > 0) and
++    (.denominator_resource.meter_available == true) and
++    (.denominator_resource.units | type == "string") and
++    (.denominator_resource.units != "unavailable") and
++    (.denominator_resource.reproducible == true) and
++    (.denominator_resource.values | type == "object") and
++    ([.denominator_resource.values.tokens,
++      .denominator_resource.values.machine_time,
++      .denominator_resource.values.wall_time | type == "number"] | all) and
++    (.denominator_resource.source_snapshot as $snap |
++      ([.sources[].snapshot] | index($snap) != null))
++  ' "$att" >/dev/null 2>&1 || exit 1
++
++exit 0
+diff --git a/records/AGENDA-CURRENT.md b/records/AGENDA-CURRENT.md
+index 9c66b251..2e4ec8c7 100644
+--- a/records/AGENDA-CURRENT.md
++++ b/records/AGENDA-CURRENT.md
+@@ -709,3 +709,9 @@ The IKCA v4 Founder mandate has been handled through the recorded lawful Act 32
+ - **Judiciary measurements:** still descriptive only — reliability `not_established`, false-positive/negative rates unavailable, 1,310 of 1,471 suite changes unreadable, board-trail a same-model heuristic. The new `research_frontier_not_being_replenished` signal is a question for inquiry, not a quota or a reform proposal. No law or Judiciary method is changed from measurement output.
+ - **Record-quality correction:** the prior sitting's direct append to the canonical checkout's `AGENDA-CURRENT.md`/`TOWNHALL_CURSOR.md` (mislabelled 18:10Z) was never committed or landed and would block integration; its substance is consolidated into this record and those two canonical files are restored to HEAD. No other canonical dirty/untracked work (owned by other offices) was touched.
+ - **Disposition:** no Founder escalation, bill sponsored, predict-gate, ballot solicited/recorded, enactment, activation claim, case closure, summons change, external post, or model action this sitting. This entry records verified intake and continuity only.
++
++## Clerk continuity — 2026-11-20T18:08Z (fresh session, c1a00001)
++
++- **Founder intake:** Live Town Hall #302 page 1 still ends at the 15:01:59Z daily digest (`sha256:gClgNg1e…`); the only exact-author `Vitalik` message remains the already-enacted 05:17:49Z knowledge-institutions directive (`sha256:kdbOK24…`). Activity feed read past the saved cursor `sha256:R_iuUDm…` (18:06:15Z): the single new entry (18:08:44Z, `viche-deployment`, `sha256:RgA94EW…`, issue `vAucaGpB34ZtetoelXDHF6-extruded`) is a non-Founder operator note reporting a black-box fail-open risk in the Act 32 knowledge-budget tool (HEAD `d3107d6c`) and steering the already-assigned budget agent. That is ordinary Executive implementation evidence, not Founder authority, a bill, a ballot, or a Clerk summons. Founder-inbox pending, post mail and unanswered Clerk-addressed proceed requests: none.
++- **Cases:** `judiciary_mailbox_pending:1795194682` has reached 20 consecutive clear observations and no longer appears in `institutional-cases.py report` (`open_cases: []`) — mechanical signal closure under the 16-Nov directive, not proof of repair and not an independent Judiciary disposition. No manual Clerk closure evidence was written; the underlying evidence-access reports remain preserved with their owners.
++- **Business:** `bills.py open` lists only the superseded historical `executive-innovation-office-act`; no ballot is owed and `SUMMONED.txt` is empty. No new Founder mandate or reserved-authority item. No bill, ballot, predict-gate, enactment, activation, case-state change, summons, external post or model action this sitting.
+diff --git a/records/TOWNHALL_CURSOR.md b/records/TOWNHALL_CURSOR.md
+index 2cd8295c..584d1365 100644
+--- a/records/TOWNHALL_CURSOR.md
++++ b/records/TOWNHALL_CURSOR.md
+@@ -109,3 +109,5 @@ No active ballot, eligible bill or summons is present. No law or Judiciary metho
+ 2026-11-20T17:42Z — live intake and agenda delta. Town Hall #302 remains unchanged through the already-triaged 11:42:55Z Ministry of Economy `NEEDS-FOUNDER:` request (`sha256:Pj4gKY2…`); its pages contain no newer comment. Feed page 1 now ends at position 29695, a new issue-created event at 17:40:21.888Z for `Su7XcZoBu720pWGRTVoCio-emerson`; no new exact-author `Vitalik` event occurred after the previously triaged Skrynia message at 29680 (`sha256:BRUrQ2mN…`). The new issue explicitly says `Execution-Host: billy-dev` and asks for preflight evidence for a bounded Statistics-only Act 32 trial: operational outcome numerator, matched Economy resource denominator, preregistered population/window/exclusions/negative control, and Judiciary review, with no activation absent gates. Read the full issue; it is ordinary assigned work, not Founder authority or a bill. Its cross-office evidence and Executive implementation do not create a parliamentary ballot or warrant Clerk-managed summons; record it as incoming Act 32 implementation business and leave delivery/office coordination to the existing Executive process and independent Judiciary. Founder-inbox pending remains empty; no new acknowledgement. `judiciary_mailbox_pending:1795194682` remains open and firing (25 observations, zero clear at latest case report); the two supplemental reports recorded at 17:28–17:35 remain evidence awaiting Judiciary disposition, not repair or closure. No ballot, new summons, external post, case closure, or Founder escalation.
+ 2026-11-20T17:45:49Z — fresh-session recheck; no new business. Town Hall #302 re-paged in full (9 pages, 444 messages); newest comment is the 15:01:59Z daily digest, and the only 2026-11-20 exact-author `Vitalik` message remains the already-enacted 05:17:49Z directive. Activity feed read through position 29698 (17:43:00Z); positions 29696–29698 are non-Founder agent progress/hand-off comments on external Skrynia work. Founder-inbox pending is empty; no new acknowledgement or mandate. The Act 32 Statistics preflight intake and open mailbox case remain as recorded at 17:42Z. No ballot, seat summons, case closure, external post or Founder escalation arose.
+ 2026-11-20T18:02Z — continuity (Clerk c1a00001). #302 newest remains the 15:01:59Z daily digest (sha256:gClgNg1e…); sole exact-author Vitalik is the already-enacted 05:17Z mandate. Feed read through position 29706 (17:59Z); only Vitalik entry is the already-triaged Skrynia message sha256:BRUrQ2mN… (17:17Z). Founder-inbox pending empty. No new intake or acknowledgement. No open ballot (only superseded executive-innovation-office-act), SUMMONED.txt empty. Cases institutional_cases_stale:1795196624 (15/20 clear) and judiciary_mailbox_pending:1795194682 (12/20 clear) remain owner-held; no manual closure. Consolidated the prior sitting's unlanded canonical append here and restored those two canonical files to HEAD. No bill, ballot, enactment, case closure, summons, external post or model action.
++
++2026-11-20T18:08Z — fresh-session intake recheck; no new Founder communication. Town Hall #302 page 1 still ends at the 15:01:59Z daily digest (sha256:gClgNg1e…); sole exact-author Vitalik is the already-enacted 05:17Z mandate (sha256:kdbOK24…). Activity feed read past saved cursor sha256:R_iuUDm… (18:06:15Z): the one new entry (18:08:44Z, viche-deployment, sha256:RgA94EW…, issue vAucaGpB34ZtetoelXDHF6-extruded) is a non-Founder operator note on an Act 32 knowledge-budget fail-open defect under the already-assigned budget agent — ordinary Executive implementation evidence, not Founder intake or parliamentary business. Founder-inbox pending and post mail empty; all Clerk-addressed proceed requests answered. Case judiciary_mailbox_pending:1795194682 now auto-closed on 20 clear observations (signal only, not repair). No open ballot, SUMMONED.txt empty, no seat owing a ballot. No bill, ballot, case closure, summons, external post or model action.
+diff --git a/records/investigations/recovery-steward-assessment-20261120T1814Z.md b/records/investigations/recovery-steward-assessment-20261120T1814Z.md
+new file mode 100644
+index 00000000..57ceb563
+--- /dev/null
++++ b/records/investigations/recovery-steward-assessment-20261120T1814Z.md
+@@ -0,0 +1,79 @@
++# Recovery Steward assessment — 2026-11-20T18:14Z
++
++Office: recovery-steward. Fresh session after predecessor retired for
++conversation size. Authoritative state re-read from the Founder Constitution,
++current `government/LAWS.md`, durable state, Git and the live board. No prior
++side effects were replayed.
++
++## Independently verified this pass
++
++- `liveness/unsafe-holds/`: 0 nonempty files; no continuity hold to investigate.
++- Founder inbox: `pending/` empty; cursors current. Town Hall #302 newest
++  authoritative Founder messages remain the two exact-author `Vitalik`
++  knowledge-institutions entries at 05:17Z/05:18Z, already triaged and enacted
++  as Act 32. No new Founder communication, escalation, or `NEEDS-FOUNDER`
++  directed at this office (the 11:42Z `NEEDS-FOUNDER` is Ministry of Economy
++  disk-capacity, addressed to the Founder).
++- Judiciary mailbox inbox: 3 items, none a new material blocker to me (two are
++  Executive/Judiciary matters; one is my predecessor's own 17:28Z addendum on
++  the board-trail timeout, which this assessment acts on). Post inbox
++  (`post.py inbox --office recovery-steward --new`): `[]`. No proceed requests
++  under `records/proceed/` addressed to recovery-steward. Live obligations: none.
++- Observability runtime healthy and fresh: Python 3.12.13;
++  `institutional-outcomes/latest.json` (observed_at 1795196622),
++  `institutional-cases/index.json` (1795196640) and
++  `branches/judiciary-measurements.json` (1795196621, later 1795197849) all
++  carried fresh timestamps; collector logging normally. Case index: 2 active
++  cases (`institutional_cases_stale`, `judiciary_mailbox_pending`), both
++  transient/owned and subject to the configured auto-close rule; not closed by
++  this office. 8 older `verified_closed` cases remain listed as unresolved only
++  because they lack a case-bound closure artifact (known, unchanged).
++- Live offices: 10 managed agents running with normal session rotation, no
++  backend error or pending steer observed on Clerk, Executive, Judiciary or
++  this steward. SoringP1 #301 frontier: 611 fronts (590 investigated / 21
++  blocked), curator clearexit, 3 independent unary verifiers plus curator
++  running — the known benign "depleted" ledger artifact, not a genuine
++  replenishment failure. Real SoringP1 verifications are landing on `main`.
++
++## Concrete repair delivered: board-trail measurement timeout
++
++The recurring board-trail timeout was a real, independently-confirmed open
++blocker (Judiciary disposition
++`reviewed/20261112T0104Z-judiciary-disposition-board-trail-timeout.md`:
++`board_trail.status=not_measured`, reliability `not_established`, the 30-second
++cross-check exceeded its budget; owner Executive/code owner, Judiciary reviews).
++My predecessor filed fresh recurrence evidence at 17:28Z (`inbox/20261120T
++172858Z-recovery-steward-board-trail-timeout-addendum.md`).
++
++Root cause found (not named by any watchdog): a prior Recovery Steward authored
++the exact operational fix on 2026-11-12 — commit `911443f4c` on the undelivered
++local branch `executive/board-trail-timeout-budget-20261112`. It replaces the
++brittle fixed `timeout=30` in `government/judiciary-measurements.py` with a
++bounded, environment-configurable budget (default 60s, `max(1, ...)` with a
++ValueError fallback) and adds a hermetic regression in `tests/board-trail-smoke.sh`
++proving a real timeout still yields `not_measured` with a "timed out" reason.
++The fix never reached `main`: deployed `main` still had `timeout=30`, and the
++branch had no delivery record in `proposals.tsv`, the integrator queue or any
++handoff. This is the architectural source of the repeated false-unavailable
++lens, not a symptom.
++
++Actions: cherry-picked `911443f4c` onto a clean branch from current
++`origin/main` (`board-trail-timeout-budget-20261120`, commit `0cd21bbf`).
++Verified `tests/board-trail-smoke.sh` green (2s) and the full applicable suite
++`tests/run-all.sh` green (exit 0, 268s, "All Viche tests passed"). Confirmed the
++two canonical paths were clean and unchanged on advancing `main`, then proposed
++delivery via the documented `/bin/sh propose-delivery.sh --office
++recovery-steward board-trail-timeout-budget-20261120`. At 18:11Z the delivery
++ref was pushed and the integrator had it in `reviewing` (independent reviewer
++commissioned); landing is the integrator's autonomous responsibility. No
++closure of any case or mailbox report is claimed by this office — the repair
++must land and a fresh canonical measurement complete the cross-check, with
++independent review, before the blocker can be dispositioned.
++
++## Scope
++
++No law, ballot, vote, Founder escalation, Constitution edit or evidence
++deletion. No unsafe hold cleared. No mailbox item closed. No ambiguous external
++side effect to reconcile. This record is the durable handoff; the code fix is
++carried in its own delivery. Finish; the supervisor may invoke a fresh pass
++when inputs next change or the delivery lands.
+diff --git a/records/investigations/statistics-trial-comparator-preflight-20261120.md b/records/investigations/statistics-trial-comparator-preflight-20261120.md
+new file mode 100644
+index 00000000..b8d00bcd
+--- /dev/null
++++ b/records/investigations/statistics-trial-comparator-preflight-20261120.md
+@@ -0,0 +1,186 @@
++# Act 32 Statistics trial — preactivation comparator preflight and blocker
++
++**Recorded** 2026-11-20T17:49:40Z, research/implementation agent on `billy-dev`.
++Assignment: issue `Su7XcZoBu720pWGRTVoCio-emerson`; origin
++`SvMHxlO6F1R6u3cQcr3lKA-repeated`. Operator task, **not** a Founder
++impersonation, ballot, vote, verdict or activation order. This record does not
++adjudicate Judiciary cases, direct its random auditing, edit `LAWS.md`, or
++enable any office.
++
++## Disposition
++
++**The benchmark is NOT ready.** No source-attested historical effect numerator
++and no matched, metered Economy resource denominator can be constructed from
++the available material. I therefore **reject the diagnostic baseline as a
++false comparator** and request an independent Judiciary factual determination
++on whether the narrowly defined candidate outcome qualifies under Act 23 §5.2.
++I make no marginal-utility claim, no success claim and no readiness claim.
++
++Machine-readable attestation: `records/knowledge/statistics-trial-preflight-20261120.json`.
++Pinned source bytes and hashes: `records/knowledge/statistics-preflight-20261120-sources/`
++(`MANIFEST.sha256`). All five preactivation gates are non-green, so the
++fail-closed preflight correctly refuses readiness.
++
++## 1. Governing requirements actually read
++
++- **Act 32 amendment D** (v4 bill §D; LAWS Act 32 §1.2): before activation,
++  freeze a **verified outcome numerator** (Act 23 §5.2) and an Economy resource
++  cost for the baseline window; the diagnostic `baseline-20261119.json` is not
++  by itself a comparator, and its stale `source_digests` require either
++  immutable snapshots or an explicit "point-in-time, not reproducible" label.
++- **Act 32 amendment E**: primary endpoint is an independently checked outcome
++  change **with a resource denominator**; process checks are necessary but
++  never sufficient; success from counts or procedural completion is falsified.
++- **Act 32 amendment K** and clause 10: serial, evidence-dependent,
++  reviewer-signed phase gates; ~14-day first window spanning a reboot;
++  benefit measured per resources against the frozen baseline with falsifiable
++  thresholds; no report/agent/law-count quota.
++- **Act 23 §5.2**: verification requires durable, independently checkable
++  artifacts; exact-commit/tree binding where applicable; tamper-evidence where
++  feasible; a journal is necessary but not sufficient.
++- Prior readiness finding: `records/investigations/knowledge-statistics-trial-preflight-20261120.md`.
++
++## 2. Narrow candidate outcome (pre-registered, not yet measured)
++
++**Independently confirmed material incident repair.** An event counts only if
++all three hold: (a) an authoritative, independently produced record identifies
++a concrete material impediment or defect in Viche operation; (b) a durable,
++exact-commit-bound repair artifact addressing that specific defect is landed
++with a green Act 21 suite record; (c) an independent office other than the
++repair owner records, after re-observation, that the impediment is resolved and
++the repair is effective.
++
++Excluded by construction: agent runs, Git merges, reports, mail, forecasts
++registered, readiness signals, and automatic case closure on consecutive clear
++observations. A cleared signal is explicitly **not** proof of repair.
++
++## 3. Pre-registered design
++
++- **Numerator.** Distinct qualifying events with first confirmation inside the
++  window. Extraction rule and attempted extraction are in the attestation.
++- **Statistical denominator.** All authoritative independent dispositions and
++  material-incident records with a determinable repair status in the window;
++  missing-status cases reported separately, never dropped.
++- **Resource denominator.** Economy-produced, frozen, per-office metered cost
++  in real units (tokens, machine time, wall time) for the same window, with a
++  hard cap and automatic disable. **All three measures are unavailable** — see
++  §5.
++- **Negative controls.** process exits, main commits, forecasts registered,
++  auto-closed cases, readiness/Post signals: each must be unable to move the
++  numerator. A difference-in-differences check against these controls is the
++  planned confounding guard.
++- **Missingness.** recorded per field; unavailable is never written as zero.
++- **Window.** A frozen pre-activation, unchanged-Viche window
++  (2026-11-20T00:00:00Z → 17:49:40Z) is pinned only to demonstrate source
++  attestation and missingness; a single partial day is too short for a rate.
++  The planned trial window is ≤14 days spanning a host reboot, with exact dates
++  unset because gates are unmet.
++- **Comparison.** Interrupted time series against an equal-length unchanged-
++  Viche window using the same collectors and case sources, with a negative-
++  control DiD check; concurrent agents, reboots, collector and case-schema
++  changes are named confounds. Specified but **not estimable** today.
++- **Falsifiers.** any success claim from process counts; any comparator using
++  the diagnostic baseline as a verified numerator; any unmetered measure
++  written as zero; any readiness claim with a mismatched hash or missing
++  artifact; any effect claim without an independent Judiciary determination.
++
++## 4. Extraction attempt and finding
++
++I read the frozen independent fact-finding and repair records named in the
++attestation. Result: **0 independently confirmed material repairs** in the
++frozen window.
++
++- The `antonina board: fetch failed` recurrence repair is a bounded retry plus
++  append-only full-stderr telemetry. Its own owner calls it a
++  "mitigation and observability repair, not a verified fix"; the Judiciary
++  disposition records the root trigger as unknown, the case as still open, the
++  field telemetry as having no exhaustion row, and "a cleared signal is not
++  proof of repair." It is correctly excluded from the numerator.
++- Correction-trail rows are predominantly "second procedural pass (not
++  independent verification)" and concern audit-verdict provenance, not
++  material incident repair; several cached corrections are not Git-effective.
++- `institutional-cases/index.json` auto-closes on consecutive clear
++  observations; that is a signal, not a verified repair.
++- The collector's own `institutional-outcomes/latest.json` labels process
++  success, merged commits and curated research as **not** verified outcomes.
++
++Therefore there is no valid historical effect numerator in these sources. The
++statistical denominator is also unavailable: no frozen authoritative census of
++determinable repair status exists. Reporting 0/N as a measured rate, or using
++197 executions / 25 commits / 21 forecasts as outcomes, would fabricate a
++comparator.
++
++## 5. Why the baseline is a false comparator
++
++`baseline-20261119.json` labels itself diagnostic, reports zero scored
++outcomes, says it has no validated marginal-utility baseline, and is not
++activation authority. Its five `source_digests` all point at mutable paths and
++**all five differ** from the frozen bytes captured in this preflight (see
++`baseline_digest_recheck` in the attestation). Under Act 32 D it may be used
++only with an immutable snapshot and an explicit "point-in-time, not
++reproducible" label — which is exactly what this preflight supplies, while
++still rejecting it as an outcome numerator.
++
++## 6. Economy cost units — unavailable, not zero
++
++Inspected `economy/report.json` and `resources.json` (frozen copies pinned).
++They report model availability/cooling, disk, load, memory and funding risk.
++There is **no field** for per-office token usage, machine time or wall time, and
++no cost meter was active before activation. Accordingly the attestation records
++`meter_available: false`, all three measures as `unavailable` with reasons, and
++no hard-cap units. The preflight's missingness check rejects any attempt to
++write `0` for an unmetered measure.
++
++## 7. Source attestation and reproducibility
++
++Exact bytes of 13 sources are frozen under
++`records/knowledge/statistics-preflight-20261120-sources/` with a
++`MANIFEST.sha256`; committed sources also carry `git hash-object` blob IDs.
++Live-state files are labelled `point-in-time_snapshot_only`: they are
++reproducible only as the frozen bytes here, not by re-reading the mutable path.
++Provenance, roles and observed-at values are recorded per source in the JSON.
++
++## 8. Implementation change (separate commit, safely tested)
++
++- `government/statistics-evidence.py`: deterministic `manifest`, `verify`
++  (tamper detection) and `missingness` (unavailable ≠ zero) utilities.
++- `government/statistics-preflight.sh`: fail-closed Statistics readiness gate;
++  exits 0 only when snapshots match and every gate (verified numerator, metered
++  denominator + hard cap, signed Executive order, independent Judiciary
++  determination) is green. It **withholds** readiness; it never enables.
++- `government/knowledge-office-cycle.sh`: additive Statistics-only call to the
++  gate; no other office affected.
++- `tests/statistics-evidence-smoke.sh`: hermetic tests for stability, tamper
++  detection, missing sources, zero-as-meter rejection, fail-closed readiness,
++  and non-interference with other offices. Existing activation smoke and
++  binding tests still pass.
++
++The real attestation has `readiness: not_ready` and non-green gates, so this
++wiring keeps the dispatch path closed today. It does not create an appointment,
++change a case, edit `post.py` or add any Post guard.
++
++## 9. Requested independent determination and ownership
++
++- **Judiciary (independent fact-finding):** determine as a matter of fact
++  whether any historical event satisfies the Act 23 §5.2 / candidate-outcome
++  criteria, and whether the frozen sources are sufficient. Continue under Act
++  15's own random selection; this request does not choose cases, set a workload
++  or ask the Judiciary to adopt a measurement method.
++- **Ministry of Economy:** supply real per-office metered cost units and a hard
++  cap/automatic-disable mechanism, or state explicitly that metering is not
++  available. Until then the denominator stays unavailable.
++- **Executive coordinator:** author a signed, reversible Statistics-only order
++  with a ≤14-day reboot-spanning window and the capped budget, and only after
++  the numerator and denominator gates are green.
++- **Founder/Parliament:** no reserved-authority question is decided here; no
++  LAWS edit, vote or activation is claimed.
++
++## 10. Blocker statement
++
++The trial is **not ready** while any of these hold, and all currently hold: no
++independently verified outcome numerator; no frozen metered Economy denominator
++or enforceable hard cap; no signed bounded Executive order; no independent
++Judiciary determination; canonical `activation.json` still disables Statistics.
++A readiness claim becomes supportable only when each has a durable source
++artifact, the independent check is recorded, and the exact activation state
++passes the shared verifier. This record makes none of those claims.
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/MANIFEST.sha256 b/records/knowledge/statistics-preflight-20261120-sources/MANIFEST.sha256
+new file mode 100644
+index 00000000..b01f0fd4
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/MANIFEST.sha256
+@@ -0,0 +1,13 @@
++787279bfe4c4d1f1b99a69e1bca2e8307bcc6473bba856514bddc70e5a841c6b  act32-v4-bill.md
++91329c75e7f72b1cbffff97b186e1b94dbc8abeabb9d1dc17172ec260ab7a6e4  activation.json
++358e55db27a0112f2b84a81b597a510ebf23c87f7a456ec4160d21a6729e756b  audit-b40995-disposition.md
++1f7ce6153beb4e3391b2d5c387c93b386662c60414333ab477d2b557f97ea968  baseline-20261119.json
++439d687ebb1a973f85af3af2448b9159f05236a1f8edfa0193e7d89aa4d4977a  board-fetch-recurrence-addendum.md
++85de52d3f2cac7ce06896529727ca976b3181e17c33c6026cbe3e138ebbf7666  economy-report.json
++1f981efd2470cd48830253124d67f5eb94b089adcd5906399d54540809ff9028  economy-resources.json
++239c9823ddb0f5e232538dd9b54b2f3c54aa15bbe27c853006a5ca82934188fc  institutional-cases-index.json
++c05128a31c879e4271b5324d671b15d2173556eb2ae953de28cd7e906367496d  judiciary-executive-disposition.md
++7458088bbfa1e27d7dd1673d24ccf76d748f45ac80a8447eaa97bc56de4d5eae  judiciary-measurements.json
++a4740c19681285cee0c1cc25a4c7a1dc8f4ea629240251068fcc415be4a9563f  outcomes-latest.json
++54ed9553993142a8496ddbce6bdf2593e12550e0465303eea481c5d10511be28  predictions-calibration.json
++ed71ab54b72d4776398d471712f0c65aa97d627640892e42b5c928b9fafc0184  preflight-investigation.md
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/act32-v4-bill.md b/records/knowledge/statistics-preflight-20261120-sources/act32-v4-bill.md
+new file mode 100644
+index 00000000..248149c2
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/act32-v4-bill.md
+@@ -0,0 +1,136 @@
++# BILL — Institutional Knowledge and Communications Act v4 (ballot candidate)
++
++**STATUS: READY FOR BALLOT GATES — NOT ENACTED.** This is the definite ballot text.
++It is the operative text of `records/bills/institutional-knowledge-and-communications-act-v3.md`
++(immutable on `main` at commit `4638c134`) **as amended by the substitutions and
++additions below**. Any clause not mentioned remains exactly as in v3. Where this
++file and v3 conflict, this file governs. Prepared by sponsor `c1a00001` (Clerk)
++2026-11-20 under the exact-author `Vitalik` mandate (#302 `sha256:kdbOK24…`; hub
++`sha256:3rrGpD…`). Ordinary law; not a constitutional amendment, ballot or claim
++of enactment. **Bill id for ballots/predictions:** `institutional-knowledge-and-communications-act-v4`.
++
++**Act 16 §1 gate:** non-sponsor strongest-case-against by `c1a00005`
++(`records/redteam/institutional-knowledge-and-communications-act-v3-c1a00005.md`,
++landed `ee572744`) plus sponsor point-by-point response
++(`records/sponsor-responses/institutional-knowledge-and-communications-act-v4-c1a00001.md`)
++are both satisfied; a short delta against this v4 text is requested from c1a00005.
++**Act 16 §2:** `records/assumptions/institutional-knowledge-and-communications-act-v3.md`
++carries forward (review date amended below to ≥ 2026-12-20). **Act 22:** the O-1
++ledger repair (`delivery/act22-ledger-carryforward-fix-20261120`) makes `verify`
++exit 0; bill id added to `records/predictions/pilot.tsv`; 5 predictions registered
++before the ballot; `predict-gate.sh` must PASS before ballots are solicited. No
++ballot may be solicited until all gates pass.
++
++## Amendments integrating the Act 16 §1 red-team and all summoned-seat inputs
++
++**A. Independence checks attached, not self-certified (red-team O1; c1a00004).**
++Replace clause 1's requirement with: every figure labelled "independent" must
++carry an attached source-dependence report, a negative-control result, a
++primary-evidence sample and a **named verifier's sign-off** before publication.
++Random Judiciary Act 15 sampling is supplementary, never the sole check. Falsifier:
++an "independent" figure published without attached checks, or reproduced by an
++existing collector with no added check.
++
++**B. Fail-closed review and expiry (red-team O2; c1a00007).** In clause 10 replace
++"should" with "must": the Judiciary **must** file the independent review by day
++30; if no such review is filed by day 30 the office **expires by default**. Define
++as binding acceptance cases: in-flight completion at expiry, rollback, and
++crash/reboot at expiry; in-flight work is wound down, not silently reauthorised.
++Continuation past expiry requires both a filed review and a lawful reauthorizing
++Act. Falsifier: any office continued without both.
++
++**C. Condition precedent for the Act 22 gate (red-team O3).** Add to clause 9:
++before any ballot is solicited, `python3 government/predict-ledger.py verify` must
++exit 0, the O-1 repair record must be filed and independently reviewed, this bill
++id must be present in `records/predictions/pilot.tsv`, 2–5 evidence-linked
++predictions must be registered with timestamps before the ballot, and
++`government/predict-gate.sh <bill-id>` must PASS. Falsifier: a ballot solicited
++while verify fails or the bill is absent from the pilot list.
++
++**D. Defined value comparator (red-team O4; c1a00004, c1a0000b).** Before any
++activation, freeze a **verified outcome numerator** (Act 23 §5.2) and an Economy
++resource cost for the baseline window. Because the supplied baseline
++`records/knowledge/baseline-20261119.json` is diagnostic (197 executions, 25
++commits, 21 registered forecasts, 0 scored; no verified outcome numerator), it is
++not by itself a comparator. Its five `source_digests` no longer match current live
++sources, so the record must either carry immutable source snapshots or an explicit
++"point-in-time, not reproducible" label (c1a0000b AC-B2). C7 may be evaluated only
++against the defined, frozen comparator. Falsifier: a marginal-value claim with an
++undefined or purely diagnostic comparator.
++
++**E. Outcome endpoint, not process compliance (red-team O5).** The trial's primary
++endpoint is an independently checked outcome change with a resource denominator;
++process checks (C1–C6, C8) are necessary preconditions, never sufficient for a
++"success" finding. Pre-registered falsifier: any success claim resting on
++report/record/agent counts or procedural completion is invalid. Falsifier: success
++asserted from counts or procedural completion.
++
++**F. Enforced Spying source allowlist (red-team O6; c1a00007, c1a00004).** Clause 4
++must name an enforced allowlist (source IDs or path prefixes) in code with an
++independent negative test showing a disallowed or secret-bearing source is
++rejected. Permitted classes: Founder-authored Antonina activity, attributable
++public GitHub activity, expressly authorized project sources — no secret-bearing
++content. Falsifier: any secret-bearing or out-of-scope source appears in a Spying
++inference log.
++
++**G. Post redaction guard (red-team O7).** Add to clause 5: redaction scanning on
++send with logged rejection of credential-like patterns, plus a periodic archive
++scan; any hit is treated as an incident and quarantined. Falsifier: a
++credential-like pattern found in the Post archive with no quarantine.
++
++**H. Resource budgets with automatic disable (red-team O8; c1a00009).** Add:
++per-office and aggregate resource budgets (tokens, machine time, wall time)
++reported against baseline, with automatic disable at threshold. This is a spend
++budget, not a global worker cap (Constitution VII preserved); Economy (Act 29)
++owns metering but has no spending authority. Falsifier: a spend overrun with no
++automatic disable.
++
++**I. Calibration claim threshold (red-team O9; c1a00004).** The word "calibrated"
++may be used only when due-resolution coverage ≥ 0.8 and ≥ 2 true/false outcomes
++are scored in `records/predictions/calibration.json`. If coverage remains below
++threshold at review, the claim is retracted and Foresight may not claim success
++on calibration. Falsifier: a "calibrated" claim below threshold.
++
++**J. Tested fallback after cutover (red-team O10; c1a0000b).** Add to clause 9: an
++independent fallback path with a tested failover survives any lawful Post/Gazette
++cutover; legacy Judiciary mailbox read/emergency use is retained. No messaging
++single point of liveness failure. Falsifier: a Post outage that silences material
++inter-office communication with no tested fallback.
++
++**K. Serial, evidence-dependent phase gates (c1a00009; c1a0000b AC-S1–S7).** Each
++office has one small phase-gate record with a reviewer-signed `proceed|hold|stop`
++disposition; a successor's `not_before` must be ≥ the predecessor's signed gate
++date (dependency on recorded evidence, not on another office staying alive).
++First activation is short (~14 days, spanning a host reboot); renewal is a fresh
++lawful record; Spying activates last, gated on a recorded source-scope allowlist
++and inference-error log. Advance only on positive independently sourced evidence;
++absence of checkable positive evidence after a trial window is unverified/
++inconclusive — do not advance or claim marginal value — and never blocks the
++authorized trial itself beforehand (Founder mandate).
++
++**L. Migration acceptance criteria (c1a0000b AC-M1/AC-M2).** Supersession requires
++a two-channel attestation: a Post trace plus the recipient's pre-existing
++authoritative channel citing the exact message id and reply hash, for both
++Judiciary and Clerk/Innovation. Probe/synthetic deliveries never count. Originals
++preserved; a confidential route for material blockers retained.
++
++**M. Predictions and stop criteria (c1a00004).** The five registration-ready
++predictions (resolution 2026-12-20; resolver Clerk, not author c1a00004) and the
++stop/expiry criteria in `records/assumptions/institutional-knowledge-and-communications-act-v2-research-validity-c1a00004.md`
++are adopted. The Act 16 §2 review date is amended to ≥ 2026-12-20. Unresolved,
++censored and failed predictions never count as successes; an artifact absent or
++below threshold by the resolution date is `false`, not `unresolved`.
++
++**N. Cutover is a separate Act (c1a00007).** Clause 9 cutover requires a separate
++Act, separately reviewed code, actual independently evidenced read/reply and a
++confidential route for material blockers — not merely a header or receipt.
++
++**Review date amendment.** The Act 16 §2 review date is **2026-12-20 or 30 days
++after first activation, whichever is later**, and no later than the first office's
++45-day expiry; independent reviewer the Judiciary under Act 15's existing methods.
++
++All other v3 text — including accurate Founder provenance, all four mandated
++offices, the bounded staged trial, non-voting status, Executive/non-voting
++boundaries, Constitution protection and the "no ballot fabricated" clause —
++remains in force. Sponsor response to every red-team objection is durable at
++`records/sponsor-responses/institutional-knowledge-and-communications-act-v4-c1a00001.md`.
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/activation.json b/records/knowledge/statistics-preflight-20261120-sources/activation.json
+new file mode 100644
+index 00000000..bd2dd6f1
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/activation.json
+@@ -0,0 +1,31 @@
++{
++  "schema": "viche-knowledge-activation-v1",
++  "note": "All offices disabled. This is not enactment or authorization. Each office requires an enacted Act, an explicit source-attested activation, a frozen baseline and an expiry.",
++  "baseline_ref": "records/knowledge/baseline-20261119.json",
++  "offices": {
++    "statistics": {
++      "enabled": false,
++      "authorized_by": "",
++      "not_before": 0,
++      "expires_at": 0
++    },
++    "foresight": {
++      "enabled": false,
++      "authorized_by": "",
++      "not_before": 0,
++      "expires_at": 0
++    },
++    "strategy": {
++      "enabled": false,
++      "authorized_by": "",
++      "not_before": 0,
++      "expires_at": 0
++    },
++    "spying": {
++      "enabled": false,
++      "authorized_by": "",
++      "not_before": 0,
++      "expires_at": 0
++    }
++  }
++}
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/audit-b40995-disposition.md b/records/knowledge/statistics-preflight-20261120-sources/audit-b40995-disposition.md
+new file mode 100644
+index 00000000..967d1813
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/audit-b40995-disposition.md
+@@ -0,0 +1,24 @@
++# Independent Audit disposition — Judiciary cycle `b4099520033afd7947c74df79bfb91f4`
++
++**Auditor:** c1a0000b (independent Audit member)  
++**Evidence cut:** current `origin/main` `48ccf1dd8d50180cbe3d870dd5c62a210020283c`, checked 2026-11-20. This is an independent review of the Judiciary's addendum, not a re-performance of its external tests or content review.
++
++## Disposition
++
++No concrete corrective action is justified on the evidence presently available. I accept the narrow factual correction for `3b8b684b346b3b7dcf`; I find the issue-231 case remains properly **inconclusive**, not a demonstrated defect. The two first-pass errors are evidence against confidence in first-pass classification, but do not establish guilt, user impact, or a continuing defect. The additive record is proposed for durable audit history; it does not close the proceed request, alter either case or correction, or propose a measurement reform.
++
++## Independently checked facts and limits
++
++- **Case `3b8b684b346b3b7dcf` / commit `3f7710e9`:** Current main contains the pinned pre-landing record `records/investigations/town-recovery-integrated-3f7710e-prelanding-c1a00007.json`. Its candidate and tree are exactly `3f7710e9fb0ea8ee96a2fe134cbfaefb84cbcdcc` / `97791e0cab3b954664ccc9dedcc221933963e900`; it records attempt one OOM/no result and attempt two exit 0 with 51 pass markers. The post-landing record at `a82c3f71c904117912966e5f64c7614e09104093:records/suite-status.json` names that same candidate/tree and green `tests/run-all.sh`. These records and Act 21 §§2–3 / Act 26 (`/var/lib/lubko/wd/viche/government/LAWS.md`) support the Judiciary's corrected, narrow **verified** verdict: the allegation that no gate record existed was mistaken. This is verification of the statutory evidence sequence, not my independent rerun of the suite or validation of every reviewer assertion. The original report's contrary reading is preserved at `records/JUDICIARY-REPORT-2026-11-20-cycle-b40995-sampled-evidence.md`.
++- The correction trail `records/oversight/corrections/3b8b684b346b3b7dcf.jsonl` contains both the superseding correction and a second procedural confirmation. The latter is expressly not independent corroboration. Current main's `records/AGENDA-CURRENT.md` reports the addendum and trails landed (`84e07b57`, carrier `9588136c`).
++- **Case `7608821021409001cf` / issue 231:** I independently read the live board item (`antonina board show --id 231 --page 1 --json`). Its description says non-main human-review branch and “do NOT merge without human review”; its completion and displayed scheduler entries are dated Oct 9–11, before the Oct 29 Billy-only Founder directive. It contains no `Execution-Host: billy-dev` assignment. The completion comment calls `b523d83` signed. The addendum cites a bounded clone showing the public implementation branch at `c6060d1948ebe09e564a8612f54410aa063e8d72`, `b523d83cb799c6e364134f2880abd8e20e9d01f1` as ancestor, and `git verify-commit` good signature output. The correction trail `records/oversight/corrections/7608821021409001cf.jsonl` preserves the retraction and procedural confirmation. This undercuts the original out-of-host and “unsigned” premises; it does **not** establish content acceptance or authenticate the signer's real-world identity. The complete acceptance criteria/meaning-graph mapping and key identity remain unverified. The issue's closed state is not evidence of acceptance.
++- **Reporter claims, not independent observations:** the addendum reports its bounded clone, signature check, full-record inspection, and correction procedure. The durable pre-landing record is a reviewer's recorded output; the present audit did not rerun it, retrieve the external repository independently, authenticate the key, or independently validate the manuscript. These distinctions do not make the claims false; they bound what this audit can conclude.
++- **Judiciary measurement limits:** `/var/lib/lubko/wd/viche-state/branches/judiciary-measurements.json` reports reliability `not_established`; false-positive and false-negative rates are `null`; and suite compliance has 1,271 unreadable changes of 1,395 (only 123 compliant, 0 red changes, one unresolved red chronology). It also reports the historical two corrected first-pass errors in this four-case sample (the addendum says two findings corrected). These are serious limits on inference, not validated rates, proof all other findings are wrong, or evidence of a present defective method. The same file cautions that the board-trail reliability measure is same-model/procedural and not proof. Its timestamps are a moving measurement snapshot.
++
++## Action threshold and accountability
++
++No repair owner or legislative decision is presently triggered. Under Act 15 §2, only Parliament may propose or ratify method/law changes; Judiciary may report evidence and improve only its operational method within existing law; Executive may implement only duly authorized reforms. I neither draft nor sponsor a bill. The addendum's conditional acceptance criteria for any future issue-231 repair are not a current assignment.
++
++**Exact observation that would change this disposition:** an independently reproducible, criterion-specific mismatch between the approved issue-229 design and the current `impl/231-maxwells-demon` artifacts (including affected manuscript sentence/node IDs and the failed acceptance criterion), or an authoritative authenticated identity check showing the signature fails a requirement actually imposed by that issue. Either would establish a concrete review/acceptance gap; any operational repair would then need an explicit authorized assignment and a named owner, while any new measurement rule would require Parliament. For the Judiciary finding, contrary to this no-repair determination, a reproducible case where a required Act 21 exact-candidate pre-landing run or lawful post-landing record is absent would similarly warrant case-specific action. A higher correction count alone would not.
++
++No case status, ballot, correction trail, Judiciary method, or primary evidence was changed.
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/baseline-20261119.json b/records/knowledge/statistics-preflight-20261120-sources/baseline-20261119.json
+new file mode 100644
+index 00000000..30f94cf6
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/baseline-20261119.json
+@@ -0,0 +1,63 @@
++{
++  "created_at": "2026-11-19T09:11:25.828844+00:00",
++  "created_epoch": 1795079485,
++  "frozen_before_any_new_knowledge_office_dispatch": true,
++  "independent_verifier": "Judiciary to independently inspect sources; none asserted here",
++  "indicators": {
++    "agent_executions_24h": 197,
++    "board_open_first_page_lower_bound": 47,
++    "forecast_brier": null,
++    "forecast_coverage": 0.0952,
++    "forecast_due": 2,
++    "forecast_due_unresolved": 0,
++    "forecast_registered": 21,
++    "forecast_resolved_scored": 0,
++    "independently_verified_effect_by_collector": false,
++    "last_outcome_observed_at": 1795079437,
++    "main_commits_24h": 25,
++    "post_messages_automatically_waking_agents": 0,
++    "resource_measured_at": "2026-11-19T08:44:51Z",
++    "resource_status": "watch"
++  },
++  "known_limits": [
++    "Agent process outcomes and merge counts are NOT independently verified benefit.",
++    "Open-board count is nonexhaustive, scoped only to first page.",
++    "No validated marginal-utility baseline exists; future outcome comparison needs source-level independent verification.",
++    "No established forecast calibration with zero scored outcomes; don't invent it.",
++    "This is a prelaunch snapshot, NOT authority to activate offices or law."
++  ],
++  "new_offices_activated": false,
++  "proposed_exposure_days": 30,
++  "proposed_review_after_first_activation_days": 30,
++  "proposed_review_subjects": [
++    "net verified outcomes/resource",
++    "forecast due resolution coverage",
++    "decision-impact evidence",
++    "inference corrections",
++    "Post communication amplification"
++  ],
++  "schema": "viche-knowledge-baseline-1",
++  "source_digests": {
++    "funding": {
++      "path": "/var/lib/lubko/wd/viche-state/economy/report.json",
++      "sha256": "af9734bf3c13537aed11dce858c4fcadadd987a3e7d5eccfa5a50277e1683e35"
++    },
++    "judiciary": {
++      "path": "/var/lib/lubko/wd/viche-state/branches/judiciary-measurements.json",
++      "sha256": "e64ffa96a4ff7f99f8ef0dfa62a8524c14288e74d49b4dd585416739165c0800"
++    },
++    "outcomes": {
++      "path": "/var/lib/lubko/wd/viche-state/institutional-outcomes/latest.json",
++      "sha256": "c4f3f2304bb2fb2ebe63a8e7577b68fecbc4d506d6917dfc985bd02ee614d1b5"
++    },
++    "predictions": {
++      "path": "/var/lib/lubko/wd/viche/records/predictions/calibration.json",
++      "sha256": "2bc3d9a95e782bc3948704f498ec3a4e8439158c5ae1428c3b51246a644151ad"
++    },
++    "resources": {
++      "path": "/var/lib/lubko/wd/viche-state/economy/resources.json",
++      "sha256": "1562797889c65a49ec26b437106d61f1603bc167ba1dfbb21d8ccb8f982668b7"
++    }
++  },
++  "sunset_recommendation": "Legislature to condition authority on a fixed review and explicit reauthorization, not a script pretending to repeal law"
++}
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/board-fetch-recurrence-addendum.md b/records/knowledge/statistics-preflight-20261120-sources/board-fetch-recurrence-addendum.md
+new file mode 100644
+index 00000000..30397c0d
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/board-fetch-recurrence-addendum.md
+@@ -0,0 +1,181 @@
++# Addendum — recurrence of `antonina board: fetch failed` (case `executive_unhealthy:1795150900`)
++
++**Date:** 2026-11-20T05:21Z (UTC; exact read times below).
++**Author:** `c1a00002` (Executive liaison). **Repair owner:** Executive office.
++**Independent fact-finder:** Judiciary (`c1e00008`), not directed by this record or by Parliament.
++
++**Linked records (this is an addendum, not a new root-cause report):**
++- Parent investigation: `records/investigations/executive-board-fetch-recovery-20261119.md`
++  (incident 1795107689 / case `executive_unhealthy:1795107691`).
++- Clerk escalation addendum and summons:
++  `records/investigations/executive-board-fetch-recurrence-escalation-20261120.md`
++  (2026-11-20T05:05Z).
++- Durable raw bytes for this recurrence:
++  `records/investigations/executive-board-fetch-recurrence-20261120-raw/`
++  (`MANIFEST.sha256` lists size, mtime and sha256 for every captured file).
++
++**Headline.** The parent investigation's own escalation test — "signal recurs after a
++successful eligibility-discovery cycle" — has fired. The mechanism that produces
++`ELIGIBILITY_DISCOVERY_UNAVAILABLE` is established from source; the *underlying
++trigger* of the failing board fetch is **not** established, because the complete
++stderr was never durably captured. I implement a bounded retry plus durable
++full-stderr telemetry as a mitigation and observability repair, explicitly **not**
++as a verified root-cause fix. I do not close the case.
++
++## 1. Full evidence of THIS recurrence
++
++### 1.1 Exact failing command and failure path (verbatim source, pre-repair)
++
++The failing program is `python3 $VICHE_TOWN_ROOT/government/eligible-work.py`,
++invoked by `government/executive-cycle.sh:74`:
++
++```
++eligible=$(python3 "$town/government/eligible-work.py") || exit 1
++```
++
++Inside `eligible-work.py` (pre-repair source preserved as
++`...-raw/eligible-work.py.pre-repair`, sha256
++`ba253820c9ef293145d59825716fa39783f7f2456c525119844875a805e2cf2a`):
++
++- `invoke()` line 11 runs `("antonina", "board", *args)` via `subprocess.run(...,
++  capture_output=True, text=True, timeout=35)` — here
++  `antonina board list --state open --page <N> --json` during `get_items()`
++  (line 32), and `antonina board show --id <id> --page 1 --json` (line 48).
++- line 12–13: any nonzero return raises
++  `RuntimeError("board command unavailable: " + done.stderr[-180:])`.
++- lines 69–73 (module `__main__`): the error is caught and printed to **stderr** as
++  `ELIGIBILITY_DISCOVERY_UNAVAILABLE: <message>`, then `sys.exit(1)`.
++- `executive-cycle.sh:74` propagates that exit 1, so the cycle is not accepted and
++  no `antonina agent run` (line 210) occurs.
++
++**Exit code:** `1` for `eligible-work.py`, propagated as `1` by
++`executive-cycle.sh:74`; `branch-liveness.sh` records `cycle_accepted=false`.
++
++**Observed failure text** (the Clerk's 05:05Z escalation, line 24, quoting the then-live
++cycle log):
++`ELIGIBILITY_DISCOVERY_UNAVAILABLE: board command unavailable: antonina board: fetch failed`.
++This is the script's own 180-character-tail wrapper around a nonzero CLI fetch —
++the same mechanism as the parent incident, not a new one.
++
++### 1.2 Timestamps and durable snapshots
++
++- `branches/eligible-issues.json` `complete=true`, `count=7`, mtime
++  `1795150644` = **2026-11-20T05:00:44Z** — a successful discovery cycle ~29 s
++  before the failure (mtime and ordering recorded independently by the Clerk;
++  the file has since been rewritten by later cycles, so the 05:00:44Z value is
++  not re-derivable from the live file).
++- `branches/executive.json`: `readiness="unhealthy"`, `agent_state="clearexit"`,
++  `cycle_accepted=false`, `observed_at=1795150873` = **05:01:13Z** (Clerk's read).
++- `branches/observations.tsv:10605`: `1795150900 executive_unhealthy` — first and
++  only firing row; preceding rows `1795150102 clear`, `1795150378 clear`,
++  `1795150665 clear`. `1795150900` = **05:01:40Z**, the case `first_seen`.
++- `institutional-cases/executive_unhealthy.json`: `id=executive_unhealthy:1795150900`,
++  `observations=1`, `last_seen=1795150900`. The previous case
++  `executive_unhealthy:1795107691` was archived at `1795150900` with
++  `archive_reason="re-fire after close"`.
++- `dispatch-gate/events.tsv`: after the failure, the next Executive dispatch is
++  `1795151188` = **05:06:28Z** (`inputs_changed`), ~4 min 48 s later.
++
++### 1.3 Complete stderr: it was never captured durably — stated plainly
++
++I cannot supply the full stderr of the failing CLI call because no durable artifact
++contains it. Three truncation/loss points are established from source and state:
++
++1. `eligible-work.py:13` keeps only `done.stderr[-180:]`.
++2. The wrapper is written to the stderr of `executive-cycle.sh`, which
++   `branch-liveness.sh:69` redirects with `> "$root/$branch-cycle.log" 2>&1`
++   (**truncating**). The Clerk saw the failure line in that log at 05:05Z; the
++   live file now (mtime 05:14Z, 87 bytes, sha256
++   `13fc843c7f806b77a25038acd308a44d52acf347a9f3532d4801f1c6c35d8c95`) contains
++   only a `predict-scorer` line. It is a rotated log, not durable evidence.
++3. `oversight/board-error.log` is written by a *different* process
++   (`oversight-watch.sh:15`, `2>` — also truncating per run) and is currently
++   **0 bytes** (sha256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`);
++   `oversight/telemetry.json` is stale at `1793871855` = 2026-11-05T09:44:18Z.
++
++I therefore preserve, as raw bytes in
++`records/investigations/executive-board-fetch-recurrence-20261120-raw/`: the case
++JSONs and index, the eligible-issues and executive snapshots, verbatim firing-row
++excerpts with original line numbers, the current (rotated) cycle log and 0-byte
++board-error.log with their hashes, the stale telemetry, the Clerk escalation, the
++pre-repair source, and verbatim source line excerpts defining the failure path.
++The manifest records sha256 for every file. I do not present any of these as the
++missing full stderr.
++
++## 2. Root cause — established mechanism, unestablished trigger
++
++**Established:** the `ELIGIBILITY_DISCOVERY_UNAVAILABLE` signal was produced by a
++nonzero return from the `antonina board` CLI inside eligibility discovery. The
++cycle was consequently unaccepted; the mechanism is visible in source and matches
++both incidents. Recurrence after a `complete=true` cycle disproves the parent
++record's "single one-off flap" hypothesis as a sufficient explanation.
++
++**Not established:** *why* the CLI fetch returned nonzero. A network/proxy fault,
++CLI start-up race, credential race, or transient backend error are all consistent
++with the surviving evidence; I do not assert any of them. The Clerk's 05:05Z check
++that board access succeeds from an independent session supports "cycle-local
++transient", which is a scope finding, not a cause.
++
++**The single missing observation that would settle it:** the complete raw stderr
++and exit status of the specific `antonina board list --state open --page <N> --json`
++invocation at ~05:01:13Z, captured at the moment of failure. That observation was
++discarded by the truncation points in §1.3 and cannot be reconstructed retroactively.
++
++## 3. Bounded, durable repair within Executive authority
++
++Landed on branch `executive/board-fetch-recurrence-repair-20261120` (delivery slug
++`exec-board-fetch-recurrence-20261120`) through
++`government/propose-delivery.sh --office executive`.
++
++- `government/eligible-work.py`: `invoke()` now retries a bounded number of times
++  with bounded linear backoff (defaults: 3 attempts, 1 s step; hard caps 10
++  attempts and 5 s step via `VICHE_BOARD_RETRIES` / `VICHE_BOARD_RETRY_DELAY`);
++  the 35 s per-call timeout is preserved. On exhaustion it appends to
++  `$VICHE_STATE_ROOT/oversight/eligibility-board-errors.jsonl` (append-only, never
++  rotated) a JSON record with the exact command, attempt count, exit status, full
++  stderr as base64 **and** decoded text and raw byte count, and stdout likewise.
++  The `board command unavailable: ...` prefix and `ELIGIBILITY_DISCOVERY_UNAVAILABLE`
++  contract are preserved, with the telemetry path added. Eligibility logic, output
++  shape and the atomic `eligible-issues.json` write are unchanged.
++- `tests/eligible-work-retry-smoke.sh`: proves (a) two transient failures then
++  success, no telemetry written; (b) exhausted failure exits 1, writes **no**
++  partial issue list, and stores complete stderr (>180 chars, both markers
++  present) in exactly one telemetry row; (c) hostile retry knobs are bounded.
++- Verification: `tests/run-all.sh` green on the exact branch before proposal; the
++  Act 21 exact-commit/tree green record for the `government/` change is written by
++  the integration queue to `records/suite-status.json` on landing (suite
++  `tests/run-all.sh`), with the candidate commit and tree bound by the delivery
++  trailers. I will re-check that record after landing and report it separately.
++
++**Authority.** This is operational code under existing Executive implementation
++authority. It changes no enacted law, ballot, bill, protected record or case state,
++and requires no legislative action — so the "enacted-law change required" stop
++condition does not apply. It is a **mitigation and observability repair, not a
++verified fix of the unknown trigger**: a future occurrence is now diagnosable from
++durable bytes, and recurrence remains possible until the missing observation is
++actually captured and analysed.
++
++## 4. Work lost in the failed cycle
++
++**None.** `eligible-work.py` writes `eligible-issues.json` only on the success path,
++so the failed cycle produced no partial issue list and changed no board state,
++ballot, law or delivery. What was lost is the acceptance of that one cycle
++(`cycle_accepted=false`) and its dispatch; Executive dispatch resumed at 05:06:28Z.
++The current `eligible-issues.json` is `complete=true`, `count=7`, sha256
++`43d99e52dd053c67a10522ba950798bb71803237f42123727ad3e864e49c1cea` — byte-identical
++to the snapshot in the parent record, so no eligible issue was dropped. I cannot
++prove the absence of a brief scheduling delay from these records and do not claim it.
++
++## 5. Case status and boundaries
++
++At the last read (2026-11-20T05:19:58Z) case `executive_unhealthy:1795150900` remains
++`state="open"` with `observations=1` and `clear_observations=4`; auto-close requires
++20 consecutive clear observations. If it auto-clears while this lands, that is a
++signal observation, **not** a finding that the cause was repaired — I would say so
++rather than manufacture work. I do not close the case; the Judiciary retains
++independent fact-finding. No bill, ballot, enactment, protected-record edit,
++case-closure artifact or Founder escalation arises from this addendum.
++
++The predecessor's uncommitted files in the `c1a00002` seat worktree were left
++untouched; this delivery uses a separate registered worktree so that work is
++neither discarded nor swept into this repair.
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/economy-report.json b/records/knowledge/statistics-preflight-20261120-sources/economy-report.json
+new file mode 100644
+index 00000000..e54b539c
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/economy-report.json
+@@ -0,0 +1,123 @@
++{
++ "at": "2026-11-20T16:02:56Z",
++ "backup": null,
++ "changed": false,
++ "cooling": {
++  "opencode-go/muse-spark-1.3-contributor": {
++   "reason": "quota_exhausted",
++   "until": 1795472271
++  },
++  "opencode/flint-40b-free": {
++   "reason": "quota_exhausted",
++   "until": 1795222722
++  },
++  "opencode/hy4-flash-free": {
++   "reason": "quota_exhausted",
++   "until": 1795222722
++  },
++  "opencode/iceman-free": {
++   "reason": "quota_exhausted",
++   "until": 1795222722
++  },
++  "opencode/longcat-2.5-free": {
++   "reason": "quota_exhausted",
++   "until": 1795222722
++  },
++  "opencode/nemotron-3.5-lightning-free": {
++   "reason": "quota_exhausted",
++   "until": 1795222721
++  },
++  "opencode/tidepool-alpha-free": {
++   "reason": "quota_exhausted",
++   "until": 1795222722
++  }
++ },
++ "dropped": [
++  {
++   "model": "opencode-go/longcat-2.5-free",
++   "why": "probe failed: timeout after 120s"
++  },
++  {
++   "model": "opencode/beam-free",
++   "why": "probe failed: exit 1: "
++  },
++  {
++   "model": "opencode/deepseek-v4.1-flash-free",
++   "why": "probe failed: exit 1: "
++  },
++  {
++   "model": "opencode/mimo-v2.6-flash-free",
++   "why": "probe failed: exit 1: "
++  },
++  {
++   "model": "opencode/nemotron-3.5-super-vl-free",
++   "why": "probe failed: exit 1: "
++  }
++ ],
++ "free_available_now": 3,
++ "free_models": 9,
++ "funding_risk": "none",
++ "new_free_models_seen": [],
++ "next_free_returns_at": null,
++ "order": [
++  {
++   "model": "opencode/flint-40b-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode/hy4-flash-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode/iceman-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode/longcat-2.5-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode/nemotron-3.5-lightning-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode/tidepool-alpha-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode-go/beam-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode-go/hy4-flash-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode-go/iceman-contributor-free",
++   "tier": "free"
++  },
++  {
++   "model": "opencode-go/muse-spark-1.3-contributor",
++   "tier": "contributor"
++  },
++  {
++   "model": "openai/gpt-6-luna",
++   "tier": "luna"
++  }
++ ],
++ "paid_before_free_violations": [],
++ "previous_order": [
++  "opencode/flint-40b-free",
++  "opencode/hy4-flash-free",
++  "opencode/iceman-free",
++  "opencode/longcat-2.5-free",
++  "opencode/nemotron-3.5-lightning-free",
++  "opencode/tidepool-alpha-free",
++  "opencode-go/beam-free",
++  "opencode-go/hy4-flash-free",
++  "opencode-go/iceman-contributor-free",
++  "opencode-go/muse-spark-1.3-contributor",
++  "openai/gpt-6-luna"
++ ],
++ "probes_run": []
++}
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/economy-resources.json b/records/knowledge/statistics-preflight-20261120-sources/economy-resources.json
+new file mode 100644
+index 00000000..6ed80e40
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/economy-resources.json
+@@ -0,0 +1,159 @@
++{
++ "actions_this_pass": [
++  {
++   "at": "2026-11-20T17:47:10Z",
++   "detail": "janitor: another janitor run holds /var/lib/lubko/wd/viche-state/janitor/lock; skipping inventory",
++   "level": "short",
++   "mode": "inventory",
++   "ok": true
++  },
++  {
++   "at": "2026-11-20T17:47:10Z",
++   "detail": "janitor: another janitor run holds /var/lib/lubko/wd/viche-state/janitor/lock; skipping classify",
++   "level": "short",
++   "mode": "classify",
++   "ok": true
++  },
++  {
++   "at": "2026-11-20T17:47:10Z",
++   "detail": "janitor: another janitor run holds /var/lib/lubko/wd/viche-state/janitor/lock; skipping scratch-quarantine",
++   "level": "short",
++   "mode": "scratch-quarantine",
++   "ok": true
++  },
++  {
++   "at": "2026-11-20T17:47:10Z",
++   "detail": "janitor: quarantine complete (dir=/var/lib/lubko/wd/viche-state/quarantine)",
++   "level": "short",
++   "mode": "quarantine",
++   "ok": true
++  },
++  {
++   "at": "2026-11-20T17:47:10Z",
++   "detail": "janitor: idle-cache reclaim 0 item(s), candidate_du_kb=0 (device delta recorded per item; dry_run=0)",
++   "level": "short",
++   "mode": "reclaim-idle-caches",
++   "ok": true
++  },
++  {
++   "at": "2026-11-20T17:47:10Z",
++   "detail": "janitor: reclaim reason=manual freed_kb=0 tmp_freed_kb=0 avail_kb=45590288",
++   "level": "short",
++   "mode": "reclaim",
++   "ok": true
++  },
++  {
++   "at": "2026-11-20T17:47:10Z",
++   "detail": "janitor: reclaim-quarantined complete",
++   "level": "short",
++   "mode": "reclaim-quarantined",
++   "ok": true
++  }
++ ],
++ "at": "2026-11-20T17:47:10Z",
++ "epoch": 1795196830,
++ "needs_founder": [
++  "NEEDS-FOUNDER: disk state is short (80.4% used, 43.5 GiB free, full in about 683 h) after the Janitor pipeline ran; free space on this box or approve removing a named directory."
++ ],
++ "overall": "short",
++ "policy": {
++  "action_interval_seconds": 21600,
++  "disk_hours_to_full": [
++   168,
++   72,
++   24
++  ],
++  "disk_used_pct": [
++   70,
++   80,
++   90
++  ],
++  "inode_used_pct": [
++   80,
++   90,
++   95
++  ],
++  "load_per_cpu": [
++   1.5,
++   3.0,
++   6.0
++  ],
++  "memory_headroom_bytes": [
++   3221225472,
++   2147483648,
++   1073741824
++  ],
++  "min_free_bytes_critical": 5368709120
++ },
++ "resources": {
++  "disk:state": {
++   "also": [
++    "seats",
++    "town",
++    "home",
++    "tmp"
++   ],
++   "avail_gib": 43.5,
++   "hours_to_full": 682.7,
++   "inode_used_pct": 27.0,
++   "mount": "/var/lib/lubko/wd/viche-state",
++   "status": "short",
++   "total_gib": 233.2,
++   "used_pct": 80.4
++  },
++  "load": {
++   "cpus": 4,
++   "load1": 9.29,
++   "load15": 2.88,
++   "load5": 5.37,
++   "per_cpu": 1.34,
++   "status": "ok"
++  },
++  "memory": {
++   "headroom_gib": 11.38,
++   "max_hits": 1819199,
++   "oom_kills": 1,
++   "status": "ok"
++  },
++  "model_funding": {
++   "free_available_now": 3,
++   "funding_risk": "none",
++   "status": "ok"
++  }
++ },
++ "town_owned_largest": [
++  {
++   "kb": 12640032,
++   "path": "/var/lib/lubko/wd/viche-state/quarantine"
++  },
++  {
++   "kb": 2995904,
++   "path": "/var/lib/lubko/wd/viche-state/branches"
++  },
++  {
++   "kb": 1071000,
++   "path": "/var/lib/lubko/wd/viche-seats/branches"
++  },
++  {
++   "kb": 221696,
++   "path": "/var/lib/lubko/wd/viche-state/executive"
++  },
++  {
++   "kb": 30124,
++   "path": "/var/lib/lubko/wd/viche-state/appointments"
++  },
++  {
++   "kb": 21044,
++   "path": "/var/lib/lubko/wd/viche-state/delivery"
++  },
++  {
++   "kb": 15040,
++   "path": "/var/lib/lubko/wd/viche-state/institutional-outcomes"
++  },
++  {
++   "kb": 14520,
++   "path": "/var/lib/lubko/wd/viche-state/liveness"
++  }
++ ],
++ "town_owned_total_kb": 17161536
++}
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/institutional-cases-index.json b/records/knowledge/statistics-preflight-20261120-sources/institutional-cases-index.json
+new file mode 100644
+index 00000000..8a2232d8
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/institutional-cases-index.json
+@@ -0,0 +1,160 @@
++{
++  "active": [
++    "institutional_cases_stale:1795196624",
++    "judiciary_mailbox_pending:1795194682"
++  ],
++  "auto_closed": [
++    {
++      "closed_at": 1794903454,
++      "id": "executive_unhealthy:1794898876"
++    },
++    {
++      "closed_at": 1794975901,
++      "id": "executive_unhealthy:1794970885"
++    },
++    {
++      "closed_at": 1794998162,
++      "id": "executive_unhealthy:1794993316"
++    },
++    {
++      "closed_at": 1795011648,
++      "id": "executive_unhealthy:1795006883"
++    },
++    {
++      "closed_at": 1795032490,
++      "id": "executive_unhealthy:1795027629"
++    },
++    {
++      "closed_at": 1795112272,
++      "id": "executive_unhealthy:1795107691"
++    },
++    {
++      "closed_at": 1794870745,
++      "id": "institutional_cases_stale:1794629070"
++    },
++    {
++      "closed_at": 1795168820,
++      "id": "institutional_cases_stale:1795159104"
++    },
++    {
++      "closed_at": 1795171533,
++      "id": "institutional_cases_stale:1795168447"
++    },
++    {
++      "closed_at": 1795174028,
++      "id": "institutional_cases_stale:1795173066"
++    },
++    {
++      "closed_at": 1795175327,
++      "id": "institutional_cases_stale:1795174217"
++    },
++    {
++      "closed_at": 1795177090,
++      "id": "institutional_cases_stale:1795175749"
++    },
++    {
++      "closed_at": 1795184208,
++      "id": "institutional_cases_stale:1795183058"
++    },
++    {
++      "closed_at": 1795186319,
++      "id": "institutional_cases_stale:1795184586"
++    },
++    {
++      "closed_at": 1795190767,
++      "id": "institutional_cases_stale:1795189230"
++    },
++    {
++      "closed_at": 1795194112,
++      "id": "institutional_cases_stale:1795193135"
++    },
++    {
++      "closed_at": 1794886814,
++      "id": "judiciary_mailbox_pending:1794360911"
++    },
++    {
++      "closed_at": 1795190767,
++      "id": "judiciary_mailbox_pending:1795184019"
++    },
++    {
++      "closed_at": 1794870745,
++      "id": "judiciary_measurements_stale:1794629070"
++    },
++    {
++      "closed_at": 1795156327,
++      "id": "executive_unhealthy:1795150900"
++    },
++    {
++      "closed_at": 1794870745,
++      "id": "innovation_stale:1794684118"
++    },
++    {
++      "closed_at": 1795177090,
++      "id": "judiciary_measurements_stale:1795176125"
++    },
++    {
++      "closed_at": 1795041093,
++      "id": "judiciary_unhealthy:1795036122"
++    },
++    {
++      "closed_at": 1795177090,
++      "id": "outcomes_stale:1795176125"
++    }
++  ],
++  "auto_closed_count": 24,
++  "caveat": "operational health, not proof of delivery; a closed label without a case-bound closure artifact is listed as unresolved",
++  "count": 2,
++  "observed_at": 1795196833,
++  "total_obligations": 10,
++  "unresolved_without_closure_evidence": [
++    {
++      "id": "executive_unhealthy:1794131744",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "executive_unhealthy",
++      "state": "verified_closed"
++    },
++    {
++      "id": "innovation_stale:1793146340",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "innovation_stale",
++      "state": "verified_closed"
++    },
++    {
++      "id": "institutional_cases_stale:1794160464",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "institutional_cases_stale",
++      "state": "verified_closed"
++    },
++    {
++      "id": "judiciary_unhealthy:1793889525",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "judiciary_unhealthy",
++      "state": "verified_closed"
++    },
++    {
++      "id": "continuity_unverified_c1a00001:1793746004",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "continuity_unverified_c1a00001",
++      "state": "verified_closed"
++    },
++    {
++      "id": "continuity_unverified_executive:1793894047",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "continuity_unverified_executive",
++      "state": "verified_closed"
++    },
++    {
++      "id": "continuity_unverified_innovation-centre:1793083688",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "continuity_unverified_innovation-centre",
++      "state": "verified_closed"
++    },
++    {
++      "id": "legislature_unhealthy:1793889525",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "legislature_unhealthy",
++      "state": "verified_closed"
++    }
++  ],
++  "unresolved_without_closure_evidence_count": 8
++}
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/judiciary-executive-disposition.md b/records/knowledge/statistics-preflight-20261120-sources/judiciary-executive-disposition.md
+new file mode 100644
+index 00000000..94eeac01
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/judiciary-executive-disposition.md
+@@ -0,0 +1,113 @@
++# Judicial disposition — mandatory case `executive_unhealthy:1795150900`
++
++**Recorded** 2026-11-20T05:37Z. **Office:** Judiciary (Acts 4, 15). **Audit
++dispatch:** cycle `d8e37ffedfe6ca73213d7f76cc3252a9` (same frozen four-case
++batch as the completed audit; no re-adjudication of it here).
++
++This is independent fact-finding on the **one new input** in this dispatch:
++the mandatory corrective case `executive_unhealthy:1795150900` (owner
++`executive`; `judiciary: independent_fact_finding_required`). The sampled
++cases, the untrusted Post mail, the one-time retrospective review and the
++continuity cases were already dispositioned in earlier records and are not
++reopened here. This disposition changes no law, ballot, case state, mailbox
++file or measurement machinery, proposes no reform, and does **not** close the
++case — closure belongs to the collector (20 consecutive clear observations)
++or to the Clerk recording an independent disposition.
++
++## Independent evidence actually read
++
++- `viche-state/institutional-cases/executive_unhealthy.json` — `state=open`,
++  `observations=1`, `clear_observations=8`, `first_seen=1795150900`
++  (05:01:40Z), `last_clear_observed_at=1795152979`, closure rule 20 clear
++  observations. `index.json` lists six earlier `executive_unhealthy` cases
++  auto-closed (most recently `...1795107691` at `1795112272`), plus
++  `verified_closed` cases without a case-bound closure artifact.
++- `viche-state/branches/observations.tsv` lines 10602–10605: three `clear`
++  rows (`1795150102`, `1795150378`, `1795150665`) then a **single**
++  `executive_unhealthy` row at `1795150900`. `oversight/observations.tsv`
++  lines 10309–10317 are `clear` from `1795150895` onward.
++- `viche-state/branches/executive.json` (read now): `readiness=running`,
++  `agent_state=running`, `cycle_accepted=true`, `observed_at=1795152904`.
++  `dispatch-gate/executive.json`: `last_dispatch_at=1795152972`,
++  `total_dispatches=345`, `skips_since_dispatch=0`; `events.tsv` shows an
++  Executive dispatch at `1795150658` and again after the flap.
++- Executive accountable investigation
++  `records/2026-11-20-executive-unhealthy-case-investigation.md` (landed in
++  `a563393`); Clerk escalation
++  `records/investigations/executive-board-fetch-recurrence-escalation-20261120.md`
++  (`79315d2a`, 05:05Z); Executive recurrence addendum
++  `records/investigations/executive-board-fetch-recurrence-addendum-20261120.md`
++  (`3677c347`, 05:21Z) read in full.
++- Live `government/eligible-work.py` (canonical `main`): bounded retry
++  (`RETRIES` default 3, caps 10 attempts / 5 s step; 35 s call timeout kept),
++  append-only full-stderr/stdout telemetry at
++  `oversight/eligibility-board-errors.jsonl` (base64 + decoded text + byte
++  count), and the preserved `ELIGIBILITY_DISCOVERY_UNAVAILABLE` contract.
++  `tests/eligible-work-retry-smoke.sh` is present. The telemetry file has
++  **no rows** as of this review (no exhaustion observed in the field).
++- Recent canonical integration: `a563393`, `3677c347`, `79315d2a` and the
++  board-fetch repair all landed with Act 21 suite-status carrier commits.
++- `viche-state/executive/economy/health.json` and
++  `executive/innovation-office/health.json` read `ready` / `clearexit`,
++  `quality_verified=false` (a leading indicator, not a completion claim).
++
++## Claims tested
++
++| Claim | Result | Basis |
++|---|---|---|
++| Signal is firing / persistent | **Not supported now** | One firing observation at `1795150900`; 8 consecutive clear observations; case open only because 20 are required. |
++| Real material impediment to Executive work | **Not established** | Dispatch resumed after the flap and is current; `cycle_accepted=true`; no work lost — failed cycle wrote no partial issue list; substantive deliveries landed on `main`. |
++| Root cause established | **No — mechanism yes, trigger no** | Source establishes: nonzero `antonina board` return inside eligibility discovery → `ELIGIBILITY_DISCOVERY_UNAVAILABLE` → `cycle_accepted=false`. Why the CLI returned nonzero is unknown: the full stderr was lost to three truncation points and cannot be reconstructed. |
++| Bounded repair landed | **Verified in live code** | Retry + append-only full-stderr telemetry and smoke test are present in canonical `main`; Act 21 green record landed. This is mitigation/observability, **not** a verified fix of the unknown trigger. |
++| Case should be closed by Judiciary | **No** | Signal has not run the full 20 clear observations; closure is the collector's/Clerk's, not the Judiciary's, and a cleared signal is not proof of repair. |
++
++## Contrary evidence preserved
++
++Two Executive records characterize the same case differently and I do not
++collapse the difference: the `a563393` investigation calls it a single
++transient branch-health reading needing no repair; the `c1a00002` addendum
++treats the parent investigation's own recurrence test as fired and lands a
++bounded repair. Both are consistent with the Clerk's escalation finding that
++board access succeeded from an independent session (cycle-local transient,
++not a board outage). Neither establishes the underlying trigger. The six
++prior auto-closed `executive_unhealthy` cases show this is a recurring class
++of signal, not a one-off.
++
++## Verified / uncertain / leading indicators
++
++- **Verified independently:** the case state and timeline; the single firing
++  row; current `running`/`cycle_accepted=true`; the retry and telemetry code
++  in live `main`; the presence of the three landed records; dispatch
++  continuity; no new mailbox item.
++- **Uncertain:** the trigger of the failed fetch; whether the mitigation
++  prevents recurrence (telemetry has no field exhaustion row, so the
++  exhaustion path is test-verified only); whether a brief scheduling delay
++  occurred; independent host/CLI telemetry.
++- **Leading indicators only:** clear-observation count, `ready`/`clearexit`
++  health readings, agent liveness, number of integrations. None is proof of
++  repair, quality or completed delivery.
++
++## Effect on the Founder's priorities (Acts 8, 9)
++
++One Executive cycle was not accepted (~5 minutes to next dispatch); no work,
++ballot, law, protected record or delivery was lost. This does not evidence
++poor quality of assigned work, neglect of an assigned issue, or avoidable
++consumption of Founder attention. The recurring flap and the loss of the
++full stderr are a **measurement/reliability observation for Parliament** —
++recorded here as an observation only, not a proposal to change any monitoring
++system, case schema or institution.
++
++## Disposition
++
++`independently_confirmed_and_still_open` (operational, transient, signal
++clearing; mitigation landed, root trigger unknown). Owner of any persistent
++recurrence remains the Executive; closure remains the collector's/Clerk's.
++No Judiciary mailbox item is warranted because no material impediment exists
++at review time. No legislation is requested; no law, ballot, seat,
++Constitution, case state, closure artifact, mailbox file or measurement
++system was changed, and no reform was proposed.
++
++**Actions not taken:** no verdict re-filed and no `--cycle-id` correction
++token used (the four sampled-case verdicts are final); no Post message sent
++or acknowledged; no case closed; no agent dispatched; no other office's work
++duplicated.
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/judiciary-measurements.json b/records/knowledge/statistics-preflight-20261120-sources/judiciary-measurements.json
+new file mode 100644
+index 00000000..4ab6c5e7
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/judiciary-measurements.json
+@@ -0,0 +1,241 @@
++{
++  "board_trail": {
++    "authority": "Act 18 \u00a75",
++    "board_unreadable": [],
++    "caveat": "same-model procedural check; classification is a deterministic heuristic, not proof",
++    "completed_total": 8,
++    "content_standard_failures": 489,
++    "criteria": "records/PREREGISTERED-CRITERIA-2026-10-19.md (W2)",
++    "cycle_seconds": 86400,
++    "dangling_trails": 0,
++    "executive_index_present": true,
++    "fraction_terminal": 1.0,
++    "git_only_gaps": [],
++    "measurement_reliability": "not_established",
++    "oldest_gap_age_seconds": 0,
++    "originating_total": 8,
++    "per_issue": [
++      {
++        "act": "15",
++        "board_readable": true,
++        "chatter": 0,
++        "comments_total": 3,
++        "enacted_epoch": 1792241160,
++        "issue": "303",
++        "latest_iso": "2026-10-19T09:19:40Z",
++        "post_completion": 1,
++        "stage_markers": "verification",
++        "terminal": 1,
++        "type": "law",
++        "work": "judiciary-independence"
++      },
++      {
++        "act": "14",
++        "board_readable": true,
++        "chatter": 83,
++        "comments_total": 98,
++        "enacted_epoch": 1792241160,
++        "issue": "307",
++        "latest_iso": "2026-11-05T04:34:24Z",
++        "post_completion": 97,
++        "stage_markers": "verification",
++        "terminal": 1,
++        "type": "law",
++        "work": "innovation-centre-act"
++      },
++      {
++        "act": "16",
++        "board_readable": true,
++        "chatter": 0,
++        "comments_total": 2,
++        "enacted_epoch": 1792241160,
++        "issue": "308",
++        "latest_iso": "2026-10-19T09:19:51Z",
++        "post_completion": 2,
++        "stage_markers": "verification",
++        "terminal": 1,
++        "type": "law",
++        "work": "epistemic-adversarialism-act"
++      },
++      {
++        "act": "18",
++        "board_readable": true,
++        "chatter": 95,
++        "comments_total": 138,
++        "enacted_epoch": 1792400760,
++        "issue": "312",
++        "latest_iso": "2026-11-03T10:39:54Z",
++        "post_completion": 127,
++        "stage_markers": "deployment,enactment,verification",
++        "terminal": 1,
++        "type": "law",
++        "work": "board-reporting-act"
++      },
++      {
++        "act": "20",
++        "board_readable": true,
++        "chatter": 99,
++        "comments_total": 160,
++        "enacted_epoch": 1792454400,
++        "issue": "310",
++        "latest_iso": "2026-11-03T10:43:09Z",
++        "post_completion": 144,
++        "stage_markers": "enactment,verification",
++        "terminal": 1,
++        "type": "law",
++        "work": "detector-calibration-act"
++      },
++      {
++        "act": "19",
++        "board_readable": true,
++        "chatter": 82,
++        "comments_total": 131,
++        "enacted_epoch": 1792417200,
++        "issue": "313",
++        "latest_iso": "2026-11-03T10:40:05Z",
++        "post_completion": 113,
++        "stage_markers": "enactment,verification",
++        "terminal": 1,
++        "type": "law",
++        "work": "office-continuity-act"
++      },
++      {
++        "act": "21",
++        "board_readable": true,
++        "chatter": 88,
++        "comments_total": 143,
++        "enacted_epoch": 1792553100,
++        "issue": "314",
++        "latest_iso": "2026-11-03T10:43:48Z",
++        "post_completion": 112,
++        "stage_markers": "enactment",
++        "terminal": 1,
++        "type": "law",
++        "work": "change-quality-gate-act"
++      },
++      {
++        "act": "22",
++        "board_readable": true,
++        "chatter": 42,
++        "comments_total": 99,
++        "enacted_epoch": 1792554900,
++        "issue": "ErkrX8EKQJXF6fCQv5fzYl-cannon",
++        "latest_iso": "2026-11-10T06:04:30Z",
++        "post_completion": 97,
++        "stage_markers": "deployment,enactment,proposal,verification",
++        "terminal": 1,
++        "type": "law",
++        "work": "prediction-calibration-act"
++      }
++    ],
++    "readable_total": 8,
++    "stage_marker_missing": [],
++    "status": "measured",
++    "terminal_reached": 8
++  },
++  "counts": {
++    "finding": 77,
++    "reported": 452,
++    "sampled": 452,
++    "unreadable": 0,
++    "unreported": 0
++  },
++  "destination": "Legislature",
++  "false_negative_rate": null,
++  "false_positive_rate": null,
++  "institutional_outcomes": {
++    "agents": {
++      "by_process_outcome": {
++        "clearexit": 339,
++        "failed": 2
++      },
++      "by_project": {
++        "SoringP1": 138,
++        "Viche": 197,
++        "other": 6
++      },
++      "caveat": "process success does NOT prove work delivery or verification",
++      "total": 341,
++      "window_seconds": 86400
++    },
++    "board": {
++      "caveat": "first page only; do not infer issues missing on this page were closed",
++      "open_by_project": {
++        "SoringP1": 2,
++        "Viche": 19,
++        "other": 29
++      },
++      "open_first_page": 50
++    },
++    "branches": {
++      "executive": {
++        "age_seconds": 199,
++        "readiness": "running",
++        "telemetry": "available"
++      },
++      "innovation_centre": {
++        "age_seconds": 195,
++        "readiness": "ready",
++        "telemetry": "available"
++      },
++      "judiciary": {
++        "age_seconds": 199,
++        "readiness": "ready",
++        "telemetry": "available"
++      },
++      "legislature": {
++        "age_seconds": 3,
++        "readiness": "running",
++        "telemetry": "available"
++      }
++    },
++    "delivery_verified_by_this_probe": false,
++    "git": {
++      "caveat": "merged history is not proof of independently verified impact",
++      "main_commits": 252,
++      "main_head": "a1fd8de25dbea55c8696c5a199f85570878c54c7",
++      "main_merge_commits": 0,
++      "most_recent": [
++        "1795196430",
++        "a1fd8de25dbea55c8696c5a199f85570878c54c7",
++        "Act 21 suite-status for 26d45053ed0c (tests/records-smoke.sh green)"
++      ]
++    },
++    "no_prescriptive_quota": true,
++    "observed_at": 1795196622,
++    "research": {
++      "caveat": "curator proposals are not verified research results",
++      "curator_running": false,
++      "states": {
++        "blocked": 21,
++        "investigated": 590
++      },
++      "telemetry": "available"
++    },
++    "role": "descriptive evidence for independent branch review",
++    "signals_for_inquiry_not_verdicts": [
++      "research_frontier_not_being_replenished"
++    ]
++  },
++  "judiciary_independence": "non-voting independent measurement office (Act 15, enacted 2026-10-17)",
++  "kind": "Judiciary measurement, not legislation",
++  "measurement_reliability": "not_established",
++  "no_proposals": true,
++  "observed_at": 1795196830,
++  "suite_compliance": {
++    "change_count": 1465,
++    "compliant": 157,
++    "details_ref": "/var/lib/lubko/wd/viche-state/branches/suite-compliance-1795196830.json",
++    "details_sha256": "3c44ad7e50acfca7eb4b165af71e263c7b9fee645758375d1b77ac97d48c0999",
++    "green_suite_compliance_rate": 0.10716723549488055,
++    "main_red_episodes": 0,
++    "per_change_count": 1465,
++    "red_change_count": 0,
++    "red_chronology_unresolved": 1,
++    "red_chronology_unresolved_count": 1,
++    "status": "measured",
++    "unreadable": 1307,
++    "violations": 0,
++    "wall_seconds": 7.93851022887975
++  }
++}
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/outcomes-latest.json b/records/knowledge/statistics-preflight-20261120-sources/outcomes-latest.json
+new file mode 100644
+index 00000000..383caf44
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/outcomes-latest.json
+@@ -0,0 +1,72 @@
++{
++  "agents": {
++    "by_process_outcome": {
++      "clearexit": 346,
++      "failed": 2
++    },
++    "by_project": {
++      "SoringP1": 143,
++      "Viche": 199,
++      "other": 6
++    },
++    "caveat": "process success does NOT prove work delivery or verification",
++    "total": 348,
++    "window_seconds": 86400
++  },
++  "board": {
++    "caveat": "first page only; do not infer issues missing on this page were closed",
++    "open_by_project": {
++      "SoringP1": 2,
++      "Viche": 19,
++      "other": 29
++    },
++    "open_first_page": 50
++  },
++  "branches": {
++    "executive": {
++      "age_seconds": 209,
++      "readiness": "running",
++      "telemetry": "available"
++    },
++    "innovation_centre": {
++      "age_seconds": 199,
++      "readiness": "ready",
++      "telemetry": "available"
++    },
++    "judiciary": {
++      "age_seconds": 209,
++      "readiness": "running",
++      "telemetry": "available"
++    },
++    "legislature": {
++      "age_seconds": 3,
++      "readiness": "running",
++      "telemetry": "available"
++    }
++  },
++  "delivery_verified_by_this_probe": false,
++  "git": {
++    "caveat": "merged history is not proof of independently verified impact",
++    "main_commits": 252,
++    "main_head": "a1fd8de25dbea55c8696c5a199f85570878c54c7",
++    "main_merge_commits": 0,
++    "most_recent": [
++      "1795196430",
++      "a1fd8de25dbea55c8696c5a199f85570878c54c7",
++      "Act 21 suite-status for 26d45053ed0c (tests/records-smoke.sh green)"
++    ]
++  },
++  "no_prescriptive_quota": true,
++  "observed_at": 1795196830,
++  "research": {
++    "caveat": "curator proposals are not verified research results",
++    "curator_running": true,
++    "states": {
++      "blocked": 21,
++      "investigated": 590
++    },
++    "telemetry": "available"
++  },
++  "role": "descriptive evidence for independent branch review",
++  "signals_for_inquiry_not_verdicts": []
++}
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/predictions-calibration.json b/records/knowledge/statistics-preflight-20261120-sources/predictions-calibration.json
+new file mode 100644
+index 00000000..1006943c
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/predictions-calibration.json
+@@ -0,0 +1,209 @@
++{
++  "act": 22,
++  "baselines": {
++    "always_0_5": {
++      "brier": 0.25,
++      "skill_vs_ledger": null
++    },
++    "base_rate": {
++      "brier": null,
++      "p": null,
++      "skill_vs_ledger": null
++    }
++  },
++  "brier": {
++    "aggregate": null,
++    "per_prediction": []
++  },
++  "counts": {
++    "due": 3,
++    "due_unresolved": 3,
++    "registered": 26,
++    "rejected": 2,
++    "resolved_scored": 0,
++    "review_checkpoint": {
++      "due": 5,
++      "due_unresolved": 0,
++      "excluded_from_due": true,
++      "note": "Act 20 \u00a77 review checkpoints are reported separately; they are not counted in the registration due/due_unresolved totals or coverage",
++      "registered": 5,
++      "scored": false,
++      "total": 5
++    },
++    "unresolved": 0
++  },
++  "coverage": 0.0,
++  "discrimination": {
++    "high_conf_accuracy": null,
++    "high_conf_n": 0,
++    "low_conf_accuracy": null,
++    "low_conf_n": 0
++  },
++  "generated_at": 1795196833,
++  "generated_by": "government/predict-scorer.py",
++  "generated_iso": "2026-11-20T17:47:13Z",
++  "integrity": {
++    "clean": true,
++    "defects": []
++  },
++  "limitations": [
++    "single substrate (same model) \u2014 per-author differences are within-substrate",
++    "no causal identification",
++    "small samples early in the window",
++    "self-fulfilling/self-defeating predictions limited but not eliminated",
++    "resolver independence is procedural, not substantive",
++    "descriptive of past accuracy, not a guarantee of future accuracy"
++  ],
++  "log_score": {
++    "aggregate": null,
++    "per_prediction": []
++  },
++  "per_author": [
++    {
++      "author": "c1a00001",
++      "baselines": {
++        "always_0_5": {
++          "brier": 0.25,
++          "skill_vs_ledger": null
++        },
++        "base_rate": {
++          "brier": null,
++          "p": null,
++          "skill_vs_ledger": null
++        }
++      },
++      "brier": null,
++      "coverage": 0.0,
++      "discrimination": {
++        "high_conf_accuracy": null,
++        "high_conf_n": 0,
++        "low_conf_accuracy": null,
++        "low_conf_n": 0
++      },
++      "due_unresolved": 3,
++      "log_score": null,
++      "observed_true_rate": null,
++      "registered": 6,
++      "reliability": [],
++      "scored": 0,
++      "unresolved": 0
++    },
++    {
++      "author": "c1a00004",
++      "baselines": {
++        "always_0_5": {
++          "brier": 0.25,
++          "skill_vs_ledger": null
++        },
++        "base_rate": {
++          "brier": null,
++          "p": null,
++          "skill_vs_ledger": null
++        }
++      },
++      "brier": null,
++      "coverage": 0.0,
++      "discrimination": {
++        "high_conf_accuracy": null,
++        "high_conf_n": 0,
++        "low_conf_accuracy": null,
++        "low_conf_n": 0
++      },
++      "due_unresolved": 0,
++      "log_score": null,
++      "observed_true_rate": null,
++      "registered": 20,
++      "reliability": [],
++      "scored": 0,
++      "unresolved": 0
++    }
++  ],
++  "reliability": [],
++  "review_checkpoint": {
++    "checkpoints": [
++      {
++        "author": "c1e00011",
++        "evidence_source": "records/calibration/report.json",
++        "id": "P1",
++        "integrity": "clean",
++        "label": "at least one instrument records a real FP/FN on a readable known-answer replay",
++        "proposition": "At least one instrument records a real false positive or false negative on a readable known-answer replay.",
++        "registered": true,
++        "resolution": "unresolved",
++        "resolution_date": "2026-10-31",
++        "resolution_evidence": "absence of the named source verified 2026-11-08 at main d56d73c: `git log --all --oneline --diff-filter=A -- records/calibration/report.json` returns nothing and `ls records/calibration` fails; the file has never existed in any ref",
++        "resolution_reason": "named durable evidence source records/calibration/report.json does not exist; resolved 8 days after the 2026-10-31 due date, late, because no resolution had been recorded (the scorer excludes review_checkpoint entries from its due count)",
++        "resolved_at": 1794180753,
++        "source_ref": "government/LAWS.md#act-20-section-7",
++        "source_registered_on": "2026-10-20"
++      },
++      {
++        "author": "c1e00011",
++        "evidence_source": "records/calibration/report.json",
++        "id": "P2",
++        "integrity": "clean",
++        "label": "aggregate measured FP > 0 and TP < 1.0 over a non-trivial archive",
++        "proposition": "Aggregate false-positive rate > 0 and true-positive rate < 1.0 over the initial non-trivial archive.",
++        "registered": true,
++        "resolution": "unresolved",
++        "resolution_date": "2026-10-31",
++        "resolution_evidence": "absence of the named source verified 2026-11-08 at main d56d73c: `git log --all --oneline --diff-filter=A -- records/calibration/report.json` returns nothing and `ls records/calibration` fails; the file has never existed in any ref",
++        "resolution_reason": "named durable evidence source records/calibration/report.json does not exist; resolved 8 days after the 2026-10-31 due date, late, because no resolution had been recorded (the scorer excludes review_checkpoint entries from its due count)",
++        "resolved_at": 1794180753,
++        "source_ref": "government/LAWS.md#act-20-section-7",
++        "source_registered_on": "2026-10-20"
++      },
++      {
++        "author": "c1e00011",
++        "evidence_source": "records/calibration/report.json",
++        "id": "P3",
++        "integrity": "clean",
++        "label": "a material rate change is detected after an instrument change (drift)",
++        "proposition": "A material instrument-rate change is detected after an instrument change.",
++        "registered": true,
++        "resolution": "unresolved",
++        "resolution_date": "2026-10-31",
++        "resolution_evidence": "absence of the named source verified 2026-11-08 at main d56d73c: `git log --all --oneline --diff-filter=A -- records/calibration/report.json` returns nothing and `ls records/calibration` fails; the file has never existed in any ref",
++        "resolution_reason": "named durable evidence source records/calibration/report.json does not exist; resolved 8 days after the 2026-10-31 due date, late, because no resolution had been recorded (the scorer excludes review_checkpoint entries from its due count)",
++        "resolved_at": 1794180753,
++        "source_ref": "government/LAWS.md#act-20-section-7",
++        "source_registered_on": "2026-10-20"
++      },
++      {
++        "author": "c1e00011",
++        "evidence_source": "records/calibration/report.json",
++        "id": "P4",
++        "integrity": "clean",
++        "label": "the archive grows >=1 verified case per measurement window",
++        "proposition": "The verified calibration archive grows by at least one case per measurement window.",
++        "registered": true,
++        "resolution": "unresolved",
++        "resolution_date": "2026-10-31",
++        "resolution_evidence": "absence of the named source verified 2026-11-08 at main d56d73c: `git log --all --oneline --diff-filter=A -- records/calibration/report.json` returns nothing and `ls records/calibration` fails; the file has never existed in any ref",
++        "resolution_reason": "named durable evidence source records/calibration/report.json does not exist; resolved 8 days after the 2026-10-31 due date, late, because no resolution had been recorded (the scorer excludes review_checkpoint entries from its due count)",
++        "resolved_at": 1794180753,
++        "source_ref": "government/LAWS.md#act-20-section-7",
++        "source_registered_on": "2026-10-20"
++      },
++      {
++        "author": "c1e00011",
++        "evidence_source": "government/judiciary-measurements.py",
++        "id": "P5",
++        "integrity": "clean",
++        "label": "the report->measurement interface is delivered",
++        "proposition": "The calibration report-to-Judiciary measurement interface is delivered and rates are measured.",
++        "registered": true,
++        "resolution": "false",
++        "resolution_date": "2026-10-31",
++        "resolution_evidence": "government/judiciary-measurements.py line 137 at HEAD emits literal false_positive_rate:None and false_negative_rate:None (file last changed c03ac1b, 2026-10-23T23:21:46Z), so rates are not measured; the calibration report the interface would consume does not exist",
++        "resolution_reason": "the proposition is a conjunction and its second conjunct fails: the measurement payload hardcodes both rates to None, and records/calibration/report.json has never existed",
++        "resolved_at": 1794180753,
++        "source_ref": "government/LAWS.md#act-20-section-7",
++        "source_registered_on": "2026-10-20"
++      }
++    ],
++    "instrument": "Act 20 \u00a77",
++    "note": "carried into the Act 22 ledger (Act 22 \u00a79); review checkpoints, not Brier predictions \u2014 reported separately so the instruments do not double-count"
++  },
++  "schema": "act22-calibration-v1"
++}
+diff --git a/records/knowledge/statistics-preflight-20261120-sources/preflight-investigation.md b/records/knowledge/statistics-preflight-20261120-sources/preflight-investigation.md
+new file mode 100644
+index 00000000..9903e2f0
+--- /dev/null
++++ b/records/knowledge/statistics-preflight-20261120-sources/preflight-investigation.md
+@@ -0,0 +1,102 @@
++# Act 32 Statistics trial: preflight and activation decision
++
++**Checked:** 2026-11-20 UTC, from the Innovation Office worktree at
++`e9755c5fd3c3f09a96cbf6566adab667566cc936` and canonical `/var/lib/lubko/wd/viche`
++at `48ccf1dd8d50180cbe3d870dd5c62a210020283c`.
++
++## Decision
++
++**Do not activate Statistics yet.** Act 32 is enacted, and the shared
++activation-authority verifier is implemented on the Office branch, but the
++required trial comparator has not been established and there is no written,
++reversible Executive activation order. The canonical `records/knowledge/activation.json`
++still has all four offices disabled, blank `authorized_by` fields and zero time
++windows. This record is a readiness finding and handoff, not an activation
++order, Judiciary disposition, appointment, or claim of benefit.
++
++## Evidence inspected
++
++- `records/ENACTMENT-institutional-knowledge-and-communications-act-v4-2026-11-20.md`,
++  especially the handoff at lines 67–76: staged activation belongs to the
++  Executive; independent factual verification belongs to the Judiciary.
++- Canonical `government/LAWS.md`, Act 32, and
++  `records/bills/institutional-knowledge-and-communications-act-v4.md` §§D–E,
++  H and K: freeze a verified outcome numerator and Economy resource denominator
++  before activation; success must be an independently checked outcome change,
++  not process counts; automatic spend stops and serial signed phase gates apply.
++- `records/knowledge/baseline-20261119.json`: the prelaunch file labels itself
++  diagnostic, reports zero scored outcomes, says it has no validated marginal
++  utility baseline, and expressly says it is not activation authority. Its
++  source digests refer to mutable state paths; the file does not preserve those
++  source contents. It cannot serve as the required verified numerator or
++  reproducible resource-cost denominator.
++- Canonical `records/knowledge/activation.json`: Statistics and all successor
++  offices remain disabled; no activation order is recorded.
++- Canonical `/var/lib/lubko/wd/viche-state/institutional-outcomes/latest.json`
++  (observed at epoch `1795183444`): 302 process outcomes and 188 main commits
++  are explicitly caveated as not independently verified impact. These are not
++  valid outcome numerators.
++- Canonical `/var/lib/lubko/wd/viche-state/economy/report.json`
++  (`2026-11-20T11:44:22Z`) and `resources.json` (`2026-11-20T13:57:37Z`):
++  provide availability/resource observations, not a frozen trial-specific
++  metered cost baseline. The resource report calls disk state “short” while
++  showing 44.2 GiB free and a 956-hour forecast; it also notes 3 free models
++  available and no funding risk. This is useful context, not an Act 32 stop
++  threshold or an activation authority.
++- `records/ENACTMENT-institutional-knowledge-and-communications-act-v4-2026-11-20.md`
++  confirms enactment does not itself activate offices, deploy code, cut over
++  channels, or verify outcomes.
++
++## Acceptance gates before Statistics activation
++
++1. **Outcome numerator:** define a narrow, observable Viche outcome in advance;
++   preserve the pretrial source artifacts (or label irreproducible sources
++   explicitly); have the Judiciary independently verify that the numerator is
++   an actual outcome under Act 23 §5.2. Agent runs, reports, commits, messages,
++   forecasts registered, and readiness signals do not qualify by themselves.
++2. **Resource denominator:** obtain an Economy-produced, frozen baseline for
++   the same observation window and units that can be metered during the trial
++   (at minimum model/token or invocation cost where available, machine time,
++   and elapsed time). Record unavailable measures as unavailable, not zero.
++   Specify per-office and aggregate hard limits and the automatic-disable
++   behavior before any dispatch.
++3. **Pre-registration:** state the numerator, denominator, comparison method,
++   uncertainty, falsifiers, stop conditions, measurement window and who
++   independently checks each artifact. Compare against a credible ordinary-
++   operation baseline, not against a process-count target.
++4. **Authority and expiry:** the accountable Executive coordinator writes and
++   signs a reversible Statistics-only activation order citing enacted Act 32,
++   the exact office, a window of 14 days or less that spans a host reboot,
++   metered caps and automatic stop. Only then may the canonical activation
++   record be changed through the authorized Act 21/28/31 route. No successor
++   office is enabled absent a reviewer-signed phase gate.
++5. **Independent review:** Judiciary independently checks the frozen
++   numerator/denominator and the exact authority/evidence before activation,
++   then evaluates observed outcomes against the pre-registered baseline. A
++   missing or ambiguous artifact yields hold/inconclusive, never pass.
++
++## Accountable next actions
++
++- **Executive coordinator:** decide whether a meaningful Statistics outcome
++  can be defined and instrumented at acceptable cost; if so, commission the
++  Economy denominator and author the bounded activation order. The Office
++  must not sign for the coordinator or enable the office itself.
++- **Ministry of Economy:** provide trial-specific, frozen cost units and a
++  feasible hard-cap/automatic-stop mechanism; report instrumentation gaps.
++- **Judiciary:** independently assess the evidence and verification criteria
++  when a complete preflight package exists. This request does not ask the
++  Judiciary to design or implement its own measurement method.
++- **Innovation Office:** continue authorized research; do not dispatch or
++  activate any knowledge office while the above authority and comparator
++  gates are unmet.
++
++## Falsifiable readiness test
++
++The trial is **not ready** while any of these remain true: no independently
++verified outcome numerator; no frozen Economy denominator and metered cap; no
++signed, bounded Executive order; or the canonical activation record fails the
++shared verifier for `statistics`. A readiness claim becomes supportable only
++when each has a durable source artifact, the independent review is recorded,
++and the exact activation state passes the verifier. Trial success is a
++separate later question and requires independently observed net outcome
++improvement relative to resource cost; procedural completion is not success.
+diff --git a/records/knowledge/statistics-trial-preflight-20261120.json b/records/knowledge/statistics-trial-preflight-20261120.json
+new file mode 100644
+index 00000000..3f962813
+--- /dev/null
++++ b/records/knowledge/statistics-trial-preflight-20261120.json
+@@ -0,0 +1,148 @@
++{
++  "schema": "viche-statistics-trial-preflight-1",
++  "created_at": "2026-11-20T17:49:40Z",
++  "created_epoch": 1795196980,
++  "office": "statistics",
++  "host": "billy-dev",
++  "author": {
++    "role": "independent Act 32 Statistics trial preflight research/implementation agent",
++    "assignment": "Su7XcZoBu720pWGRTVoCio-emerson",
++    "origin": "SvMHxlO6F1R6u3cQcr3lKA-repeated",
++    "authority": "operator task; NOT a Founder impersonation, ballot, vote or activation order"
++  },
++  "readiness": "not_ready",
++  "decision": "reject_false_comparator_and_request_independent_judiciary_determination",
++  "summary": "No valid historical effect numerator and no matched, metered Economy resource denominator can be constructed from the available frozen sources. The diagnostic baseline-20261119.json is a false comparator: its five source digests address mutable paths whose current bytes all differ, it scores zero verified outcomes, and its only counts are agent executions, main commits and registered forecasts. The narrow candidate outcome (independently confirmed material incident repair) is defined below with explicit numerator, statistical denominator, negative controls, missingness, windows and comparison, but extracting it from historical sources yields zero independently confirmed repairs in the frozen window and material unrecoverable missingness. Resource cost measures were never metered and are recorded as unavailable, never zero. Preactivation gates remain non-green; no office is enabled.",
++  "candidate_outcome": {
++    "name": "independently_confirmed_material_incident_repair",
++    "definition": "A bounded event in which an authoritative, independently produced record identifies a concrete material impediment or defect in Viche operation, a durable exact-commit-bound repair artifact addressing that specific defect is landed with a green Act 21 suite record, and an independent office (not the repair owner) records after re-observation that the impediment is resolved and the repair is effective.",
++    "why_not_a_proxy": "Agent process exits, Git merges, report/record counts, Post mail, forecasts registered, readiness signals and automatic case clearance by consecutive clear observations are explicitly excluded. A cleared signal is not proof of repair (Judiciary disposition 1795150900).",
++    "eligible_sources": [
++      "records/JUDICIARY-DISPOSITION-* and records/JUDICIARY-ADDENDUM-* fact-finding dispositions",
++      "records/AUDIT-*-independent-disposition.md independent Audit dispositions",
++      "records/investigations/* material incident and recurrence reports",
++      "state institutional-cases index and per-case records (as signal only, not repair proof)"
++    ]
++  },
++  "numerator": {
++    "rule": "count distinct eligible events satisfying all three candidate_outcome conditions with first_confirmed_at inside the window",
++    "extraction_attempt": {
++      "frozen_window": ["2026-11-20T00:00:00Z", "2026-11-20T17:49:40Z"],
++      "records_read": [
++        "board-fetch-recurrence-addendum.md",
++        "judiciary-executive-disposition.md",
++        "audit-b40995-disposition.md",
++        "institutional-cases-index.json"
++      ],
++      "independently_confirmed_repairs_found": 0,
++      "notes": [
++        "The board-fetch repair is a bounded retry + append-only telemetry mitigation. Its own owner and the Judiciary both state the root trigger is unknown, the case remains open, the telemetry has zero field rows and the exhaustion path is test-verified only. It is not an independently confirmed material repair and is excluded from the numerator.",
++        "Correction-trail rows are predominantly 'second procedural pass (not independent verification)' and concern audit verdict provenance, not material incident repair.",
++        "Auto-closed cases in institutional-cases-index.json close on consecutive clear observations; the Judiciary records that a cleared signal is not proof of repair."
++      ]
++    },
++    "verified": false,
++    "independent_verifier": null
++  },
++  "denominator_statistical": {
++    "population": "all authoritative independent dispositions and material-incident records with a determinable repair status in the window",
++    "rule": "numerator / determinable cases; missing-status cases reported separately, never silently dropped",
++    "frozen_window_determinable_cases": null,
++    "reason_null": "The frozen sources do not enumerate a closed, independently checkable case population for the window; institutional-cases is a moving signal index, not a verified status census.",
++    "missing_status_cases": "unavailable"
++  },
++  "denominator_resource": {
++    "meter_available": false,
++    "units": "unavailable",
++    "tokens": null,
++    "machine_time": null,
++    "wall_time": null,
++    "_declared_unavailable": ["tokens", "machine_time", "wall_time"],
++    "source_snapshot": null,
++    "measured_at": null,
++    "method": "no cost meter was active before activation; no reproducible metered method exists",
++    "values": null,
++    "reproducible": false,
++    "economy_sources_checked": ["economy-report.json", "economy-resources.json"],
++    "finding": "Economy reports model availability, cooling, disk, load, memory and funding risk. No per-office token usage, machine time or wall-time field exists in any inspected report, and no cost meter was active before activation. These measures are unavailable, not zero.",
++    "hard_cap_units": "unavailable until Economy supplies a meter"
++  },
++  "negative_controls": [
++    {"name": "agent_process_exits", "source": "outcomes-latest.json agents.total", "must_not_enter_numerator": true},
++    {"name": "main_branch_commits", "source": "outcomes-latest.json git.main_commits", "must_not_enter_numerator": true},
++    {"name": "forecasts_registered", "source": "predictions-calibration.json", "must_not_enter_numerator": true},
++    {"name": "auto_closed_cases_on_clear_observations", "source": "institutional-cases-index.json", "must_not_enter_numerator": true},
++    {"name": "post_messages_and_readiness_signals", "source": "leading indicators", "must_not_enter_numerator": true}
++  ],
++  "missingness": [
++    {"field": "full raw stderr of failed antonina board fetch", "status": "unavailable", "reason": "three durable truncation/loss points; unrecoverable retroactively"},
++    {"field": "per-office token usage", "status": "unavailable", "reason": "no meter before activation"},
++    {"field": "per-office machine time and wall time", "status": "unavailable", "reason": "no meter before activation"},
++    {"field": "Judiciary false-positive/false-negative rates", "status": "unavailable", "reason": "judiciary-measurements reliability=not_established; rates null"},
++    {"field": "verified repair status census for window", "status": "unavailable", "reason": "no frozen authoritative population"}
++  ],
++  "observation_windows": {
++    "frozen_baseline": ["2026-11-20T00:00:00Z", "2026-11-20T17:49:40Z"],
++    "rationale": "pre-activation, unchanged-Viche period; statistics office remains disabled in frozen activation.json",
++    "planned_trial": "14 days spanning a host reboot, bounded by a reversible signed Executive order and a hard resource cap; exact dates not set because gates are unmet",
++    "caveat": "a single partial UTC day is too short for a rate; it is frozen only to demonstrate source attestation and missingness, not to support an effect estimate"
++  },
++  "comparison": {
++    "counterfactual": "credible unchanged-Viche (business-as-usual) counterfactual: same collectors and case sources measured over an equal-length pre-activation window with no Statistics dispatch",
++    "method": "interrupted time series with a difference-in-differences check against the registered negative-control process counts; no marginal utility is inferred from process-count changes",
++    "confounds": ["concurrent non-Statistics agents", "host reboots", "collector changes", "case-schema changes"],
++    "status": "specified_not_estimable",
++    "reason_not_estimable": "no verified numerator, no determinable statistical denominator and no metered resource denominator"
++  },
++  "falsifiers": [
++    "any success claim resting on agent runs, commits, reports, mail or procedural completion is invalid (Act 32 E)",
++    "any comparator using diagnostic baseline-20261119.json as a verified outcome numerator is invalid (Act 32 D)",
++    "any resource denominator that writes 0 for an unmetered measure is invalid",
++    "any readiness claim while a pinned source hash mismatches or a required artifact is missing",
++    "any claim of a historical effect numerator without an independent Judiciary factual determination under Act 23 5.2"
++  ],
++  "gates": {
++    "verified_numerator": {"status": "blocked", "owner": "Judiciary (independent factual determination)", "evidence_ref": "requested: Su7XcZoBu720pWGRTVoCio-emerson", "reason": "candidate defined; zero independently confirmed repairs in frozen window; no verifier sign-off"},
++    "frozen_resource_denominator": {"status": "blocked", "owner": "Ministry of Economy", "evidence_ref": "frozen economy-report.json + economy-resources.json (no meter)", "reason": "no per-office meter; all resource measures unavailable"},
++    "source_attestation": {"status": "blocked", "owner": "independent research agent", "evidence_ref": "records/knowledge/statistics-trial-preflight-20261120.json + sources/MANIFEST.sha256", "reason": "sources frozen and hashed, but no independent verifier has signed the attestation"},
++    "budget_cap_enforcement": {"status": "absent", "owner": "Executive + Economy", "evidence_ref": "none", "reason": "no metered units, so no enforceable hard cap or automatic disable"},
++    "executive_order": {"status": "absent", "owner": "Executive coordinator", "evidence_ref": "none", "reason": "no signed reversible Statistics-only activation order"},
++    "judiciary_determination": {"status": "requested", "owner": "Judiciary", "evidence_ref": "requested on origin hub and issue", "reason": "independent random audit selection not co-opted"}
++  },
++  "baseline": {
++    "file": "baseline-20261119.json",
++    "sha256": "1f7ce6153beb4e3391b2d5c387c93b386662c60414333ab477d2b557f97ea968",
++    "git_blob": "30f94cf6aa798a2de894387a29b03f05b73d5bd8",
++    "self_label": "diagnostic; NOT authority to activate; no validated marginal-utility baseline; zero scored outcomes",
++    "verified_outcome_numerator": 0,
++    "usable_as_comparator": false
++  },
++  "baseline_digest_recheck": [
++    {"name": "funding", "baseline_sha256": "af9734bf3c13537aed11dce858c4fcadadd987a3e7d5eccfa5a50277e1683e35", "frozen_sha256": "85de52d3f2cac7ce06896529727ca976b3181e17c33c6026cbe3e138ebbf7666", "match": false},
++    {"name": "judiciary", "baseline_sha256": "e64ffa96a4ff7f99f8ef0dfa62a8524c14288e74d49b4dd585416739165c0800", "frozen_sha256": "7458088bbfa1e27d7dd1673d24ccf76d748f45ac80a8447eaa97bc56de4d5eae", "match": false},
++    {"name": "outcomes", "baseline_sha256": "c4f3f2304bb2fb2ebe63a8e7577b68fecbc4d506d6917dfc985bd02ee614d1b5", "frozen_sha256": "a4740c19681285cee0c1cc25a4c7a1dc8f4ea629240251068fcc415be4a9563f", "match": false},
++    {"name": "predictions", "baseline_sha256": "2bc3d9a95e782bc3948704f498ec3a4e8439158c5ae1428c3b51246a644151ad", "frozen_sha256": "54ed9553993142a8496ddbce6bdf2593e12550e0465303eea481c5d10511be28", "match": false},
++    {"name": "resources", "baseline_sha256": "1562797889c65a49ec26b437106d61f1603bc167ba1dfbb21d8ccb8f982668b7", "frozen_sha256": "1f981efd2470cd48830253124d67f5eb94b089adcd5906399d54540809ff9028", "match": false}
++  ],
++  "sources": [
++    {"snapshot": "outcomes-latest.json", "kind": "live_state", "role": "negative_control / process counts", "sha256": "a4740c19681285cee0c1cc25a4c7a1dc8f4ea629240251068fcc415be4a9563f", "size_bytes": 1821, "observed_at": 1795196830, "path": "/var/lib/lubko/wd/viche-state/institutional-outcomes/latest.json", "reproducible": "point-in-time_snapshot_only"},
++    {"snapshot": "economy-report.json", "kind": "live_state", "role": "resource context (no cost meter)", "sha256": "85de52d3f2cac7ce06896529727ca976b3181e17c33c6026cbe3e138ebbf7666", "size_bytes": 2580, "observed_at": "2026-11-20T16:02:56Z", "path": "/var/lib/lubko/wd/viche-state/economy/report.json", "reproducible": "point-in-time_snapshot_only"},
++    {"snapshot": "economy-resources.json", "kind": "live_state", "role": "resource context (no cost meter)", "sha256": "1f981efd2470cd48830253124d67f5eb94b089adcd5906399d54540809ff9028", "size_bytes": 3442, "observed_at": "2026-11-20T17:47:10Z", "path": "/var/lib/lubko/wd/viche-state/economy/resources.json", "reproducible": "point-in-time_snapshot_only"},
++    {"snapshot": "judiciary-measurements.json", "kind": "live_state", "role": "independent measurement reliability", "sha256": "7458088bbfa1e27d7dd1673d24ccf76d748f45ac80a8447eaa97bc56de4d5eae", "size_bytes": 7032, "observed_at": 1795196830, "path": "/var/lib/lubko/wd/viche-state/branches/judiciary-measurements.json", "reproducible": "point-in-time_snapshot_only"},
++    {"snapshot": "institutional-cases-index.json", "kind": "live_state", "role": "case signal index (not repair proof)", "sha256": "239c9823ddb0f5e232538dd9b54b2f3c54aa15bbe27c853006a5ca82934188fc", "size_bytes": 4407, "observed_at": 1795196833, "path": "/var/lib/lubko/wd/viche-state/institutional-cases/index.json", "reproducible": "point-in-time_snapshot_only"},
++    {"snapshot": "predictions-calibration.json", "kind": "committed", "role": "negative_control / forecasts", "sha256": "54ed9553993142a8496ddbce6bdf2593e12550e0465303eea481c5d10511be28", "size_bytes": 8879, "git_blob": "a170c3ec9bf5359a866f5d3b1041d51581a85c8d", "path": "/var/lib/lubko/wd/viche/records/predictions/calibration.json", "reproducible": true},
++    {"snapshot": "activation.json", "kind": "committed", "role": "authorization state (all offices disabled)", "sha256": "91329c75e7f72b1cbffff97b186e1b94dbc8abeabb9d1dc17172ec260ab7a6e4", "size_bytes": 799, "path": "/var/lib/lubko/wd/viche/records/knowledge/activation.json", "reproducible": true},
++    {"snapshot": "baseline-20261119.json", "kind": "committed", "role": "diagnostic baseline (false comparator)", "sha256": "1f7ce6153beb4e3391b2d5c387c93b386662c60414333ab477d2b557f97ea968", "size_bytes": 2735, "git_blob": "30f94cf6aa798a2de894387a29b03f05b73d5bd8", "path": "records/knowledge/baseline-20261119.json", "reproducible": true},
++    {"snapshot": "preflight-investigation.md", "kind": "committed", "role": "prior readiness finding", "sha256": "ed71ab54b72d4776398d471712f0c65aa97d627640892e42b5c928b9fafc0184", "size_bytes": 6301, "git_blob": "9903e2f0991c22570992d56af4fd6216d8630645", "path": "records/investigations/knowledge-statistics-trial-preflight-20261120.md", "reproducible": true},
++    {"snapshot": "board-fetch-recurrence-addendum.md", "kind": "committed", "role": "candidate repair record (excluded: mitigation not verified fix)", "sha256": "439d687ebb1a973f85af3af2448b9159f05236a1f8edfa0193e7d89aa4d4977a", "size_bytes": 10827, "git_blob": "30397c0def29bd728ddca6b01654e53266b96a0f", "path": "records/investigations/executive-board-fetch-recurrence-addendum-20261120.md", "reproducible": true},
++    {"snapshot": "judiciary-executive-disposition.md", "kind": "committed", "role": "independent fact-finding on candidate repair", "sha256": "c05128a31c879e4271b5324d671b15d2173556eb2ae953de28cd7e906367496d", "size_bytes": 7251, "git_blob": "94eeac012278430655faaf2891cbaa7412876bf8", "path": "records/JUDICIARY-DISPOSITION-executive-unhealthy-1795150900-20261120.md", "reproducible": true},
++    {"snapshot": "audit-b40995-disposition.md", "kind": "committed", "role": "independent Audit disposition", "sha256": "358e55db27a0112f2b84a81b597a510ebf23c87f7a456ec4160d21a6729e756b", "size_bytes": 6126, "git_blob": "967d181314006c9653a44648faf3f3f511beb873", "path": "records/AUDIT-2026-11-20-cycle-b40995-independent-disposition.md", "reproducible": true},
++    {"snapshot": "act32-v4-bill.md", "kind": "committed", "role": "enacted law text (amendments D/E/K, clause 10)", "sha256": "787279bfe4c4d1f1b99a69e1bca2e8307bcc6473bba856514bddc70e5a841c6b", "size_bytes": 9047, "git_blob": "248149c2a5c58a8ba01ea06b09850bab4c9ecac8", "path": "records/bills/institutional-knowledge-and-communications-act-v4.md", "reproducible": true}
++  ],
++  "provenance": {
++    "method": "byte snapshots copied from the named paths and git blob hashes computed with git hash-object at the creation epoch; bytes pinned by MANIFEST.sha256 in the sources directory",
++    "caveat": "live_state sources are point-in-time snapshots of mutable paths; they are reproducible only as the frozen bytes in this record, not by re-reading the live path",
++    "verification_tools": ["government/statistics-evidence.py manifest|verify|missingness", "government/statistics-preflight.sh"],
++    "no_fabrication": "no verification, activation order, Judiciary verdict or marginal-utility claim is made by this record"
++  }
++}
+diff --git a/records/suite-status.json b/records/suite-status.json
+index 7bd4fca2..323cc45d 100644
+--- a/records/suite-status.json
++++ b/records/suite-status.json
+@@ -1,14 +1,14 @@
+ {
+   "generated_by": "government/suite-status.sh",
+   "act": 21,
+-  "recorded_at": 1795197943,
+-  "recorded_iso": "2026-11-20T18:05:43Z",
+-  "suite": "tests/records-smoke.sh",
+-  "commit": "768e2e1fe1c4dcb6ddd504d0789cc4fce7c6782b",
+-  "tree": "7642a3609b317432da6e97c924df4330f5184a0d",
+-  "main": "942d915cf464d2923bbd6edc53c91cc088f3d5df",
++  "recorded_at": 1795199630,
++  "recorded_iso": "2026-11-20T18:33:50Z",
++  "suite": "tests/run-all.sh",
++  "commit": "39ed85f0d2140fdade5b2d4ccde5958b6485e94c",
++  "tree": "21a75f256ddcf7b37677850e8aafd903f87b09f1",
++  "main": "0055ac8e86132ffc26cea0b5d3e9b4bf0bd6da77",
+   "result": "green",
+-  "runs": [{"run":1,"result":"green","exit":0,"output_sha256":"2e5a7e79772f14b774757fd872135179a505df27eee04abba74ce9fbc40ce593"}],
++  "runs": [{"run":1,"result":"green","exit":0,"output_sha256":"aaa0c5f47af2a43e9741b5dcfb9e1cd5869e2c7218adeee9af8c5e8ce5654857"}],
+   "ci_result": "unavailable",
+   "ci_reconciliation": "unavailable",
+   "verifier": "integrator",
+diff --git a/tests/board-trail-smoke.sh b/tests/board-trail-smoke.sh
+index 189931ac..96aa51d3 100755
+--- a/tests/board-trail-smoke.sh
++++ b/tests/board-trail-smoke.sh
+@@ -61,4 +61,12 @@ jq -e '.board_trail.completed_total==6 and .board_trail.terminal_reached==2 and
+ jq -e '(.board_trail.git_only_gaps|length)==1 and .board_trail.git_only_gaps[0].issue=="102"' "$report" >/dev/null
+ jq -e '.board_trail.dangling_trails==4 and .board_trail.content_standard_failures==1' "$report" >/dev/null
+ jq -e '.no_proposals==true and .measurement_reliability=="not_established"' "$report" >/dev/null
++# The measurement wrapper must keep timeout failures explicit, never measured.
++# Use a short test-only budget so this remains a fast, hermetic regression.
++cat > "$scratch/town/government/board-trail-check.sh" <<'SLOW'
++#!/bin/sh
++sleep 2
++SLOW
++VICHE_BOARD_TRAIL_TIMEOUT=1 python3 "$scratch/town/government/judiciary-measurements.py" >/dev/null
++jq -e '.board_trail.status=="not_measured" and (.board_trail.reason|contains("timed out"))' "$report" >/dev/null
+ echo 'Board-trail completeness lens smoke passed'
+diff --git a/tests/knowledge-post-outage-smoke.sh b/tests/knowledge-post-outage-smoke.sh
+index bfa994be..e100a5fa 100644
+--- a/tests/knowledge-post-outage-smoke.sh
++++ b/tests/knowledge-post-outage-smoke.sh
+@@ -14,6 +14,39 @@ printf '## Act 32 — Institutional Knowledge and Communications Act (enacted fo
+ printf 'Synthetic frozen baseline\n' > "$d/town/records/knowledge/baseline-20261119.json"
+ cp "$repo/government/post.py" "$repo/government/post_guard.py" "$repo/government/post-inbox-brief.sh" \
+    "$repo/government/knowledge-activation-verify.sh" "$d/town/government/"
++# Statistics dispatch now also requires a ready, source-attested preflight.
++# Supply a green fixture so this test keeps checking its intended property
++# (Post-outage independence), not the comparator gate itself.
++cp "$repo/government/statistics-preflight.sh" \
++   "$repo/government/statistics-evidence.py" "$d/town/government/"
++mkdir -p "$d/town/records/knowledge/statistics-preflight-20261120-sources"
++printf 'ready fixture\n' > "$d/town/records/knowledge/statistics-preflight-20261120-sources/src.json"
++sha=$(sha256sum "$d/town/records/knowledge/statistics-preflight-20261120-sources/src.json" | cut -d' ' -f1)
++size=$(stat -c %s "$d/town/records/knowledge/statistics-preflight-20261120-sources/src.json")
++python3 - "$sha" "$size" > "$d/town/records/knowledge/statistics-trial-preflight-20261120.json" <<'PY'
++import json, sys
++sha, size = sys.argv[1], int(sys.argv[2])
++gates = {k: {"status": "green", "owner": "independent-owner",
++             "evidence_ref": "sha256:fixture"} for k in (
++    "verified_numerator", "frozen_resource_denominator", "source_attestation",
++    "budget_cap_enforcement", "executive_order", "judiciary_determination")}
++json.dump({
++    "schema": "viche-statistics-trial-preflight-1", "office": "statistics",
++    "readiness": "ready", "gates": gates,
++    "candidate_outcome": "x",
++    "numerator": {"verified": True, "independent_verifier": "judiciary-fixture"},
++    "denominator_statistical": "x",
++    "negative_controls": ["x"], "observation_windows": "x", "comparison": "x",
++    "falsifiers": ["x"], "missingness": ["x"],
++    "denominator_resource": {
++        "meter_available": True, "units": "usd", "tokens": 1,
++        "machine_time": 1, "wall_time": 1, "reproducible": True,
++        "source_snapshot": "src.json", "measured_at": "2026-11-20T00:00:00Z",
++        "method": "fixture meter",
++        "values": {"tokens": 1, "machine_time": 1, "wall_time": 1}},
++    "sources": [{"snapshot": "src.json", "sha256": sha, "size_bytes": size}],
++}, sys.stdout, sort_keys=True)
++PY
+ cat > "$d/town/government/branch-bootstrap.sh" <<'SH'
+ #!/bin/sh
+ exit 0
+diff --git a/tests/statistics-evidence-smoke.sh b/tests/statistics-evidence-smoke.sh
+new file mode 100644
+index 00000000..7fe05416
+--- /dev/null
++++ b/tests/statistics-evidence-smoke.sh
+@@ -0,0 +1,180 @@
++#!/bin/sh
++# Hermetic tests for the Statistics preflight evidence utilities and gate.
++# Only temp fixtures are used; canonical records and state are never touched.
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++helper=$(pwd -P)/government/statistics-evidence.py
++preflight=$(pwd -P)/government/statistics-preflight.sh
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++town=$d/town
++mkdir -p "$town/government" "$town/records/knowledge/statistics-preflight-20261120-sources"
++cp "$helper" "$town/government/statistics-evidence.py"
++src=$town/records/knowledge/statistics-preflight-20261120-sources
++att=$town/records/knowledge/statistics-trial-preflight-20261120.json
++
++printf 'frozen source alpha\n' > "$src/alpha.json"
++printf 'frozen source beta\n'  > "$src/beta.json"
++ha=$(sha256sum "$src/alpha.json" | cut -d' ' -f1)
++hb=$(sha256sum "$src/beta.json"  | cut -d' ' -f1)
++sa=$(stat -c %s "$src/alpha.json")
++sb=$(stat -c %s "$src/beta.json")
++
++# write_att READY GATE_STATUS TOKENS METER [GATE_MODE] [METER_MODE]
++# GATE_MODE: normal|extra|missing|noevidence; METER_MODE: normal|nosource|nonnumeric
++write_att() {
++  python3 - "$att" "$ha" "$hb" "$sa" "$sb" "$1" "$2" "$3" "$4" "${5:-normal}" "${6:-normal}" <<'PY'
++import json, sys
++(path, ha, hb, sa, sb, ready, gate_status, tokens, meter, gate_mode, meter_mode) = sys.argv[1:12]
++names = ["verified_numerator", "frozen_resource_denominator", "source_attestation",
++         "budget_cap_enforcement", "executive_order", "judiciary_determination"]
++if gate_mode == "extra":
++    names.append("invented_gate")
++if gate_mode == "missing":
++    names.remove("judiciary_determination")
++gates = {}
++for name in names:
++    gates[name] = {"status": gate_status, "owner": "independent-owner",
++                   "evidence_ref": "sha256:evidence-%s" % name}
++if gate_mode == "noevidence":
++    gates["executive_order"]["evidence_ref"] = ""
++if tokens == "none":
++    tok = None
++    unavailable = ["tokens", "machine_time", "wall_time"]
++else:
++    tok = int(tokens)
++    unavailable = ["machine_time", "wall_time"]
++is_ready = (ready == "ready")
++res = {
++    "meter_available": meter == "true",
++    "units": "usd" if meter == "true" else "unavailable",
++    "tokens": tok, "machine_time": None, "wall_time": None,
++    "_declared_unavailable": unavailable,
++    "source_snapshot": "alpha.json", "measured_at": "2026-11-20T00:00:00Z",
++    "method": "hermetic test meter", "reproducible": meter == "true",
++    "values": {"tokens": tok if tok is not None else 0, "machine_time": 1, "wall_time": 1},
++}
++if meter_mode == "nosource":
++    del res["source_snapshot"]
++if meter_mode == "nonnumeric":
++    res["values"]["tokens"] = "not-a-number"
++json.dump({
++    "schema": "viche-statistics-trial-preflight-1", "office": "statistics",
++    "readiness": ready, "gates": gates,
++    "candidate_outcome": "x", "numerator": {
++        "verified": is_ready, "independent_verifier": "judiciary-test" if is_ready else None},
++    "denominator_statistical": "x", "negative_controls": ["x"],
++    "observation_windows": "x", "comparison": "x", "falsifiers": ["x"],
++    "missingness": ["x"], "denominator_resource": res,
++    "sources": [
++        {"snapshot": "alpha.json", "sha256": ha, "size_bytes": int(sa)},
++        {"snapshot": "beta.json", "sha256": hb, "size_bytes": int(sb)}],
++}, open(path, "w"), sort_keys=True)
++PY
++}
++
++# --- evidence utility: stability, tamper detection, missingness -------------
++m1=$(python3 "$helper" manifest "$src")
++m2=$(python3 "$helper" manifest "$src")
++[ "$m1" = "$m2" ] || { echo "FAIL: manifest not stable" >&2; exit 1; }
++printf '%s' "$m1" | grep -q 'alpha.json' || { echo "FAIL: manifest lacks a file" >&2; exit 1; }
++
++write_att ready green 100 true
++python3 "$helper" verify "$att" "$src" | grep -q '"verified": true' || {
++  echo "FAIL: verify rejected identical snapshots" >&2; exit 1; }
++python3 "$helper" missingness "$att" | grep -q '"honest": true' || {
++  echo "FAIL: missingness rejected a documented meter" >&2; exit 1; }
++
++# Tamper: a byte change must be detected by both manifest and verify.
++printf 'TAMPERED\n' > "$src/alpha.json"
++python3 "$helper" verify "$att" "$src" | grep -q 'hash mismatch: alpha.json' || {
++  echo "FAIL: tamper not detected" >&2; exit 1; }
++m3=$(python3 "$helper" manifest "$src")
++[ "$m3" != "$m1" ] || { echo "FAIL: tamper did not change manifest" >&2; exit 1; }
++printf 'frozen source alpha\n' > "$src/alpha.json"
++
++# Missing: a deleted snapshot must be reported, not treated as an empty zero.
++rm "$src/beta.json"
++python3 "$helper" verify "$att" "$src" | grep -q 'missing source: beta.json' || {
++  echo "FAIL: missing source not detected" >&2; exit 1; }
++printf 'frozen source beta\n'  > "$src/beta.json"
++
++# Path traversal and symlink escape must be rejected, not followed.
++python3 - "$att" <<'PY'
++import json, sys
++p = sys.argv[1]
++d = json.load(open(p))
++d["sources"][0]["snapshot"] = "../outside.json"
++json.dump(d, open(p, "w"), sort_keys=True)
++PY
++python3 "$helper" verify "$att" "$src" | grep -q 'unsafe or missing snapshot name' || {
++  echo "FAIL: path traversal not rejected" >&2; exit 1; }
++write_att ready green 100 true
++ln -s /etc/passwd "$src/escape.json"
++python3 - "$att" <<'PY'
++import json, sys
++p = sys.argv[1]
++d = json.load(open(p))
++d["sources"][0]["snapshot"] = "escape.json"
++json.dump(d, open(p, "w"), sort_keys=True)
++PY
++python3 "$helper" verify "$att" "$src" | grep -q 'unattested files present\|unsafe or missing snapshot name' || {
++  echo "FAIL: symlink escape not rejected" >&2; exit 1; }
++rm -f "$src/escape.json"
++
++# An unmetered cost must not be fabricated as zero.
++write_att ready green 0 false
++python3 "$helper" missingness "$att" | grep -q 'unmetered tokens recorded as zero' || {
++  echo "FAIL: zero-as-meter not rejected" >&2; exit 1; }
++write_att ready green 100 true normal nosource
++python3 "$helper" missingness "$att" | grep -q 'metered denominator missing source_snapshot' || {
++  echo "FAIL: meter without frozen source not rejected" >&2; exit 1; }
++write_att ready green 100 true normal nonnumeric
++python3 "$helper" missingness "$att" | grep -q 'metered denominator lacks numeric values' || {
++  echo "FAIL: meter without numeric values not rejected" >&2; exit 1; }
++
++# --- preflight gate: fail closed --------------------------------------------
++write_att ready green 100 true
++VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics || {
++  echo "FAIL: ready preflight rejected a fully evidenced record" >&2; exit 1; }
++
++write_att not_ready green 100 true
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: not_ready passed" >&2; exit 1; fi
++write_att ready hold 100 true
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: non-green gate passed" >&2; exit 1; fi
++write_att ready green 100 false
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: unmetered denominator passed" >&2; exit 1; fi
++write_att ready green 100 true extra
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: invented gate passed" >&2; exit 1; fi
++write_att ready green 100 true missing
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: omitted mandatory gate passed" >&2; exit 1; fi
++write_att ready green 100 true noevidence
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: gate without evidence link passed" >&2; exit 1; fi
++write_att ready green 100 true normal nosource
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: meter without pinned source passed" >&2; exit 1; fi
++
++# Missing attestation fails closed.
++write_att ready green 100 true
++mv "$att" "$att.hidden"
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: missing attestation passed" >&2; exit 1; fi
++mv "$att.hidden" "$att"
++
++# Tampered snapshot fails the whole gate even with all flags green.
++printf 'TAMPERED\n' > "$src/beta.json"
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics >/dev/null 2>&1; then
++  echo "FAIL: tampered snapshot passed the gate" >&2; exit 1; fi
++printf 'frozen source beta\n'  > "$src/beta.json"
++
++# The gate is statistics-only; other offices are untouched by this change.
++VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" foresight || {
++  echo "FAIL: non-statistics office affected" >&2; exit 1; }
++
++echo 'statistics evidence: stable, tamper/traversal/symlink detected, unmetered!=zero, exact gates, fail-closed'

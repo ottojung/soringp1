@@ -1,0 +1,90 @@
+commit 2a018dcb1c847c6b5d44483d801786c60bce1a50
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Sun Nov 22 09:28:14 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Sun Nov 22 09:28:14 2026 +0000
+
+    Integrate delivery/act22-production-clock-guard-20261122 (operator): Merge remote-tracking branch 'refs/remotes/origin/main' into fix/act22-clock-guard-20261122
+    
+    Landed by the integration queue (Act 31) as one candidate on main 828547a1fb0b.
+    
+    Delivery-Branch: delivery/act22-production-clock-guard-20261122
+    Delivery-Head: 8b6cdd68e1829855ce2a4e87e811a252eeeb515a
+    Proposed-By: operator
+    Reviewed-By: reviewer-pey0gxnppey52kehxd51im-canada
+    Review-Reason: Adds a production clock backdating guard for Act22 forecasts: prevents bypass via /tmp ledger paths while preserving backward compatibility with legacy deterministic clock tests. No laws deleted or rewritten, and no collateral damage to the Act 22 ledger framework.
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/predict-ledger.py b/government/predict-ledger.py
+index 282c121f..473790af 100644
+--- a/government/predict-ledger.py
++++ b/government/predict-ledger.py
+@@ -61,12 +61,21 @@ def ledger_path() -> Path:
+ 
+ def now_epoch() -> int:
+     env = os.environ.get("VICHE_PREDICT_NOW")
+-    if env is not None:
+-        try:
+-            return int(env)
+-        except ValueError:
+-            pass
+-    return int(time.time())
++    if env is None:
++        return int(time.time())
++    # This synthetic clock is a TEST FIXTURE only. It must never authenticate
++    # backdated production predictions or resolutions (Act 22).
++    root = town_root().resolve()
++    ledger = ledger_path().resolve()
++    temp = Path("/tmp").resolve()
++    if (not os.environ.get("VICHE_TOWN_ROOT")
++            or not root.is_relative_to(temp)
++            or not ledger.is_relative_to(root)):
++        raise SystemExit("predict-ledger: REFUSED synthetic clock on a live ledger")
++    try:
++        return int(env)
++    except ValueError as exc:
++        raise SystemExit("predict-ledger: invalid synthetic clock") from exc
+ 
+ 
+ def iso(epoch: int) -> str:
+diff --git a/tests/predict-clock-production-smoke.sh b/tests/predict-clock-production-smoke.sh
+new file mode 100644
+index 00000000..25e8f4a6
+--- /dev/null
++++ b/tests/predict-clock-production-smoke.sh
+@@ -0,0 +1,35 @@
++#!/bin/sh
++# Live time cannot be overridden on a Git worktree. Fixture time remains
++# supported only with a separately selected scratch town and local ledger.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++script="$repo/government/predict-ledger.py"
++# A malicious caller cannot bypass the check by selecting an /tmp ledger
++# while retaining the real code checkout as its town root.
++if VICHE_TOWN_ROOT="$repo" VICHE_PREDICT_LEDGER="$tmp/live.json" \
++   VICHE_PREDICT_NOW=90 python3 "$script" register \
++   --bill fake --proposition 'Old event' --probability .8 \
++   --resolution-date 1970-01-02 --evidence fake --author seat >/dev/null 2>&1; then
++  echo "Production clock override accepted" >&2; exit 1
++fi
++test ! -e "$tmp/live.json"
++# An override must not escape an otherwise harmless scratch fixture root.
++if VICHE_TOWN_ROOT="$tmp" VICHE_PREDICT_LEDGER="$repo/records/predictions/ledger.json" \
++   VICHE_PREDICT_NOW=90 python3 "$script" register \
++   --bill fake --proposition 'Old event' --probability .8 \
++   --resolution-date 1970-01-02 --evidence fake --author seat >/dev/null 2>&1; then
++  echo "Scratch root redirected synthetic-clock write to production" >&2; exit 1
++fi
++# Synthetic fixture still works: legacy tests depend on deterministic clock.
++VICHE_TOWN_ROOT="$tmp" VICHE_PREDICT_NOW=90 python3 "$script" register \
++    --bill fixture --proposition 'Fixture event' --probability .8 \
++    --resolution-date 1970-01-02 --evidence fixture --author seat > /dev/null
++VICHE_TOWN_ROOT="$tmp" python3 "$script" verify > /dev/null
++python3 - "$tmp/records/predictions/ledger.json" <<'PY'
++import json,sys
++a=json.load(open(sys.argv[1]))
++assert len(a["entries"])==1 and a["entries"][0]["registered_at"]==90
++PY
++echo "Act22 production/test clock boundary passed"

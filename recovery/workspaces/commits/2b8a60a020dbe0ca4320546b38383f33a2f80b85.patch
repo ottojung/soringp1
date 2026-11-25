@@ -1,0 +1,254 @@
+commit 2b8a60a020dbe0ca4320546b38383f33a2f80b85
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 08:42:32 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 08:42:56 2026 +0000
+
+    Use fresh context for each completed government turn
+
+diff --git a/government/AGENT-REPORTING-POLICY.md b/government/AGENT-REPORTING-POLICY.md
+index b35dc6bb..2cc6be4d 100644
+--- a/government/AGENT-REPORTING-POLICY.md
++++ b/government/AGENT-REPORTING-POLICY.md
+@@ -256,3 +256,18 @@ not the number of simultaneous tools, tasks or agents.
+   instructions before repeating a stale plan. A completed proof or other
+   delivery on the critical path takes priority over speculative parallel
+   work. Observe applicable lease, review, memory, funding and safety limits.
++
++
++## Fresh government turns (Founder, 2026-11-24)
++
++Every government office and parliamentary seat starts each new completed-turn
++successor with a new, empty Antonina session. Do not continue the previous
++agent's conversational or thinking history. Use the current charter, law,
++board, Git worktree, durable receipts, institutional records and handoffs.
++Record useful conclusions, outstanding obligations and evidence in those
++normal durable locations before ending; do not create extra routine reports
++just to pass context. A running turn may receive urgent steering without
++creating a second agent on its worktree. Terminal failure recovery and
++unsafe holds remain governed by the existing continuity rules. This policy
++does not reset delegated research agents' sessions: their unfinished proof
++work may genuinely need context continuity.
+diff --git a/government/antonina-interface.md b/government/antonina-interface.md
+index 7924a49d..4fbc3bd1 100644
+--- a/government/antonina-interface.md
++++ b/government/antonina-interface.md
+@@ -92,3 +92,10 @@ antonina agent list --running --page 1 --limit 100 --json |
+ 
+ This contract describes interface behavior, not policy precedence. Follow the
+ Founder's constitution, mandates, host assignment and `executive-agenda.md`.
++
++Government appointments rotate to a fresh native session after each completed
++turn by the common appointments.sh ensure path. No previous transcript is
++injected. The existing running-agent steering interface is reserved for
++in-flight corrections; ordinary new turns use the fresh appointment. Durable
++seat/office keys and worktrees remain stable. Do not apply government
++appointment rotation to delegated research sessions.
+diff --git a/government/appointments.sh b/government/appointments.sh
+index b92d2b94..c370e5bd 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -155,10 +155,10 @@ if [ "$action" = ensure ] && [ -n "$old" ] && [ "${status:-}" = failed ] &&
+   reason='confirmed PID1 restart orphan; no prompt replay'
+   action=replace
+ fi
+-# Founder directive 2026-11-16: an idle office whose conversation has grown
+-# too large is given a fresh session with a short handover note, instead of
+-# re-reading one ever-growing conversation every cycle. Only a positively
+-# idle/clearexit appointee rotates; a running, failed or held one never does.
++# Founder directive 2026-11-24: every completed government turn gets a
++# fresh appointment with no old model conversation. Existing running turns
++# are not interrupted; unsafe/failed sessions remain under recovery rules.
++# The normal ensure path is shared by all parliamentary and office callers.
+ rotation=no
+ if [ "$action" = ensure ] && [ -n "$old" ] && [ "$live" = true ] &&
+    { [ "${status:-}" = idle ] || [ "${status:-}" = clearexit ]; } &&
+@@ -170,7 +170,7 @@ if [ "$action" = ensure ] && [ -n "$old" ] && [ "$live" = true ] &&
+   expected=$old
+   caller=appointments.ensure
+   trigger=session_rotation
+-  reason='conversation too large; fresh session with handover note'
++  reason='completed government turn; fresh context and durable record pointers'
+   action=replace
+ fi
+ if [ "$action" = ensure ] && [ -n "$old" ]; then
+diff --git a/government/handover.sh b/government/handover.sh
+index 09853849..26f00967 100644
+--- a/government/handover.sh
++++ b/government/handover.sh
+@@ -1,24 +1,10 @@
+ #!/bin/sh
+-# Fresh office sessions with a short handover note (Founder directive,
+-# 2026-11-16). POSIX /bin/sh. No model call: the note is assembled from the
+-# outgoing session's own last reports and pointers to durable records.
+-#
+-#   handover.sh due ID
+-#       Exit 0 when the appointee ID is idle and its conversation is large
+-#       enough to replace: its last model request carried at least
+-#       VICHE_ROTATE_CONTEXT_TOKENS of context (default 120000), or it has
+-#       accepted at least VICHE_ROTATE_PROMPTS prompts (default 150).
+-#       Exit 1 otherwise, including whenever the evidence is unreadable.
+-#   handover.sh write KEY OLD_ID NEW_ID
+-#       Write the handover note for office KEY from OLD_ID to NEW_ID.
+-#   handover.sh show KEY ID
+-#       Print the note when ID is its successor and has not yet received a
+-#       prompt. Prints nothing otherwise. Never fails the caller.
+-#
+-# Why: one Clerk conversation reached 2,966 prompts and a median of 152K
+-# (max 892K) context tokens per model step; every sitting re-read all of it.
+-# Durable records, not a conversation, are the Town's memory (Constitution
+-# VIII), so a successor loses nothing that is actually authoritative.
++# Fresh context per completed government turn (Founder, 2026-11-24).
++# due ID: rotate a used, positively idle/clearexit appointment; no model call.
++# write KEY OLD_ID NEW_ID: persist only identity and durable record pointers.
++# show KEY ID: display the short pointer note to an unused successor.
++# Never inject the predecessor's conversation or thinking history. Durable
++# institutional records are the memory, not the previous session.
+ set -eu
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+@@ -33,25 +19,14 @@ case "$cmd" in
+     meta=$(antonina agent status --id "$2" --json 2>/dev/null) || exit 1
+     st=$(printf '%s\n' "$meta" | jq -r '.state // empty' 2>/dev/null) || exit 1
+     case "$st" in idle|clearexit) :;; *) exit 1;; esac
+-    prompts=$(printf '%s\n' "$meta" | jq -r '.prompts // 0' 2>/dev/null) || exit 1
+-    case "$prompts" in ''|*[!0-9]*) exit 1;; esac
+-    [ "$prompts" -gt 0 ] || exit 1
+-    if [ "$prompts" -ge "${VICHE_ROTATE_PROMPTS:-150}" ]; then exit 0; fi
+-    context=$(antonina agent log --id "$2" --lines 400 2>/dev/null | python3 -c '
+-import json, sys
+-last = 0
+-for line in sys.stdin:
+-    if not line.startswith("{\"type\":\"step_finish\""):
+-        continue
+-    try:
+-        tokens = json.loads(line)["part"].get("tokens") or {}
+-    except Exception:
+-        continue
+-    last = int(tokens.get("input", 0)) + int((tokens.get("cache") or {}).get("read", 0))
+-print(last)
+-' 2>/dev/null) || exit 1
+-    case "$context" in ''|*[!0-9]*) exit 1;; esac
+-    [ "$context" -ge "${VICHE_ROTATE_CONTEXT_TOKENS:-120000}" ]
++    # clearexit itself is evidence that the appointment has completed a turn.
++    [ "$st" != clearexit ] || exit 0
++    # Idle is also used for newly created, never-invoked appointments.
++    # A native session or positive prompt count proves this one is not fresh.
++    printf '%s\n' "$meta" | jq -e '
++      ((.prompts // 0) | type=="number" and .>0) or
++      ((.native_session_id // "") | type=="string" and length>0)
++    ' >/dev/null
+     ;;
+   write)
+     [ "$#" -eq 4 ] && valid_id "$2" && valid_id "$3" && valid_id "$4" || exit 2
+@@ -66,30 +41,12 @@ print(last)
+       printf 'rotated_at: %s\n' "$(date -u +%FT%TZ)"
+       printf '%s\n' '---'
+       printf 'You are a FRESH session for office %s. Your predecessor %s was\n' "$key" "$old"
+-      printf 'retired because its conversation had grown too large to re-read every cycle.\n'
+-      printf 'Its conversation is NOT available to you and is NOT authority. The\n'
+-      printf 'authoritative state is durable: Git records under %s/records,\n' "$town"
++      printf 'retired after completing its government turn.\n'
++      printf 'Its conversation is NOT authority and is not carried forward.\n'
++      printf 'Reconstruct your assignment from durable records under %s/records,\n' "$town"
+       printf 'records/handoffs/, the Town Hall cursor, the Antonina board, and %s.\n' "$state"
+-      printf 'Do not redo work your predecessor finished; verify it from those records.\n'
+-      printf 'Do not repeat external actions (posts, merges, dispatches) without checking.\n'
+-      printf '\nPredecessor'"'"'s last reports (newest last, truncated):\n'
+-      antonina agent log --id "$old" --lines 3000 2>/dev/null | python3 -c '
+-import json, sys
+-texts = []
+-for line in sys.stdin:
+-    if not line.startswith("{\"type\":\"text\""):
+-        continue
+-    try:
+-        text = (json.loads(line)["part"].get("text") or "").strip()
+-    except Exception:
+-        continue
+-    if text:
+-        texts.append(" ".join(text.split()))
+-for text in texts[-3:]:
+-    print("- " + (text[:900] + " [...]" if len(text) > 900 else text))
+-if not texts:
+-    print("- (no readable report; reconstruct from durable records)")
+-' 2>/dev/null || printf '%s\n' '- (predecessor log unreadable; reconstruct from durable records)'
++      printf 'Check unfinished work and current evidence; do not redo completed work.\n'
++      printf 'Check durable receipts before repeating external actions.\n'
+     } > "$tmp"
+     mv -f "$tmp" "$dir/$key.md"
+     printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$key" "$old" "$new" >> "$dir/rotations.log"
+diff --git a/tests/handover-smoke.sh b/tests/handover-smoke.sh
+index dfb8c4a4..88d81b6f 100644
+--- a/tests/handover-smoke.sh
++++ b/tests/handover-smoke.sh
+@@ -1,6 +1,5 @@
+ #!/bin/sh
+-# Founder directive 2026-11-16: an idle office whose conversation has grown
+-# too large gets a fresh session and a short handover note, shown once.
++# Every completed government turn uses a fresh context and durable pointers.
+ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ d=$(mktemp -d)
+@@ -34,9 +33,8 @@ step() { # step INPUT_TOKENS -> one OpenCode step_finish line
+ say() { printf '{"type":"text","timestamp":1,"sessionID":"ses_a","part":{"text":"%s"}}\n' "$1"; }
+ ensure() { /bin/sh "$d/town/government/appointments.sh" ensure c1a00001; }
+ 
+-# Small conversation, few prompts: no rotation.
+-printf '{"state":"clearexit","prompts":12}\n' > "$d/mock/old-clerk.json"
+-{ step 9000; say 'early report'; step 20000; } > "$d/mock/old-clerk.log"
++# A never-used idle appointment is not rotated.
++printf '{"state":"idle","prompts":0}\n' > "$d/mock/old-clerk.json"
+ test "$(ensure)" = old-clerk
+ test ! -e "$d/state/handover/c1a00001.md"
+ 
+@@ -51,18 +49,19 @@ test "$(/bin/sh "$d/town/government/appointments.sh" resolve c1a00001)" = old-cl
+ printf '{"state":"clearexit","prompts":12}\n' > "$d/mock/old-clerk.json"
+ test "$(VICHE_SESSION_ROTATION=off ensure)" = old-clerk
+ 
+-# Idle with a 450K-token last request: rotated, with a note built from its
+-# own last reports, and an audited provenance row.
+-{ say 'report one'; say 'report two'; say 'report three'; say 'Cursor advanced to sha256:abc; review of 67be6d0 is blocked'; step 450000; } > "$d/mock/old-clerk.log"
++# Even a small completed turn rotates, with a pointer note and provenance.
++{ say 'report one'; say 'report two'; say 'report three'; say 'Cursor advanced to sha256:abc; review of 67be6d0 is blocked'; step 2000; } > "$d/mock/old-clerk.log"
++printf '{"state":"clearexit","prompts":1}\n' > "$d/mock/old-clerk.json"
+ new=$(ensure)
+ test "$new" = fresh-1
+ test "$(/bin/sh "$d/town/government/appointments.sh" resolve c1a00001)" = fresh-1
+ note=$d/state/handover/c1a00001.md
+ grep -Fxq 'successor: fresh-1' "$note"
+ grep -Fxq 'predecessor: old-clerk' "$note"
+-grep -Fq 'Cursor advanced to sha256:abc' "$note"
+-grep -Fq 'report two' "$note"
+-if grep -Fq 'report one' "$note"; then echo 'note must keep only the last three reports' >&2; exit 1; fi
++grep -Fq 'durable records' "$note"
++if grep -Eq 'Cursor advanced|report (one|two|three)' "$note"; then
++  echo 'predecessor conversation must not be injected' >&2; exit 1
++fi
+ jq -e 'select(.trigger=="session_rotation" and .expected_prior_id=="old-clerk" and .successor=="fresh-1")' \
+   "$d/state/appointments/replacement-provenance.jsonl" >/dev/null
+ test "$(wc -l < "$d/state/handover/rotations.log")" -eq 1
+@@ -76,15 +75,16 @@ test -z "$(/bin/sh "$d/town/government/handover.sh" show c1a00001 old-clerk)"
+ printf '{"state":"running","prompts":1}\n' > "$d/mock/fresh-1.json"
+ test -z "$(/bin/sh "$d/town/government/handover.sh" show c1a00001 fresh-1)"
+ 
+-# The fresh session is not rotated again until it, too, grows.
++# A single short completed turn is enough to rotate.
+ printf '{"state":"clearexit","prompts":1}\n' > "$d/mock/fresh-1.json"
+ step 30000 > "$d/mock/fresh-1.log"
+-test "$(ensure)" = fresh-1
+-
+-# Many prompts alone also trigger rotation; an unreadable log never does.
+-printf '{"state":"clearexit","prompts":151}\n' > "$d/mock/fresh-1.json"
+-rm -f "$d/mock/fresh-1.log"
+ test "$(ensure)" = fresh-2
+-printf '{"state":"idle","prompts":3}\n' > "$d/mock/fresh-2.json"
++# Unused successor is kept; idle with a native session rotates too.
+ test "$(ensure)" = fresh-2
+-echo 'Session rotation and handover note smoke passed'
++printf '{"state":"idle","prompts":0,"native_session_id":"ses_old"}\n' > "$d/mock/fresh-2.json"
++test "$(ensure)" = fresh-3
++printf '{"state":"running","prompts":1}\n' > "$d/mock/fresh-3.json"
++test "$(ensure)" = fresh-3
++printf '{"state":"failed","prompts":1}\n' > "$d/mock/fresh-3.json"
++test "$(ensure)" = fresh-3
++echo 'Fresh government turns and durable-only handover passed'

@@ -1,0 +1,153 @@
+commit 252fea5655a51bd1beb821432e31e640fcd747aa
+Author:     Viche Executive <executive@viche.local>
+AuthorDate: Sun Nov 8 00:02:06 2026 +0000
+Commit:     Viche Executive <executive@viche.local>
+CommitDate: Sun Nov 8 00:02:06 2026 +0000
+
+    Seat registration: validity test, preserve-and-repair, never abort later seats
+    
+    Draft for Parliament authorisation (handoff H-1794095844-7aa5); not proposed for
+    merge. Reported defect: a dangling .git file passed the presence test, so a
+    broken seat was silently skipped; a non-empty seat directory without .git hit
+    'exit 1', aborting reconciliation for every later seat. Eight of ten live seats
+    were broken this way.
+    
+    Now: a seat counts as registered only if 'git -C <seat> rev-parse --git-dir'
+    succeeds. Otherwise the directory is preserved to a timestamped backup, stale
+    worktree metadata is pruned, and the seat is re-registered; a failure is logged
+    and the loop continues. Structural checks (seat IDs, duplicates, incomplete
+    rows) still exit non-zero.
+    
+    Adds tests/seat-registration-smoke.sh: hermetic minimal town, one seat with a
+    dangling .git file and one non-empty seat without .git; asserts both are
+    re-registered, the later seat is reached, and both backups retain the seat's
+    working file. Passes under /bin/sh and dash.
+
+diff --git a/government/boot.sh b/government/boot.sh
+index ca6fc4bf..5486563d 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -33,12 +33,24 @@ total=$(wc -l < "$ids")
+ while IFS="$tab" read -r seat_id title focus; do
+     [ -n "$seat_id" ] || continue
+     seat_dir=$seats/$seat_id
+-    if [ ! -f "$seat_dir/.git" ] && [ ! -d "$seat_dir/.git" ]; then
++    # A seat is registered only if Git can actually use it. A dangling .git
++    # file (or a directory whose .git/worktrees/<seat> admin dir vanished) is
++    # not registration: preserve it, then re-register. One broken seat must
++    # never abort reconciliation for the seats after it.
++    if ! git -C "$seat_dir" rev-parse --git-dir >/dev/null 2>&1; then
+         if [ -d "$seat_dir" ] && [ -n "$(ls -A "$seat_dir")" ]; then
+-            echo "Refusing to replace seat directory: $seat_dir" >&2
+-            exit 1
++            backup=$seat_dir.backup-$(date -u +%Y%m%dT%H%M%SZ)
++            if ! mv "$seat_dir" "$backup"; then
++                echo "Viche: cannot preserve broken seat $seat_dir" >&2
++                continue
++            fi
++            echo "Viche: preserved broken seat $seat_dir at $backup" >&2
++        fi
++        git -C "$town" worktree prune >/dev/null 2>&1 || :
++        if ! git -C "$town" worktree add --detach "$seat_dir" HEAD; then
++            echo "Viche: cannot register seat $seat_dir; continuing" >&2
++            continue
+         fi
+-        git -C "$town" worktree add --detach "$seat_dir" HEAD
+     fi
+     # All seats have durable, independently recoverable sessions; don't let a
+     # failed provider continuation permanently remove a future voter.
+diff --git a/tests/seat-registration-smoke.sh b/tests/seat-registration-smoke.sh
+new file mode 100755
+index 00000000..00899fef
+--- /dev/null
++++ b/tests/seat-registration-smoke.sh
+@@ -0,0 +1,89 @@
++#!/bin/sh
++# Seat registration must be all-or-nothing per seat, never per government.
++#
++# Root cause this guards against (reported as H-1794095844-7aa5): the old
++# presence test `[ -f "$seat_dir/.git" ]` treated a DANGLING .git file as a
++# registered seat, silently skipping repair, and a non-empty seat directory
++# without .git hit `exit 1`, aborting reconciliation for every later seat. Eight
++# of ten live seats were broken this way.
++#
++# The test runs government/boot.sh against a minimal hermetic town: every later
++# stage of boot.sh is conditional on a script that does not exist here, so only
++# seat reconciliation runs. POSIX /bin/sh only.
++set -eu
++root=$(git rev-parse --show-toplevel)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' 0
++
++town=$scratch/town
++seats=$scratch/seats
++mkdir -p "$town/government" "$seats" "$scratch/bin" "$scratch/state"
++
++git -C "$town" init -q
++printf '# Test laws (boot.sh only requires a non-empty file)\n' > "$town/government/LAWS.md"
++printf 'aaaa\tSeat A\tfirst seat\nbbbb\tSeat B\tsecond seat\n' > "$town/government/seats.tsv"
++printf 'seed\n' > "$town/README"
++git -C "$town" add README government/LAWS.md government/seats.tsv
++git -C "$town" -c user.name='Seat Smoke' -c user.email='seat@example.invalid' \
++    commit -qm 'Test: hermetic town for seat registration'
++
++# boot.sh requires the Antonina CLI to exist; reconciliation itself must not
++# call it when seat-liveness.sh is absent from this minimal town.
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++exit 0
++MOCK
++chmod +x "$scratch/bin/antonina"
++
++# Seat A: dangling .git file. The old presence test skipped this seat entirely.
++mkdir -p "$seats/aaaa"
++printf 'gitdir: %s\n' "$scratch/vanished/worktrees/aaaa" > "$seats/aaaa/.git"
++printf 'seat A work\n' > "$seats/aaaa/seat-note.txt"
++
++# Seat B: non-empty directory with no .git. The old code exited 1 here, so no
++# later seat was ever reconciled.
++mkdir -p "$seats/bbbb"
++printf 'seat B work\n' > "$seats/bbbb/seat-note.txt"
++
++PATH=$scratch/bin:$PATH \
++VICHE_TOWN_ROOT=$town \
++VICHE_SEATS_ROOT=$seats \
++VICHE_STATE_ROOT=$scratch/state \
++    /bin/sh "$root/government/boot.sh"
++
++# Both seats must now be usable Git worktrees, not just directories with a .git.
++for id in aaaa bbbb; do
++    git -C "$seats/$id" rev-parse --git-dir >/dev/null 2>&1 || {
++        echo "FAIL: seat $id was not re-registered" >&2
++        exit 1
++    }
++done
++
++# Reconciliation must have continued past the first broken seat to the second:
++# both are registered worktrees of the town repository.
++git -C "$town" worktree list --porcelain > "$scratch/worktrees"
++for id in aaaa bbbb; do
++    grep -Fxq "worktree $seats/$id" "$scratch/worktrees" || {
++        echo "FAIL: seat $id is not a registered worktree" >&2
++        exit 1
++    }
++done
++
++# Nothing may be discarded: each broken directory is preserved in a timestamped
++# backup that still holds the seat's untracked work.
++for id in aaaa bbbb; do
++    backup=
++    for candidate in "$seats/$id".backup-*; do
++        [ -d "$candidate" ] && backup=$candidate
++    done
++    [ -n "$backup" ] || {
++        echo "FAIL: no backup preserved for broken seat $id" >&2
++        exit 1
++    }
++    [ -f "$backup/seat-note.txt" ] || {
++        echo "FAIL: backup for $id lost the seat's working file" >&2
++        exit 1
++    }
++done
++
++printf '%s\n' 'Viche: broken seats are preserved, re-registered, and never abort later seats'

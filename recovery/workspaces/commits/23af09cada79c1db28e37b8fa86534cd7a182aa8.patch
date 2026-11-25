@@ -1,0 +1,125 @@
+commit 23af09cada79c1db28e37b8fa86534cd7a182aa8
+Author:     Viche Executive <executive@viche.local>
+AuthorDate: Mon Nov 9 15:50:32 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Tue Nov 10 02:02:10 2026 +0000
+
+    Report recorded Act 20 review-checkpoint resolutions and separate due counts
+    
+    Rebuild of 166fc3d onto current main (records-only delta). A recorded,
+    integrity-valid review-checkpoint resolution now reports its outcome,
+    resolved_at, reason and evidence; an absent or invalid one stays 'pending'.
+    counts.review_checkpoint {total,registered,due,due_unresolved,excluded_from_due}
+    makes checkpoint due work visible without folding it into registration
+    coverage. The ledger is read only. tests/predict-smoke.sh adds the hermetic
+    PC1/PC2 case (recorded -> unresolved, absent -> pending, due 2, unresolved 1,
+    integrity clean).
+
+diff --git a/government/predict-scorer.py b/government/predict-scorer.py
+index a8ba7b83..73e0c49f 100644
+--- a/government/predict-scorer.py
++++ b/government/predict-scorer.py
+@@ -313,11 +313,30 @@ def main() -> int:
+         definitions = rc.get("checkpoints", [])
+     else:
+         definitions = [dict(c) for c in ACT20_CHECKPOINTS]
++    cp_due = 0
++    cp_due_unresolved = 0
+     for definition in definitions:
+         e = checkpoint_by_id.get(definition.get("id"))
+         row = dict(definition)
+         row["registered"] = e is not None
+-        row["resolution"] = "pending"
++        res = res_by_id.get(definition.get("id"))
++        if res is None or definition.get("id") in invalid_resolution_ids:
++            row["resolution"] = "pending"
++        else:
++            # A recorded resolution must be reported, not hidden behind a
++            # hardcoded "pending". An absent resolution stays pending.
++            row["resolution"] = res.get("outcome", "pending")
++            row["resolved_at"] = res.get("resolved_at")
++            row["resolution_reason"] = res.get("reason", "")
++            row["resolution_evidence"] = res.get("evidence_citation", "")
++        try:
++            due_now = due_epoch(str(definition.get("resolution_date", ""))) <= now
++        except (TypeError, ValueError):
++            due_now = False
++        if due_now:
++            cp_due += 1
++            if res is None or definition.get("id") in invalid_resolution_ids:
++                cp_due_unresolved += 1
+         if e is not None:
+             row.update({"proposition": e.get("proposition"),
+                         "resolution_date": e.get("resolution_date"),
+@@ -337,6 +356,17 @@ def main() -> int:
+             "registered": len(registered), "rejected": len(rejected),
+             "resolved_scored": n_scored, "unresolved": len(unresolved),
+             "due": len(due), "due_unresolved": len(due_unresolved),
++            "review_checkpoint": {
++                "total": len(definitions),
++                "registered": sum(1 for r in checkpoints if r.get("registered")),
++                "due": cp_due,
++                "due_unresolved": cp_due_unresolved,
++                "scored": False,
++                "excluded_from_due": True,
++                "note": ("Act 20 §7 review checkpoints are reported separately; they "
++                         "are not counted in the registration due/due_unresolved "
++                         "totals or coverage"),
++            },
+         },
+         "coverage": (round(coverage, 4) if coverage is not None else None),
+         "brier": {"aggregate": (round(brier_agg, 6) if brier_agg is not None else None),
+diff --git a/tests/predict-smoke.sh b/tests/predict-smoke.sh
+index 2389652d..7556c79b 100644
+--- a/tests/predict-smoke.sh
++++ b/tests/predict-smoke.sh
+@@ -223,4 +223,49 @@ done
+ if /bin/sh "$root/government/predict-gate.sh" --all --at 100 too-many >/dev/null 2>&1; then
+     echo 'gate accepted more than five predictions (Act 22 maximum is five)' >&2; exit 1
+ fi
++# Act 20 §7 review checkpoints: a recorded resolution must be reported (not
++# hardcoded "pending"), an absent one stays pending, and their due accounting
++# must be visible and separate from registration coverage.
++mkdir -p "$tmp/records/predictions"
++cat > "$tmp/records/predictions/review-checkpoint.json" <<'JSON'
++{"checkpoints": [
++ {"id": "PC1", "proposition": "first", "resolution_date": "1970-01-02", "evidence_source": "fixture-e", "author": "seat", "label": "one"},
++ {"id": "PC2", "proposition": "second", "resolution_date": "1970-01-02", "evidence_source": "fixture-e", "author": "seat", "label": "two"}
++]}
++JSON
++python3 - "$root" "$tmp" <<'PY'
++import importlib.util, json, sys
++root, tmp = sys.argv[1], sys.argv[2]
++spec = importlib.util.spec_from_file_location("scorer", root + "/government/predict-scorer.py")
++m = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(m)
++entries = []
++for cid, prop in (("PC1", "first"), ("PC2", "second")):
++    e = {"kind": "review_checkpoint", "id": cid, "proposition": prop,
++         "resolution_date": "1970-01-02", "evidence_source": "fixture-e",
++         "author": "seat", "source_ref": "fixture",
++         "source_registered_on": "1970-01-01", "recorded_at": 90}
++    e["content_hash"] = m.content_hash(e)
++    entries.append(e)
++res = {"id": "PC1", "outcome": "unresolved", "resolver": "seat",
++       "evidence_citation": "fixture", "evidence_at": 90,
++       "resolved_at": 92, "reason": "fixture"}
++res["content_hash"] = m.resolution_hash(res)
++json.dump({"entries": entries, "resolutions": [res]},
++          open(tmp + "/pc-ledger.json", "w"))
++PY
++VICHE_PREDICT_LEDGER=$tmp/pc-ledger.json \
++    VICHE_PREDICT_CALIBRATION=$tmp/pc-calibration.json \
++    VICHE_PREDICT_NOW=100 python3 "$root/government/predict-scorer.py" >/dev/null
++python3 - "$tmp/pc-calibration.json" <<'PY'
++import json, sys
++x = json.load(open(sys.argv[1]))
++rows = {r["id"]: r for r in x["review_checkpoint"]["checkpoints"]}
++assert rows["PC1"]["resolution"] == "unresolved", rows["PC1"]
++assert rows["PC2"]["resolution"] == "pending", rows["PC2"]
++c = x["counts"]["review_checkpoint"]
++assert c["due"] == 2 and c["due_unresolved"] == 1, c
++assert c["excluded_from_due"] is True
++assert x["integrity"]["clean"] is True, x["integrity"]
++PY
+ echo 'predict-smoke: passed'

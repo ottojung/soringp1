@@ -1,0 +1,129 @@
+commit 21ea739124020a52eae1a2cc50ecadaddc32be8f
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Thu Oct 15 11:26:23 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Thu Oct 15 11:26:23 2026 -0700
+
+    Make parliamentary summons actionable for each seat (#14)
+    
+    * Give summoned parliamentarians explicit current mandates
+    
+    * Make the Research Advocate's outstanding Act 10 task explicit
+    
+    * Test that summons deliver specific mandates and isolate seats
+    
+    * Run targeted-summons smoke test in CI
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index 52b649bb..953105d2 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -29,6 +29,8 @@ jobs:
+         run: dash tests/clerk-liveness-smoke.sh
+       - name: Exercise parliamentary seat liveness recovery
+         run: dash tests/seat-liveness-smoke.sh
++      - name: Exercise targeted parliamentary summons
++        run: dash tests/summons-smoke.sh
+       - name: Exercise legislative tally
+         run: dash tests/tally-smoke.sh
+       - name: Exercise urgent Founder intake independently of sittings
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 8ea006a8..ca9522f8 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -23,7 +23,11 @@ Your agenda MUST cover only Viche self-governance/improvement and Kawun delivery
+ do not take unrelated Antonina board tasks. See Act 9 of the founding laws.
+ Prepare a concise agenda and publish it in the durable records or Antonina.
+ Convene other seats for actual business by listing their hexadecimal IDs, one
+-per line, in $town/records/SUMMONED.txt; remove resolved summons.
++per line, in $town/records/SUMMONED.txt. For each summoned member, write a
++concrete, current assignment in $town/records/summons/SEAT_ID.md describing
++its expected deliverable, supporting evidence and relevant branch/issue.
++Refresh or remove these assignment files as business changes; remove resolved
++IDs from SUMMONED.txt. Do not leave members guessing among historical tasks.
+ Solicit individual ballots, check quorum with government/tally.sh,
+ and record hearings, evidence, dissent, and real progress. Do not fabricate votes
+ or bother the Founder about routine decisions the government can resolve.
+@@ -31,11 +35,33 @@ EOF
+ else
+     cat <<EOF
+ You are a voting parliamentarian, not the Town Hall intake clerk.
+-Read current laws, the public agenda, mandates, research and board discussion.
++You are being summoned for current business. Prioritize your latest specific
++assignment, not an earlier completed ballot or historical agenda. Read the
++current laws and verify all material facts before making changes.
+ Work only on improving Viche itself or delivering Kawun tasks, never other
+ Antonina projects. Review the exclusive mandate in Founding Act 9.
+ Form an independent assessment and deliberate; record explicit ballots when
+ appropriate. Delegate useful independent tasks without numerical worker caps.
+ Do not independently repeat the clerk's entire Town Hall intake.
+ EOF
++    mandate=$town/records/summons/$seat.md
++    if [ -s "$mandate" ]; then
++        cat <<EOF
++=== YOUR CURRENT SUMMONS ($seat) ===
++EOF
++        cat "$mandate"
++        cat <<EOF
++=== END CURRENT SUMMONS ===
++Act on this assignment; record the outcome or a concrete blocker with evidence.
++Do not repeat completed work. If it is already resolved, verify that and ask the
++Clerk to clear your summons.
++EOF
++    else
++        cat <<EOF
++No seat-specific summons file exists. Find the Clerk's most recent outstanding
++summons in the proceedings or Town Hall and resolve that current business.
++If its requested deliverable cannot be determined, record the missing mandate
++as a blocker rather than inventing or repeating old work.
++EOF
++    fi
+ fi
+diff --git a/records/summons/c1a00004.md b/records/summons/c1a00004.md
+new file mode 100644
+index 00000000..f528506d
+--- /dev/null
++++ b/records/summons/c1a00004.md
+@@ -0,0 +1,7 @@
++# Current summons: Research Advocate (c1a00004)
++
++Issued by Clerk c1a00001 at the 2026-10-15 18:10Z sitting. This supersedes completed Territorial Janitor Act ballot business.
++
++**Deliverable:** Complete the Act 10 §1 cgroup-memory metrics compliance patch in `records/research/sample-metrics.sh` without losing unrelated changes. The candidate implementation is on `origin/resource-steward/act10-cgroup-patch` (original commit `9509f89`), adding cgroup v2 `memory.current`, `memory.max`, `memory.events` max-hits and OOM-kill counts.
++
++First check whether main already contains the fix. If not, independently review the candidate against Act 10 and current main, integrate safely, test with `sh -n` and `dash -n`, run the sampler and verify that output columns match the header, and publish the tested result to main through the government's normal review/integration workflow. Record evidence and notify the Clerk. If blocked, record the specific blocker instead of returning to the completed ballot.
+diff --git a/tests/summons-smoke.sh b/tests/summons-smoke.sh
+new file mode 100644
+index 00000000..aaade03d
+--- /dev/null
++++ b/tests/summons-smoke.sh
+@@ -0,0 +1,29 @@
++#!/bin/sh
++# A summoned seat must receive concrete current work, not just a generic agenda.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/government" "$scratch/records/summons"
++printf 'c1a00001\tClerk\tintake\nc1a00004\tResearch\tmetrics\nc1a00005\tResource\taudit\n' > "$scratch/government/seats.tsv"
++printf '%s\n' 'UNIQUE ACT 10 CGROUP ASSIGNMENT' > "$scratch/records/summons/c1a00004.md"
++VICHE_TOWN_ROOT=$scratch
++VICHE_TOWNHALL_ID=297
++export VICHE_TOWN_ROOT VICHE_TOWNHALL_ID
++
++/bin/sh "$repo/government/sitting.sh" c1a00004 > "$scratch/seat4.txt"
++grep -Fq 'UNIQUE ACT 10 CGROUP ASSIGNMENT' "$scratch/seat4.txt"
++grep -Fq 'Prioritize your latest specific' "$scratch/seat4.txt"
++grep -Fq 'Act on this assignment' "$scratch/seat4.txt"
++
++/bin/sh "$repo/government/sitting.sh" c1a00005 > "$scratch/seat5.txt"
++grep -Fq 'No seat-specific summons file exists' "$scratch/seat5.txt"
++if grep -Fq 'UNIQUE ACT 10 CGROUP ASSIGNMENT' "$scratch/seat5.txt"; then
++    echo 'Leaked seat-specific task to another seat' >&2
++    exit 1
++fi
++
++/bin/sh "$repo/government/sitting.sh" c1a00001 > "$scratch/clerk.txt"
++grep -Fq 'records/summons/SEAT_ID.md' "$scratch/clerk.txt"
++grep -Fq 'records/SUMMONED.txt' "$scratch/clerk.txt"
++echo 'Summons smoke checks passed'

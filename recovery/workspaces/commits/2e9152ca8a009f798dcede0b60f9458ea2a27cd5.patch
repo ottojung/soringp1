@@ -1,0 +1,95 @@
+commit 2e9152ca8a009f798dcede0b60f9458ea2a27cd5
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 23:02:03 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 23:02:03 2026 +0000
+
+    Keep verification-infrastructure failures retriable without false double-red verdicts
+
+diff --git a/government/integrator.py b/government/integrator.py
+index 9290126e..98171487 100755
+--- a/government/integrator.py
++++ b/government/integrator.py
+@@ -482,14 +482,34 @@ def land(p, entry, review):
+                                         SUITE_STATUS_LOG_DIR=str(logs)))
+         status_file = wt / "records" / "suite-status.json"
+         record = load(status_file, {})
+-        if check.returncode != 0 or record.get("result") != "green":
+-            runs = record.get("runs") or []
+-            last = runs[-1].get("output_sha256") if runs else None
+-            entry.update({"status": "red", "reason": "%s failed twice on the merged candidate" % suite,
+-                          "log": str(logs / ("suite-%s.log" % last)) if last else None})
++        exact = record.get("commit") == candidate and record.get("tree") == tree
++        if not exact:
++            if check.returncode != 0:
++                # A verifier setup failure, timeout before a record, or lost
++                # evidence is not two red tests. Never reuse main's old result.
++                entry.update({"status": "approved", "reason":
++                              "verification unavailable (exit %d); no fresh exact-candidate record; retry" % check.returncode,
++                              "log": None})
++            else:
++                entry.update({"status": "refused", "reason": "suite record does not name the exact candidate"})
+             return False
+-        if record.get("commit") != candidate or record.get("tree") != tree:
+-            entry.update({"status": "refused", "reason": "suite record does not name the exact candidate"})
++        if check.returncode != 0 or record.get("result") != "green":
++            runs = record.get("runs")
++            twice_red = (check.returncode == 1 and record.get("result") == "red"
++                         and isinstance(runs, list) and len(runs) == 2
++                         and all(isinstance(run, dict) and run.get("run") == i
++                                 and run.get("result") == "red"
++                                 and type(run.get("exit")) is int and run["exit"] != 0
++                                 and isinstance(run.get("output_sha256"), str)
++                                 and re.fullmatch(r"[0-9a-f]{64}", run["output_sha256"])
++                                 for i, run in enumerate(runs, 1)))
++            if twice_red:
++                entry.update({"status": "red", "reason": "%s failed twice on the merged candidate" % suite,
++                              "log": str(logs / ("suite-%s.log" % runs[-1]["output_sha256"]))})
++            else:
++                entry.update({"status": "approved", "reason":
++                              "verification unavailable or inconsistent exact record (exit %d); retry" % check.returncode,
++                              "log": None})
+             return False
+         receipt = DELIVERY / ("verified-%s.json" % candidate)
+         shutil.copyfile(str(status_file), str(receipt))
+diff --git a/tests/integrator-smoke.sh b/tests/integrator-smoke.sh
+index e93f39ba..6baa3897 100755
+--- a/tests/integrator-smoke.sh
++++ b/tests/integrator-smoke.sh
+@@ -19,6 +19,14 @@ mkdir -p "$town/government" "$town/tests" "$town/records" "$town/constitution"
+ for f in suite-env.sh suite-status.sh integrator.py propose-delivery.sh review-delivery.sh dispatch-gate.sh; do
+   cp "$repo/government/$f" "$town/government/$f"
+ done
++# Fixture-only switch for a verifier setup outage before it emits a record.
++python3 - "$town/government/suite-status.sh" <<'PYTEST'
++from pathlib import Path
++import sys
++p=Path(sys.argv[1]);s=p.read_text()
++assert "set -eu\n" in s
++p.write_text(s.replace("set -eu\n",'set -eu\n[ "${VICHE_TEST_VERIFY_UNAVAILABLE:-no}" != yes ] || exit 2\n',1))
++PYTEST
+ # Suites: red when records/BREAK and records/ARM are both present (green on
+ # each side alone, red once merged); every run is counted.
+ cat > "$town/tests/records-smoke.sh" <<'EOF'
+@@ -160,6 +168,21 @@ log=$(jq -r '[.entries[] | select(.branch == "delivery/breaker")] | last | .log'
+ grep -q 'records/BREAK with records/ARM' "$log"
+ python3 "$town/government/integrator.py" office c1a00004 | grep -q 'RED: tests/records-smoke.sh failed twice'
+ 
++# 5b. Infrastructure outage before an exact receipt is not a terminal red.
++# The old main record is green but belongs to another SHA/tree.
++seat verifier_outage
++printf 'retriable\n' > "$tmp/verifier_outage/records/verifier-outage.md"
++git -C "$tmp/verifier_outage" add -A
++git -C "$tmp/verifier_outage" commit -qm 'verification outage recovery fixture'
++propose verifier_outage judiciary verifier-outage
++VICHE_TEST_VERIFY_UNAVAILABLE=yes integrate
++test "$(st verifier-outage)" = approved
++if on_main records/verifier-outage.md; then echo 'unverified candidate landed' >&2; exit 1; fi
++jq -e '[.entries[] | select(.branch == "delivery/verifier-outage")] | last | .reason | contains("no fresh exact-candidate record")' "$state/delivery/queue.json" >/dev/null
++integrate
++test "$(st verifier-outage)" = landed
++on_main records/verifier-outage.md
++
+ # 6. A conflict with main is reported, not landed.
+ seat f
+ printf 'their line\n' > "$tmp/f/records/shared.md"
