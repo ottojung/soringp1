@@ -1,0 +1,55 @@
+# Historical pull requests
+
+All 51 PR descriptions and 16 returned discussion entries (issue comments, inline reviews or review submissions) are preserved. Original URLs remain available. These records are historical and no PR state was changed.
+
+- [#1: Bootstrap SoringP1 Lean research foundation](pr-01.md) — 0 discussion entries
+- [#2: Add exact small-n minimax evaluator and regression tests](pr-02.md) — 0 discussion entries
+- [#3: Revert Phoebe-only CI restriction; restore GitHub Actions checks](pr-03.md) — 0 discussion entries
+- [#4: Adopt exploration-first SoringP1 research workflow](pr-04.md) — 0 discussion entries
+- [#5: Audit sorting information-bound obstructions and verify small-poset frontier](pr-05.md) — 0 discussion entries
+- [#6: Correct binary-language density and explicit-tree certificate claims](pr-06.md) — 0 discussion entries
+- [#7: Analyze exact minimax symmetry quotients and move-orbit reductions](pr-07.md) — 0 discussion entries
+- [#8: Establish encoding consequences and logarithmic unary advice](pr-08.md) — 0 discussion entries
+- [#9: Investigate ordinal-sum decomposition of exact minimax costs](pr-09.md) — 0 discussion entries
+- [#10: Refresh formalization status after A24 and correct NP caveat](pr-10.md) — 0 discussion entries
+- [#11: Bound exact sorting-number computation by deterministic budgeted DFS](pr-11.md) — 0 discussion entries
+- [#12: Falsify poset-module reversal symmetry at n=7; retain restricted theorem](pr-12.md) — 1 discussion entries
+- [#13: Certify compositional poset lower bounds with exact merge obstructions](pr-13.md) — 1 discussion entries
+- [#14: Analyze strategy-DAG certificates and relabelling quotients](pr-14.md) — 1 discussion entries
+- [#15: Benchmark sound polynomial-space pruning of exact budgeted DFS](pr-15.md) — 1 discussion entries
+- [#16: Prove restricted parallel-module duality and test the general conjecture](pr-16.md) — 0 discussion entries
+- [#17: Clarify binary-input complexity bounds and certificate limits](pr-17.md) — 1 discussion entries
+- [#18: Add certified constructive upper witnesses for poset sorting](pr-18.md) — 1 discussion entries
+- [#19: Prove one-ply adversarial information bound and infinite strict-witness family](pr-19.md) — 0 discussion entries
+- [#20: Show asymmetric posets retain quadratically many comparison-pair orbits](pr-20.md) — 0 discussion entries
+- [#21: Quantify exact winning-state advice tradeoffs in small sorting games](pr-21.md) — 1 discussion entries
+- [#22: Prove compositional one-ply bounds and unbounded fixed-lookahead gap](pr-22.md) — 2 discussion entries
+- [#23: Analyze adversarial lookahead hierarchy and first two-ply obstruction](pr-23.md) — 2 discussion entries
+- [#24: Document complexity barriers for general-poset versus antichain sorting](pr-24.md) — 0 discussion entries
+- [#25: Implement verified retrograde winning-layer search for tiny sorting games](pr-25.md) — 1 discussion entries
+- [#26: Make complexity-first exploration the binding SoringP1 workflow](pr-26.md) — 0 discussion entries
+- [#27: Reduce exact sorting-number evaluation to O(n log² n) work space](pr-27.md) — 0 discussion entries
+- [#28: Require 10+ parallel unary research agents; defer binary complexity](pr-28.md) — 0 discussion entries
+- [#29: Sharpen unary SORT-BOUND-U to 2^O(N log N) time and O(N log N) space](pr-29.md) — 1 discussion entries
+- [#30: Set SoringP1 research-agent target to five](pr-30.md) — 0 discussion entries
+- [#31: Document Sergeev's sublinear sorting excess and entropy balance identity](pr-31.md) — 1 discussion entries
+- [#32: Prove a superlarge winning sorting frontier via independent chain comparisons](pr-32.md) — 1 discussion entries
+- [#33: Record unconditional EXPTIME sparsity barrier for unary sorting threshold](pr-33.md) — 1 discussion entries
+- [#34: Require a distinct complexity-relevant objective for active agents](pr-34.md) — 0 discussion entries
+- [#35: Remove contradictory agent headcount mandates across SoringP1 research docs](pr-35.md) — 0 discussion entries
+- [#36: Require at least five active SoringP1 agents, without a cap](pr-36.md) — 0 discussion entries
+- [#37: Rotate concrete research packets instead of restarting exhausted agent prompts](pr-37.md) — 0 discussion entries
+- [#38: Replace exhausted SoringP1 sessions with fresh, independent complexity research](pr-38.md) — 0 discussion entries
+- [#39: Recover stalled SoringP1 agents while preserving minimum research capacity](pr-39.md) — 0 discussion entries
+- [#40: Give researchers a bounded, deduplicated Antonina board reader](pr-40.md) — 0 discussion entries
+- [#41: Refocus SoringP1 research pool on eight falsifiable uniform-complexity fronts](pr-41.md) — 0 discussion entries
+- [#42: Recover stalled researchers promptly when preferred model quota resets](pr-42.md) — 0 discussion entries
+- [#43: Fix research keeper unable to replenish failed but front-owned agents](pr-43.md) — 0 discussion entries
+- [#44: Correct unary hardness error; AC⁰ circuits and sharp one-comparison no-go](pr-44.md) — 0 discussion entries
+- [#49: Keep Lean verification for theorem changes; skip it for research-note-only PRs](pr-49.md) — 0 discussion entries
+- [#50: Add independent framed-DAG certificate checker (no Lean formalization)](pr-50.md) — 0 discussion entries
+- [#51: Consolidate research policy docs; stop the pool keeper from inventing filler work](pr-51.md) — 0 discussion entries
+- [#52: Consolidate certificate research and retire integrated branches](pr-52.md) — 0 discussion entries
+- [#53: Replace exhausted research packet pool with autonomous claim-once frontier](pr-53.md) — 0 discussion entries
+- [#54: Keep a durable, continuously curated SoringP1 research frontier](pr-54.md) — 0 discussion entries
+- [#55: Keep SoringP1 fronts alive through transient provider failures](pr-55.md) — 0 discussion entries
