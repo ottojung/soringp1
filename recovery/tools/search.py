@@ -114,6 +114,8 @@ def front(index,ident):
     f=select(index['fronts'],'id',ident)
     print(f['id'],f'({f["status"]})',f['topic'],sep=' — ')
     print(f['question'],'\nOriginal full report:',f['path'])
+    for key,label in [('falsifier','Intended test or falsifier'),('implication','Proposed implication'),('reported_excerpt','Historical reported excerpt (unverified)')]:
+        if f.get(key):print(label+': '+f[key])
     print('\nBoard links (matching title, opening text or explicit author):')
     rows={b['id']:b for b in index['board']}
     for mid in f['board']:

@@ -71,8 +71,14 @@ def main(check=False):
             report = f.get('finding_unverified') or ''
             lines = [line.strip() for line in report.splitlines() if line.strip()]
             # Do not promote a claimed verdict to an established theorem.
-            excerpt = next((line for line in lines if re.search(r'(?i)^\s*(?:[*#]+\s*)?(?:finding|result|verdict|conclusion|outcome|mathematical finding)\b',line)), '')
-            front_ids[f['id']]['reported_excerpt'] = flat(excerpt,300) if excerpt else ''
+            excerpt = next((line for line in lines if re.search(r'(?i)^\s*(?:[*#]+\s*)?(?:finding|result|verdict|conclusion|outcome|mathematical finding|paper proof|counterexample|theorem|negative result)\b',line)), '')
+            if not excerpt:
+                substantive = [line for line in lines if len(line) > 50 and not re.match(r"(?i)^(I(?:'ll| will| have| inspected)|Let me|Recovery check|First,? |Now I|Worktree|Tool |Starting )", line)]
+                excerpt = substantive[-1] if substantive else (lines[0] if lines else '')
+            front = front_ids[f['id']]
+            front['reported_excerpt'] = flat(excerpt,300) if excerpt else ''
+            front['falsifier'] = f.get('falsifier') or ''
+            front['implication'] = f.get('implication') or ''
 
     agent_to_front=defaultdict(list)
     for rec in front_ids.values():
@@ -206,7 +212,9 @@ def main(check=False):
         lines=[f'# {topic}','','[Catalogue home](../README.md) · [Evidence status guide](../../RESULTS.md)','','Status is the original workflow label, not mathematical proof. Linked messages may contain corrections or rejected claims.','']
         for f in rows:
             lines.extend([f'## {f["id"]}','',f'{esc(f["question"])}','',f'**{f["status"]}** · {link("Full research report",ROOT/f["path"],p)}'])
-            if f.get('reported_excerpt'):lines.append('Historical reported excerpt: '+esc(f['reported_excerpt']))
+            if f.get('falsifier'):lines.append('Intended test or falsifier: '+esc(flat(f['falsifier'],220)))
+            if f.get('implication'):lines.append('Proposed implication: '+esc(flat(f['implication'],220)))
+            if f.get('reported_excerpt'):lines.append('Historical reported excerpt (unverified): '+esc(f['reported_excerpt']))
             ev=[]
             for mid in f['board'][-5:]:
                 b=board_by_id[mid]

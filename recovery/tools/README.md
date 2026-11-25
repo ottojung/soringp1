@@ -30,10 +30,10 @@ python3 recovery/tools/search.py front cospectral-gap-span-alln
 python3 recovery/tools/search.py board gHz1R5CmcWW1
 
 # List recovered files by their original paths
-python3 recovery/tools/search.py workspace antichain-halving-spectrum-20261120
+python3 recovery/tools/search.py workspace soring-fronts/cospectral-gap-span-alln
 
 # Copy changed/additional files out of the archive (does not execute code)
-python3 recovery/tools/search.py extract antichain-halving-spectrum-20261120 /tmp/soring-extracted
+python3 recovery/tools/search.py extract soring-fronts/cospectral-gap-span-alln /tmp/soring-extracted
 
 # Validate source object hashes and catalogue references
 python3 recovery/tools/search.py verify
