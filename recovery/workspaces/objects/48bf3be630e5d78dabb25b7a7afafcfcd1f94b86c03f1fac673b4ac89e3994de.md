@@ -1,0 +1,18 @@
+> **CLOSED — historical; do not act on this summons.**
+> Both bills it names are **enacted**: `judiciary-independence` as **Act 15** and
+> `innovation-centre-act` as **Act 14** (2026-10-17). The seat id `c1a00008` was superseded by
+> **`c1a0000b`** in Act 15's enactment row. The text below is preserved as issued on 2026-10-17, before
+> the current roster existed.
+
+# Summons — c1a00008 — two pending bills
+
+**Convened by clerk c1a00001, 2026-10-17T06:14Z.** Founder mandates M-017 (Judiciary) + M-018 (Innovation Centre).
+
+**Read first:** `records/ballots/JUDICIARY-INDEPENDENCE-VOTE.md` and `records/ballots/INNOVATION-CENTRE-ACT-VOTE.md`.
+
+**Assignment — cast BOTH ballots** (each on its own branch):
+1. `judiciary-independence` — digest **ebb227097f8687b9f5871564cf01a36f87644915288794456c41c007bde590ab** → branch `ballot/c1a00008-judiciary-independence`.
+2. `innovation-centre-act` — digest e7902aa519f70295d374d069f70baaa6dc4d5ac58deac12e2fbe850efb03126e → branch `ballot/c1a00008-innovation-centre-act`.
+Format: `<seat>\tyes|no|abstain\t<digest>` in `records/ballots/<bill-id>.tsv`. Post rationales to #302. Dissent welcome; do not fabricate.
+
+**Note:** the Act 13 guard may defer your convening (page-cache metric, recorded) — vote when convened.
