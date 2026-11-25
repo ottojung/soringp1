@@ -39,19 +39,19 @@ def message_text(row,cache):
 
 def search(index,args):
     terms=[x.casefold() for x in args.terms if x]
-    kinds=set(args.kind or ['front','board','source','session','patch','docs','supplement'])
+    kinds=set(args.kind or ['front','board','source','session','commission','mixed','github','patch','docs','supplement'])
     result=[]; cache={}; visited=set()
     def consider(kind,title,path,body=None,line=1,meta=''):
         key=(kind,path,line)
         if key in visited:return
-        visited.add(key)
         t=(title+' '+meta).casefold()
         if args.metadata:
             full=t
         else:
-            if body is None:body=read(path)
+            if body is None:body='' if path.endswith('.gz') else read(path)
             full=t+'\n'+body.casefold()
         if not all(term in full for term in terms):return
+        visited.add(key)
         rank=sum((10 if term in t else 0)+min(full.count(term),5) for term in terms)
         excerpt=''
         if body:
@@ -73,11 +73,24 @@ def search(index,args):
     if 'session' in kinds:
         for s in index['sessions']:
             consider('session',s['id'],s['path'],meta=s['workspace']+' '+' '.join(s['fronts']))
+    if 'commission' in kinds:
+        for c in index.get('commissions',[]):
+            consider('commission',c['title'],c['path'],meta=' '.join(c['workspaces']+c['fronts']))
+    if 'mixed' in kinds:
+        for r in index.get('mixed_reports',[]):
+            consider('mixed',r['title'],r['path'],meta=' '.join(r['workspaces']+r['sessions']+r['fronts']))
+    if 'github' in kinds:
+        for i in index.get('github',[]):
+            consider('github','#'+i['id']+' '+i['title'],i['path'],meta=i['state'])
     if 'patch' in kinds:
         for p in index['commits']:
             consider('patch',p['subject'],p['path'],meta=p['id'])
     if 'docs' in kinds:
-        for p in sorted(ROOT.parent.glob('docs/*.md')):
+        paths=[ROOT.parent/'README.md',ROOT.parent/'AGENTS.md',ROOT.parent/'SoringP1.lean']
+        for folder in ('docs','notes','SoringP1','scripts','tests'):
+            paths.extend(p for p in (ROOT.parent/folder).rglob('*') if p.is_file() and p.suffix in {'.md','.lean','.py','.go','.cpp','.hpp','.txt'} and '__pycache__' not in p.parts)
+        for p in sorted(set(paths)):
+            if not p.is_file():continue
             rel=str(p.relative_to(ROOT.parent))
             consider('docs',p.stem,'../'+rel,p.read_text(encoding='utf-8',errors='replace'))
         for p in sorted(ROOT.glob('*.md')):
@@ -110,6 +123,12 @@ def front(index,ident):
     for p in f['workspaces']:print('  '+p)
     print('\nRelated assistant reports:')
     for p in f['sessions']:print('  '+p)
+    if f.get('commissions'):
+        print('\nHistorical task commissions:')
+        for p in f['commissions']:print('  '+p)
+    if f.get('mixed_reports'):
+        print('\nRelated mixed-project research reports:')
+        for p in f['mixed_reports']:print('  '+p)
     if f.get('mentions'):
         print('\nAdditional board mentions (not necessarily findings about this front):')
         for mid in f['mentions']:
@@ -167,8 +186,8 @@ def verify(index):
         exists(f['path'])
         for mid in f['board']+f.get('mentions',[]):
             if mid not in board_ids:errors.append('missing referenced board ID '+mid)
-        for p in f['sessions']+f['workspaces']:exists(p)
-    for s in index['sessions']+index['commits']+index['sources']:exists(s['path'])
+        for p in f['sessions']+f['workspaces']+f.get('commissions',[])+f.get('mixed_reports',[]):exists(p)
+    for s in index['sessions']+index['commits']+index['sources']+index.get('commissions',[])+index.get('mixed_reports',[])+index.get('github',[]):exists(s['path'])
     cache={}
     for b in index['board']:
         exists(b['path'])
@@ -187,7 +206,7 @@ def verify(index):
     # Additional line redactions explicitly recorded during first recovery
     # can legitimately change the bytes; no hash mismatch is silently ignored.
     redacted={r['path'] for r in load('workspaces/additional-redactions.json')}
-    for folder in ['workspaces/objects','supplement/objects','followup/objects']:
+    for folder in ['workspaces/objects','supplement/objects','followup/objects','followup/orphan-blobs','followup/dangling-drafts/objects','followup/task-commissions/objects','followup/mixed-reports/objects']:
         for p in sorted((ROOT/folder).glob('*')):
             if not p.is_file():continue
             stem=p.name.split('.')[0]
@@ -207,7 +226,7 @@ def main():
     sub=p.add_subparsers(dest='command',required=True)
     s=sub.add_parser('search',help='Search metadata and full research text')
     s.add_argument('terms',nargs='+',help='All terms must match; quote phrases')
-    s.add_argument('--kind',action='append',choices=['front','board','source','session','patch','docs','supplement'])
+    s.add_argument('--kind',action='append',choices=['front','board','source','session','commission','mixed','github','patch','docs','supplement'])
     s.add_argument('--metadata',action='store_true',help='Search only titles, IDs and source paths')
     s.add_argument('--limit',type=int,default=25)
     for name,helptext in [('front','Show a research front and all linked evidence'),('board','Print one original board message by ID or unique prefix'),('workspace','List original files and archive objects')]:

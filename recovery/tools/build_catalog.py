@@ -56,13 +56,24 @@ def main(check=False):
         txt = read(p)
         rec = {'id':ident,'path':str(p.relative_to(ROOT)),'topic':topic,
                'status':section(txt,'status'),'question':section(txt,'question'),
-               'agent':section(txt,'agent_id'),'board':[], 'sessions':[], 'workspaces':[]}
+               'agent':section(txt,'agent_id'),'board':[], 'mentions':[], 'sessions':[], 'workspaces':[], 'commissions':[], 'mixed_reports':[]}
         topics[topic].append(rec); front_ids[ident] = rec
     assert len(front_ids) == 750
     # Use exact ID tokens in message headings/authors, plus exact agent ID.
     # A matching reference is a navigation lead, not proof or attribution.
-    ids_sorted = sorted(front_ids, key=len, reverse=True)
-    front_rx = re.compile(r'(?<![A-Za-z0-9_-])(?:'+'|'.join(map(re.escape,ids_sorted))+r')(?![A-Za-z0-9_-])')
+    front_tokens = set(front_ids)
+    def matching_ids(text):
+        return set(re.findall(r'[A-Za-z0-9_-]+',text)) & front_tokens
+    ledger = ROOT/'followup/ledger.json'
+    if ledger.is_file():
+        for f in data(ledger)['fronts']:
+            if f['id'] not in front_ids:continue
+            report = f.get('finding_unverified') or ''
+            lines = [line.strip() for line in report.splitlines() if line.strip()]
+            # Do not promote a claimed verdict to an established theorem.
+            excerpt = next((line for line in lines if re.search(r'(?i)^\s*(?:[*#]+\s*)?(?:finding|result|verdict|conclusion|outcome|mathematical finding)\b',line)), '')
+            front_ids[f['id']]['reported_excerpt'] = flat(excerpt,300) if excerpt else ''
+
     agent_to_front=defaultdict(list)
     for rec in front_ids.values():
         if rec['agent']: agent_to_front[rec['agent']].append(rec['id'])
@@ -77,14 +88,15 @@ def main(check=False):
             if body.endswith('---'): body=body[:-3].rstrip()
             title=next((l.strip() for l in body.splitlines() if l.strip()),'')
             verdict=next((l.strip() for l in body.splitlines() if re.match(r'^\s*(?:\*\*)?(VERDICT|DISPOSITION)\b',l,re.I)), '')
-            focus=set(front_rx.findall(m.group(2)+' '+title+' '+verdict))
+            focus=matching_ids(m.group(2)+' '+title+' '+verdict)
             # Some Executive reviews refer to a front only in their opening paragraph.
-            if not focus: focus.update(front_rx.findall(body[:500]))
-            for aid, fs in agent_to_front.items():
-                if aid and aid in m.group(2): focus.update(fs)
-            row={'id':mid.group(1).strip(),'date':m.group(1),'author':m.group(2),'path':str(page.relative_to(ROOT)), 'line':text.count('\n',0,m.start())+1,'title':flat(title,240),'verdict':flat(verdict,300),'fronts':sorted(focus)}
+            if not focus: focus.update(matching_ids(body[:500]))
+            for aid in re.findall(r'[A-Za-z0-9_-]+',m.group(2)):
+                focus.update(agent_to_front.get(aid.removeprefix('agent-'),[]))
+            row={'id':mid.group(1).strip(),'date':m.group(1),'author':m.group(2),'path':str(page.relative_to(ROOT)), 'line':text.count('\n',0,m.start())+1,'title':flat(title,240),'verdict':flat(verdict,300),'fronts':sorted(focus),'mentions':sorted(matching_ids(body)-focus)}
             board.append(row)
             for f in row['fronts']: front_ids[f]['board'].append(row['id'])
+            for f in row['mentions']: front_ids[f]['mentions'].append(row['id'])
     assert len({b['id'] for b in board}) == len(board)
     board.sort(key=lambda b:(b['date'],b['id']))
     board_by_id={b['id']:b for b in board}
@@ -109,6 +121,26 @@ def main(check=False):
         target=ROOT/'supplement/objects'/obj
         if not target.is_file():raise ValueError(f'missing object {target}')
         sources[(Path(original).name,str(target.relative_to(ROOT)))].append(original)
+    audit=ROOT/'followup/file-audit.json'
+    if audit.is_file():
+        for row in data(audit)['mappings']:
+            target=ROOT/row['path']
+            if not target.is_file():raise ValueError(f'missing follow-up object {target}')
+            sources[(Path(row['source']).name,row['path'])].append(row['source'])
+    for p in sorted((ROOT/'quarantine/antichain-abc').glob('*')):
+        if p.is_file():
+            sources[(p.name.removesuffix('.gz'),str(p.relative_to(ROOT)))].append('quarantined ABC experiment/'+p.name.removesuffix('.gz'))
+    for folder in ('state','stashes'):
+        for p in sorted((ROOT/folder).rglob('*')):
+            if p.is_file():sources[(p.name,str(p.relative_to(ROOT)))].append('archive '+folder+'/'+p.name)
+    for p in sorted((ROOT/'followup/orphan-blobs').glob('*')):
+        if p.is_file():
+            sources[('orphaned-draft-'+p.name[:12],str(p.relative_to(ROOT)))].append('central Git unreachable blob (see followup/orphan-audit.json)')
+    dangling=ROOT/'followup/dangling-drafts/audit.json'
+    if dangling.is_file():
+        for row in data(dangling)['preserved']:
+            for name in row['original_paths'] or ['orphaned-draft-'+row['blob'][:12]]:
+                sources[(Path(name).name,row['path'])].append(row['source']+'/'+name)
     sessions=[]
     for name in ['session-index.json','agent-index.json']:
         for x in data(ROOT/'assistant-reports'/name):
@@ -122,6 +154,43 @@ def main(check=False):
             row={'id':x.get('session',x.get('agent','')),'workspace':x['workspace'],'path':rel,'outputs':x['outputs'],'fronts':sorted(fs)}
             sessions.append(row)
             for f in fs: front_ids[f]['sessions'].append(rel)
+    commissions=[]
+    commission_index=ROOT/'followup/task-commissions/index.json'
+    if commission_index.is_file():
+        bypath=defaultdict(list)
+        for x in data(commission_index):bypath[x['path']].append(x)
+        session_fronts={s['id']:s['fronts'] for s in sessions}
+        for path,rows in sorted(bypath.items()):
+            assert (ROOT/path).is_file(),path
+            workspaces_set=sorted({x['workspace'] for x in rows})
+            fs=set()
+            for x in rows:
+                fs.update(match_workspace(x['workspace']))
+                fs.update(session_fronts.get(x['session'],[]))
+            text=read(ROOT/path)
+            row={'path':path,'title':flat(text,150),'workspaces':workspaces_set,'sessions':sorted({x['session'] for x in rows}),'occurrences':len(rows),'fronts':sorted(fs)}
+            commissions.append(row)
+            for f in fs:front_ids[f]['commissions'].append(path)
+    mixed_reports=[]
+    mixed_index=ROOT/'followup/mixed-reports/index.json'
+    if mixed_index.is_file():
+        bypath=defaultdict(list)
+        for x in data(mixed_index):bypath[x['path']].append(x)
+        for path,rows in sorted(bypath.items()):
+            text=read(ROOT/path)
+            title=flat(text,180)
+            fs=matching_ids(text)
+            for x in rows:fs.update(match_workspace(x['workspace']))
+            row={'path':path,'title':title,'occurrences':len(rows),'sessions':sorted({x['session'] for x in rows}),'workspaces':sorted({x['workspace'] for x in rows}),'fronts':sorted(fs)}
+            mixed_reports.append(row)
+            for f in fs:front_ids[f]['mixed_reports'].append(path)
+    github=[]
+    github_index=ROOT/'followup/github-discussions/index.json'
+    if github_index.is_file():
+        for i in data(github_index):
+            rel=f"followup/github-discussions/issue-{i['number']}.md"
+            assert (ROOT/rel).is_file(),rel
+            github.append({'id':str(i['number']),'path':rel,'title':i['title'],'state':i['state'],'comments':len(i['comments'])})
     commits=[]
     for folder in ['workspaces/commits','followup/patches']:
         for p in sorted((ROOT/folder).glob('*.patch')):
@@ -130,19 +199,23 @@ def main(check=False):
             subject=next((l.strip() for l in head.splitlines() if l.startswith('    ') and l.strip()),p.stem)
             commits.append({'id':p.stem,'path':str(p.relative_to(ROOT)),'subject':subject})
     # Markdown catalogue, split into comfortably sized pages.
-    overview=['# Research catalogue','','This index is generated from the archived evidence. Links connect questions, dated board messages, original source objects, assistant reports and historical patches. Matching IDs are navigation aids, not new verification.','','Start with the [mathematical synthesis](../SYNTHESIS.md), [result register](../RESULTS.md), and [open questions](../OPEN-QUESTIONS.md).','','## Research topics','']
+    overview=['# Research catalogue','','This index is generated from the archived evidence. Links connect questions, dated board messages, original source objects, assistant reports and historical patches, original task commissions and cross-project reports. Matching IDs are navigation aids, not new verification.','','Start with the [mathematical synthesis](../SYNTHESIS.md), [result register](../RESULTS.md), and [open questions](../OPEN-QUESTIONS.md).','','## Research topics','']
     for topic, rows in topics.items():
         p=OUT/'topics'/f'{slug(topic)}.md'
         overview.append(f'- {link(topic,p,OUT/"README.md")} — {len(rows)} fronts')
         lines=[f'# {topic}','','[Catalogue home](../README.md) · [Evidence status guide](../../RESULTS.md)','','Status is the original workflow label, not mathematical proof. Linked messages may contain corrections or rejected claims.','']
         for f in rows:
             lines.extend([f'## {f["id"]}','',f'{esc(f["question"])}','',f'**{f["status"]}** · {link("Full research report",ROOT/f["path"],p)}'])
+            if f.get('reported_excerpt'):lines.append('Historical reported excerpt: '+esc(f['reported_excerpt']))
             ev=[]
             for mid in f['board'][-5:]:
                 b=board_by_id[mid]
                 ev.append(link(b['date'][:10]+' '+('review' if b['verdict'] else 'message'),ROOT/b['path'],p,b['line']))
             if ev:lines.append('Board: '+' · '.join(ev)+(f' ({len(f["board"])} total; use search for all)' if len(f['board'])>5 else ''))
+            if f.get('mentions'):lines.append(f'Additional board mentions: {len(f["mentions"])} (use front lookup for exact links)')
             if f['sessions']:lines.append('Assistant reports: '+' · '.join(link(Path(x).stem,ROOT/x,p) for x in f['sessions'][:3])+(f' ({len(f["sessions"])} total)' if len(f['sessions'])>3 else ''))
+            if f.get('commissions'):lines.append('Original task commissions: '+' · '.join(link(Path(x).stem[:12],ROOT/x,p) for x in f['commissions'][:3])+(f' ({len(f["commissions"])} total)' if len(f['commissions'])>3 else ''))
+            if f['mixed_reports']:lines.append('Mixed-session reports: '+' · '.join(link(Path(x).stem[:12],ROOT/x,p) for x in f['mixed_reports'][:3])+(f' ({len(f["mixed_reports"])} total)' if len(f['mixed_reports'])>3 else ''))
             if f['workspaces']:lines.append('Source manifests: '+' · '.join(link(Path(x).stem,ROOT/x,p) for x in f['workspaces'][:3]))
             lines.append('')
         emit(p.relative_to(OUT),lines)
@@ -175,13 +248,21 @@ def main(check=False):
     sessions.sort(key=lambda s:(s['workspace'],s['id']))
     for s in sessions:s['label']=s['workspace']
     collection('sessions','Assistant report sessions',sessions,'sessions',lambda s,p:[f'- {link(s["id"],ROOT/s["path"],p)} · {s["outputs"]} outputs · {esc(s["workspace"])}'],100)
+    commissions.sort(key=lambda c:(c['workspaces'][0],c['path']))
+    for c in commissions:c['label']=c['workspaces'][0]
+    collection('commissions','Historical research commissions',commissions,'distinct task texts',lambda c,p:[f'- {link(c["title"],ROOT/c["path"],p)} · {c["occurrences"]} occurrence(s)',f'  - {esc(flat(c["workspaces"][0],180))}'],100)
+    mixed_reports.sort(key=lambda r:(r['workspaces'][0],r['path']))
+    for r in mixed_reports:r['label']=r['workspaces'][0]
+    collection('mixed-reports','Additional cross-project research reports',mixed_reports,'distinct texts',lambda r,p:[f'- {link(r["title"],ROOT/r["path"],p)} · {r["occurrences"]} occurrence(s)',f'  - {esc(flat(r["workspaces"][0],170))}'],100)
+    if github:
+        overview.append('- [GitHub issue discussions](../followup/github-discussions/README.md) — '+str(len(github))+' issues, '+str(sum(i['comments'] for i in github))+' comments')
     commits.sort(key=lambda c:(c['subject'].lower(),c['id']))
     for c in commits:c['label']=c['subject']
     collection('commits','Historical commit patches',commits,'patches',lambda c,p:[f'- {link(c["id"][:12],ROOT/c["path"],p)} · {esc(flat(c["subject"],170))}'],150)
-    overview.extend(['','## Search on a local clone','','The dependency-free search tool covers front reports, full board messages, recovered code, patches, assistant outputs, and original path mappings. See [search and integrity checks](../tools/README.md).','','The raw archive is linked in [the recovery guide](../README.md).'])
+    overview.extend(['','## Search on a local clone','','The dependency-free search tool covers front reports, full board messages, recovered code, patches, assistant outputs, task commissions, GitHub discussions and original path mappings. See [search and integrity checks](../tools/README.md).','','The raw archive is linked in [the recovery guide](../README.md).'])
     emit(Path('README.md'),overview)
     # Small structured lookup index for the CLI and reproducibility.
-    index={'fronts':sorted(front_ids.values(),key=lambda f:f['id']),'board':board,'workspaces':workspaces,'sources':sr,'sessions':sessions,'commits':commits}
+    index={'fronts':sorted(front_ids.values(),key=lambda f:f['id']),'board':board,'workspaces':workspaces,'sources':sr,'sessions':sessions,'commissions':commissions,'mixed_reports':mixed_reports,'github':github,'commits':commits}
     outputs[OUT/'index.json']=json.dumps(index,ensure_ascii=False,separators=(',',':'))+'\n'
     bad=[]
     for path,txt in outputs.items():
@@ -190,7 +271,7 @@ def main(check=False):
         else:
             path.parent.mkdir(parents=True,exist_ok=True)
             path.write_text(txt,encoding='utf-8')
-    print('fronts',len(front_ids),'board',len(board),'workspaces',len(workspaces),'source versions',len(sr),'sessions',len(sessions),'patches',len(commits),'catalogue files',len(outputs))
+    print('fronts',len(front_ids),'board',len(board),'workspaces',len(workspaces),'source versions',len(sr),'sessions',len(sessions),'commissions',len(commissions),'patches',len(commits),'catalogue files',len(outputs))
     if bad:
         print('stale/missing generated files:',*bad[:20],sep='\n',file=sys.stderr)
         return 1
