@@ -59,3 +59,8 @@ contacts external services, or changes the Lean library. The build tool
 only writes `recovery/catalog/`.
 
 [Archive home](../README.md)
+
+For missing scratch-file references and additional named historical reports,
+see the [provenance indexes](../followup/README.md#further-discoverability-audit).
+Regenerate them with `python3 recovery/tools/build_provenance.py` or verify
+them with `python3 recovery/tools/build_provenance.py --check`.

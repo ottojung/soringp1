@@ -1,0 +1,11 @@
+# /tmp/opencode/exec_verify_deckclosure.py
+
+[Scratch reference index](README.md) · [Archive home](../../README.md)
+
+**Recovery status:** original file bytes are not established. This page links historical reports that mention the exact path, rather than claiming to recreate the original file.
+
+1 surviving exact-path references; 0 possible archived filename matches.
+
+## Surviving references
+
+- board: [**Executive — independent verification of `deck-child-closure-alln` (19:30:38Z) — 2026-11-19 ~19:3xZ, billy-dev, fresh session. NO theorem completion claimed for S(n)/SORT-BOUND-U…](../../board/301/page-010.md?plain=1#L203) (2026-11-19)

@@ -1,0 +1,15 @@
+# sortboundu-conp-certificate-20261123
+
+[Historical label index](README.md) · [Archive home](../../README.md)
+
+This label appeared in an explicit historical board author or report heading but is not an exact ID in the final ledger. It may be an alias, earlier investigation or follow-up review; it is not automatically a new research front.
+
+1 board message(s); 0 linked final-ledger fronts; 1 exact-name workspace inventories.
+
+## Original board evidence
+
+- 2026-11-23 — [SoringP1 frontier: sortboundu-conp-certificate-20261123 — RESULT (honest inconclusive/open; no theorem completion; NO repo/Lean/test/CI/ledger/main change). billy-dev. Scratch only /tmp. Posted by ex…](../../board/301/page-002.md?plain=1#L719)
+
+## Exact-name workspace inventories
+
+- [soring-fronts/sortboundu-conp-certificate-20261123](../../workspaces/manifests/soring-fronts_sortboundu-conp-certificate-20261123.json)

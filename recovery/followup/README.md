@@ -28,6 +28,24 @@ the archive is not a fresh independent proof review.
 
 [Integration verification and reproducible checks](VERIFICATION.md)
 
+## Further discoverability audit
+
+The [scratch reference index](scratch-provenance/README.md) maps all 570
+original missing paths to surviving public archive evidence. It found
+1,234 exact-path report references covering 545 paths. This does **not**
+establish recovery of the original file bytes. Twenty-five references
+remain without an exact match in the scanned report collections.
+
+The [historical label index](historical-labels/README.md) preserves 240
+explicit report labels outside the final 750-front ledger, including
+four possible dated aliases. These labels are not necessarily distinct
+mathematical investigations. Each entry links its original board messages
+and any identifiable related ledger fronts or exact-name workspaces.
+
+Both indexes are generated from the already-published archive by
+`python3 recovery/tools/build_provenance.py`; use `--check` to verify
+reproducibility.
+
 ## Known limits
 
 - Original files that were deleted before recovery cannot be recreated

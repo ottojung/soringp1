@@ -1,0 +1,12 @@
+# /tmp/opencode/curator/minimax.py
+
+[Scratch reference index](README.md) · [Archive home](../../README.md)
+
+**Recovery status:** original file bytes are not established. This page links historical reports that mention the exact path, rather than claiming to recreate the original file.
+
+2 surviving exact-path references; 0 possible archived filename matches.
+
+## Surviving references
+
+- front: [height-two-deck-complete-invariant](../../fronts/0498-height-two-deck-complete-invariant.md?plain=1#L38)
+- session: [/home/lubko/soring-fronts/height-two-deck-complete-invariant](../../assistant-reports/sessions/ses_e3b1c0647ffeOMi4G3Ni0kA5Ls.md?plain=1#L22)

@@ -37,6 +37,12 @@ keyword queries, cross-references and workspace extraction, use the
 | [Task commissions](catalog/commissions/README.md) | 1,386 distinct historical task texts, 1,710 occurrences |
 | [Verification notes](state/) · [Stashes](stashes/) · [Quarantined experiment](quarantine/antichain-abc/README.md) | Original checks, unfinished drafts and experimental output |
 
+The [historical label index](followup/historical-labels/README.md) links
+240 explicitly named report labels that are not exact IDs in the final
+ledger. They may be aliases, earlier directions or one-off checks, not
+necessarily distinct fronts. The [scratch reference index](followup/scratch-provenance/README.md)
+links surviving report evidence for 545 of 570 missing original paths.
+
 The [follow-up audit](followup/README.md) records the broader filesystem,
 Git-object, ledger and session checks, including any remaining omissions.
 The original reports and prior versions are preserved, even when their
