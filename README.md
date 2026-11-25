@@ -16,6 +16,10 @@ Research was suspended on 2026-11-24. No new investigations or automated
 research agents are authorized by the historical notes. The accumulated
 research is now preserved on this default branch.
 
+**Research website:** [GitHub Pages](https://ottojung.github.io/soringp1/)
+(the site requires Pages to be enabled in the repository settings).
+The website source and local preview instructions are in [site/README.md](site/README.md).
+
 **Start with the [research archive](recovery/README.md)**:
 
 | What you want | Where to start |
