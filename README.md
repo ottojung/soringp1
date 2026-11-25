@@ -10,9 +10,30 @@ to sort. The long-term goal is a Lean kernel-checked result about that
 complexity. This is a research goal, not a claimed theorem; no P/NP or
 other separation is proved.
 
+## Project status: suspended
+
+Research was suspended on 2026-11-24. No new investigations or automated
+research agents are authorized by the historical notes. The accumulated
+research is now preserved on this default branch.
+
+**Start with the [research archive](recovery/README.md)**:
+
+| What you want | Where to start |
+|---|---|
+| What was actually learned | [Research synthesis](recovery/SYNTHESIS.md) |
+| Theorems, computations, conditional results, barriers | [Results and evidence register](recovery/RESULTS.md) |
+| Conjectures, unsolved questions, failed approaches | [Open questions](recovery/OPEN-QUESTIONS.md) and [corrections](recovery/CORRECTIONS.md) |
+| Every research direction and original evidence | [Complete topic and source catalogue](recovery/catalog/README.md) |
+| Search the archive on a clone | [Search and integrity tools](recovery/tools/README.md) |
+| Kernel-checked Lean theorems | [Formal theorem inventory](docs/kernel-results.md) |
+
+The archive keeps historical reports and experimental code separate from
+the maintained Lean library. A research agent's reported conclusion is
+not a certified theorem.
+
 ## The problem
 
-Complexity classes need an input encoding. Active research uses the unary
+Complexity classes need an input encoding. The historical research focused on the unary
 one:
 
 \[
@@ -20,7 +41,7 @@ one:
 \]
 
 with input length \(N = n + k + 1\), and the function \(S_{\mathrm{unary}}(1^n)\).
-A binary encoding is defined for precision but is not under active research.
+A binary encoding is defined for precision but was not an active research stream.
 See [docs/problem.md](docs/problem.md) for exact definitions and for which
 outcomes are realistically reachable.
 

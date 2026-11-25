@@ -103,10 +103,14 @@ including qualifications. See also the thematic and referee indexes.
   Defect need not be monotone on every hard-child transition. This
   does not bound the light child's drop or all optimal states'
   defect. [Referee](board/301/page-001.md).
-- A sufficient condition for a defect-free state to satisfy the
-  recursive balanced-split predicate g is e(P)>3*2^(L(P)-2);
-  both optimal children must then have L=F=L(P)-1. The general
-  completeness conjecture for g remains open. [Referee](board/301/page-002.md).
+- A defect-free state with e(P)>3*2^(L(P)-2) has two defect-free
+  children at any F-optimal comparison. The historical proof of the
+  stronger recursive g conclusion has an induction-scope gap: the
+  children need not meet the same density hypothesis. The argument
+  validly confines a **minimal** counterexample to completeness to the
+  complementary band, not every counterexample. See the
+  [archival correction](CORRECTIONS.md#recursive-g-completeness) and
+  [historical referee](board/301/page-001.md?plain=1#L3).
 - The project found that an information-tight root can have
   defect-positive reachable states. For example, a verified
   five-comparison path from A_6 reaches e=16,F=5, with 5+F=S(6)=10.

@@ -7,6 +7,23 @@ is in `git log`. Where another document disagrees with this one, this one wins.
 Operational details (host, Antonina, the research board, the agent pool
 keeper) live in [docs/operations.md](docs/operations.md).
 
+## Current status — suspended
+
+The owner suspended SoringP1 research on 2026-11-24. **Do not launch,
+relaunch, schedule or steer research agents, reopen coordination issues,
+or interpret any historical frontier as an active task.** A separate
+explicit owner decision is required to resume mathematical research.
+
+Preservation, indexing, correction of archive metadata, and verification of
+existing historical evidence are permitted archival maintenance. The
+[default-branch archive](recovery/README.md) includes conjectures, false
+starts and unreviewed reports; the publication gate below applies to
+promoting mathematical claims into the maintained library, not to
+preserving historical evidence. Keep proof status and scope explicit.
+
+The research instructions below describe the former project and apply
+to future research only if the owner explicitly resumes it.
+
 ## Objective
 
 Change what is known about the **uniform complexity of computing the exact

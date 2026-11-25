@@ -3,6 +3,15 @@
 How SoringP1 research is run day to day. The research rules themselves are
 in [AGENTS.md](../AGENTS.md); this document only covers the machinery.
 
+## Suspended — do not run the keeper
+
+The owner suspended this project on 2026-11-24. The research board is
+closed and the keeper/agent workflow below is historical. No automated
+or manual research-agent launch is authorized until explicit resumption.
+For archival maintenance use the [research archive](../recovery/README.md).
+Do not treat the preserved ledger, open mathematical questions, or old
+operational directions as a live work queue.
+
 ## Execution host
 
 All Antonina/Viche agents, worktrees, manual development and experiments

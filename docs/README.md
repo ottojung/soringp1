@@ -6,6 +6,15 @@ active task. [`AGENTS.md`](../AGENTS.md) is the current authority for
 research direction and Lean policy; previous instructions in notes are
 historical.
 
+## Archived research (suspended 2026-11-24)
+
+The default branch now contains the entire recovered corpus.
+Start with the [archive home](../recovery/README.md), [synthesis](../recovery/SYNTHESIS.md),
+[result register](../recovery/RESULTS.md), [open questions](../recovery/OPEN-QUESTIONS.md),
+[corrections](../recovery/CORRECTIONS.md), or
+[searchable catalogue](../recovery/catalog/README.md).
+Historical discussions and packet lists are not active work.
+
 ## Start here
 
 | File | Purpose |
@@ -49,7 +58,7 @@ findings. They are not independent milestones to formalize in Lean.
 The machine-readable [research packets](research-packets.json) are for
 curated Billy agents, not a list of established mathematical results.
 
-## Active GitHub discussions
+## Historical GitHub discussions
 
 - [#47: Exact optimal framed-DAG certificates](https://github.com/ottojung/soringp1/issues/47)
 - [#48: Root-specific adversarial lower-bound rule](https://github.com/ottojung/soringp1/issues/48)
