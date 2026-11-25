@@ -24,7 +24,7 @@ Does there exist a fully deterministic realization of Sergeev's TR20-096 group-i
 **investigated** · [Full research report](../../fronts/0008-sergeev-canonical-ceiling-audit.md)
 Intended test or falsifier: Either a canonical tie-broken deterministic Sergeev realization whose per-stage ceil losses sum to at most O(n/log(n)^(1/5)) with the batch costs independently recomputed from TR20-096 equations and lemmas, or a paper a…
 Proposed implication: A positive answer would clear the only known o(n)-surplus sorter through the Oct-27 necessary conditions, giving the first checkable certificate arithmetic at sublinear surplus; failure would expose the first recorded o…
-Historical reported excerpt (unverified): ## Finding (honest summary)
+Historical reported excerpt (unverified): ## Finding (honest summary) **Front question:** does a deterministic Sergeev realization exist whose aggregate per-stage ceiling rounding loss stays within the `O(n/(log n)^{1/5})` surplus, or does every legal choice force loss exceeding it? **Verdict — the FAIL arm is refuted at the accounting lev…
 Board: [2026-10-27 message](../../board/301/page-044.md?plain=1#L48)
 Source manifests: [soring-fronts_sergeev-canonical-ceiling-audit](../../workspaces/manifests/soring-fronts_sergeev-canonical-ceiling-audit.json)
 
@@ -175,7 +175,7 @@ Does there exist a k-regular integer sequence T(n), for some base k &gt;= 2, wit
 **investigated** · [Full research report](../../fronts/0373-k-regular-asymptotic-barrier.md)
 Intended test or falsifier: Construct such a T with an explicit finite linear representation and verify its asymptotic, monotonicity and prefix agreement, or prove that no k-regular sequence can have this growth and monotonicity profile.
 Proposed implication: If such a model exists, any proof that S is not k-regular must use arithmetic information beyond growth and finite prefixes, mirroring the board's automatic and D-algebraic barriers; if none exists, the growth profile i…
-Historical reported excerpt (unverified): ## Mathematical finding: the barrier model exists
+Historical reported excerpt (unverified): ## Mathematical finding: the barrier model exists The answer to the front is **yes**. Let \\[
 Board: [2026-11-08 message](../../board/301/page-021.md?plain=1#L152) · [2026-11-08 message](../../board/301/page-021.md?plain=1#L177)
 Assistant reports: [ses_e44a96de8ffeGhxLGvX6ux7sgI](../../assistant-reports/sessions/ses_e44a96de8ffeGhxLGvX6ux7sgI.md)
 Original task commissions: [061d3cd4613b](../../followup/task-commissions/objects/061d3cd4613bf158b7121a935cc29f90aabebdccc5cc616e4cc62355903995d3.txt)
@@ -312,7 +312,7 @@ If the Ford-Johnson upper bound F(m)=log2(m!)+c*m+o(m) in the information-plus-u
 **investigated** · [Full research report](../../fronts/0656-sergeev-band-widening-alln.md)
 Intended test or falsifier: Prove the Sergeev-substituted condition still fails at some split a=omega(n/(log n)^{1/5}) for infinitely many n, or exhibit a Ford-Johnson-certifiable split that fails under U, refuting any widening.
 Proposed implication: Determines whether a known improvement in sorting upper bounds widens the information-theoretic certification route to the antichain defect inequality, bridging an upper-bound gain to a structural lower bound for S(n) w…
-Historical reported excerpt (unverified): ## Result
+Historical reported excerpt (unverified): ## Result Work done on `billy-dev` only. Recovery audit first: branch `billy-dev` clean at `6a96398`, stash empty, no worktrees, ledger front `sergeev-band-widening-alln` was `running` with no finding, and #301 had **zero** posts under this tag — so nothing from the interrupted turn was duplicated.…
 Board: [2026-11-21 message](../../board/301/page-005.md?plain=1#L454) · [2026-11-21 message](../../board/301/page-005.md?plain=1#L505)
 Assistant reports: [ses_e007b2784ffekowOrBfZlZx26P](../../assistant-reports/sessions/ses_e007b2784ffekowOrBfZlZx26P.md)
 Original task commissions: [aca76d5eaa55](../../followup/task-commissions/objects/aca76d5eaa55db4c42797d5d8e54e2763e65f8c5e0175b91d7557a8cf123ec78.txt) · [bc5727a5af2b](../../followup/task-commissions/objects/bc5727a5af2b11198d0ef91d7aa24fbd3e969483b8feb80764fcf13c2da4588b.txt)
@@ -326,7 +326,7 @@ Fix delta in (0,1/2). For every sufficiently large n, does there exist a height-
 **investigated** · [Full research report](../../fronts/0707-bias-path-worstcase-sergeev-alln.md)
 Intended test or falsifier: Exhibit some delta&gt;0 and infinitely many n such that every height-S(n) tree has a root-to-leaf path containing omega(n) delta-biased comparisons, so the excess is concentrated on adversarial branches rather than spread …
 Proposed implication: A positive answer would give a uniform structural constraint on optimal trees usable for succinct near-balanced certificates; a negative answer shows the sublinear excess lives on rare adversarial paths and blocks expec…
-Historical reported excerpt (unverified): ### Verdict and honest limit
+Historical reported excerpt (unverified): ### Verdict and honest limit I did **not** exhibit the falsifier's counterexample, and did **not** prove the front. The decisive obstacle is that settling it requires a structural bound on the worst‑path minority Kraft surplus $R$ in Sergeev's group‑insertion tree (or some optimal tree); equal‑rese…
 Board: [2026-11-23 review](../../board/301/page-002.md?plain=1#L3) · [2026-11-23 review](../../board/301/page-003.md?plain=1#L1184)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_df8fbedddffeeyUJ9zQysZ9vs3](../../assistant-reports/sessions/ses_df8fbedddffeeyUJ9zQysZ9vs3.md)

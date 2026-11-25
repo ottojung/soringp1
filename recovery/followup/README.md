@@ -17,7 +17,8 @@ original archive and these additional discoveries are on the default branch.
 | [Scratch references](scratch-reference-audit.json) | 570 missing exact paths, 14 candidate filename matches, no confirmed recovery at the original paths |
 | [Mixed-session scan](mixed-reports/README.md) | 27,033 candidate assistant messages checked; 1,540 distinct relevant texts archived |
 | [Historical task texts](task-commissions/README.md) | 1,386 distinct commissions, 1,710 retained occurrences |
-| [GitHub discussions](github-discussions/README.md) | Four issue bodies and all 16 returned comments copied into the archive |
+| [GitHub discussions](github-discussions/README.md) | Four issue bodies, 51 pull-request descriptions and all 32 returned discussion entries copied into the archive |
+| [Remote branch coverage](remote-branch-audit.json) | All 49 branch references checked; every non-main commit in these branch histories already has an archived patch |
 
 The machine-readable audit records retain source paths, identifiers, checks
 and exclusion reasons. Objects are deduplicated by sanitized content. The

@@ -59,7 +59,7 @@ Is SORT-BOUND-U PSPACE-complete under polynomial-time many-one reductions, or ca
 **investigated** · [Full research report](../../fronts/0024-sort-bound-u-pspace-complete.md)
 Intended test or falsifier: Exhibit either a polynomial-time many-one reduction from some PSPACE-complete problem to SORT-BOUND-U (proving PSPACE-hardness) or an unconditional proof that SORT-BOUND-U has structural properties incompatible with PSP…
 Proposed implication: PSPACE-completeness would mean P!=PSPACE iff SORT-BOUND-U not in P (linking to a major separation), while a proof of PSPACE-membership without completeness would sharpen the gap and clarify the role of antichain structu…
-Historical reported excerpt (unverified): **Finding (unconditional obstruction to PSPACE-completeness):**
+Historical reported excerpt (unverified): **Finding (unconditional obstruction to PSPACE-completeness):** `SORT-BOUND-U` is sparse (\[deduction\], `research-certificates-barriers.md` Claim B / `research-hardness-boundaries.md` §4) and in `PSPACE` (\[deduction\], Claim A via `APTIME=PSPACE`). For classes that have self-reducible complete sets a…
 Additional board mentions: 2 (use front lookup for exact links)
 Mixed-session reports: [5877b6da8f89](../../followup/mixed-reports/objects/5877b6da8f896707b050bee31995a48fc78a8fad4afe13a858f0cec0f858c4e8.txt)
 Source manifests: [soring-fronts_sort-bound-u-pspace-complete](../../workspaces/manifests/soring-fronts_sort-bound-u-pspace-complete.json)
@@ -71,7 +71,7 @@ Can Sergeev's entropy-balance/o(n) surplus observation be turned into a sound de
 **investigated** · [Full research report](../../fronts/0028-entropy-balance-deterministic-pruning.md)
 Intended test or falsifier: Show any proposed local entropy-balance potential is either unsound (prunes some optimal strategy) on a concrete family, or preserves an exponential class family equivalent to isomorphism classes.
 Proposed implication: A verified sound pruning rule would give a practical path toward better exact evaluators and clarify barrier structure.
-Historical reported excerpt (unverified): ### Verdict
+Historical reported excerpt (unverified): ### Verdict **No sound deterministic worst-case pruning rule based solely on a local entropy-balance potential is obvious, and there is a strong mathematical obstruction.** - **Against (b) (frontier cut):** Any potential invariant under isomorphism/Aut orbits preserves the 2^((1/4-o(1)) n log^2 n) …
 Additional board mentions: 1 (use front lookup for exact links)
 Source manifests: [soring-fronts_entropy-balance-deterministic-pruning](../../workspaces/manifests/soring-fronts_entropy-balance-deterministic-pruning.json)
 
@@ -224,7 +224,7 @@ For the sparse unary language SORT-BOUND-U in PSPACE (by ATM alternation), is th
 **investigated** · [Full research report](../../fronts/0135-sparse-pspace-ph-level.md)
 Intended test or falsifier: Construct a polynomial-time reduction from some QBF_k-complete language to SORT-BOUND-U for all fixed k, or prove SORT-BOUND-U in Sigma_k^P for some fixed k using its sparsity and the minimax game structure.
 Proposed implication: Pinning the PH level would clarify whether the alternating comparison game collapses below PSPACE or is a genuine sparse PSPACE instance, without relying on P/poly circuit lower bounds.
-Historical reported excerpt (unverified): **Mathematical finding (attempt to disprove PH-hardness):**
+Historical reported excerpt (unverified): **Mathematical finding (attempt to disprove PH-hardness):** **Claim attacked:** SORT-BOUND-U is PH-hard (reduces QBF_k to it for all fixed k). **Structural obstruction (deduction):** The comparison game is ∃ (sorter picks incomparable pair) vs ∀ (adversary answers consistently with some total order…
 Board: [2026-11-01 message](../../board/301/page-035.md?plain=1#L291)
 Source manifests: [soring-fronts_sparse-pspace-ph-level](../../workspaces/manifests/soring-fronts_sparse-pspace-ph-level.json)
 
@@ -344,7 +344,7 @@ Can SORT-BOUND-U be shown many-one PSPACE-hard by reducing from QBF/alternating 
 **investigated** · [Full research report](../../fronts/0244-antichain-game-pspace-completeness.md)
 Intended test or falsifier: Prove the adversary's global total-order consistency constraints create an insurmountable simulation gap that cannot be bridged for any polynomial-time reduction preserving yes-instances.
 Proposed implication: PSPACE-completeness would be a strong complexity classification (separating from P/NP under standard assumptions). Ruling it out would bound hardness.
-Historical reported excerpt (unverified): **Mathematical finding (obstruction):**
+Historical reported excerpt (unverified): **Mathematical finding (obstruction):** - **Direction matters.** Claim A shows the game simulates an ATM (membership `SORT-BOUND-U ∈ PSPACE`). The converse fails. The adversary is *restricted*, not free. - **Strategy-space restriction.** In the comparison game, adversary must answer consistently wi…
 Source manifests: [soring-fronts_antichain-game-pspace-completeness](../../workspaces/manifests/soring-fronts_antichain-game-pspace-completeness.json)
 
 ## sparse-manyone-pspace-hard-barrier
@@ -395,7 +395,7 @@ In algebraic decision/comparison models that capture transcript-only budgeted DF
 **investigated** · [Full research report](../../fronts/0312-budgeted-dfs-algebraic-decision-lower-bound.md)
 Intended test or falsifier: Give a uniform exact algorithm in that model family with 2^{o(n)} predicate evaluations for all sufficiently large n, or prove the model fails to capture a known exact method such as budgeted DFS/pruning variants releva…
 Proposed implication: A model-specific exponential predicate lower bound would sharpen understanding of why current exact evaluators are costly without claiming a separation from P/PSPACE; a subexponential exact simulation would directly imp…
-Historical reported excerpt (unverified): ## Conclusion (mathematical finding)
+Historical reported excerpt (unverified): ## Conclusion (mathematical finding) **Literal claim C is refuted for the stated ExtGt-inclusive model on its easiest infinite subclass**: `ExtGt(A_n,2^k)` decides all `k &lt;= ⌈log₂ n!⌉-1` in 1 evaluation (`n&gt;=3`), so not `2^{Ω(n)}` on infinitely many inputs. The meaningful residue is: *on informatio…
 Source manifests: [soring-fronts_budgeted-dfs-algebraic-decision-lower-bound](../../workspaces/manifests/soring-fronts_budgeted-dfs-algebraic-decision-lower-bound.json)
 
 ## threshold-pruning-state-count
@@ -418,7 +418,7 @@ Can S(n) be computed in O(n log n) space (or less) uniformly in n for the unary 
 **investigated** · [Full research report](../../fronts/0336-unary-evaluator-space-nlogn.md)
 Intended test or falsifier: A lower bound showing any deterministic uniform evaluator of S(n) requires Omega(n log^2 n) space, or a construction achieving O(n log n) space with correctness proof.
 Proposed implication: Improves the space complexity of exact S(n) evaluation below the established O(n log^2 n) bound, directly advancing the active frontier.
-Historical reported excerpt (unverified): ## Finding (no repository change)
+Historical reported excerpt (unverified): ## Finding (no repository change) **Claim attacked:** *S(n) can be computed in O(n log n) space uniformly, beating the established O(n log² n) work-tape bound.* **Result: not established; the natural reduction is obstructed, and no counterexample/lower bound is proved either.**
 Assistant reports: [ses_e473cf102ffeVOhVB6azI3G2V6](../../assistant-reports/sessions/ses_e473cf102ffeVOhVB6azI3G2V6.md) · [ses_e473b3b1bffe9X3FYoxoVS9JpW](../../assistant-reports/sessions/ses_e473b3b1bffe9X3FYoxoVS9JpW.md)
 Original task commissions: [3f65d416b003](../../followup/task-commissions/objects/3f65d416b00366d8edac642616d93e9f7d088a219dbb71888148d2f3e8279eb7.txt) · [d154dc457eec](../../followup/task-commissions/objects/d154dc457eec566dac8c3738dbe787a2f60e2f89d063dd464eae5bf8615d2c6c.txt)
 Source manifests: [soring-fronts_unary-evaluator-space-nlogn](../../workspaces/manifests/soring-fronts_unary-evaluator-space-nlogn.json)
@@ -549,7 +549,7 @@ Can exact evaluation of S(n) or decision of SORT-BOUND-U be performed in o(n log
 **investigated** · [Full research report](../../fronts/0524-catalytic-reversible-exact-evaluation-space.md)
 Intended test or falsifier: An explicit uniform algorithm using o(n log^2 n) ordinary bits together with polynomial catalytic or reversible workspace and sub-2^{O(n^2)} time, or a proof that catalytic encodings cannot beat the state-storing barrie…
 Proposed implication: A positive result would improve the unary space upper bound below n log^2 n; a negative result would extend the winning-frontier barrier from path- and state-storing paradigms to catalytic computation.
-Historical reported excerpt (unverified): ## Outcome
+Historical reported excerpt (unverified): ## Outcome No substantive repository or Lean changes were made. I wrote a paper-level `exec-report.md` in the isolated worktree `/home/lubko/soring301-exec-catalytic-reversible-space-20261117` and attempted to report on board #301. ### Mathematical finding
 Board: [2026-11-17 message](../../board/301/page-015.md?plain=1#L232) · [2026-11-17 message](../../board/301/page-015.md?plain=1#L256)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e147963e3ffec31P56HpreG0FD](../../assistant-reports/sessions/ses_e147963e3ffec31P56HpreG0FD.md)
@@ -563,7 +563,7 @@ Can a randomized Las Vegas algorithm compute S(n) exactly on input 1^n in expect
 **investigated** · [Full research report](../../fronts/0529-randomized-exact-evaluator-game-tree.md)
 Intended test or falsifier: Establish a Yao-style average-case lower bound: exhibit a distribution on adversary states/paths on which every correct randomized evaluator explores at least 2^{Omega(n log^2 n)} nodes in expectation or retains Omega(n…
 Proposed implication: A positive result improves the uniform upper bound for exact unary S and places evaluation in a randomized subclass; a negative result extends the winning-frontier and space barriers from deterministic to randomized alg…
-Historical reported excerpt (unverified): ## Conclusion for this resume cycle
+Historical reported excerpt (unverified): ## Conclusion for this resume cycle The interrupted turn's work **has already completed**: the attack was performed, the finding was written, and it was posted exactly once. There is no unfinished duplicate action. The only remaining lifecycle item is external/keeper-managed (agent exit → ledger re…
 Board: [2026-11-17 message](../../board/301/page-015.md?plain=1#L563) · [2026-11-17 message](../../board/301/page-015.md?plain=1#L608) · [2026-11-18 message](../../board/301/page-015.md?plain=1#L664)
 Assistant reports: [ses_e141f9304ffeuuVEQzB000bVDa](../../assistant-reports/sessions/ses_e141f9304ffeuuVEQzB000bVDa.md)
 Original task commissions: [b09078a5ab86](../../followup/task-commissions/objects/b09078a5ab86b8f1b87f7c7f2af693bba2d36a5fd5a87c2d9a5dbc44794b2ed8.txt)
@@ -592,7 +592,7 @@ All-n question: for every poset state P reachable on some height-S(n) optimal co
 **investigated** · [Full research report](../../fronts/0547-ecovers-reachable-summary-evaluator.md)
 Intended test or falsifier: Exhibit an n and two states P,Q reachable on height-S(n) optimal plays with e(P)=e(Q) and covers(P)=covers(Q) but F(P) not equal to F(Q); or show covers(P) is unbounded on reachable states so no fixed-size (e,covers) ke…
 Proposed implication: If the pair is determining and efficiently computable, an (e,covers)-keyed memoized exact evaluator would use O(n log n)-bit state keys and could evade the isomorphism-identity space lower bound, giving a smaller-space …
-Historical reported excerpt (unverified): ## Finding: Conjecture K is FALSE (refuted at n=7)
+Historical reported excerpt (unverified): ## Finding: Conjecture K is FALSE (refuted at n=7) I attacked the all‑n claim that for every poset state `P` on some height‑`S(n)` optimal play from the antichain (`P ∈ R_n`), the exact continuation cost `F(P)` is determined by `(e(P), covers(P))`. **Explicit falsifying witness** (canonical success…
 Board: [2026-11-19 message](../../board/301/page-013.md?plain=1#L897) · [2026-11-19 message](../../board/301/page-013.md?plain=1#L1031) · [2026-11-19 message](../../board/301/page-013.md?plain=1#L1148)
 Additional board mentions: 4 (use front lookup for exact links)
 Assistant reports: [ses_e0d52a95fffew5k5OD24Ft2lWd](../../assistant-reports/sessions/ses_e0d52a95fffew5k5OD24Ft2lWd.md)
@@ -634,7 +634,7 @@ For the accepting family A={1^n#1^{S(n)}}, does every uniform deterministic mach
 **investigated** · [Full research report](../../fronts/0631-space-separation-omega-sn-on-a-alln.md)
 Intended test or falsifier: Exhibit a uniform deterministic machine deciding SORT-BOUND-U using o(S(n)) work-tape bits on every input in A, with correctness and space accounting.
 Proposed implication: If true, game depth itself is a space lower bound for unary threshold decision; if false, the transcript path can be compressed below the game depth.
-Historical reported excerpt (unverified): ## Result of the front `space-separation-omega-sn-on-a-alln`
+Historical reported excerpt (unverified): ## Result of the front `space-separation-omega-sn-on-a-alln` **Open obstruction, not a proof.** No falsifier was exhibited: no uniform deterministic machine deciding `SORT-BOUND-U` with `o(S(n))` work-tape bits on `A = {1^n#1^{S(n)}}` was found. Likewise, no general `Ω(S(n))` space lower bound for …
 Board: [2026-11-21 message](../../board/301/page-007.md?plain=1#L319)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e03bf5783ffexLX9DkGOQF81sM](../../assistant-reports/sessions/ses_e03bf5783ffexLX9DkGOQF81sM.md)
@@ -759,7 +759,7 @@ For every large n, consider the signed outcome-probability profiles sigma_e = lo
 **investigated** · [Full research report](../../fronts/0710-leaf-deviation-profile-space-alln.md)
 Intended test or falsifier: Exhibit infinitely many n and a height-S(n) tree whose n! leaves realize only poly(n) distinct deviation profiles, which would collapse the proposed profile-enumeration barrier to a polynomial one.
 Proposed implication: A super-polynomial distinct-profile count would complement the poset winning-frontier barrier with a distinct, probability-based state-space obstruction to exact evaluators; a polynomial count would rule out that route …
-Historical reported excerpt (unverified): ### Verdict
+Historical reported excerpt (unverified): ### Verdict Neither horn settled. The honest contribution is the n=6 witness (min = 6), the collapse/add characterization, the barrier-independence observation, and the precise S(n)-knowledge obstruction. Model fidelity maintained: soundness ≠ completeness; general-poset hardness does not transfer;…
 Board: [2026-11-23 review](../../board/301/page-002.md?plain=1#L377)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_df8d5753bffeSRsxQcink7qduQ](../../assistant-reports/sessions/ses_df8d5753bffeSRsxQcink7qduQ.md)

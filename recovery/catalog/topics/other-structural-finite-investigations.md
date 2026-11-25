@@ -22,7 +22,7 @@ Does the optimal increment d(2^k) = S(2^k) - S(2^k - 1) equal ceil(log2(2^k)) = 
 **investigated** · [Full research report](../../fronts/0015-power-of-two-increment-exactness.md)
 Intended test or falsifier: An all-n proof that d(2^k) = k via a structural minimax argument at antichain-block ends, or an explicit k (first candidate n = 32, since exact values are known only through n = 22) for which a poset-extension or advers…
 Proposed implication: At every miss the cumulative two-phase deficit tau(n) grows by a full block-end increment, so a proof that d(2^k) &lt; k for some or all large k pins the O(n) miss-mass constant and refines whether the two-phase lemma's Om…
-Historical reported excerpt (unverified): ## Finding: unresolved
+Historical reported excerpt (unverified): ## Finding: unresolved I found no all-\(n\) proof that \(d(2^k)=k\), and no power of two where the two-phase bound is beaten. The first undecided candidate remains \(n=32\): Stober–Weiß establish \(S(16)=46\), \(S(17)=50\), and \(S(18)=54\); with prior results, exact values are known through \(n=22…
 Additional board mentions: 1 (use front lookup for exact links)
 Source manifests: [soring-fronts_power-of-two-increment-exactness](../../workspaces/manifests/soring-fronts_power-of-two-increment-exactness.json)
 
@@ -88,7 +88,7 @@ For some fixed constant c &gt;= 2, is SORT-BOUND-U not decidable in deterministi
 **investigated** · [Full research report](../../fronts/0034-fixed-poly-time-lower-bound.md)
 Intended test or falsifier: Prove SORT-BOUND-U in DTIME(N^c) for some fixed c&gt;=2 via a uniform algorithm, or derive an unconditional Omega(N^c) time lower bound for all c from the model without assuming P!=PSPACE.
 Proposed implication: Establishing a fixed-polynomial time separation (even if not super-polynomial) would be a nontrivial complexity consequence and is not obviously blocked by PSPACE membership or P/poly circuit triviality.
-Historical reported excerpt (unverified): ### Conclusion (honest limits)
+Historical reported excerpt (unverified): ### Conclusion (honest limits) - **No disproof found** for either side. - **Main obstruction to upper bound:** no all-$n$ exact polynomial method known; exponential DFS is the best uniform bound recorded. Theorem 6.6 shows recurrence arguments are insufficient.
 Additional board mentions: 2 (use front lookup for exact links)
 Source manifests: [soring-fronts_fixed-poly-time-lower-bound](../../workspaces/manifests/soring-fronts_fixed-poly-time-lower-bound.json)
 
@@ -111,7 +111,7 @@ Is d(n)=S(n)-S(n-1) non-decreasing in n, and is d(2^k)=k (insertion lower bound 
 **investigated** · [Full research report](../../fronts/0043-increment-monotonicity-dyadic.md)
 Intended test or falsifier: Find any n&gt;=3 with d(n) &lt; d(n-1), or prove monotonicity fails for all large n, or show d(2^k) &gt; k for some k via a better insertion lower bound.
 Proposed implication: Monotonicity of the increment would give strong structural constraints on the sorting number function and might imply new bounds or help relate S(n) to the information bound across scales.
-Historical reported excerpt (unverified): ### Conclusion (tried to disprove)
+Historical reported excerpt (unverified): ### Conclusion (tried to disprove) - **Cannot disprove monotonicity of $d(n)$** with known exact values (all monotonic to 22). No published counterexample; constructing one would require unknown $S(23+)$. - **Cannot disprove $d(2^k)=k$** with known values; the info-bound increment forces $k$ and kn…
 Additional board mentions: 1 (use front lookup for exact links)
 Source manifests: [soring-fronts_increment-monotonicity-dyadic](../../workspaces/manifests/soring-fronts_increment-monotonicity-dyadic.json)
 
@@ -303,7 +303,7 @@ Is there an infinite family of n such that every optimal strategy for sorting n 
 **investigated** · [Full research report](../../fronts/0107-first-comparison-forcing.md)
 Intended test or falsifier: Prove that for infinitely many n there are at least two non-isomorphic optimal first moves, or prove for all sufficiently large n the first move is unique up to relabeling.
 Proposed implication: Strong symmetry/uniqueness of optimal minimax strategies would constrain the state space structure; lack of uniqueness would mean the strategy space remains rich and harder to canonically compress.
-Historical reported excerpt (unverified): #### Conclusion
+Historical reported excerpt (unverified): #### Conclusion For all n&gt;=2 the first move is unique up to relabeling (all pairs isomorphic). The "always free" in the sense of choosing different move-types does not occur; freedom is only labeling. Clause (b) of the falsifier holds for all n&gt;=2. No infinite family with non-isomorphic optimal fir…
 Source manifests: [soring-fronts_first-comparison-forcing](../../workspaces/manifests/soring-fronts_first-comparison-forcing.json)
 
 ## s-non-decreasing-jump
@@ -432,7 +432,7 @@ Is there an infinite family of $n$ and optimal strategies for sorting $n$ elemen
 **investigated** · [Full research report](../../fronts/0141-history-incompressibility-kolmogorov.md)
 Intended test or falsifier: Give a uniform, polynomial-time constructible compressed representation (a grammar/DAG with poly$(n)$ size) that, for all $n$, describes some comparison strategy achieving $S(n)$ and is verifiably correct by a poly$(n)$…
 Proposed implication: If all optimal strategies are incompressible, then polynomial-size certificates cannot exist and SORT-BOUND-U ∉ NP; this directly attacks certificate completeness (separating from soundness) without assuming NP-hardness…
-Historical reported excerpt (unverified): **Finding (disproof of the incompressibility claim):**
+Historical reported excerpt (unverified): **Finding (disproof of the incompressibility claim):** The minimax recurrence $F(\emptyset)=S(n)$ with any fixed tie-break rule (e.g. lexicographic on pairs) defines, for every $n$, a deterministic adaptive strategy $T_n^*$ that is optimal ($\text{height}(T_n^*)=S(n)$). The description "$T_n^*$ is …
 Source manifests: [soring-fronts_history-incompressibility-kolmogorov](../../workspaces/manifests/soring-fronts_history-incompressibility-kolmogorov.json)
 
 ## winning-frontier-compression-bound
@@ -550,7 +550,7 @@ For Fredman's lower bound S(n) &gt;= log2 n! + n - log2 n - O(1), does there exi
 **investigated** · [Full research report](../../fronts/0190-fredman-eventual-delta-obstruction.md)
 Intended test or falsifier: Either extract effective constants from a primary source derivation to get an explicit n0 with a paper proof that forces Delta(n)&gt;=1 for all n&gt;=n0, or construct for arbitrarily large n an adaptive comparison tree achiev…
 Proposed implication: If eventually strict inequality holds for all large n, the set {n : Delta(n)=0} is finite and any near-information certificate need only cover finitely many tight cases; if cofinite equality is possible that would revea…
-Historical reported excerpt (unverified): **Finding (mathematical):**
+Historical reported excerpt (unverified): **Finding (mathematical):** - Known exact values: $\Delta(n)=S(n)-\lceil\log_2 n!\rceil = 0$ at $n\in\{0,1,\ldots,11,20,21\}$ and $\ge1$ elsewhere for known $n\le22$ (tight cases recur at 20,21). The falsifier's "for arbitrarily large n" tight tree is not ruled out by small-n data; indeed tightness…
 Board: [2026-11-02 message](../../board/301/page-032.md?plain=1#L323) · [2026-11-02 message](../../board/301/page-032.md?plain=1#L331) · [2026-11-02 message](../../board/301/page-032.md?plain=1#L339) · [2026-11-02 message](../../board/301/page-032.md?plain=1#L347) · [2026-11-02 message](../../board/301/page-032.md?plain=1#L355)
 Source manifests: [soring-fronts_fredman-eventual-delta-obstruction](../../workspaces/manifests/soring-fronts_fredman-eventual-delta-obstruction.json)
 
@@ -691,7 +691,7 @@ Prove or disprove for all sufficiently large n that the equality S(n)=ceil(log2(
 **investigated** · [Full research report](../../fronts/0252-minimax-equals-info-only-large-n.md)
 Intended test or falsifier: Construct an infinite family where S(n)=ceil(log2(n!)) but for every minimax-optimal strategy at some level the split gives imbalance forcing S(n) &gt; ceil(log2(n!)) in a way not visible from total e alone, or prove recur…
 Proposed implication: Clarifies when equality cases are 'fragile' to strategy choices versus strategy-independent; bears on whether the exact-reset/divisibility obstructions can only hit in tight information-bound regimes.
-Historical reported excerpt (unverified): ## Result summary
+Historical reported excerpt (unverified): ## Result summary **The front's biconditional is refuted under both readings; the salvageable all-n content is a new "one-bit slack rule".** **Theorem (paper proof, all n, any tree).** If a depth-d reachable state P in a correct height-h tree is locally loose (m(P) &gt; ⌈log₂ e(P)⌉), then e(P) ≤ 2^(h−…
 Board: [2026-11-03 message](../../board/301/page-029.md?plain=1#L175) · [2026-11-03 message](../../board/301/page-029.md?plain=1#L183)
 Source manifests: [soring-fronts_minimax-equals-info-only-large-n](../../workspaces/manifests/soring-fronts_minimax-equals-info-only-large-n.json)
 
@@ -788,7 +788,7 @@ For the budgeted transcript DFS decision procedure for SORT-BOUND-U, is the Omeg
 **investigated** · [Full research report](../../fronts/0274-path-stack-logn-per-level-alln.md)
 Intended test or falsifier: Prove a lower bound showing that some reachable path configuration forces storing &gt;= c log n bits per level for arbitrarily large n and some budget, or exhibit a concrete re-encoding that achieves O(N) total bits for al…
 Proposed implication: A verified all-n forced lower bound would rule out linear space for the dominant algorithm family and show PSPACE-space tightness within this class, while a compression would tighten the known uniform space bound and ch…
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **Mathematical finding (information-theoretic):** For any correct implementation of this fixed-enumeration transcript DFS that must backtrack and explore all pairs in worst case, the cursor/index over $\binom{n}{2}=\Omega(n^2)$ pairs requires $\ge \lceil \log_2(\binom{n}{2}+1)\rceil = \O…
 Additional board mentions: 3 (use front lookup for exact links)
 Mixed-session reports: [e70582fbe904](../../followup/mixed-reports/objects/e70582fbe904334939e0e6f13c1298e6b6594eca5a3366efd5a8cab628e9326d.txt)
 Source manifests: [soring-fronts_path-stack-logn-per-level-alln](../../workspaces/manifests/soring-fronts_path-stack-logn-per-level-alln.json)
@@ -881,7 +881,7 @@ For all n&gt;=2 and k&gt;=1, can SORT-BOUND-U membership 1^n#1^k be decided by a
 **investigated** · [Full research report](../../fronts/0309-unary-threshold-downward-selfreduction.md)
 Intended test or falsifier: Exhibit an infinite family (n_t,k_t) where any correct root-decomposition reduction requires either some query with m_t &gt;= n_t, superpolynomially many m_t&lt;n_t queries, or an uncheckable optimal-branch selection not capt…
 Proposed implication: A uniform downward self-reduction would constrain the structure of exact S(n) evaluation and could enable recursive compression or interact with sparsity/complexity consequences; a robust obstruction would separate S(n)…
-Historical reported excerpt (unverified): ## Mathematical finding (concise)
+Historical reported excerpt (unverified): ## Mathematical finding (concise) The proposed front’s mechanism is **disproved**: a locally checkable antichain-root comparison decomposition cannot be a deterministic polynomial-time oracle
 Source manifests: [soring-fronts_unary-threshold-downward-selfreduction](../../workspaces/manifests/soring-fronts_unary-threshold-downward-selfreduction.json)
 
 ## poset-dp-state-lower-bound-2pow-n2
@@ -951,7 +951,7 @@ For every r &gt;= 1, is the fence poset P_{r+1} the unique core poset (no elemen
 **investigated** · [Full research report](../../fronts/0328-fence-core-uniqueness.md)
 Intended test or falsifier: Exhibit a core poset P with m(P)=r and e(P)=F_{r+2} that is not isomorphic to the fence P_{r+1} for some r, starting with r=6.
 Proposed implication: Uniqueness would make the fence the canonical extremal family for the extension threshold T(r)=F_{r+3}-1, transferring fence-specific certificate and evaluator lower bounds to every threshold extremal; it would be a str…
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding The all-`r` fence-core uniqueness claim is **false**, and it already fails at **`r = 3`**, not at `r = 6`. **Counterexample (`paper proof`).** Let
 Board: [2026-11-07 message](../../board/301/page-023.md?plain=1#L645)
 Assistant reports: [ses_e47b085ddffes2kIih32s4g3fc](../../assistant-reports/sessions/ses_e47b085ddffes2kIih32s4g3fc.md)
 Original task commissions: [02d97709f032](../../followup/task-commissions/objects/02d97709f0321c5a5aff25730b4b94e85c06d8b4faffa838fb27547070c7ba95.txt)
@@ -1029,7 +1029,7 @@ Can S(n) be computed uniformly in polynomial time with additive error O(1), or e
 **investigated** · [Full research report](../../fronts/0352-additive-approximation-frontier.md)
 Intended test or falsifier: Construct a uniform polynomial-time algorithm with additive error O(1), or prove an infinite-family lower bound showing that no uniform polynomial-time approximation can beat the Sergeev excess.
 Proposed implication: An O(1)-error algorithm would give the first polynomial-time near-exact evaluator without deciding exact S(n); a matching lower bound would show the Sergeev excess is algorithmically necessary and separate exact from ap…
-Historical reported excerpt (unverified): ## Result already recorded
+Historical reported excerpt (unverified): ## Result already recorded The finding posted to #301 stands: the O(1)-approximation front reduces the positive direction to the open bounded-excess question (output `I(n)=⌈log₂n!⌉`), no published lower bound through `n≤47` even reaches excess 2, and a sharpened diagonal shows bounded excess/agreem…
 Board: [2026-11-08 message](../../board/301/page-022.md?plain=1#L294)
 Assistant reports: [ses_e45ac9e30ffe34ZWnNDyxgazLZ](../../assistant-reports/sessions/ses_e45ac9e30ffe34ZWnNDyxgazLZ.md)
 Original task commissions: [ddab54b77c4b](../../followup/task-commissions/objects/ddab54b77c4baf89f08af1c393c7b92743681ca24760e12220b7eb54d8b3cb67.txt)
@@ -1190,7 +1190,7 @@ For every n, is there an optimal height-S(n) sorting tree whose first floor(n/2)
 **investigated** · [Full research report](../../fronts/0382-optimal-matching-prefix-normal-form.md)
 Intended test or falsifier: An explicit n with S(n) &lt; floor(n/2) + F(M_n), equivalently a proof that every optimal-height tree for that n uses a comparison sharing a key among its first floor(n/2) comparisons.
 Proposed implication: A positive answer gives an exact structural reduction of the minimax game to the single matching-poset family and a new normal form for exact evaluation; a counterexample shows that sharing comparisons in the opening ph…
-Historical reported excerpt (unverified): **Conclusion**
+Historical reported excerpt (unverified): **Conclusion** All intended work from the interrupted turn is already complete. The only external side effect was the single board #301 comment, now independently confirmed present. I made no additional posts or changes and do not need to rerun the research or post again.
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e43ddf66bffeo6Ikotht3AHLsv](../../assistant-reports/sessions/ses_e43ddf66bffeo6Ikotht3AHLsv.md)
 Original task commissions: [ea013c71a21c](../../followup/task-commissions/objects/ea013c71a21c31aa22bf45e6b656b6e366a11b76201a867493532cd76e7edcbf.txt)
@@ -1297,7 +1297,7 @@ For every n, does the faithful state-expanded comparison-tree LP at the near-opt
 **investigated** · [Full research report](../../fronts/0412-near-optimal-farkas-succinctness.md)
 Intended test or falsifier: Construct an infinite family of n whose near-optimal LP has only super-polynomial-support Farkas certificates, or give a polynomial-support certificate for every n at k=S(n)-1.
 Proposed implication: A positive answer would supply a coNP-style no-certificate exactly in the hard window, since the known matching-family support barrier applies only at k approximately n/2.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding The front’s positive hypothesis is **false**, and the obstruction is stronger than “only at \(k\approx n/2\)”. From #301’s dual propagation lemma, for **every** \(0\le t\le k\), every Farkas certificate of the faithful state-expanded budget-\(k\) LP has support at least
 Board: [2026-11-09 message](../../board/301/page-020.md?plain=1#L687) · [2026-11-09 message](../../board/301/page-020.md?plain=1#L709)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e42539429ffewghrMxLNNfEBhj](../../assistant-reports/sessions/ses_e42539429ffewghrMxLNNfEBhj.md)
@@ -1324,7 +1324,7 @@ Is S(n) nondecreasing in n for all n, i.e. S(n+1) &gt;= S(n), and can an all-n p
 **investigated** · [Full research report](../../fronts/0416-sorting-number-monotonicity-all-n.md)
 Intended test or falsifier: Exhibit an explicit n where an optimal (n+1)-element sorting tree has strictly smaller worst-case depth than S(n), or prove monotonicity for all n.
 Proposed implication: Monotonicity would simplify threshold languages and recurrence bounds; a counterexample would break standard S(n) interpolation assumptions.
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **Claim:** Monotonicity holds: `S(n+1) ≥ S(n)` for all `n ≥ 0`. (Equivalent to `S(n)` nondecreasing.) **Proof (deduction, paper argument):** Let `T` be an optimal decision tree sorting `n+1` distinct keys, with worst-case depth `S(n+1)`. Given `n` keys `x_1,…,x_n`, append a sentinel key …
 Assistant reports: [ses_e42136511ffeL2TWtlYeyq2RhP](../../assistant-reports/sessions/ses_e42136511ffeL2TWtlYeyq2RhP.md)
 Original task commissions: [4df4f0903f48](../../followup/task-commissions/objects/4df4f0903f48459d326afb749d06d45d56e14bffdf11cccf96ff4dad32c60e8f.txt)
 Source manifests: [soring-fronts_sorting-number-monotonicity-all-n](../../workspaces/manifests/soring-fronts_sorting-number-monotonicity-all-n.json)
@@ -1336,7 +1336,7 @@ For the tree-selection LP (choosing an optimal decision tree among candidate com
 **investigated** · [Full research report](../../fronts/0419-succinct-farkas-tree-selection-lp.md)
 Intended test or falsifier: Find a polynomial-size dual certificate for a non-sortable instance of the tree-selection LP, or prove that every such certificate has exponential support by a matching-count obstruction.
 Proposed implication: If polynomial, LP-based exact S(n) evaluation gains a succinct certificate; if exponential, the barrier extends from flow encoding to tree-selection, ruling out LP-certificate routes entirely.
-Historical reported excerpt (unverified): ### Conclusion (paper-level, not proof)
+Historical reported excerpt (unverified): ### Conclusion (paper-level, not proof) **No theorem, no counterexample, no repository change.** The precise obstruction is the missing bridge: one must first fix the tree-selection LP's constraint matrix and show whether its Farkas dual has a polynomial-size extreme ray/vertex (soundness) and whet…
 Assistant reports: [ses_e41f6fbaaffekdx4YeYPGMzNNc](../../assistant-reports/sessions/ses_e41f6fbaaffekdx4YeYPGMzNNc.md)
 Original task commissions: [7e1bb1ea0517](../../followup/task-commissions/objects/7e1bb1ea05174ce42e0c530e9fce4c7a156cb38d97e02a4ef95ab8574126df07.txt)
 Source manifests: [soring-fronts_succinct-farkas-tree-selection-lp](../../workspaces/manifests/soring-fronts_succinct-farkas-tree-selection-lp.json)
@@ -1348,7 +1348,7 @@ Does the adaptive comparison-sorting number S(n) equal the nonadaptive (sorting-
 **investigated** · [Full research report](../../fronts/0421-adaptive-vs-nonadaptive-sorting-number.md)
 Intended test or falsifier: A single n where the optimal nonadaptive network depth exceeds the adaptive S(n) by more than a fixed constant, or a proof that the gap is O(1) for all n.
 Proposed implication: An unbounded gap would separate adaptive decision trees from nonadaptive networks as complexity measures for S(n); O(1) would collapse the two models for exact evaluation.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **The front as written is a model mismatch; under its literal depth reading the additive-O(1) claim is false, with the gap diverging in the opposite direction.** - `S(n)` is a **sequential** worst-case comparison count: `S(n) ≥ log₂(n!) = Ω(n log n)`.
 Board: [2026-11-09 message](../../board/301/page-020.md?plain=1#L829) · [2026-11-09 message](../../board/301/page-020.md?plain=1#L1194)
 Assistant reports: [ses_e414d0da1ffegthwUgxq3K5wVx](../../assistant-reports/sessions/ses_e414d0da1ffegthwUgxq3K5wVx.md)
 Original task commissions: [8f5e60ccd5b3](../../followup/task-commissions/objects/8f5e60ccd5b38db1d287edb06212f188f3b5ea53ed50e98dc903979577ac0217.txt)
@@ -1406,7 +1406,7 @@ For every n and every n-element poset P with e(P) at least n!/2, is F(P)/ceil(lo
 **investigated** · [Full research report](../../fronts/0431-high-extension-relative-efficiency.md)
 Intended test or falsifier: Give an explicit n and n-element poset P with e(P)&gt;=n!/2 and F(P)/ceil(log2 e(P)) &lt; S(n)/ceil(log2 n!), with exact minimax values or rigorous upper and lower bounds.
 Proposed implication: If true, the linear relative excess of the fence family is confined to low-extension posets and no ratio-based general-poset lower bound can transfer to the antichain; if false, a near-antichain poset is more informatio…
-Historical reported excerpt (unverified): ## Outcome
+Historical reported excerpt (unverified): ## Outcome **Recovery check.** On `billy-dev`, worktree clean at `6a96398`. The front `high-extension-relative-efficiency` was `running` with no finding and no board post. The interrupted turn had left only `/tmp/opencode/minratio.py` (no output, no post). I confirmed that, did the research, and po…
 Board: [2026-11-09 message](../../board/301/page-019.md?plain=1#L55) · [2026-11-09 review](../../board/301/page-019.md?plain=1#L131)
 Assistant reports: [ses_e40258cf8ffeG5RuKzhyjTGLNj](../../assistant-reports/sessions/ses_e40258cf8ffeG5RuKzhyjTGLNj.md)
 Original task commissions: [f03b22552955](../../followup/task-commissions/objects/f03b22552955495398bd29f751ae007715387a131fc5d4feb5fe0f75d0aa96c5.txt)
@@ -1420,7 +1420,7 @@ For every n with S(n) &gt; ceil(log2 n!) and every n-element poset P with e(P) &
 **investigated** · [Full research report](../../fronts/0432-one-third-extension-relative-efficiency.md)
 Intended test or falsifier: Exhibit an explicit n with S(n) &gt; ceil(log2 n!) and an n-element poset P with e(P) &gt;= n!/3 whose exact or rigorously bounded relative overhead F(P)/ceil(log2 e(P)) is strictly below S(n)/ceil(log2 n!); the smallest cand…
 Proposed implication: The k=2 case is the newest board theorem; a k=3 counterexample would give the first near-antichain poset that is more information-efficient than the antichain and a new benchmark for exact sorting, while a proof extends…
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding I attacked the k=3 candidate `V_n = A_{n-3} ⊔ V_3` and reduced the first possible falsification (`n=12`) to a single exact value. **Exact reduction (paper proof + standard recurrence).** Since `T_n = C_3 ⊔ A_{n-3}` is obtained from `V_n` by adding the relation `b&lt;c`, we have `F(T_n) ≤ F(…
 Board: [2026-11-09 message](../../board/301/page-019.md?plain=1#L184) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L583) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L615)
 Assistant reports: [ses_e3ffdcaa2ffetjs8wb6Ixq3g7v](../../assistant-reports/sessions/ses_e3ffdcaa2ffetjs8wb6Ixq3g7v.md)
 Original task commissions: [01ad6e7361a6](../../followup/task-commissions/objects/01ad6e7361a6b0ff4dc3994de19ce1b40dbc899245c9ab1d7b7e625cc8847a19.txt)
@@ -1448,7 +1448,7 @@ Does every finite poset of height at most three satisfy the Gold Partition inequ
 **investigated** · [Full research report](../../fronts/0435-height-three-gold-partition-threshold.md)
 Intended test or falsifier: Exhibit an explicit height-three poset with e(P) &lt; F_{m(P)+2}, certified by exact integer linear-extension counting and exact minimax; the reported GPC census through fourteen elements forces any such counterexample to …
 Proposed implication: A positive all-n theorem extends the Fibonacci threshold to the first unbounded-width, unbounded-dimension height class above height two and tests whether extension-count pruning is height-limited; a counterexample loca…
-Historical reported excerpt (unverified): **Mathematical finding (posted to #301).**
+Historical reported excerpt (unverified): **Mathematical finding (posted to #301).** Let `P` have height exactly three, with height levels `A,B,C` of sizes `a,b,c`. Every concatenation of level orders is a linear extension, so \\[
 Board: [2026-11-09 message](../../board/301/page-019.md?plain=1#L362) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L473)
 Assistant reports: [ses_e3fd85840ffe7k1WHZ5jGcG7x8](../../assistant-reports/sessions/ses_e3fd85840ffe7k1WHZ5jGcG7x8.md)
 Original task commissions: [1f1a7941e8d1](../../followup/task-commissions/objects/1f1a7941e8d1cba658d388fb768990f7843f30a7eba0d47c86732e6a72a0b8f7.txt)
@@ -1476,7 +1476,7 @@ Does every finite n-element poset P satisfy e(P) * prod_v (1+d_v) &gt;= n!, wher
 **investigated** · [Full research report](../../fronts/0441-degree-product-extension-inequality.md)
 Intended test or falsifier: Exhibit an n-element poset P with e(P) * prod_v (1+d_v) &lt; n!, verified by exact integer arithmetic for e(P) and the outdegrees d_v.
 Proposed implication: If true, the polynomial-time degree product gives a sound extension lower bound that can replace exact #P extension counting in minimax pruning; if false, it identifies a sharp limit of degree-only bounds.
-Historical reported excerpt (unverified): **Conclusion**
+Historical reported excerpt (unverified): **Conclusion** The previous turn finished the mathematical work and the board post. There is no unfinished action to continue, and I made no new post, commit, PR, or ledger edit. The only item worth noting for review is the expected pending ledger transition from `running` after agent termination.
 Board: [2026-11-09 message](../../board/301/page-019.md?plain=1#L673) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L708) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L716) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L756)
 Assistant reports: [ses_e3f761871ffeMZ8iMUbrzOjaNz](../../assistant-reports/sessions/ses_e3f761871ffeMZ8iMUbrzOjaNz.md)
 Original task commissions: [2ad07c4da440](../../followup/task-commissions/objects/2ad07c4da440955dd4b0040b91021da0b4508f116ac8f68068cdddf8093f45b8.txt)
@@ -1543,7 +1543,7 @@ For every n and every height-at-most-two n-element poset P, does the stable full
 **investigated** · [Full research report](../../fronts/0461-height-two-full2wl-child-completeness.md)
 Intended test or falsifier: Exhibit a height-two poset with two incomparable pairs of identical stable full/paired 2-WL colour but non-isomorphic unordered child-type pairs, with the colour refinement and both child canonical forms computed explic…
 Proposed implication: A positive all-n theorem would explain the exhaustive height-two stability through n=11 and would give a sound move quotient for height-two minimax states, including the one-comparison state Q_n whose exact value is S(n…
-Historical reported excerpt (unverified): ### Counterexample
+Historical reported excerpt (unverified): ### Counterexample Let \(G=\mathbb Z_2\times\mathbb Z_8\) and \\[
 Board: [2026-11-09 message](../../board/301/page-018.md?plain=1#L636) · [2026-11-09 message](../../board/301/page-018.md?plain=1#L742)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e3e35de2effeH4ZIi1RDrAIid7](../../assistant-reports/sessions/ses_e3e35de2effeH4ZIi1RDrAIid7.md)
@@ -1557,7 +1557,7 @@ For all finite posets A and B on disjoint ground sets, is F(A disjoint-union B) 
 **investigated** · [Full research report](../../fronts/0465-disjoint-union-minimax-superadditivity.md)
 Intended test or falsifier: Exhibit explicit finite posets A and B with F(A disjoint-union B) &lt; F(A)+F(B), with both sides obtained from the exact minimax recurrence rather than from an information bound or an assumed additivity formula.
 Proposed implication: An all-n superadditivity theorem would give a sound decomposition lower bound for reachable disjoint-union states; a counterexample would show exactly how cross-component comparisons can destroy direct-sum intuition and…
-Historical reported excerpt (unverified): ## Result recorded
+Historical reported excerpt (unverified): ## Result recorded The front is **true**: for all finite posets \(A,B\) on disjoint ground sets, \\[
 Board: [2026-11-09 message](../../board/301/page-018.md?plain=1#L895) · [2026-11-09 message](../../board/301/page-018.md?plain=1#L913) · [2026-11-09 message](../../board/301/page-018.md?plain=1#L940)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e3dea7d4dffe4c5Hfrx9lWBhZg](../../assistant-reports/sessions/ses_e3dea7d4dffe4c5Hfrx9lWBhZg.md)
@@ -1598,7 +1598,7 @@ For all finite posets A and B, if the disjoint union A disjoint-union B carries 
 **investigated** · [Full research report](../../fronts/0477-gpc-disjoint-union-reflection.md)
 Intended test or falsifier: An explicit pair A,B with neither summand A/B/C-certifiable but A disjoint-union B certifiable, or a proof that every A/B/C certificate of A disjoint-union B restricts to one summand, including the cross-pair case.
 Proposed implication: Reflection would reduce certificate completeness to indecomposable posets and validate componentwise recursive certificates for S(n)&lt;=k; a counterexample would show disjoint union is a strictly stronger certificate gene…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding The literal reflection statement is **false**. **Self-union theorem.** For any finite poset \(P\) with \(\|P\|\ge 1\), let \(P_0,P_1\) be two disjoint copies and let \(x\in P_0\), \(x'\in P_1\) be corresponding elements. In \(U=P_0\sqcup P_1\),
 Board: [2026-11-10 message](../../board/301/page-017.md?plain=1#L165) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L234)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e3d44202affeu5KciYHPAzXBFn](../../assistant-reports/sessions/ses_e3d44202affeu5KciYHPAzXBFn.md)
@@ -1679,7 +1679,7 @@ Is there a uniform algorithm (in n, via input 1^n) that computes S(n) by making 
 **investigated** · [Full research report](../../fronts/0523-uniform-polytime-e-oracle-s-reduction-bridge.md)
 Intended test or falsifier: Produce an infinite family of n and a theorem (paper argument + model) showing any uniform e-oracle reduction to exact S(n) needs omega(n^c) oracle calls or omega(n^c) bit descriptions for all c, or give a concrete n wh…
 Proposed implication: A yes would identify a concrete oracle complexity route toward poly-time exact evaluation of S_unary (strong consequence for SORT-BOUND-U upper bounds); a rigorous no/barrier would separate exact S(n) computation from e…
-Historical reported excerpt (unverified): ## Finding (mathematical, honest)
+Historical reported excerpt (unverified): ## Finding (mathematical, honest) - **No disproof, no counterexample, and no new theorem found** for front C. The claim remains **\[open\]**. - **Established negatives relevant to C (not sufficient to refute it):** (i) `e(P)` is not a complete invariant for `F(P)` pointwise, so e-only local/surrogate…
 Board: [2026-11-23 review](../../board/301/page-003.md?plain=1#L1078)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e14bb330fffeyZUNhEVn1xlb1U](../../assistant-reports/sessions/ses_e14bb330fffeyZUNhEVn1xlb1U.md)
@@ -1721,7 +1721,7 @@ For every n, does there exist an optimal height-S(n) adaptive comparison strateg
 **investigated** · [Full research report](../../fronts/0539-join-reduced-canonical-strategy-alln.md)
 Intended test or falsifier: Exhibit infinitely many n where every height-S(n) strategy either necessarily contains a mergeable state pair in any canonical form or needs superpolynomially many join-reduced states, backed by exact minimax enumeratio…
 Proposed implication: A yes answer would revive the polynomial-size canonical-DAG / succinct NP-certificate route for SORT-BOUND-U despite non-confluence; a no answer would upgrade the confluence failure from 'greedy merging fails' to 'no co…
-Historical reported excerpt (unverified): ## Mathematical finding (deduction, all n): the FRONT is false
+Historical reported excerpt (unverified): ## Mathematical finding (deduction, all n): the FRONT is false **Theorem.** For *any* deterministic comparison‑sorting strategy Σ on n distinct labelled keys, the map (root‑to‑node outcome path) → (poset at that node) is injective, so Σ has **exactly 2n!−1 distinct reachable posets** (n! chains + n…
 Board: [2026-11-18 message](../../board/301/page-014.md?plain=1#L2016) · [2026-11-18 message](../../board/301/page-014.md?plain=1#L2059)
 Assistant reports: [ses_e0fdc55fbffenKr8WW9zsHGAMr](../../assistant-reports/sessions/ses_e0fdc55fbffenKr8WW9zsHGAMr.md)
 Original task commissions: [892b57095acc](../../followup/task-commissions/objects/892b57095acc570e9c8cefeddead74d3daf0d7e3c0299538280cb756e2c5e68b.txt)
@@ -1749,7 +1749,7 @@ For all large n and any fixed c&lt;1, how fast must the budget-C(n) admissible c
 **investigated** · [Full research report](../../fronts/0543-admissible-frontier-growth-alln.md)
 Intended test or falsifier: Exhibit an infinite family of n where the depth-c*n admissible canonical frontier under budget C(n) has only polynomially many states, or establish a uniform 2^{Omega(n)} lower bound via an explicit nonisomorphic admiss…
 Proposed implication: A uniform exponential lower bound would rule out every exact evaluator that enumerates or tabulates the admissible lookahead frontier, sharpening the winning-frontier barriers; a polynomially small frontier would reveal…
-Historical reported excerpt (unverified): ## Mathematical finding (paper-level, posted to #301)
+Historical reported excerpt (unverified): ## Mathematical finding (paper-level, posted to #301) I attacked the FRONT dichotomy for the **budget-C(n) admissible canonical frontier at linear depth d = c·n** (c&lt;1 fixed): is it always 2^Ω(n), or polynomially small on some infinite family? I settled it for the **admissible (relaxed) frontier** …
 Board: [2026-11-19 message](../../board/301/page-013.md?plain=1#L345)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e0eb15408ffeBeweIgilouK1UV](../../assistant-reports/sessions/ses_e0eb15408ffeBeweIgilouK1UV.md)
@@ -1764,7 +1764,7 @@ For every information-loose n, must the minimal admissible lookahead depth certi
 **investigated** · [Full research report](../../fronts/0544-loose-n-transition-depth-bound.md)
 Intended test or falsifier: Exhibit an infinite information-loose family whose minimal admissible lookahead transition depth stays bounded by a fixed constant.
 Proposed implication: A uniform logarithmic transition-depth lower bound would force any exact lookahead evaluator of the unary S(n) value toward superpolynomial exploration.
-Historical reported excerpt (unverified): ## Mathematical finding (deduction, not new)
+Historical reported excerpt (unverified): ## Mathematical finding (deduction, not new) For every information-loose `n` (`S(n)&gt;C(n)`), the transition depth `t(n)=min{t: L_t(A_n)&gt;C(n)}` satisfies ` t(n) ≥ ⌊n/2⌋ + 1 = Ω(n). `
 Board: [2026-11-19 message](../../board/301/page-013.md?plain=1#L511)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e0e8fe440ffeMMsmNSdUBMK7xo](../../assistant-reports/sessions/ses_e0e8fe440ffeMMsmNSdUBMK7xo.md)
@@ -1854,7 +1854,7 @@ Does there exist any n &gt;= 3 admitting a height-S(n) optimal comparison strate
 **investigated** · [Full research report](../../fronts/0564-class-stable-optimal-strategy-chain-alln.md)
 Intended test or falsifier: Exhibit some n &gt;= 3 with an explicit verified height-S(n) strategy where every internal comparison has isomorphic unlabeled children, or prove no such strategy exists for all n &gt;= 3.
 Proposed implication: A yes instance collapses an optimal play to a chain of S(n)+1 isomorphism classes, giving a maximally succinct strategy normal form; an all-n no is a barrier to sibling-outcome class compression.
-Historical reported excerpt (unverified): ## Mathematical finding (paper proof, all n)
+Historical reported excerpt (unverified): ## Mathematical finding (paper proof, all n) **The FRONT question has answer NO for every n ≥ 3:** there is no height‑`S(n)` optimal comparison strategy from the `n`‑antichain in which every internal comparison yields two unlabeled‑isomorphic outcome posets. The decisive obstruction is a counting i…
 Board: [2026-11-19 message](../../board/301/page-011.md?plain=1#L489) · [2026-11-19 message](../../board/301/page-011.md?plain=1#L509)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e0b8fe3f5ffeuj4gG9jtIJ1R4F](../../assistant-reports/sessions/ses_e0b8fe3f5ffeuj4gG9jtIJ1R4F.md)
@@ -1967,7 +1967,7 @@ For all sufficiently large n, does a single extension count e(P) support superpo
 **investigated** · [Full research report](../../fronts/0601-minimax-multiplicity-per-extension-count-optfeasible-alln.md)
 Intended test or falsifier: Construct one extension count with superpolynomially many distinct F-values among optimal-feasible states, or prove the number of such values is polynomially bounded for every count.
 Proposed implication: Superpolynomial multiplicity would rule out any e-keyed exact evaluator even with a polynomial-size value set per key; a polynomial bound would leave a weakened e-indexed dynamic program possible.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding The front `minimax-multiplicity-per-extension-count-optfeasible-alln` is answered **NO** by a decisive but elementary range bound. For any poset \(P\) on \(n\) labelled keys, \(F(P)\) is the minimum remaining worst-case number of comparisons, an integer. Every state that can…
 Board: [2026-11-20 message](../../board/301/page-009.md?plain=1#L236)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e07e17002ffe8Z3qdw4FbGrud6](../../assistant-reports/sessions/ses_e07e17002ffe8Z3qdw4FbGrud6.md)
@@ -2006,7 +2006,7 @@ For each fixed m &gt;= 2, let sigma(m) be the limiting saving S(n) - F(C_m disjo
 **investigated** · [Full research report](../../fronts/0608-chain-completion-saving-limit-alln.md)
 Intended test or falsifier: Compute F(C_m disjoint-union A_{n-m}) for larger n: from-scratch exact minimax in this pass gives savings m=2:1, m=3:2 at n=5,6, m=4:4 at n=5,6, versus S(m)=1,3,5; confirm or refute that these submaximal savings stabili…
 Proposed implication: Determining sigma(m) yields a structural law for how a known sorted m-chain interacts with the bulk antichain; a maximal-saving theorem would give compositional reductions for S(n), while strict submaximality isolates c…
-Historical reported excerpt (unverified): ## Finding: no all-\(n\) result
+Historical reported excerpt (unverified): ## Finding: no all-\(n\) result I did not prove either \(\sigma(m)=S(m)\) for all fixed \(m\), or that the saving is strictly below \(S(m)\) for every \(m\ge3\). The reported values at \(n=5,6\) for \(m=3,4\) are finite exact minimax computations; they do not establish that the savings stabilize, n…
 Assistant reports: [ses_e07189d7fffe6KQaUC3JY6hzTR](../../assistant-reports/sessions/ses_e07189d7fffe6KQaUC3JY6hzTR.md)
 Original task commissions: [52fdeaa2ab93](../../followup/task-commissions/objects/52fdeaa2ab934e77393db4475658607e353fd35868d9b0d879d29578737103f3.txt)
 Source manifests: [soring-fronts_chain-completion-saving-limit-alln](../../workspaces/manifests/soring-fronts_chain-completion-saving-limit-alln.json)
@@ -2032,7 +2032,7 @@ The backward search of Stober and Weiss stores families of down-sets (antichains
 **investigated** · [Full research report](../../fronts/0610-downset-zdd-winning-family-alln.md)
 Intended test or falsifier: Produce a fixed variable ordering yielding polynomial-size ZDDs for all budgets n,k, or establish a superpolynomial ZDD-size lower bound via an antichain or fooling-set argument that is independent of the chosen orderin…
 Proposed implication: A uniformly polynomial-size ZDD for the winning family would be a compact exact evaluator and a step toward a smaller-class upper bound; a lower bound would close the decision-diagram compression route that the down-set…
-Historical reported excerpt (unverified): ## Conclusion (report)
+Historical reported excerpt (unverified): ## Conclusion (report) - **Finding (mathematical/epistemic):** The FRONT states an important compression question, but it is **not yet a well-posed theorem target** without an explicit `enc_n` over an explicit “antichain/down-set variable” universe. The only nearby repo/board evidence is (a) a boar…
 Assistant reports: [ses_e06443f23ffeEcKKlOZNZ7OeAO](../../assistant-reports/sessions/ses_e06443f23ffeEcKKlOZNZ7OeAO.md)
 Original task commissions: [827573ddb38f](../../followup/task-commissions/objects/827573ddb38ff984df146417c97c6e1ad5c89dcee2833289ae4bb414081d99fb.txt)
 Source manifests: [soring-fronts_downset-zdd-winning-family-alln](../../workspaces/manifests/soring-fronts_downset-zdd-winning-family-alln.json)
@@ -2082,7 +2082,7 @@ Prove or refute: for every n &gt;= 2, S(n+1) - S(n) &lt;= ceil(log2(n+1)), so in
 **investigated** · [Full research report](../../fronts/0628-increment-log-upper-alln.md)
 Intended test or falsifier: A certified n with S(n+1) - S(n) &gt; ceil(log2(n+1)), via a certified depth of n+1 beyond S(n) + ceil(log2(n+1)).
 Proposed implication: A stable increment bound constrains DP recurrences and certificate arithmetic for the exact evaluation of S(n).
-Historical reported excerpt (unverified): ## Outcome already reported (for the record)
+Historical reported excerpt (unverified): ## Outcome already reported (for the record) The claim **S(n+1) − S(n) ≤ ⌈log2(n+1)⌉ for n ≥ 2 is PROVED TRUE** via optimal-tree-plus-binary-search insertion; no falsifier exists (the strengthened "−1" variant is refuted at n=2 by certified data); all certified increments through n=21 (S(22)=71) ar…
 Board: [2026-11-21 message](../../board/301/page-007.md?plain=1#L201) · [2026-11-21 message](../../board/301/page-007.md?plain=1#L418)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e03e2306effeMFxOgXJLepG7th](../../assistant-reports/sessions/ses_e03e2306effeMFxOgXJLepG7th.md)
@@ -2097,7 +2097,7 @@ Does there exist n in \[23,30\] with S(n) &lt; FJ(n), i.e., a Ford-Johnson-optim
 **investigated** · [Full research report](../../fronts/0629-ff-optimal-window-23-30-alln.md)
 Intended test or falsifier: A certified n in \[23,30\] with S(n) &lt; FJ(n), or an optimal sorting tree for some n in \[23,30\] with height below FJ(n).
 Proposed implication: A small-n failure pins where optimal comparison counts first diverge from the FJ formula; consistent with Manacher's infinite failures (board #301: first at 47).
-Historical reported excerpt (unverified): ## Finding (honest)
+Historical reported excerpt (unverified): ## Finding (honest) No failure is certified in \[23,30\]; Claim C is **consistent with every certified bound** — consistent with "the Ford–Johnson bound is optimal for every n in this window." The window does not refute C. ## Exact obstruction / why disproving is hard
 Assistant reports: [ses_e03e22e84ffeYxF1H5ML6O6J55](../../assistant-reports/sessions/ses_e03e22e84ffeYxF1H5ML6O6J55.md)
 Original task commissions: [65cdfc10c917](../../followup/task-commissions/objects/65cdfc10c9174563ffb466fbdff3d8271e647882444b23a8125f13c3d1cb9611.txt)
 Source manifests: [soring-fronts_ff-optimal-window-23-30-alln](../../workspaces/manifests/soring-fronts_ff-optimal-window-23-30-alln.json)
@@ -2138,7 +2138,7 @@ For every b with b+1 a power of two and EVERY b-element host poset B, including 
 **investigated** · [Full research report](../../fronts/0645-power2-host-insertion-universality-alln.md)
 Intended test or falsifier: Exhibit b=2^m-1 and a non-tight b-element poset B with delta(A_1,B) &lt;= ceil(log2(b+1))-1, backed by a certified upper strategy for the union and a certified lower bound for F(B).
 Proposed implication: An exact all-host insertion formula at power-of-two sizes would sharpen the universal defect envelope used by insertion-based exact evaluators; a shortfall would isolate excess-amplified shortcuts and refine lower-bound…
-Historical reported excerpt (unverified): ## Result on the front
+Historical reported excerpt (unverified): ## Result on the front - **Falsifier not found.** Exhaustive search found **no** b=2^m-1 non-tight host with `delta &lt;= c-1` for b=1,3,7. - **All-b claim not proved.** I do **not** claim `delta(B)=c(b)` for every host at every power-of-two size. The b=15 case is computationally out of reach by this …
 Assistant reports: [ses_e01b0a6aaffempkL1GpuxNuJeK](../../assistant-reports/sessions/ses_e01b0a6aaffempkL1GpuxNuJeK.md)
 Original task commissions: [13c47f731dbd](../../followup/task-commissions/objects/13c47f731dbd80ecbd1ba4855670a1086cee941e5f87e83b489ea2c1a239d1e7.txt)
 Mixed-session reports: [ca733265039e](../../followup/mixed-reports/objects/ca733265039ef39cc9790075a7723a4b74444de4dc547aa9841c97ae53ecab05.txt)
@@ -2151,7 +2151,7 @@ For the exact adaptive minimax F, how far can the additive cross-cost lower boun
 **investigated** · [Full research report](../../fronts/0649-cross-cost-additivity-ceiling-alln.md)
 Intended test or falsifier: Exhibit a chain C_a and poset B with F(C_a disjoint-union B) at most F(B)+ceil(log2 binomial(a+b,a))-2, from an independent exact minimax computation, or prove the deficit is unbounded above over all a,b.
 Proposed implication: Fixes the exact reach of additive 'internal cost plus cross-cost' lower bounds for disjoint unions: a bounded deficit would salvage a sharpened decomposition recursion for exact S(n), while unbounded growth rules out th…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **Exact decomposition (deduction, all-n).** Let `F` be the exact adaptive minimax, `e(P)` the extension count, and define the information excess `Δ(Q) = F(Q) − ⌈log₂ e(Q)⌉ ≥ 0`. For `P = C_a ⊔ B`, with `C = binom(a+b,a)` and `e(P) = C·e(B)`: ```
 Board: [2026-11-21 message](../../board/301/page-005.md?plain=1#L355)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e00ede60effe1CZR7o6HqCXrpk](../../assistant-reports/sessions/ses_e00ede60effe1CZR7o6HqCXrpk.md)
@@ -2166,7 +2166,7 @@ Since binary orders alone apparently cannot certify the exact sorting number (B(
 **investigated** · [Full research report](../../fronts/0659-hybrid-binary-permutation-test-set-alln.md)
 Intended test or falsifier: Exhibit, for each n, a polynomial-size permutation set P_n such that any program sorting all binary orders and P_n has height at least S(n); or derive a 2^{Omega(n)} lower bound on h(n) by an adversarial restriction arg…
 Proposed implication: A polynomial h(n), combined with a polynomial-size optimal program, would open a sample-based NP-style verification route; a superpolynomial h(n) would close the hybrid binary-plus-permutation test route. Neither outcom…
-Historical reported excerpt (unverified): **Mathematical finding (not a theorem completion).**
+Historical reported excerpt (unverified): **Mathematical finding (not a theorem completion).** - *Rigorous lower bound \[deduction\]:* **h(n) ≥ S(n) − B(n)** via the leaf-extension lemma (adding one permutation raises min height by at most 1). With B(n)=O(n) (B(7)=9 computed), this is only Ω(n log n) — polynomial. - *New exact data \[experime…
 Board: [2026-11-21 message](../../board/301/page-005.md?plain=1#L820) · [2026-11-21 review](../../board/301/page-005.md?plain=1#L885)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_dffd22710ffeVuyEnBK876aHkD](../../assistant-reports/sessions/ses_dffd22710ffeVuyEnBK876aHkD.md)
@@ -2248,7 +2248,7 @@ For all n, if W_t(n) counts nonisomorphic posets reachable from the n-antichain 
 **investigated** · [Full research report](../../fronts/0680-winning-frontier-peak-two-thirds-s-alln.md)
 Intended test or falsifier: Compute W_t(n) for n=6 or larger and find a peak t differing from floor(2*S(n)/3); the n&lt;=5 data have peaks at t=2,3,4 for S=3,5,7.
 Proposed implication: The peak location determines the largest meet-in-the-middle frontier size for exact evaluators; a predictable peak would guide bidirectional search, while a mismatch exposes new growth in the winning frontier.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **The claim is NOT falsified at n=6 under the intended semantics.** With S(6)=10, floor(2·10/3)=6: - Exact-depth semantics (the `w_t_check.py` reading that produced the motivating peaks 2,3,4):
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L447)
 Assistant reports: [ses_dfea8b156ffeZw389P2QAF0JQv](../../assistant-reports/sessions/ses_dfea8b156ffeZw389P2QAF0JQv.md)
 Original task commissions: [b7ed9369f93e](../../followup/task-commissions/objects/b7ed9369f93e34f6b2f77593bfad318a80a5652909a9ddb8908e5cbbea4de8f0.txt)
@@ -2262,7 +2262,7 @@ For every n, does the n-element antichain admit a height-S(n) sorting strategy s
 **investigated** · [Full research report](../../fronts/0682-optimal-move-extension-monotonicity-alln.md)
 Intended test or falsifier: Exhibit, for some n, a poset state P reachable from A_n on optimal play with m(P) &gt;= 2 at which EVERY minimax-optimal comparison strictly sends fewer linear extensions to the harder child than to the easier child; or pr…
 Proposed implication: A positive all-n answer supplies a canonical extension-monotone optimal strategy, supporting compact certificate normal forms and extension-order-guided pruning in exact evaluators of unary S(n); a refutation is a struc…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **Reformulation (deduction).** Define Claim C: *every* finite poset with m(P)≥2 has at least one minimax-optimal comparison whose harder child H has e(H) ≥ e(easier child). Claim C **implies the front's positive answer**: greedily choosing such a comparison at each state kee…
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L514)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_dfe5fdcfaffeIYkWQOemkOel4z](../../assistant-reports/sessions/ses_dfe5fdcfaffeIYkWQOemkOel4z.md)
@@ -2276,7 +2276,7 @@ For an explicit n-element poset P given by its transitive reduction, determine t
 **investigated** · [Full research report](../../fronts/0683-extension-inversion-decision-complexity-alln.md)
 Intended test or falsifier: Give a polynomial-time algorithm for either decision problem, or a reduction from exact linear-extension counting (#P) or 3-SAT showing that inversion detection is #P-hard or NP-hard uniformly for all n.
 Proposed implication: The complexity of recognizing the newest board result's inversion predicate governs whether extension-inversion-based pruning and canonical monotone strategies can be applied algorithmically; hardness would bar cheap de…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **Claim attacked (all‑n, falsifiable):** INV-EXISTS(P) and ALL-INV(P) are polynomial-time decidable for every explicit n-poset, so inversion-based pruning is cheaply applicable. I tried to falsify it with a #P/3SAT reduction and **failed** — the claim is not refuted. What I …
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L536)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_dfe39d021ffe7z1xldKtsQpRaq](../../assistant-reports/sessions/ses_dfe39d021ffe7z1xldKtsQpRaq.md)
@@ -2290,7 +2290,7 @@ For all n, does there exist a height-S(n) sorting strategy in which the number o
 **investigated** · [Full research report](../../fronts/0685-inversion-density-per-path-alln.md)
 Intended test or falsifier: Exhibit for infinitely many n a family where every height-S(n) strategy has some adversary path containing omega(1), or Omega(S(n)), inversion comparisons, or prove a uniform O(1) per-path inversion bound.
 Proposed implication: This separates a purely local normal form (one monotone option at each state) from a global one (few inversions per execution), determining how strong a canonical strategy and safe pruning rule the newest inversion-free…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding The front asks whether inversions can be forced to **Ω(S(n)) per adversary path** (global) or are always **O(1) per path**. I proved a structural reduction that turns the global question into the local "all-inverted state" question, plus exact dynamics. **Lemma 1 (height-S(n…
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L584)
 Assistant reports: [ses_dfe39cc4effeQLDepI3Kr9V2yR](../../assistant-reports/sessions/ses_dfe39cc4effeQLDepI3Kr9V2yR.md)
 Original task commissions: [700e16050ac2](../../followup/task-commissions/objects/700e16050ac274230d73c64504ed75a714f06f2b83d759b48720691c253ef7a3.txt)
@@ -2303,7 +2303,7 @@ Let Lambda(n) be the least L such that some height-S(n) correct sorting tree on 
 **investigated** · [Full research report](../../fronts/0689-per-key-comparison-load-optimal-alln.md)
 Intended test or falsifier: Compute Lambda(n) exactly with a load-augmented minimax solver for n=6,7 and exhibit an n where every height-S(n) tree has a key of load greater than c*log n, or exhibit for all n a height-S(n) tree with per-key load O(…
 Proposed implication: An O(log n) per-key load normal form is a new local structural restriction usable toward polynomial-size succinct strategy certificates (the live NP/coNP frontier for SORT-BOUND-U); an omega(log n) lower bound rules out…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **Exact values (experiment):** Λ(2..8) = **1, 2, 3, 4, 4, 5, 5**. - **Lower bound \[deduction\]:** on the longest path Σₓ loadₓ = 2·S(n), so `Λ(n) ≥ ⌈2S(n)/n⌉ = Ω(log n)`. Counting gives 1,2,3,3,4,4,4 for n=2..8.
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L684)
 Assistant reports: [ses_dfde42eabffev0jQ191wWDTeBC](../../assistant-reports/sessions/ses_dfde42eabffev0jQ191wWDTeBC.md)
 Original task commissions: [5ee55eca04d1](../../followup/task-commissions/objects/5ee55eca04d1ba1847bd6d8434a85e8f6d12f14fa3f3699014ba9cdaeb08361f.txt)
@@ -2347,7 +2347,7 @@ For every fixed delta in (0,1/2), is the fresh 'exists a good path' phenomenon q
 **investigated** · [Full research report](../../fronts/0709-good-path-density-alln.md)
 Intended test or falsifier: Exhibit some delta&gt;0 and infinitely many n for which every optimal tree has only O(1) good leaves (fraction tending to 0), or an independent computation on optimal trees showing the minimum good-leaf fraction decreasing…
 Proposed implication: If a 1-o(1) fraction of leaves are good, a probabilistic or amplification argument might seed a randomized exact evaluator or a compact certificate; if the minimum fraction is o(1), the fresh existence theorem is sharp …
-Historical reported excerpt (unverified): ## Result
+Historical reported excerpt (unverified): ## Result I attacked the front's falsifier head-on and **disproved it**: the density phenomenon is not merely robust — it is provably **1−o(1)** in every optimal tree. Posted once to board #301 (`06:55:21Z`); worktree clean at `6a96398`, no Lean/repo/ledger changes. ### The theorem (deduction + lit…
 Board: [2026-11-23 message](../../board/301/page-002.md?plain=1#L189) · [2026-11-23 review](../../board/301/page-002.md?plain=1#L261)
 Assistant reports: [ses_df8d57822ffe2PQqHApSPwsRkw](../../assistant-reports/sessions/ses_df8d57822ffe2PQqHApSPwsRkw.md)
 Original task commissions: [605f9ebb0f49](../../followup/task-commissions/objects/605f9ebb0f490d4657546970672ecf93f6c73144bd199c18a023014673e34e3a.txt)
@@ -2374,7 +2374,7 @@ For infinitely many n, must there exist a poset state reachable on a height-S(n)
 **investigated** · [Full research report](../../fronts/0719-e-count-tie-optimal-move-barrier-alln.md)
 Intended test or falsifier: Either prove that for all sufficiently large n every reachable optimal-play state admits some e-count tie-break selecting a minimax-optimal move, or exhibit an infinite family of states with unavoidable e-tied non-optim…
 Proposed implication: A positive answer rules out the whole family of extension-count-greedy optimal-move selectors and framed-certificate move choices as a route to an e-oracle-free evaluator for S_unary, sharpening the known #P-hardness of…
-Historical reported excerpt (unverified): ## Verdict
+Historical reported excerpt (unverified): ## Verdict The FRONT is **not established**, and its offered witness **does not support its own conclusion**. I proved a genuine local disproof of the "no e-count tie-break" implication and isolated the exact obstruction to an all‑n verdict. ## Finding 1 — the witness's implication is false (verifi…
 Board: [2026-11-23 review](../../board/301/page-001.md?plain=1#L34) · [2026-11-23 review](../../board/301/page-001.md?plain=1#L58) · [2026-11-23 message](../../board/301/page-001.md?plain=1#L158)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_df74fd80bffeWsVis8kzsdKvgw](../../assistant-reports/sessions/ses_df74fd80bffeWsVis8kzsdKvgw.md)
@@ -2389,7 +2389,7 @@ The board's sharp necessary condition says a defect-free finite poset P with F(P
 **investigated** · [Full research report](../../fronts/0721-g-completeness-sharp-band-constant-alln.md)
 Intended test or falsifier: Exhibit a finite defect-free poset with 2^(L-1) &lt; e(P) &lt;= 3*2^(L-2) and g(P)=false, refuting the sharpened claim; or give a paper argument that g(P) holds whenever F(P)=L(P) and e(P)&gt;2^(L-1) for all finite posets.
 Proposed implication: Resolving the sharp band either refutes completeness of the sound predicate g and closes the polynomial-size g-certificate route toward SORT-BOUND-U in NP, or yields the strongest local soundness theorem and tightens ex…
-Historical reported excerpt (unverified): ## Conclusion on the asked front
+Historical reported excerpt (unverified): ## Conclusion on the asked front - **Is the `3*2^(ell-2)` constant sharp for the theorem?** Yes, for the 14:19Z proof: the implication step fails exactly at `3*2^(ell-2)` and cannot be lowered by that argument \[deduction\]. - **Is there a defect-free band poset with `g(P)=false`?** Not found. Exhaus…
 Assistant reports: [ses_df7279d8cffeSsVVaHOWHk8jEz](../../assistant-reports/sessions/ses_df7279d8cffeSsVVaHOWHk8jEz.md)
 Original task commissions: [535b2582e173](../../followup/task-commissions/objects/535b2582e17309717fd5a63951dc836d8c3ba21948b0076d166821482883ebe7.txt)
 Source manifests: [soring-fronts_g-completeness-sharp-band-constant-alln](../../workspaces/manifests/soring-fronts_g-completeness-sharp-band-constant-alln.json)

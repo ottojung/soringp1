@@ -221,7 +221,7 @@ For every width-two poset P, is the Fibonacci extension inequality e(P) &gt;= F_
 **investigated** · [Full research report](../../fronts/0330-fibonacci-threshold-width-two.md)
 Intended test or falsifier: An explicit width-two poset with e(P) &lt; F_{m(P)+2}, with both the linear-extension count and the exact minimax depth independently computed, which would refute the board's global Fibonacci threshold conjecture.
 Proposed implication: Width-two posets occur as merge and staircase states in optimal exact evaluation; a proof restricted to them would give an all-n threshold theorem for structured reachable states, while one counterexample would terminat…
-Historical reported excerpt (unverified): ## Result recap
+Historical reported excerpt (unverified): ## Result recap The width-two Fibonacci claim is **true**, conditional on Peczarski’s published proof of the Gold Partition Conjecture for width-two posets: \\[
 Board: [2026-11-08 message](../../board/301/page-023.md?plain=1#L727)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e478ca037ffeos49B3FEGKZO6f](../../assistant-reports/sessions/ses_e478ca037ffeos49B3FEGKZO6f.md)
@@ -300,7 +300,7 @@ Is the exact two-list merge number M(a,b)=F(C_a disjoint-union C_b) computable i
 **investigated** · [Full research report](../../fronts/0395-two-chain-merge-exact-complexity.md)
 Intended test or falsifier: A reduction showing exact M(a,b) encodes a #P-hard or PP-hard count on infinitely many pairs, or an explicit infinite family with a super-polynomial lower bound under a stated uniform model.
 Proposed implication: Polynomial-time M would make the split-merge value L(n) computable in polynomial time and, if the merge oracle is constructive, yield a polynomial-time construction of the split-merge sorter family at its proven height …
-Historical reported excerpt (unverified): ## Result recap
+Historical reported excerpt (unverified): ## Result recap No #P/PP-hardness reduction was found. The concrete result is a disproof of the natural polynomial extreme-insertion DP: - `R(3,6)=8` but exact `M(3,6)=7` (certified by Hwang’s `f_3(7)=6` and independently reproduced).
 Board: [2026-11-08 message](../../board/301/page-020.md?plain=1#L134) · [2026-11-08 message](../../board/301/page-020.md?plain=1#L157)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e43302c23ffecA06GcC5s7GgFH](../../assistant-reports/sessions/ses_e43302c23ffecA06GcC5s7GgFH.md)
@@ -314,7 +314,7 @@ For every pair of finite posets A and B, does reversing one component of their d
 **investigated** · [Full research report](../../fronts/0403-parallel-reversal-symmetry.md)
 Intended test or falsifier: Exhibit one explicit finite pair A,B with F(A^op disjoint-union B) unequal to F(A disjoint-union B), or an infinite all-n family of such pairs; a single counterexample refutes the all-n statement, while exhaustive check…
 Proposed implication: A positive answer makes componentwise order reversal a genuine value symmetry for the antichain-root minimax DP, extending relabelling and global duality; a counterexample shows that even disjoint-union components are n…
-Historical reported excerpt (unverified): ## Mathematical finding: the all-`n` claim is false
+Historical reported excerpt (unverified): ## Mathematical finding: the all-`n` claim is false The statement \\[
 Board: [2026-11-19 message](../../board/301/page-013.md?plain=1#L709) · [2026-11-19 message](../../board/301/page-013.md?plain=1#L727) · [2026-11-08 message](../../board/301/page-020.md?plain=1#L497)
 Additional board mentions: 4 (use front lookup for exact links)
 Assistant reports: [ses_e42a23464ffeDMhirE5DfhhP2M](../../assistant-reports/sessions/ses_e42a23464ffeDMhirE5DfhhP2M.md)
@@ -370,7 +370,7 @@ For every finite poset P, is the two-dimensional colour-refinement signature of 
 **investigated** · [Full research report](../../fronts/0438-colour-pair-signature-move-quotient.md)
 Intended test or falsifier: Exhibit an explicit poset with two incomparable pairs of equal colour-pair signature and unequal exact move values, or prove signature-equality implies move-value equality for all finite posets.
 Proposed implication: Soundness would yield a polynomial-time move quotient for exact minimax and a new state-compression lemma relevant to evaluating S(n); a counterexample would rule out colour-refinement quotients for exact search and lim…
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding The §6d colour-pair quotient is **false**, not merely unproven. There is an explicit counterexample at **n = 8**. Let \(P\) be the height-2 poset on \(\{0,\dots,7\}\) whose transitive closure is
 Board: [2026-11-09 message](../../board/301/page-019.md?plain=1#L492) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L545)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e3fb06883ffe36hLov3AIzrntU](../../assistant-reports/sessions/ses_e3fb06883ffe36hLov3AIzrntU.md)
@@ -399,7 +399,7 @@ Over all fixed blocks B with at most 7 elements, what is the supremum of (F(B)-c
 **investigated** · [Full research report](../../fronts/0446-merge-block-ordinal-supremum-n7.md)
 Intended test or falsifier: Exhibit a fixed block B on at most 7 elements whose ordinal-sum ratio (F(B)-ceil(log2 e(B)))/(covers(B)+M(B)m(B)) strictly exceeds 0.136638, or exhaustively prove that no such block exists.
 Proposed implication: The 2026-11-09 reachable-excess-per-cover-ratio post exhausts blocks only through n=6 and finds Merge(2,4) best; exhausting n=7 may raise the certified ordinal-sum non-completeness constant or establish 0.136638 as the …
-Historical reported excerpt (unverified): **Finding**
+Historical reported excerpt (unverified): **Finding** For every fixed block `B` with `\|B\| ≤ 7`, the ordinal-sum family ratio \\[
 Board: [2026-11-09 message](../../board/301/page-019.md?plain=1#L1105) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L1158)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e3f11e8ccffeI0NUe5nQ2PYWLS](../../assistant-reports/sessions/ses_e3f11e8ccffeI0NUe5nQ2PYWLS.md)
@@ -527,7 +527,7 @@ For all finite posets A and B, is the component-reversal defect \|F(A^op disjoin
 **investigated** · [Full research report](../../fronts/0580-component-reversal-defect-retry.md)
 Intended test or falsifier: Exhibit A,B with reversal defect at least 2 by exact minimax over disjoint unions, or prove the uniform bound 1 by a structural induction.
 Proposed implication: A uniform one-comparison bound would make component reversal a canonicalization with only additive-one value loss in exact DP; unbounded defect would show component orientation carries unbounded value information and bl…
-Historical reported excerpt (unverified): ## Mathematical finding (status of the claim)
+Historical reported excerpt (unverified): ## Mathematical finding (status of the claim) - **Equality form `D≡0` is FALSE** — `parallel-reversal-symmetry` (11-08) gives the n=9 witness `A=Λ₃`, `B=(0,1,1,3,7,11)`; `P=A⊔B=(0,1,1,0,8,8,24,56,88)`, `Q=Aᵒᵖ⊔B=(6,0,0,0,8,8,24,56,88)`, `F(P)=12, F(Q)=11`, so `D=1`. Reproduced by ≥3 independent solv…
 Board: [2026-11-19 message](../../board/301/page-010.md?plain=1#L302)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e0aa2ff8bffeDYNWZQkfT7Tlq6](../../assistant-reports/sessions/ses_e0aa2ff8bffeDYNWZQkfT7Tlq6.md)
@@ -585,7 +585,7 @@ For the ordered-run decomposition of a partial order reachable from the n-antich
 **investigated** · [Full research report](../../fronts/0664-run-decomposition-selective-summary-size-alln.md)
 Intended test or falsifier: Exhibit an infinite family of root-optimal ordered-run posets whose exact minimax values remain distinct under every polynomial-time computable selective summary, or prove a concrete polynomial-size summary family is so…
 Proposed implication: A polynomial sound selective summary would reduce exact sorting-number evaluation below the winning-frontier exponent; a superpolynomial lower bound would make the run-decomposition enumeration barrier structural for al…
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **The literal “superpolynomially many distinct classes” horn is not forced by the winning-frontier enumeration, and the positive horn is not a combinatorial compression question—it is exactly the open question of whether `F(P)` is polynomial-time computable on ordered-run posets.** ### W…
 Board: [2026-11-22 review](../../board/301/page-004.md?plain=1#L130)
 Assistant reports: [ses_dff6428bbffeXFg1a8i27vssAM](../../assistant-reports/sessions/ses_dff6428bbffeXFg1a8i27vssAM.md)
 Original task commissions: [bf3bad304e85](../../followup/task-commissions/objects/bf3bad304e85a19b67d78f903580d016c8ca7a8f9a391a5a8497f69c332cc975.txt)
@@ -612,7 +612,7 @@ If some finite poset P with m(P)&gt;=2 is all-inverted (every minimax-optimal co
 **investigated** · [Full research report](../../fronts/0684-inversion-propagation-ordinal-sum-alln.md)
 Intended test or falsifier: Exhibit an all-inverted poset P whose ordinal-sum power P^{(+t)} fails to be all-inverted for some t&gt;=2, or prove that the set of minimax depths m admitting an all-inverted poset is finite.
 Proposed implication: If all-inversion propagates under ordinal sums, a single finite counterexample refutes the all-n extension-monotone claim for infinitely many n and rules out extension-order-guided evaluators outright; isolation would c…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding I proved the front's main question outright: **all-inversion propagates under ordinal sums, and is fully characterized by them.** Setup (definitions from board #301 05:30Z): for a finite poset, an optimal comparison has hard child $H$ with $m(H)=m-1$ and easy child $E$ with …
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L562)
 Assistant reports: [ses_dfe39ce7effe7DEqSU0k6S6glK](../../assistant-reports/sessions/ses_dfe39ce7effe7DEqSU0k6S6glK.md)
 Original task commissions: [dc6d16b91bdf](../../followup/task-commissions/objects/dc6d16b91bdfa253f1a82da1eb7b0d7a28d0a544d63c2043eb2b6b84279b5d10.txt)
@@ -625,7 +625,7 @@ For all finite posets A and B, does sibling-extension-inversion all-inversion tr
 **investigated** · [Full research report](../../fronts/0686-parallel-composition-all-inversion-alln.md)
 Intended test or falsifier: Exhibit finite posets A,B with allinv(A\|\|B) differing from (allinv(A) AND allinv(B)): either a disjoint union that is all-inverted although some component is not, or two all-inverted components whose disjoint union is n…
 Proposed implication: Together with the reported ordinal-sum propagation theorem, a parallel composition theorem would make all-inversion recognizable via Gallai modular decomposition, giving polynomial-time recognition of the Claim-C-equiva…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **1. Exact obstruction (deduction).** The front's equivalence `allinv(A‖B) = allinv(A) ∧ allinv(B)` is *hostage to the open Claim C* (the sibling fronts' conjecture that every poset with `m≥2` has a non-inverted optimal comparison):
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L610)
 Assistant reports: [ses_dfe0ef7cdffe9NKnInaDw4g0Iy](../../assistant-reports/sessions/ses_dfe0ef7cdffe9NKnInaDw4g0Iy.md)
 Original task commissions: [91e4e5be7499](../../followup/task-commissions/objects/91e4e5be7499c43a7e5f7c24c2da975ad5af7288e1b1d2d9d7c76ed77ad443ed.txt)

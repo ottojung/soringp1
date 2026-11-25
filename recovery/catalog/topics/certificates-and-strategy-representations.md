@@ -37,7 +37,7 @@ Construct a sound, polynomial-time checkable adversary invariant that forces a c
 **investigated** · [Full research report](../../fronts/0005-quantified-root-adversary-proof.md)
 Intended test or falsifier: Construct a uniform sorter counterstrategy defeating a proposed local forcing invariant even though isolated reachable gadget states remain hard.
 Proposed implication: A verified all-n antichain lower-bound theorem can improve numerical bounds on S(n), but would not alone separate unary computation complexity classes.
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding No new all-\(n\) antichain-root lower-bound invariant or counterexample was established. The precise obstacle remains the **root quantifier gap**: For a root lower bound, an adversary must defeat **every** comparison the sorter might choose: for every query, there must be an outcome that…
 Board: [2026-11-17 message](../../board/301/page-016.md?plain=1#L1147) · [2026-10-30 message](../../board/301/page-042.md?plain=1#L247) · [2026-10-30 message](../../board/301/page-043.md?plain=1#L433)
 Mixed-session reports: [1693c66be111](../../followup/mixed-reports/objects/1693c66be11193b9a754e98df6e5017dab69616db6a66f33935217d33cbac083.txt) · [259ce2d13ee6](../../followup/mixed-reports/objects/259ce2d13ee60d5e524ec41580bd3b3b4933e52c3447f5f4400dd207caefe801.txt) · [2a669e7849b7](../../followup/mixed-reports/objects/2a669e7849b79109954ddb293592067e0940cfb701afdfb4d717837d55a945d1.txt) (9 total)
 Source manifests: [soring-fronts_quantified-root-adversary-proof](../../workspaces/manifests/soring-fronts_quantified-root-adversary-proof.json)
@@ -236,7 +236,7 @@ Can the alternating minimax game for sorting be encoded as a polynomial-size cer
 **investigated** · [Full research report](../../fronts/0146-adversary-strategy-pspace-certificate.md)
 Intended test or falsifier: Prove no polynomial-size adversarial certificate exists for some family (forcing exponential witness), or construct one showing a canonical form.
 Proposed implication: Relates certificate size to PSPACE-membership tightness; may clarify gap between NP and PSPACE for this problem.
-Historical reported excerpt (unverified): **Finding (mathematical):**
+Historical reported excerpt (unverified): **Finding (mathematical):** - `SORT-BOUND-U ∈ PSPACE` via the minimax/alternating game is correct. However, there is no known polynomial-size certificate for a “no” (adversary winning strategy) witness, and there is strong obstruction to one: 1. **Combinatorial explosion**: the winning frontier sho…
 Source manifests: [soring-fronts_adversary-strategy-pspace-certificate](../../workspaces/manifests/soring-fronts_adversary-strategy-pspace-certificate.json)
 
 ## uniform-nc-circuit-sortnum
@@ -310,7 +310,7 @@ For the large winning frontier of nonisomorphic reachable states (Ω(2^(c n (log
 **investigated** · [Full research report](../../fronts/0194-winning-frontier-certificate-size-barrier.md)
 Intended test or falsifier: Prove that every correct proof system for SORT-BOUND-U has some yes-instance requiring superpolynomial certificate size due to the winning frontier's branching structure, or construct a uniform polynomial certificate sc…
 Proposed implication: A polynomial certificate would place SORT-BOUND-U in NP (a major class inclusion); a superpolynomial certificate-size lower bound under natural proof systems would rule out NP membership regardless of algorithmic speedu…
-Historical reported excerpt (unverified): **Mathematical finding (not a proof):**
+Historical reported excerpt (unverified): **Mathematical finding (not a proof):** **Compression is the natural escape.** The winning frontier gives $2^{\Omega(n\log^2 n)}$ nonisomorphic reachable winning posets $P_A$ from the chain+extra-edges construction (docs/research-winning-frontier-barrier.md). A single uniform strategy (balanced cha…
 Board: [2026-11-02 message](../../board/301/page-032.md?plain=1#L363) · [2026-11-02 message](../../board/301/page-032.md?plain=1#L371) · [2026-11-02 message](../../board/301/page-032.md?plain=1#L379) · [2026-11-02 message](../../board/301/page-032.md?plain=1#L387) · [2026-11-02 message](../../board/301/page-032.md?plain=1#L395) (7 total; use search for all)
 Source manifests: [soring-fronts_winning-frontier-certificate-size-barrier](../../workspaces/manifests/soring-fronts_winning-frontier-certificate-size-barrier.json)
 
@@ -397,7 +397,7 @@ Can the class of shelling/insertion orders be encoded as polynomial-size framed 
 **investigated** · [Full research report](../../fronts/0248-shelling-sequence-polynomial-certificate.md)
 Intended test or falsifier: Show that for some n with known S(n), no shelling-based framed DAG of polynomial size achieves height S(n) due to join/intersection constraints.
 Proposed implication: Would clarify whether NP-certificate route is feasible via structured families.
-Historical reported excerpt (unverified): **Mathematical finding (obstruction, paper argument):**
+Historical reported excerpt (unverified): **Mathematical finding (obstruction, paper argument):** For fixed-order insertion (shelling/insertion) strategies, to perform optimal insertion of element $e_{k+1}$ one must know the total order of the already-inserted prefix $\{e_1,\ldots,e_k\}$. In the framed DAG certificate model (per `scripts/c…
 Source manifests: [soring-fronts_shelling-sequence-polynomial-certificate](../../workspaces/manifests/soring-fronts_shelling-sequence-polynomial-certificate.json)
 
 ## framed-join-state-explosion-alln
@@ -450,7 +450,7 @@ Does there exist an all-n uniform polynomial-size (in N) certificate system for 
 **investigated** · [Full research report](../../fronts/0308-nonreset-polynomial-certificate.md)
 Intended test or falsifier: Prove that every polynomial-time checkable, sound and complete certificate for SORT-BOUND-U induces a partition structure equivalent (up to polynomial blowup) to some reset/framed partitioning and is thus subject to the…
 Proposed implication: A true escape would be a substantive route to NP membership via a new certificate class; a general equivalence would show reset structure is canonical and obstructions are broad.
-Historical reported excerpt (unverified): **Mathematical finding (billy-dev only):**
+Historical reported excerpt (unverified): **Mathematical finding (billy-dev only):** **What I attacked:** The claim that some all-n uniform polynomial-size (in N) certificate system for `SORT-BOUND-U` exists that is not equivalent to any framed/reset-DAG certificate and provably escapes exact-reset divisibility obstructions on optimal path…
 Source manifests: [soring-fronts_nonreset-polynomial-certificate](../../workspaces/manifests/soring-fronts_nonreset-polynomial-certificate.json)
 
 ## conp-sorter-cover-pruning-certificate
@@ -483,7 +483,7 @@ Does there exist a polynomial-length certificate for SORT-BOUND-U that is both s
 **investigated** · [Full research report](../../fronts/0335-succinct-cert-complete-antichain.md)
 Intended test or falsifier: A proof that any complete certificate must encode a full optimal decision tree of size 2^Omega(n log n) for infinitely many n, or an explicit efficient verifier with polynomial witness size for all n.
 Proposed implication: If yes, SORT-BOUND-U in NP with a succinct certificate, improving the PSPACE upper bound; if no, a decisive barrier against NP membership via tree-exhibiting methods.
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **Question.** Does there exist a polynomial-length (in \(N=n+k+1\)) certificate for \(\text{SORT-BOUND-U}=\{1^n\#1^k : S(n)\le k\}\) that is sound and complete, verifiable in polynomial time, and not reliant on an exponentially large optimal sorting tree? **Answer (paper-level).** This q…
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e473cf52fffedo07075mVTrKHp](../../assistant-reports/sessions/ses_e473cf52fffedo07075mVTrKHp.md) · [ses_e473b3f15ffezD4kSS7JNEuV08](../../assistant-reports/sessions/ses_e473b3f15ffezD4kSS7JNEuV08.md)
 Original task commissions: [3bf6994b3894](../../followup/task-commissions/objects/3bf6994b3894020e548a262a80941afc3e2e2b34637944f39a49bbdc33c21e9e.txt) · [f2c0cfefe7b2](../../followup/task-commissions/objects/f2c0cfefe7b2abb35688ea06e52bf1331acf3d0045db40b780e21f909575dbfa.txt)
@@ -496,7 +496,7 @@ Is there a polynomial-in-n succinct certificate for S(n) &lt;= k other than an e
 **investigated** · [Full research report](../../fronts/0339-strategy-certificate-not-tree.md)
 Intended test or falsifier: A proof that any sound-and-complete certificate for the antichain root must encode an exponentially large decision tree, or a concrete subexponential certificate family.
 Proposed implication: Membership of SORT-BOUND-U in NP or coNP would follow from a succinct complete certificate; ruling it out closes that route.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **Claim attacked (all-n):** There is no polynomial-in-`n` succinct certificate for `S(n) ≤ k` whose *completeness* (every permutation is sorted within `k` comparisons by the encoded strategy) can be verified in polynomial time, other than (or compressing) an exponentially la…
 Assistant reports: [ses_e47049240ffeesC0iBZMDS2e8u](../../assistant-reports/sessions/ses_e47049240ffeesC0iBZMDS2e8u.md) · [ses_e4702fb2cffeMW8Py5fsNqUwcv](../../assistant-reports/sessions/ses_e4702fb2cffeMW8Py5fsNqUwcv.md)
 Original task commissions: [495122247bd6](../../followup/task-commissions/objects/495122247bd6ad82b1bfed469003822bf84f20670a99ef646380146fbd41856c.txt) · [4ea5fa6392a1](../../followup/task-commissions/objects/4ea5fa6392a19c97842a81cb5703d6584c22045b8b47cffcc8d6aa6057f1cd3d.txt)
 Source manifests: [soring-fronts_strategy-certificate-not-tree](../../workspaces/manifests/soring-fronts_strategy-certificate-not-tree.json)
@@ -573,7 +573,7 @@ For every n and k with S(n)&gt;k, does the faithful state-expanded comparison-tr
 **investigated** · [Full research report](../../fronts/0404-succinct-farkas-dual-certificate.md)
 Intended test or falsifier: Exhibit an infinite family of non-sortable unary instances for which every Farkas certificate of the faithful state-expanded LP has superpolynomial support or needs exponentially many bits, or prove that no succinct dua…
 Proposed implication: A polynomial-size, locally checkable Farkas certificate would give a coNP certificate for the no-side of SORT-BOUND-U and, with framed sorter certificates, NP intersect coNP membership; failure confines the rank-0 LP ex…
-Historical reported excerpt (unverified): ## Result
+Historical reported excerpt (unverified): ## Result **The universal succinct-Farkas claim is false.** On billy-dev I found an infinite all-`n` family of genuine non-sortable unary instances for which **every** Farkas certificate of the faithful state-expanded LP has exponential support, hence certainly not polynomial in `N=n+k+1`. Take eve…
 Board: [2026-11-08 message](../../board/301/page-020.md?plain=1#L349) · [2026-11-08 message](../../board/301/page-020.md?plain=1#L372)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e42a2307dffeNKzhBPH7wlDg1w](../../assistant-reports/sessions/ses_e42a2307dffeNKzhBPH7wlDg1w.md)
@@ -587,7 +587,7 @@ Let g(n) be the least h such that some polynomial-size framed comparison DAG acc
 **investigated** · [Full research report](../../fronts/0406-framed-height-overhead-gap.md)
 Intended test or falsifier: Construct an all-n polynomial-size framed family with height S(n)+O(1), or prove an infinite family for which every polynomial-size framed certificate has height S(n)+omega(1).
 Proposed implication: Zero overhead would yield SORT-BOUND-U in NP; any positive universal overhead quantifies the exact completeness cost of sound joins and separates certificate soundness from all-n exact completeness.
-Historical reported excerpt (unverified): **Conclusion**
+Historical reported excerpt (unverified): **Conclusion** No all-`n` proof of zero or bounded overhead and no infinite-family lower bound were obtained. The decisive missing object remains a uniform polynomial-size optimal-height framed family, or a genuine infinite-family size-height tradeoff.
 Board: [2026-11-08 message](../../board/301/page-020.md?plain=1#L529) · [2026-11-08 message](../../board/301/page-020.md?plain=1#L609)
 Assistant reports: [ses_e4280a97dffeZCxRDsJH49ydaS](../../assistant-reports/sessions/ses_e4280a97dffeZCxRDsJH49ydaS.md)
 Original task commissions: [c70676c99693](../../followup/task-commissions/objects/c70676c996932054280ca9afa3e4bddcbf0ba8ac91469fadd0d0dc87ab51b5c6.txt)
@@ -600,7 +600,7 @@ Does there exist a polynomial-size (in n) certificate of exact S(n) whose verifi
 **investigated** · [Full research report](../../fronts/0418-compact-delta-one-certificates.md)
 Intended test or falsifier: Exhibit an infinite family of n where every sound framed certificate of height S(n)+1 has exponential size, or a polynomial-size verifier that accepts a tree of height S(n)+1 but S(n) is strictly smaller.
 Proposed implication: A polynomial-size delta-one certificate would place exact unary S(n) in NP with a relaxed bound, weakening the PSPACE upper bound's practical cost without resolving P-vs-PSPACE.
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **No new substantive theorem or counterexample was established; the delta-one relaxation does not bypass the known obstruction, and the live blocker remains completeness, not soundness.** ### What was inspected
 Assistant reports: [ses_e41f6fd65ffeHxD0nJXNcHOKwW](../../assistant-reports/sessions/ses_e41f6fd65ffeHxD0nJXNcHOKwW.md)
 Original task commissions: [d9faadcf4d1a](../../followup/task-commissions/objects/d9faadcf4d1a965aba3a96f2fd17490ddb84ae7a297d844485271bfe9f1aa64b.txt)
 Source manifests: [soring-fronts_compact-delta-one-certificates](../../workspaces/manifests/soring-fronts_compact-delta-one-certificates.json)
@@ -651,7 +651,7 @@ For all finite posets A and B that each carry a Peczarski A/B/C certificate, doe
 **investigated** · [Full research report](../../fronts/0472-certificate-disjoint-union-closure.md)
 Intended test or falsifier: Exhibit A and B with explicit A/B/C certificates whose disjoint union satisfies none of the low-slave, half-balanced, or balanced-triple conditions, with exact extension counts for every comparison branch.
 Proposed implication: Closure would make A/B/C certificates composable under the operation used by split-merge states in the exact evaluator; failure would show the board's GPC disjoint-union closure does not lift to the certificate level.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **The claim is true, and even stronger: one certified summand suffices.** If `A` carries an A/B/C certificate, then `A ⊔ B` carries a certificate of the same type, for arbitrary `B`. Hence the requested falsifier cannot exist. Let `a=\|A\|`, `b=\|B\|`. The essential correction t…
 Board: [2026-11-09 message](../../board/301/page-017.md?plain=1#L3) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L35) · [2026-11-09 message](../../board/301/page-018.md?plain=1#L1140)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e3d94fddaffeGauF7hmG7uRQkd](../../assistant-reports/sessions/ses_e3d94fddaffeGauF7hmG7uRQkd.md)
@@ -693,7 +693,7 @@ For every finite poset P, does there exist a comparison tree of height exactly F
 **investigated** · [Full research report](../../fronts/0481-recursive-abc-exact-height-completeness.md)
 Intended test or falsifier: Exhibit a finite poset P for which exact minimax shows every height-F(P) comparison tree has at least one node whose chosen incomparable pair satisfies none of the three A/B/C conditions.
 Proposed implication: A proof would upgrade A/B/C from sound GPC witnesses to a complete exact-minimax strategy grammar; a counterexample would establish a concrete soundness-versus-completeness separation for recursive A/B/C certificates an…
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding The front's universal claim is **false** under its node-local reading. I found a 6-element counterexample and reported it once to board #301 at `2026-11-10T01:03:19Z`. **Poset P.** Elements `{a,b,c,d,e,f}` with cover relations
 Board: [2026-11-10 message](../../board/301/page-017.md?plain=1#L419) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L464)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e3d1839acffehWkYF2vsciapXW](../../assistant-reports/sessions/ses_e3d1839acffehWkYF2vsciapXW.md)
@@ -737,7 +737,7 @@ For a height-F(P) comparison tree, call a node A/B-certified when its ordered co
 **investigated** · [Full research report](../../fronts/0487-ab-certified-optimal-path-starvation.md)
 Intended test or falsifier: Prove a uniform constant c such that every finite poset has a height-F(P) tree with no run longer than c, or construct an explicit family whose exact minimax forces runs of every length.
 Proposed implication: If unbounded, no exact certificate grammar that certifies bounded-length path segments using only A/B can be complete for S(n); if bounded, optimal trees decompose into certified blocks and admit a finite-state segment …
-Historical reported excerpt (unverified): ## Mathematical finding (no repository changes)
+Historical reported excerpt (unverified): ## Mathematical finding (no repository changes) **A/B-certified starvation is bounded for the tested families; no unbounded witness through n=11.** I implemented an exact minimax DP augmented with an A/B-certification check (Peczarski conditions A/B only; C excluded) and computed the minimal possib…
 Board: [2026-11-10 message](../../board/301/page-017.md?plain=1#L1033) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L1059)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e3cc80a71ffed52c2oWLuO8p85](../../assistant-reports/sessions/ses_e3cc80a71ffed52c2oWLuO8p85.md)
@@ -805,7 +805,7 @@ For all integers n &gt;= 1 and k &gt;= 0 with S(n) &gt; k, does there exist a po
 **investigated** · [Full research report](../../fronts/0518-conp-refutation-dag-certificate-alln.md)
 Intended test or falsifier: Exhibit an explicit infinite family (n_i,k_i) with S(n_i)&gt;k_i for which every sound refutation system checkable in time poly(N_i) requires certificates of superpolynomial size in N_i, or prove an unconditional superpoly…
 Proposed implication: A uniform positive answer would place SORT-BOUND-U in coNP, strengthening the known PSPACE upper bound without implying a separation; a verified lower bound would rule out an entire class of succinct no-certificates for…
-Historical reported excerpt (unverified): ## Conclusion (labeled)
+Historical reported excerpt (unverified): ## Conclusion (labeled) - **Status:** **open / unresolved** by this investigation. No genuinely substantive, independently checkable new theorem or counterexample was found, so no repository/Lean changes were made. - **What is clear (deduction/literature):** uniform poly-size refutations for all NO…
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e17d944f6ffeWIt8cFkBo9zPnD](../../assistant-reports/sessions/ses_e17d944f6ffeWIt8cFkBo9zPnD.md)
 Original task commissions: [5c33da64be14](../../followup/task-commissions/objects/5c33da64be14defc0d17cf02356b4308ec810406dfd1a5f975d4c68123522ff3.txt)
@@ -832,7 +832,7 @@ Is the unary threshold language SORT-BOUND-U = {1^n#1^k : S(n) &lt;= k} in AM, i
 **investigated** · [Full research report](../../fronts/0528-am-succinct-certificate-sortbound.md)
 Intended test or falsifier: Falsify the positive hypothesis by proving an AM-hardness/sparsity barrier for SORT-BOUND-U (a sparse AM-hard set would collapse PH), or by a communication-style lower bound showing no constant-round protocol can certif…
 Proposed implication: An AM protocol would be a genuinely new randomized succinct certificate placing exact unary S evaluation into Sigma_2^P, the probabilistic analogue of the open NP/coNP certificate question; a barrier would delimit all c…
-Historical reported excerpt (unverified): ## Mathematical finding — no proof, no counterexample
+Historical reported excerpt (unverified): ## Mathematical finding — no proof, no counterexample I attacked the all‑n question "is `SORT-BOUND-U ∈ AM`?" seriously in both directions and could prove neither membership nor non‑membership. What I did establish is a precise map of why both named falsifier routes are closed and why the natural p…
 Board: [2026-11-17 message](../../board/301/page-015.md?plain=1#L563) · [2026-11-17 message](../../board/301/page-015.md?plain=1#L640) · [2026-11-18 message](../../board/301/page-015.md?plain=1#L664)
 Assistant reports: [ses_e141f94c6ffe9kn7LZahR4pONx](../../assistant-reports/sessions/ses_e141f94c6ffe9kn7LZahR4pONx.md)
 Original task commissions: [cc5c0eb459d5](../../followup/task-commissions/objects/cc5c0eb459d5cd8fa6dfe95c3d093483759c818b0b6b10bdb07e6b871845bf89.txt)
@@ -888,7 +888,7 @@ For every n and every poset P reachable from the n-antichain along minimax-optim
 **investigated** · [Full research report](../../fronts/0556-coexistence-proof-optimal-move-set-20261119exec.md)
 Intended test or falsifier: Produce a reachable poset P on which every depth-balanced optimal comparison has an outcome child with fewer than 3/11 of e(P) extensions, certified by exact minimax depths and extension counts; or a rigorous proof that…
 Proposed implication: A uniform affirmative supplies a constant-fraction extension-drop balanced-optimal normal form for exact evaluators and a candidate route toward a polynomial-size height-S(n) strategy DAG (hence SORT-BOUND-U in NP); a c…
-Historical reported excerpt (unverified): **Result: outcome (c) — precise obstruction + partial proof.**
+Historical reported excerpt (unverified): **Result: outcome (c) — precise obstruction + partial proof.** - **Evidence (from scratch):** coexistence holds on all optimal-play-reachable states through n≤9 (0 failures among 2.75M labelled states at n=7 and 33,045 iso-classes at n=9); near-half coexistence is false from n=3, so the 3/11 Kahn–S…
 Board: [2026-11-19 message](../../board/301/page-012.md?plain=1#L532) · [2026-11-19 review](../../board/301/page-012.md?plain=1#L576)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e0c6d2929ffeIII2YjY7cY7m1C](../../assistant-reports/sessions/ses_e0c6d2929ffeIII2YjY7cY7m1C.md)
@@ -945,7 +945,7 @@ For every n, is there a set H_n of total orders on \[n\] of size 2^{o(n log n)} 
 **investigated** · [Full research report](../../fronts/0592-minimax-witness-family-size-alln.md)
 Intended test or falsifier: Either exhibit an all-n family H_n of size 2^{O(n)} with minimum sorting-tree height exactly S(n), or prove that for some c&gt;0 and all large n every H_n with \|H_n\| &lt; c*n! is sortable within S(n)-1 comparisons, so no sube…
 Proposed implication: A subexponential S(n)-complete witness family would allow a faster exact evaluator for S_unary by taking the minimax only over H_n instead of all n! orders, directly targeting the open shrink-the-exponent goal for SORT-…
-Historical reported excerpt (unverified): ## Mathematical finding (not a theorem completion)
+Historical reported excerpt (unverified): ## Mathematical finding (not a theorem completion) For `τ(n) = min{\|H\| : h(H) = S(n)}`: - **Rigorous lower bound** (`h(H) ≤ \|H\|−1`): any two orders differ at some pair; comparing it leaves both sides nonempty, induct on the larger side. Hence `τ(n) ≥ S(n)+1 = Ω(n log n)`. The bound is attained by "…
 Board: [2026-11-20 message](../../board/301/page-010.md?plain=1#L751) · [2026-11-20 message](../../board/301/page-010.md?plain=1#L823)
 Additional board mentions: 5 (use front lookup for exact links)
 Assistant reports: [ses_e088a4e58fferNY9r3C95XoO1t](../../assistant-reports/sessions/ses_e088a4e58fferNY9r3C95XoO1t.md)
@@ -974,7 +974,7 @@ Is S(24) = C(24) = 80, or does a certified adversary force S(24) &gt;= 81, or do
 **investigated** · [Full research report](../../fronts/0626-s24-s25-gap-cert-alln.md)
 Intended test or falsifier: A sorting tree for 24 keys with worst-case height &lt;= 80 (certifying S(24) &lt;= 80), or a certified adversary lower bound S(24) &gt;= 81.
 Proposed implication: An e(24) = 0 extends the info-tightness streak past n = 22 and reopens the question of when the certified excess re-emerges after 22.
-Historical reported excerpt (unverified): ### Finding
+Historical reported excerpt (unverified): ### Finding - **No falsifier found:** `A_k(A_24)=80` for all k≤5, and by the theorem for all computationally reachable k≤12. This adversary family cannot certify `S(24)≥81`; likewise it cannot certify depth `&gt;84` at n=25. It also cannot certify the **known** excess at n=22 (`A_k=70` while `S(22)=71…
 Assistant reports: [ses_e03e234abffexBVBEO5Ve3rCo8](../../assistant-reports/sessions/ses_e03e234abffexBVBEO5Ve3rCo8.md)
 Original task commissions: [e194e51ec16d](../../followup/task-commissions/objects/e194e51ec16dfe0448f71d73b1106cc6d811c09f5c90143e830b4120238bb9ee.txt)
 Source manifests: [soring-fronts_s24-s25-gap-cert-alln](../../workspaces/manifests/soring-fronts_s24-s25-gap-cert-alln.json)
@@ -1011,7 +1011,7 @@ Can a polynomial-size, prefix-determined framed DAG at exact budget S(n) be obta
 **investigated** · [Full research report](../../fronts/0634-framed-dag-exact-budget-hybrid-alln.md)
 Intended test or falsifier: Construct and checker-verify such a hybrid DAG for a fixed nontrivial range of n with polynomial node count, or exhibit an infinite family where any exact-budget hybrid requires value-dependent frames on a shared edge.
 Proposed implication: A positive all-n construction would give a polynomial-size certificate for SORT-BOUND-U and imply NP membership; a refutation would isolate the zero-comparison obstruction as unavoidable for exact budgets.
-Historical reported excerpt (unverified): **Finding.** The hybrid route is refuted for exact budgets:
+Historical reported excerpt (unverified): **Finding.** The hybrid route is refuted for exact budgets: - Weak (polynomial) rank-envelope windows give height \(W_{\text{weak}}(n) &gt; F_{\text{FJ}}(n) \ge S(n)\) for all \(n\ge 5\) (e.g. \(n=5\): 10 vs 7; \(n=12\): 39 vs 30), so they cannot certify the exact budget. - Exact budget therefore requ…
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e035dce05ffe0MxOu7CWydjYSP](../../assistant-reports/sessions/ses_e035dce05ffe0MxOu7CWydjYSP.md)
 Original task commissions: [d2b30d6f7016](../../followup/task-commissions/objects/d2b30d6f70167612982d17d809684f9cd80d0f610a2c2268d8cb9f1c3b799e48.txt)
@@ -1038,7 +1038,7 @@ Does the positive defect D(P)=F(P)-ceil(log2 e(P)) on reachable optimal-play sta
 **investigated** · [Full research report](../../fronts/0704-defect-pruning-certificate-completeness-alln.md)
 Intended test or falsifier: Show an infinite family of reachable states with D(P)&gt;0 where no polynomial-size witness identifies a non-optimal comparison without computing F of both children, or prove such a defect certificate exists.
 Proposed implication: If defect certificates exist, defect pruning becomes a sound and complete pruning rule for exact evaluation; otherwise the n=6 defect witness remains only a local heuristic.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding For the defect-pruning question, the answer is the second horn: **identifying the harder child still requires solving minimax (equivalently the #P linear-extension threshold), not merely exhibiting defect.** Exact computation for `n ≤ 6` (130,023 labelled posets at `n=6`) sh…
 Board: [2026-11-23 message](../../board/301/page-003.md?plain=1#L791)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_df93ced5cfferU0030pvuPGbiD](../../assistant-reports/sessions/ses_df93ced5cfferU0030pvuPGbiD.md)
@@ -1053,7 +1053,7 @@ The one-ply bound obeys L0 &lt;= L1 &lt;= F and the sound predicate g implies ro
 **investigated** · [Full research report](../../fronts/0722-oneply-flatness-certificate-gap-alln.md)
 Intended test or falsifier: Show that for all large n every L1-flat state on optimal antichain play is g-certifiable and defect-free, or exhibit an infinite family of reachable optimal-play states with L1(P)=L0(P) but F(P)&gt;L0(P) or g(P)=false.
 Proposed implication: Determines whether the cheap one-ply lower bound can serve as a sound and complete local certificate for exact minimax on states relevant to S(n); a negative answer is a barrier to L1-based certified evaluation and unif…
-Historical reported excerpt (unverified): ## Mathematical finding (paper proof, \[deduction\])
+Historical reported excerpt (unverified): ## Mathematical finding (paper proof, \[deduction\]) Model as in `docs/problem.md` / `docs/research-one-ply-obstruction.md`: finite poset `P`, `e(P)` linear extensions, `F(P)` minimax comparisons, `L0(P)=ceil(log2 e(P))`, `L1(P)=0` if total else `1 + min_{i~j} max(L0(P+i&lt;j), L0(P+j&lt;i))`, and `L0&lt;=L1&lt;…
 Board: [2026-11-23 message](../../board/301/page-001.md?plain=1#L130) · [2026-11-23 review](../../board/301/page-001.md?plain=1#L217)
 Assistant reports: [ses_df7279b67ffeFDr7Fympr2f2Hw](../../assistant-reports/sessions/ses_df7279b67ffeFDr7Fympr2f2Hw.md)
 Original task commissions: [7b194089195f](../../followup/task-commissions/objects/7b194089195f4e049510cd49e220475366de6ed710eec02c59f418ee0b004816.txt)
@@ -1066,7 +1066,7 @@ For antichain-reachable height-S(n) optimal-play states, let t(n) be the least p
 **investigated** · [Full research report](../../fronts/0737-reachable-profile-depth-growth-certificate-barrier-alln.md)
 Intended test or falsifier: Exhibit a constant C with M_C determining F on every antichain-reachable optimal state at every n (bounded case), or exhibit arbitrarily large n with two such states sharing M_C but differing in F (unbounded case, refut…
 Proposed implication: A bounded t(n) keeps fixed-depth local invariants alive as a route to NP/coNP membership for SORT-BOUND-U; unbounded t(n) is a barrier excluding that whole certificate family and separates structural invariant-completen…
-Historical reported excerpt (unverified): ## Mathematical finding \[experiment\], restricted class
+Historical reported excerpt (unverified): ## Mathematical finding \[experiment\], restricted class I built a from‑scratch engine (own closure, downset‑DP extension count, child enumeration, memoised minimax F) and reproduced the seed pair exactly: e=32, equal M1, F(P)=5 / F(Q)=6, M2 unequal. Full **forward** enumeration of every F‑tight reac…
 Board: [2026-11-23 message](../../board/301/page-001.md?plain=1#L796)
 Assistant reports: [ses_df550b250ffeFWwQBbwDggB1Q7](../../assistant-reports/sessions/ses_df550b250ffeFWwQBbwDggB1Q7.md)
 Original task commissions: [63feb26177de](../../followup/task-commissions/objects/63feb26177de2159b56db76725d5679dc620787c6942ebf9d09375edfbc96617.txt)

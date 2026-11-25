@@ -17,7 +17,7 @@ python3 recovery/tools/search.py search "M2" census --kind board
 # Search historical task texts or cross-project reports
 python3 recovery/tools/search.py search certificate --kind commission --kind mixed
 
-# Search archived GitHub issues
+# Search archived GitHub issues and pull requests
 python3 recovery/tools/search.py search adversary --kind github
 
 # Find an original source file by filename or workspace

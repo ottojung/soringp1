@@ -162,7 +162,7 @@ Is the first lookahead depth at which the extension-count hierarchy L_t(A_n) exc
 **investigated** · [Full research report](../../fronts/0396-lookahead-flatness-sharp-threshold.md)
 Intended test or falsifier: An explicit n with E(n)&gt;0 and L_{floor(n/2)+1}(A_n)=C(n), or a proof that some n with E(n)&gt;0 keeps L_t(A_n)=C(n) for every t below S(n).
 Proposed implication: A positive answer would make the linear-depth extension-count hierarchy complete at the first depth not covered by the flatness theorem; a counterexample would show that the soundness-completeness gap of that hierarchy …
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding The front’s sharp-threshold claim is **false**, and not just at one exceptional `n`. **Theorem (paper proof).** For every `n &gt;= 0` and every
 Board: [2026-11-08 message](../../board/301/page-020.md?plain=1#L89) · [2026-11-08 message](../../board/301/page-020.md?plain=1#L157)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e433029edffesXSxfiqU4IcOds](../../assistant-reports/sessions/ses_e433029edffesXSxfiqU4IcOds.md)
@@ -176,7 +176,7 @@ Let L_t be the depth-t extension-count lookahead hierarchy with L_0(P)=ceil(log2
 **investigated** · [Full research report](../../fronts/0397-lookahead-convergence-depth.md)
 Intended test or falsifier: Exhibit an infinite family n_i with t*(n_i)-floor(n_i/2) tending to infinity, or prove an all-n upper bound t*(n)&lt;=floor(n/2)+c with an explicit constant c.
 Proposed implication: A bounded offset would evaluate exact S(n) by a depth-(n/2+O(1)) lookahead in 2^{O(n log n)} time, improving the current 2^{O(n log^2 n)} numeric-n bound; unbounded offset would show the local counting hierarchy needs e…
-Historical reported excerpt (unverified): **Conclusion**
+Historical reported excerpt (unverified): **Conclusion** The prior turn’s board post is present exactly once and the research deliverable is complete. I did not repeat the prompt or duplicate any external action. No unfinished mathematical work remains; the unresolved scientific point is the stated open question whether `S(n)&gt;C(n)` infinit…
 Board: [2026-11-08 message](../../board/301/page-020.md?plain=1#L170) · [2026-11-08 message](../../board/301/page-020.md?plain=1#L210)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e4302d1b0ffe7aendq7X0aj8FZ](../../assistant-reports/sessions/ses_e4302d1b0ffe7aendq7X0aj8FZ.md)
@@ -190,7 +190,7 @@ For all finite height-at-most-two posets P and Q, if the multiset of unordered e
 **investigated** · [Full research report](../../fronts/0470-height-two-exact-child-count-deck-completeness.md)
 Intended test or falsifier: Exhibit height-two posets P and Q with identical multisets of unordered child extension-count pairs but provably different F(P) and F(Q), using exact minimax and exact extension counting.
 Proposed implication: Completeness would give a polynomial-size exact invariant on the height-two slice containing the one-comparison state C2 disjoint-union A_{n-2}, a state-compression target for the first step of S(n); failure would exten…
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding The front’s claim **survives exhaustively through n = 9**, and the computation supports a stronger statement: &gt; For every height-at-most-two poset `P`, let `D(P)` be the multiset, over unordered incomparable pairs `{x,y}`, of the unordered exact child-extension-count pair
 Board: [2026-11-10 message](../../board/301/page-017.md?plain=1#L484) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L601)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e3d9506b6ffeGGSDluusoedYDB](../../assistant-reports/sessions/ses_e3d9506b6ffeGGSDluusoedYDB.md)
@@ -216,7 +216,7 @@ Is there a universal constant c&lt;1 such that for every n some comparison strat
 **investigated** · [Full research report](../../fronts/0542-sublinear-window-lookahead-attainment.md)
 Intended test or falsifier: Prove an all-n lower bound that for every non-tight n some node of any height-S(n) strategy depends on at least c*n induced elements for a fixed c&gt;0, or construct a c&lt;1 window strategy attaining S(n) for all large n.
 Proposed implication: A sublinear-window strategy would give a compact-locality exact evaluator and a new upper bound for SORT-BOUND-U; an Omega(n)-window lower bound would be a barrier showing every extension-count or local-statistic lookah…
-Historical reported excerpt (unverified): ## Conclusion of this recovery pass
+Historical reported excerpt (unverified): ## Conclusion of this recovery pass - I did **not** blindly re-run the interrupted prompt. I inspected conversation, worktree, and durable board state. - The only external side effect from the interrupted turn **did complete** and is verified present and non-duplicated. No re-post, no second commit…
 Board: [2026-11-19 message](../../board/301/page-013.md?plain=1#L308)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e0eb1575fffec3zbg1XDtPRKsY](../../assistant-reports/sessions/ses_e0eb1575fffec3zbg1XDtPRKsY.md)
@@ -245,7 +245,7 @@ For every n, is the number of distinct child extension-count decks among poset s
 **investigated** · [Full research report](../../fronts/0574-optimal-play-deck-class-polynomial.md)
 Intended test or falsifier: Exhibit an infinite family of n forcing superpolynomially many distinct child decks along optimal play, for instance layered or winning-frontier states whose child extension-count decks are pairwise distinct; a rigorous…
 Proposed implication: If deck soundness holds and only polynomially many decks arise on optimal play, an exact minimax evaluator with polynomially many states would follow, strengthening the unary upper bound; superpolynomial deck growth wou…
-Historical reported excerpt (unverified): ## Verdict
+Historical reported excerpt (unverified): ## Verdict Outcome **(c)**: no theorem completion, no counterexample. The polynomial-decks hypothesis is likely **false** (the n=7 datum is strong evidence), but I did not prove superpolynomial growth for all n, and I did not prove the positive bound — both routes require progress on exact `S(n)`, …
 Board: [2026-11-19 message](../../board/301/page-010.md?plain=1#L110) · [2026-11-19 review](../../board/301/page-010.md?plain=1#L132) · [2026-11-19 message](../../board/301/page-010.md?plain=1#L157)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e0aea6f26ffepDKG7EgnRfGLLD](../../assistant-reports/sessions/ses_e0aea6f26ffepDKG7EgnRfGLLD.md)
@@ -260,7 +260,7 @@ For every n, define R(n) as the set of child extension-count decks D(Q) of all p
 **investigated** · [Full research report](../../fronts/0576-deck-child-closure-alln.md)
 Intended test or falsifier: Exhibit a concrete reachable state P (some n) and an incomparable pair {x,y} such that child deck D(P+x&lt;y) is not realized by any optimal-play-reachable state of the same antichain; a positive answer needs a uniform all…
 Proposed implication: Closure of the reachable deck set under all children is the missing lemma for a deck-quotiented minimax evaluator: without it computing F(P) requires F of children whose decks lie outside the compressed reachable set, r…
-Historical reported excerpt (unverified): ### Result: child-closure is **FALSE** — explicit n=4 falsifier
+Historical reported excerpt (unverified): ### Result: child-closure is **FALSE** — explicit n=4 falsifier My from-scratch engine reproduced the board's validated counts exactly (\|R(n)\| = 181/1551/65551 states; 8/11/61 reachable decks for n=4/5/6), then found a concrete failure: - **Reachable state** P at n=4: relations `{1&lt;2, 3&lt;2}`, 0 isol…
 Board: [2026-11-19 message](../../board/301/page-010.md?plain=1#L175) · [2026-11-19 message](../../board/301/page-010.md?plain=1#L197) · [2026-11-19 message](../../board/301/page-010.md?plain=1#L267)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e0abb7e06ffeP6VPvKgA5qf5vT](../../assistant-reports/sessions/ses_e0abb7e06ffeP6VPvKgA5qf5vT.md)
@@ -304,7 +304,7 @@ For a finite poset P let M2(P) be the depth-two extension-count profile: the mul
 **investigated** · [Full research report](../../fronts/0727-depth2-extension-profile-minimax-completeness-alln.md)
 Intended test or falsifier: For each candidate constant t, exhibit two finite posets with identical M_t profiles but provably different F; the sharp first test is whether M2 separates the known n=7 (e,M1)-cospectral F=5/F=6 pair, and an unbounded-…
 Proposed implication: A positive answer is a bounded-lookahead structural invariant completing the minimax value and constraining any extension-count-based certificate; a negative answer rules out every bounded-depth extension-count invarian…
-Historical reported excerpt (unverified): ## Outcome
+Historical reported excerpt (unverified): ## Outcome I attacked the front's all‑n question on `billy-dev` and tried hard to refute it. **No all‑n verdict was reached, but the sharp first falsifier test was refuted and several new finite facts were established.** One #301 comment was posted (verified exactly once); the worktree is clean at …
 Board: [2026-11-23 review](../../board/301/page-001.md?plain=1#L395) · [2026-11-23 review](../../board/301/page-001.md?plain=1#L421)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_df6874654ffeoLekUSGMcBuvNa](../../assistant-reports/sessions/ses_df6874654ffeoLekUSGMcBuvNa.md)

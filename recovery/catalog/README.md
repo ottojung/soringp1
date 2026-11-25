@@ -24,7 +24,7 @@ Start with the [mathematical synthesis](../SYNTHESIS.md), [result register](../R
 - [Assistant report sessions](sessions/README.md) — 1,651 sessions
 - [Historical research commissions](commissions/README.md) — 1,386 distinct task texts
 - [Additional cross-project research reports](mixed-reports/README.md) — 1,540 distinct texts
-- [GitHub issue discussions](../followup/github-discussions/README.md) — 4 issues, 16 comments
+- [GitHub issues and pull-request discussions](../followup/github-discussions/README.md) — 4 issues, 51 pull requests, 32 discussion entries
 - [Historical commit patches](commits/README.md) — 4,952 patches
 
 ## Search on a local clone

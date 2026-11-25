@@ -71,7 +71,10 @@ def main(check=False):
             report = f.get('finding_unverified') or ''
             lines = [line.strip() for line in report.splitlines() if line.strip()]
             # Do not promote a claimed verdict to an established theorem.
-            excerpt = next((line for line in lines if re.search(r'(?i)^\s*(?:[*#]+\s*)?(?:finding|result|verdict|conclusion|outcome|mathematical finding|paper proof|counterexample|theorem|negative result)\b',line)), '')
+            position = next((i for i,line in enumerate(lines) if re.search(r'(?i)^\s*(?:[*#]+\s*)?(?:finding|result|verdict|conclusion|outcome|mathematical finding|paper proof|counterexample|theorem|negative result)\b',line)), None)
+            excerpt = lines[position] if position is not None else ''
+            if position is not None and len(excerpt)<65:
+                excerpt = ' '.join(lines[position:position+3])
             if not excerpt:
                 substantive = [line for line in lines if len(line) > 50 and not re.match(r"(?i)^(I(?:'ll| will| have| inspected)|Let me|Recovery check|First,? |Now I|Worktree|Tool |Starting )", line)]
                 excerpt = substantive[-1] if substantive else (lines[0] if lines else '')
@@ -196,7 +199,13 @@ def main(check=False):
         for i in data(github_index):
             rel=f"followup/github-discussions/issue-{i['number']}.md"
             assert (ROOT/rel).is_file(),rel
-            github.append({'id':str(i['number']),'path':rel,'title':i['title'],'state':i['state'],'comments':len(i['comments'])})
+            github.append({'id':str(i['number']),'path':rel,'title':i['title'],'state':i['state'],'comments':len(i['comments']),'kind':'issue'})
+    pr_index=ROOT/'followup/github-discussions/pull-requests.json'
+    if pr_index.is_file():
+        for i in data(pr_index):
+            rel=f"followup/github-discussions/pr-{i['number']:02d}.md"
+            assert (ROOT/rel).is_file(),rel
+            github.append({'id':str(i['number']),'path':rel,'title':i['title'],'state':'historical','comments':len(i['comments']),'kind':'pull request'})
     commits=[]
     for folder in ['workspaces/commits','followup/patches']:
         for p in sorted((ROOT/folder).glob('*.patch')):
@@ -263,7 +272,7 @@ def main(check=False):
     for r in mixed_reports:r['label']=r['workspaces'][0]
     collection('mixed-reports','Additional cross-project research reports',mixed_reports,'distinct texts',lambda r,p:[f'- {link(r["title"],ROOT/r["path"],p)} · {r["occurrences"]} occurrence(s)',f'  - {esc(flat(r["workspaces"][0],170))}'],100)
     if github:
-        overview.append('- [GitHub issue discussions](../followup/github-discussions/README.md) — '+str(len(github))+' issues, '+str(sum(i['comments'] for i in github))+' comments')
+        overview.append('- [GitHub issues and pull-request discussions](../followup/github-discussions/README.md) — '+str(sum(i['kind']=='issue' for i in github))+' issues, '+str(sum(i['kind']=='pull request' for i in github))+' pull requests, '+str(sum(i['comments'] for i in github))+' discussion entries')
     commits.sort(key=lambda c:(c['subject'].lower(),c['id']))
     for c in commits:c['label']=c['subject']
     collection('commits','Historical commit patches',commits,'patches',lambda c,p:[f'- {link(c["id"][:12],ROOT/c["path"],p)} · {esc(flat(c["subject"],170))}'],150)

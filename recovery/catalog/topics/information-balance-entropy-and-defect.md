@@ -63,7 +63,7 @@ Is the sorting-number information gap g(n)=S(n)-⌈log2(n!)⌉ non-decreasing in
 **investigated** · [Full research report](../../fronts/0066-gap-monotonicity-alln.md)
 Intended test or falsifier: Exhibit infinitely many n &lt; m with g(m) &lt; g(n), or prove unbounded decrease, using only primary sources and exact values where known without unproven enumeration.
 Proposed implication: Monotonicity of the gap would constrain asymptotic forms and inform lower-bound heuristics for exact evaluation; non-monotonicity would block naive gap-based extrapolations for unary SORT-BOUND-U complexity.
-Historical reported excerpt (unverified): **Mathematical finding (primary-sources only):**
+Historical reported excerpt (unverified): **Mathematical finding (primary-sources only):** - Let $g(n)=S(n)-\lceil\log_2(n!)\rceil\ge 0$ integer, $dS(n)=S(n+1)-S(n)$, $\Delta_n=\lceil\log_2((n+1)!)\rceil-\lceil\log_2(n!)\rceil\in\{\lfloor\log_2(n+1)\rfloor,\lceil\log_2(n+1)\rceil\}$. Then $g(n+1)-g(n)=dS(n)-\Delta_n$. - If $g(n)=0$ (info b…
 Source manifests: [soring-fronts_gap-monotonicity-alln](../../workspaces/manifests/soring-fronts_gap-monotonicity-alln.json)
 
 ## graph-entropy-rate-monotonicity
@@ -262,7 +262,7 @@ Is there an all-n inequality showing that any comparison tree with height &lt;= 
 **investigated** · [Full research report](../../fronts/0215-branch-mass-telescoping-o-n-excess.md)
 Intended test or falsifier: Exhibit for every epsilon&gt;0 a uniform family of comparison trees of height &lt;= log2(n!)+epsilon*n for all large n with uniformly bounded or o(n) telescoped branch-mass loss under some sound framed join model.
 Proposed implication: A linear (up to polylog) excess lower bound from realizability of branch masses would constrain how close any exact evaluator can approach the information bound without relying on arbitrary prefix-code arguments.
-Historical reported excerpt (unverified): **Mathematical finding (disproof of the front claim):**
+Historical reported excerpt (unverified): **Mathematical finding (disproof of the front claim):** The inequality is false. The exact-reset branch-divisibility obstruction (*docs/research-exact-reset-realizability.md*) is **critical** to exact partitioning: from antichain to a star (odd n) root split gives n/2 not integer relative to leaf c…
 Additional board mentions: 2 (use front lookup for exact links)
 Source manifests: [soring-fronts_branch-mass-telescoping-o-n-excess](../../workspaces/manifests/soring-fronts_branch-mass-telescoping-o-n-excess.json)
 
@@ -273,7 +273,7 @@ Let A be the closure under transitive composition of all (e(P'),e(P'')) split ra
 **investigated** · [Full research report](../../fronts/0217-admissible-split-closure-obstruction.md)
 Intended test or falsifier: Exhibit an infinite family with heights log2(n!)+o(n) whose split ratios all lie in A and satisfy a complete set of local/global consistency constraints realizable by some actual comparison tree structure.
 Proposed implication: A general obstruction on the split monoid would constrain how close to the information bound any exact comparison tree can get regardless of certificate compression, complementing Sergeev's upper bound with a necessary …
-Historical reported excerpt (unverified): **Finding (disproof of the front):**
+Historical reported excerpt (unverified): **Finding (disproof of the front):** Sergeev’s group-insertion algorithm gives a deterministic adaptive comparison tree for every $n$ with worst-case height $$
 Additional board mentions: 1 (use front lookup for exact links)
 Source manifests: [soring-fronts_admissible-split-closure-obstruction](../../workspaces/manifests/soring-fronts_admissible-split-closure-obstruction.json)
 
@@ -295,7 +295,7 @@ Are there posets P other than the antichain such that every nontrivial compariso
 **investigated** · [Full research report](../../fronts/0225-split-critical-poset-exact-reset.md)
 Intended test or falsifier: Identify a non-antichain split-critical P admitting some exact reset to F', or show the antichain is the only root-reachable split-critical poset under the model; alternatively characterize all split-critical P and find…
 Proposed implication: A nontrivial split-critical class would generalize the branch-divisibility obstruction beyond the antichain root and constrain which reachable states can appear as exact-reset leaves in any tight certificate for evaluat…
-Historical reported excerpt (unverified): **Mathematical finding (disproof of the proposed hypothesis):**
+Historical reported excerpt (unverified): **Mathematical finding (disproof of the proposed hypothesis):** Weak orders form a large class with the split-critical property. Every nontrivial comparison in a weak order is within some incomparability block (transitive incomparability classes), and by block permutation automorphisms gives a bala…
 Source manifests: [soring-fronts_split-critical-poset-exact-reset](../../workspaces/manifests/soring-fronts_split-critical-poset-exact-reset.json)
 
 ## recursive-mass-divisibility-tight-height
@@ -326,7 +326,7 @@ Extract an effective finite version of Sergeev's S(n) - log2(n!) = o(n) bound wi
 **investigated** · [Full research report](../../fronts/0243-sergeev-effective-excess-bound.md)
 Intended test or falsifier: Show the asymptotic method is non-constructive and cannot yield any explicit finite bound useful for pruning, or derive a contradiction showing no effective form exists under current techniques.
 Proposed implication: An effective bound would directly improve search pruning and clarify the gap between information bound and actual S(n).
-Historical reported excerpt (unverified): **Finding (paper-level obstruction, no repo/Lean changes):**
+Historical reported excerpt (unverified): **Finding (paper-level obstruction, no repo/Lean changes):** - **Source/limits (literature):** Sergeev's bound is achieved by a parameterized group-insertion construction optimized asymptotically in the group sizes/recursion; the docs explicitly state the big-O supplies no explicit constants and ex…
 Board: [2026-11-23 review](../../board/301/page-003.md?plain=1#L929)
 Source manifests: [soring-fronts_sergeev-effective-excess-bound](../../workspaces/manifests/soring-fronts_sergeev-effective-excess-bound.json)
 
@@ -337,7 +337,7 @@ Find a non-enumerative recurrence for the minimax value F(P) exploiting structur
 **investigated** · [Full research report](../../fronts/0245-pigeonhole-split-exponent-shrink.md)
 Intended test or falsifier: Show that for hard posets any exact recurrence avoiding transcript enumeration is subject to the same 2^(Omega(n log^2 n)/something) barrier as full enumeration.
 Proposed implication: Better time bound is a concrete algorithmic improvement toward understanding exact complexity; relevant to upper bounds.
-Historical reported excerpt (unverified): ### Outcome
+Historical reported excerpt (unverified): ### Outcome No repo/Lean changes. Finding: the front as stated is likely false for hard posets due to labelled states with trivial automorphism groups and indecomposable structure forcing frontier enumeration; exact compression is obstructed by AND-OR non-distributivity and lack of cheap exact inva…
 Source manifests: [soring-fronts_pigeonhole-split-exponent-shrink](../../workspaces/manifests/soring-fronts_pigeonhole-split-exponent-shrink.json)
 
 ## poset-entropy-information-theoretic-lb
@@ -486,7 +486,7 @@ For all integers n &gt;= 3 with gcd(n, m)=1 and some m&gt;=2, if every leaf clas
 **investigated** · [Full research report](../../fronts/0305-antichain-split-coprime-obstruction.md)
 Intended test or falsifier: Find for some coprime pair (n,m) a target class structure with leaf classes of size divisible by m that remains realizable despite the split mismatch, or prove obstruction for all coprime pairs.
 Proposed implication: Would generalize the parity obstruction to arbitrary coprime factors from comparison splits, yielding a number-theoretic necessary condition on all exact-reset certificates.
-Historical reported excerpt (unverified): **Mathematical finding**
+Historical reported excerpt (unverified): **Mathematical finding** - **Root split is fixed.** First comparison from $A_n$ gives two branches each of size $n!/2$. For an exact reset to target poset $F'$ on $n$ labeled elements, every leaf class has size $e(F')$ (linear extensions of $F'$), so necessary conditions are $e(F') \mid n!$ and (at…
 Source manifests: [soring-fronts_antichain-split-coprime-obstruction](../../workspaces/manifests/soring-fronts_antichain-split-coprime-obstruction.json)
 
 ## optimal-path-forced-e-gap-family
@@ -571,7 +571,7 @@ Is S(n) strictly larger than ceil(log2(n!)) for every n &gt;= 22, so that inform
 **investigated** · [Full research report](../../fronts/0354-eventual-information-nontightness.md)
 Intended test or falsifier: Exhibit an explicit n &gt;= 22 together with a comparison strategy of height ceil(log2(n!)) that is checked locally or by exact search, thereby establishing S(n) = C(n).
 Proposed implication: If true, the information bound fails permanently after n = 21, so every asymptotic lower-bound or succinct-certificate method must encode excess beyond leaf counting; if false, tightness recurs and cannot be treated as …
-Historical reported excerpt (unverified): **Conclusion**
+Historical reported excerpt (unverified): **Conclusion** The prior turn's work was completed exactly once. There is no unfinished external action to resume, and I have not posted again, committed, or modified the repository. No effect remains uncertain.
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e45852c74ffeR5033rTDtm7MUh](../../assistant-reports/sessions/ses_e45852c74ffeR5033rTDtm7MUh.md)
 Original task commissions: [486409d78392](../../followup/task-commissions/objects/486409d783920027aa98fd7d2b965cf6a310dd7d370b76c0150cc577159960eb.txt)
@@ -639,7 +639,7 @@ When the Haeupler et al. heapsort variant (arXiv:2404.04552v4, Appendix C, as ci
 **investigated** · [Full research report](../../fronts/0379-haeupler-heapsort-antichain-excess.md)
 Intended test or falsifier: Analyze the antichain specialization and prove a height lower bound of the form A(n) &gt;= log2(n!) + c n for all large n, or exhibit an all-n implementation whose comparison count is log2(n!) + o(n).
 Proposed implication: An explicit o(n)-excess algorithm would make the known PSPACE upper bound constructive and give a polynomial-time computable target for exact S(n); an Omega(n) barrier would extend the insertion-sort obstruction to this…
-Historical reported excerpt (unverified): **Finding, for the record**
+Historical reported excerpt (unverified): **Finding, for the record** Appendix C of arXiv:2404.04552v4 is the van der Hoog–Rotenberg–Rutschmann insertion-sort algorithm, not a Haeupler heapsort. Haeupler’s antichain specialization is ordinary heap-based selection sort. For the standard pairing-heap insert, an adversary can force the `n−1` …
 Board: [2026-11-08 message](../../board/301/page-021.md?plain=1#L361) · [2026-11-08 message](../../board/301/page-021.md?plain=1#L377) · [2026-11-08 message](../../board/301/page-021.md?plain=1#L471)
 Assistant reports: [ses_e4435234fffeuv1d9IVHZWB4lu](../../assistant-reports/sessions/ses_e4435234fffeuv1d9IVHZWB4lu.md)
 Original task commissions: [ec862212f9d9](../../followup/task-commissions/objects/ec862212f9d9645164c07a6d254f9a3871edaedcc92134d1a8213b67e9129b4a.txt)
@@ -666,7 +666,7 @@ For every fixed finite poset Q, is the defect D_Q(n)=S(n)-F(Q disjoint-union A_{
 **investigated** · [Full research report](../../fronts/0391-fixed-pattern-defect-bound.md)
 Intended test or falsifier: Exhibit one fixed Q and an infinite sequence n_j for which D_Q(n_j) exceeds every constant; the computed chain values D_{C_3}(3..7)=3,3,2,2,3 show no plateau yet, so a growth proof or a longer computed plateau would dis…
 Proposed implication: Bounded defects would say fixed known comparability changes the exact bulk sorting number by only O(1), supporting pattern-decomposition and certificate arguments; unbounded defects would show local structure amplifies …
-Historical reported excerpt (unverified): ## Finding: the defect is bounded for every fixed pattern
+Historical reported excerpt (unverified): ## Finding: the defect is bounded for every fixed pattern Let `q=\|Q\|` and `P = Q ⊔ A_{n-q}`. The front's question has a clean affirmative answer: \\[
 Board: [2026-11-08 message](../../board/301/page-021.md?plain=1#L953)
 Additional board mentions: 4 (use front lookup for exact links)
 Assistant reports: [ses_e435b01b9ffev9izmV100AOo7p](../../assistant-reports/sessions/ses_e435b01b9ffev9izmV100AOo7p.md) · [ses_e434c67aaffeggt91NeSl9OLYn](../../assistant-reports/sessions/ses_e434c67aaffeggt91NeSl9OLYn.md)
@@ -737,7 +737,7 @@ Does the excess E(n)=S(n)-ceil(log2 n!) grow unboundedly, or is it O(1), for all
 **investigated** · [Full research report](../../fronts/0417-information-theoretic-gap-unboundedness.md)
 Intended test or falsifier: Either construct an infinite family with E(n) bounded by a constant, or prove E(n) -&gt; infinity with an explicit lower-bound growth rate.
 Proposed implication: Bounded excess would imply near-information-optimal sorting uniformly; unbounded growth would quantify inherent adaptivity cost.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **Status: OPEN — neither boundedness nor unboundedness of `E(n)=S(n)−⌈log₂ n!⌉` is established.** What is known (literature):
 Assistant reports: [ses_e42135efaffeL7q9vpqYgimH03](../../assistant-reports/sessions/ses_e42135efaffeL7q9vpqYgimH03.md)
 Original task commissions: [d6d3e9b365c4](../../followup/task-commissions/objects/d6d3e9b365c4e70077d93290db883f7857e5ed392b09dc325d2cc195792682a0.txt)
 Source manifests: [soring-fronts_information-theoretic-gap-unboundedness](../../workspaces/manifests/soring-fronts_information-theoretic-gap-unboundedness.json)
@@ -749,7 +749,7 @@ Does every near-optimal budget k=S(n)-1 for the faithful state-expanded decision
 **investigated** · [Full research report](../../fronts/0420-farkas-dual-completeness-vs-soundness-gap.md)
 Intended test or falsifier: A single non-sortable instance at small n with a verified dual witness whose support is polynomial in N=n+k+1 would refute the unavoidable exponential-support claim.
 Proposed implication: If polynomial dual witnesses exist for all n, SORT-BOUND-U membership in coNP would be substantively advanced; if not, the LP soundness does not imply polynomial certificates.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **Claim attacked.** Every near-optimal budget `k = S(n)−1` for the faithful state-expanded decision-tree LP admits a polynomial-size (in `N = n+k+1`) Farkas certificate of infeasibility, or the exponential matching-support obstruction is unavoidable for *all* sound-and-compl…
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e41be57b4ffeMN2MhJvXY0TgTq](../../assistant-reports/sessions/ses_e41be57b4ffeMN2MhJvXY0TgTq.md)
 Original task commissions: [7fa2cdb54ca9](../../followup/task-commissions/objects/7fa2cdb54ca96e85facdb070e0b0e14deb54b228dbc75389e2d36d79254d6e13.txt)
@@ -833,7 +833,7 @@ Is F(P) - ceil(log2 e(P)) at most 1 for every finite poset P of height at most t
 **investigated** · [Full research report](../../fronts/0440-height-two-information-excess-bound.md)
 Intended test or falsifier: Exhibit a height-two poset with exact excess F(P) - ceil(log2 e(P)) at least 2, verified by exact minimax and exact linear-extension counting.
 Proposed implication: If bounded, the information bound is nearly tight one comparison from the antichain and constrains information-based pruning barriers; if unbounded, shallow reachable states already carry an unbounded information gap re…
-Historical reported excerpt (unverified): **Result already delivered, not rerun**
+Historical reported excerpt (unverified): **Result already delivered, not rerun** The height-two bound is false: for \(P=A_{12}\oplus A_{12}\), exact extension counting gives \(\lceil\log_2 e(P)\rceil=58\), and ordinal-sum additivity plus the published \(S(12)=30\) gives \(F(P)=60\), so the excess is \(2\). This refutes the bound “at most …
 Board: [2026-11-09 message](../../board/301/page-019.md?plain=1#L651) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L776) · [2026-11-09 message](../../board/301/page-019.md?plain=1#L816)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e3f761a60ffe6g9F3hBvGSq3Cf](../../assistant-reports/sessions/ses_e3f761a60ffe6g9F3hBvGSq3Cf.md)
@@ -949,7 +949,7 @@ For every n, is the height-two information excess H(n)=sup{F(P)-ceil(log2 e(P)) 
 **investigated** · [Full research report](../../fronts/0464-height-two-endpoint-excess-conjecture.md)
 Intended test or falsifier: Exhibit an explicit height-two n-element poset P whose exact F(P) exceeds ceil(log2 e(P)) plus max(E(n), max_{a+b=n}(E(a)+E(b)+1)), with both sides evaluated from certified exact values.
 Proposed implication: If true, height-two excess is controlled by the one-edge and complete-bipartite endpoints and its boundedness is equivalent to boundedness of E(n); if false, a new amplification mechanism exists beyond the known endpoin…
-Historical reported excerpt (unverified): ## Result
+Historical reported excerpt (unverified): ## Result **The endpoint conjecture is not refuted by the board’s n=11 witness.** Its claimed exact value rests on a false disjoint-union identity. I did not prove the conjecture or find a replacement counterexample. ### Recovery / side effects
 Board: [2026-11-09 message](../../board/301/page-018.md?plain=1#L574) · [2026-11-09 message](../../board/301/page-018.md?plain=1#L796) · [2026-11-09 message](../../board/301/page-018.md?plain=1#L811)
 Assistant reports: [ses_e3e0dc9b4ffeBJRiQIA0p7UFcB](../../assistant-reports/sessions/ses_e3e0dc9b4ffeBJRiQIA0p7UFcB.md)
 Original task commissions: [15bdbc6a63e8](../../followup/task-commissions/objects/15bdbc6a63e8b28d396e9311bdcecdbe31b9dc0f41a6dcc785a6ebf456d426dc.txt)
@@ -990,7 +990,7 @@ For every finite poset P of height at most three that is neither an ordinal sum 
 **investigated** · [Full research report](../../fronts/0474-prime-height-three-excess-one.md)
 Intended test or falsifier: Exhibit an ordinal-sum- and disjoint-union-indecomposable height-three poset with exact information excess at least 2, with independently computed exact minimax height and exact linear-extension count.
 Proposed implication: A proof would confine any height-three excess above the antichain value E(n) to the already-studied series and parallel compositions; a counterexample would be a prime local amplifier not reducible to E(n) by the verifi…
-Historical reported excerpt (unverified): ## Result: the front's conjecture is FALSE
+Historical reported excerpt (unverified): ## Result: the front's conjecture is FALSE **Falsifier (all criteria met):** a poset `Q` on **n = 19**, height exactly 3, prime with respect to *both* decompositions (comparability graph connected ⇒ not a disjoint union; incomparability graph connected ⇒ not an ordinal sum), with information excess…
 Board: [2026-11-10 message](../../board/301/page-017.md?plain=1#L381) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L403)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e3d691b8bffe8cKAdXXQoMSrKJ](../../assistant-reports/sessions/ses_e3d691b8bffe8cKAdXXQoMSrKJ.md)
@@ -1034,7 +1034,7 @@ For every finite poset P with at least two elements that is neither a nontrivial
 **investigated** · [Full research report](../../fronts/0484-prime-excess-vs-antichain-gap.md)
 Intended test or falsifier: Exhibit a series- and parallel-indecomposable poset P with F(P)-ceil(log2 e(P)) &gt;= E(\|P\|)+2, for example by exact minimax on a deleted-relation variant of an ordinal sum.
 Proposed implication: If true, the global antichain excess E(n) controls all indecomposable local excess, yielding a decomposition-based route to exact evaluation; if false, prime states can exceed the antichain gap and block E(n)-based prun…
-Historical reported excerpt (unverified): ## Finding: the front conjecture is **false**
+Historical reported excerpt (unverified): ## Finding: the front conjecture is **false** **Recovery check first.** Host `billy-dev`; worktree clean at `6a96398`; no prior #301 post for this front, so nothing was duplicated. Exactly one board comment was posted at `2026-11-10T01:29:30Z`. No repository, Lean, commit, or PR changes. Scratch is…
 Board: [2026-11-10 message](../../board/301/page-017.md?plain=1#L508) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L620) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L638)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e3cf62e46ffeM9nvZKRpj7FKDb](../../assistant-reports/sessions/ses_e3cf62e46ffeM9nvZKRpj7FKDb.md)
@@ -1076,7 +1076,7 @@ For all integers m,k &gt;= 2 and 1 &lt;= r &lt;= m-1, is the information excess 
 **investigated** · [Full research report](../../fronts/0492-fan-family-excess-boundedness.md)
 Intended test or falsifier: Exhibit m,k,r with exact F(P)-ceil(log2 e(P)) &gt;= 4, or prove that the fan family excess is unbounded as m,k,r grow.
 Proposed implication: Since the fan family contains the single-deletion prime family, a uniform bound would imply the antichain excess E(n) is bounded by an absolute constant; a counterexample would give a simpler unbounded prime family than…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding The front's falsifier (exact excess ≥ 4, or unboundedness proof) was **not met**, and the universal bound-3 was **not proved** — the question remains **OPEN**, with the gap now precisely mapped: - **Sandwich \[paper proof\]:** `S(m)+S(k) ≤ F(P) ≤ S(m)+S(k)+⌈log₂(r+1)⌉` for eve…
 Board: [2026-11-10 message](../../board/301/page-016.md?plain=1#L92) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L1206) · [2026-11-10 message](../../board/301/page-017.md?plain=1#L1232)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e3c02cca6ffeaLD41v3Qcp7Zov](../../assistant-reports/sessions/ses_e3c02cca6ffeaLD41v3Qcp7Zov.md)
@@ -1193,7 +1193,7 @@ For the glued height-two lex-prime family R_t with A-to-B-only comparabilities (
 **investigated** · [Full research report](../../fronts/0509-glued-prime-twoply-excess-growth.md)
 Intended test or falsifier: Compute exact e(R_t) and two-ply values L2(R_t) for growing t (first open t=3 with e=366240, L0=L1=19, F in \[19,24\]) and either show L2(R_t)-ceil(log2 e(R_t)) exceeds any fixed bound or prove it bounded; exact F(R_t) is…
 Proposed implication: Unbounded two-ply excess on a reachable antichain-derived family would exhibit forced large-excess threshold states without solving exact F, blocking every bounded-excess memoization family; a uniform bound would keep t…
-Historical reported excerpt (unverified): ## Mathematical finding (honest)
+Historical reported excerpt (unverified): ## Mathematical finding (honest) - **Unbounded growth not supported; falsification attempt negative on all tested `t`.** `Δ₂(t)=L2(R_t)-C(R_t)=0` for `t=1..4`, and the weaker one-ply excess `L1(R_t)-C(R_t)=0` for `t=1..6`. In particular no instance with `Δ₂(t)&gt;0` (let alone growing) was found; the …
 Assistant reports: [ses_e33defb0dffeSLLSdjUhNBkePL](../../assistant-reports/sessions/ses_e33defb0dffeSLLSdjUhNBkePL.md)
 Original task commissions: [4fa9ccaeed69](../../followup/task-commissions/objects/4fa9ccaeed6936f22a3a47ebb0880fc84e40ba4140212b007b0ae851819ff3dd.txt)
 Mixed-session reports: [304a6571d779](../../followup/mixed-reports/objects/304a6571d779994d1a0d87cbe2780f1415f8e80c2f9a3ce7eeebab7c23ee83c7.txt) · [39a3de1f804d](../../followup/mixed-reports/objects/39a3de1f804d942a63d870315c375ffc13856ce7240cc6ce5ba62d02d11f7ee0.txt) · [6ed17f23db54](../../followup/mixed-reports/objects/6ed17f23db546407d61a08ee9cd3e24f156b8a13f30df13bcddae1937997508e.txt) (5 total)
@@ -1221,7 +1221,7 @@ Is there an absolute constant C such that for all n &gt;= 1 the exact sorting nu
 **investigated** · [Full research report](../../fronts/0514-info-lower-bound-additive-gap-boundedness.md)
 Intended test or falsifier: Exhibit either (i) for every proposed C an explicit n with a proved value S(n) &gt;= ceil(log2(n!)) + C + 1, establishing unbounded gap, or (ii) a proof that some fixed C works for all n.
 Proposed implication: A uniform additive bound would be a strong all-n structural theorem tightening the known Theta(n log n) sandwich for S(n) and could constrain exact-evaluation/certificate questions; unbounded gap would rule out constant…
-Historical reported excerpt (unverified): **Outcome:** no fixed-`C` theorem found.
+Historical reported excerpt (unverified): **Outcome:** no fixed-`C` theorem found. ## Exact obstruction The decisive gap is **strategic and global**: `g(n)&gt;0` at the root means that for height `L(n)+C` the information/efficiency necessary conditions cannot be satisfied along *every* root-to-leaf line of any single adaptive tree simultaneou…
 Assistant reports: [ses_e2cd0cabaffenYaa1GNCV9oc5f](../../assistant-reports/sessions/ses_e2cd0cabaffenYaa1GNCV9oc5f.md)
 Original task commissions: [e11503c1346f](../../followup/task-commissions/objects/e11503c1346fac3c4ada4d2ff5874b63a2f98bdf1f68307e9ab0db22cfaaec9d.txt)
 Source manifests: [soring-fronts_info-lower-bound-additive-gap-boundedness](../../workspaces/manifests/soring-fronts_info-lower-bound-additive-gap-boundedness.json)
@@ -1233,7 +1233,7 @@ For every n &gt;= 1 and every poset state P reachable from the n-element anticha
 **investigated** · [Full research report](../../fronts/0515-optimal-play-balanced-comparison-existence.md)
 Intended test or falsifier: Exhibit some n and an optimal-reachable state P from the n-antichain such that every incomparable pair {x,y} satisfying min(e(P+x&lt;y), e(P+y&lt;x)) / e(P) &gt;= 3/11 has 1 + max(F(P+x&lt;y), F(P+y&lt;x)) &gt; F(P).
 Proposed implication: A positive all-n answer would show optimal root strategies can be confined to Kahn-Saks-balanced moves, yielding a structural pruning/normal-form constraint on minimax play relevant to exact evaluators and to succinct s…
-Historical reported excerpt (unverified): ## Mathematical finding / status
+Historical reported excerpt (unverified): ## Mathematical finding / status - **Finding (negative/inconclusive on the front):** I found **no falsifier** and **no proof**. The all-`n` claim remains **open**. - **What was seriously tried:** primary-source/model separation (Kahn–Saks balance existence is not minimax-optimality completeness), a…
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e2c2888c6ffeAPXYwf8arjBhCb](../../assistant-reports/sessions/ses_e2c2888c6ffeAPXYwf8arjBhCb.md)
 Original task commissions: [557ab13fb2a1](../../followup/task-commissions/objects/557ab13fb2a10edd9a0569f1c7cdbfb0ecc75413c967bba1c587ff67615f803c.txt)
@@ -1328,7 +1328,7 @@ For every integer n &gt;= 1, is the exact sorting number bounded above by the in
 **investigated** · [Full research report](../../fronts/0532-universal-information-gap-at-most-one.md)
 Intended test or falsifier: Exhibit any explicit n &gt;= 1 together with a rigorous, independently checkable lower-bound proof that S(n) &gt;= ceil(log2(n!)) + 2.
 Proposed implication: An affirmative all-n theorem would pin S(n) to at most two adjacent values for every n, reducing exact evaluation and certification of SORT-BOUND-U to a single threshold test above the information bound.
-Historical reported excerpt (unverified): ## Finding (honest)
+Historical reported excerpt (unverified): ## Finding (honest) - **Disproof status:** **No falsifier found.** I did not identify any explicit $n\ge 1$ together with a rigorous, independently checkable proof that $S(n)\ge \lceil\log_2(n!)\rceil + 2$. - **Support status:** the claim $S(n)\le C(n)+1$ is **consistent with all cited primary exac…
 Board: [2026-11-18 message](../../board/301/page-015.md?plain=1#L767)
 Assistant reports: [ses_e11777cd8fferGSzsODXXC2Exi](../../assistant-reports/sessions/ses_e11777cd8fferGSzsODXXC2Exi.md)
 Original task commissions: [326bf473136d](../../followup/task-commissions/objects/326bf473136d7c66c2815a6eafd4f211b9069480c3ec5baca4a39d372ede4fa3.txt)
@@ -1342,7 +1342,7 @@ For every n, let t*(n) be the least depth at which the extension-count lookahead
 **investigated** · [Full research report](../../fronts/0541-lookahead-tightness-strategy-extraction.md)
 Intended test or falsifier: Exhibit an n (candidate: n=12 once t*(12) is determined) with a certified L_t(A_n)=S(n) at minimal t such that every root move attaining the recursion minimum has a child P with L_{t-1}(P)&lt;F(P); alternatively show extra…
 Proposed implication: A positive answer makes recursively following tight moves a constructive exact evaluator whose cost is governed by the t*-tight state count; a negative answer shows the lookahead relaxation is lower-bound-only and canno…
-Historical reported excerpt (unverified): ## Result
+Historical reported excerpt (unverified): ## Result **The front as literally stated is refuted; the intended "strategy extraction" reading survives its proposed first-step falsifier but is not proved, and is undecidable at the only relevant `n`.** ### 1. Literal claim — false for every n≥2 `\[deduction\]`
 Board: [2026-11-19 message](../../board/301/page-013.md?plain=1#L411) · [2026-11-19 message](../../board/301/page-013.md?plain=1#L435) · [2026-11-19 message](../../board/301/page-013.md?plain=1#L457)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e0eb15b92ffeWtMsy6EUyv8OoJ](../../assistant-reports/sessions/ses_e0eb15b92ffeWtMsy6EUyv8OoJ.md)
@@ -1386,7 +1386,7 @@ For every sufficiently large n, let the depth-balanced optimal-play frontier at 
 **investigated** · [Full research report](../../fronts/0554-depth-balanced-winning-frontier-size.md)
 Intended test or falsifier: Exhibit an infinite family of n for which the depth-balanced optimal-play frontier has at most polynomially many isomorphism classes at every depth, certified by exact minimax; alternatively prove a 2^{Omega(n log^2 n)}…
 Proposed implication: A polynomially small balanced frontier would open a new route around the winning-frontier enumeration barrier toward a faster exact evaluator for S(n); a matching exponential lower bound would show that today's depth-ba…
-Historical reported excerpt (unverified): ### Mathematical finding
+Historical reported excerpt (unverified): ### Mathematical finding **A concrete finite witness that invalidates the key inference behind the front.** From-scratch exact minimax (`n≤6`) reproduces the reported numbers: at n=6, `OPT=95251`, `BAL=93451` (loss at depths 5–6); at n≤5, `BAL=OPT` everywhere. So balance is a mild but genuine restr…
 Board: [2026-11-19 message](../../board/301/page-012.md?plain=1#L423) · [2026-11-19 message](../../board/301/page-012.md?plain=1#L471)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e0c892adaffen4MAhy7vZl4nWh](../../assistant-reports/sessions/ses_e0c892adaffen4MAhy7vZl4nWh.md)
@@ -1401,7 +1401,7 @@ For every n and every poset reachable from the n-antichain along minimax-optimal
 **investigated** · [Full research report](../../fronts/0555-depth-extension-balance-coexistence-reachable.md)
 Intended test or falsifier: Exhibit a reachable poset P on which every depth-balanced optimal comparison has an outcome child with fewer than 3/11 of e(P) extensions, or every &gt;=3/11 extension-balanced optimal comparison has an easy child of minim…
 Proposed implication: A uniform coexistence theorem would supply a cheap extension-count-computable move-selection rule that is guaranteed depth-balanced, giving a strong normal form for optimal strategies and a pruning criterion for exact e…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding - **No counterexample found on the full optimal-play-reachable domain through `n&lt;=9`.** In every reachable state checked (`m(P)&gt;=2`), at least one optimal comparison was simultaneously depth-balanced (`easy child &gt;= m-2`) and 3/11 extension-balanced (each child retaining `&gt;=…
 Board: [2026-11-19 message](../../board/301/page-012.md?plain=1#L496) · [2026-11-19 message](../../board/301/page-012.md?plain=1#L512)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e0c89262dffeKTrLLNPlFzjm8W](../../assistant-reports/sessions/ses_e0c89262dffeKTrLLNPlFzjm8W.md)
@@ -1475,7 +1475,7 @@ Compute the exact finite quantity \|C(7)\| where C(n) is the set of poset states
 **investigated** · [Full research report](../../fronts/0577-endpoint-feasibility-gap-n7.md)
 Intended test or falsifier: Exact enumeration with \|C(7)\|&gt;\|L_tree(7)\| refutes the n=7 identity claim; \|C(7)\|=\|L_tree(7)\| confirms it. Report independently checkable counts and the decomposition C(7)\L_tree(7) and L_tree(7)\L_loc(7).
 Proposed implication: A vanishing endpoint gap at n=7 supports endpoint cheap-statistic pruning as complete at that scale and weakens the case for an infinite endpoint-infeasibility obstruction; a persisting gap gives concrete witness famili…
-Historical reported excerpt (unverified): ## Finding (posted as exactly one #301 comment, 19:34:11Z)
+Historical reported excerpt (unverified): ## Finding (posted as exactly one #301 comment, 19:34:11Z) **\|C(7)\| = 3,044,007 = \|L_tree(7)\|** — the endpoint-feasibility gap **vanishes at n=7**, confirming the previously unverified n=7 identity claim and refuting the stated falsifier (\|C(7)\| &gt; \|L_tree(7)\|). Decomposition: `C(7)\L_tree(7) = 0`, …
 Board: [2026-11-19 message](../../board/301/page-010.md?plain=1#L218) · [2026-11-19 message](../../board/301/page-010.md?plain=1#L248)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e0abb7a9effeQtMpXYnRCfFU3b](../../assistant-reports/sessions/ses_e0abb7a9effeQtMpXYnRCfFU3b.md)
@@ -1490,7 +1490,7 @@ Does every finite poset P with minimax depth m(P) &gt;= 2 admit a minimax-optima
 **investigated** · [Full research report](../../fronts/0579-optimal-fib-split-retry-alln.md)
 Intended test or falsifier: An explicit finite poset with m(P) &gt;= 2 for which every comparison whose worse child has depth m(P)-1 has its other child at depth at most m(P)-3, certified by exact minimax.
 Proposed implication: A positive all-n answer makes Lemma A constructive along one optimal strategy and yields the Fibonacci extension-threshold induction without non-optimal splits; a counterexample would show the threshold proof cannot be …
-Historical reported excerpt (unverified): ## Mathematical finding (honest)
+Historical reported excerpt (unverified): ## Mathematical finding (honest) **The exact all-n question is NOT settled.** It is a distinct structural claim about the minimax game — *B(P): some minimax-optimal comparison has easy-child depth ≥ m−2* — and none of the four named adjacent fronts proves or refutes it (they establish Fibonacci **e…
 Board: [2026-11-19 message](../../board/301/page-010.md?plain=1#L405) · [2026-11-19 message](../../board/301/page-010.md?plain=1#L430)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e0aa30402ffepVB2GQ0LBaaMSS](../../assistant-reports/sessions/ses_e0aa30402ffepVB2GQ0LBaaMSS.md)
@@ -1590,7 +1590,7 @@ For every n, does the greedy (maximum-linear-extension) adversary reachable ball
 **investigated** · [Full research report](../../fronts/0590-greedy-ball-compact-index-alln.md)
 Intended test or falsifier: Give a counting or pigeonhole argument at the antichain root showing that every correct compact-index or symbolic evaluator of G(n) must separate 2^{Omega(n)} tied greedy states for infinitely many n; this would be an e…
 Proposed implication: A subexponential exact evaluator for G(n) would sharpen greedy lower-bound and certificate methods and, conditional on G(n)=S(n), improve the 2^{O(n log^2 n)} exact S(n) bound; a negative result would show the exponenti…
-Historical reported excerpt (unverified): **Result already reported (unchanged):**
+Historical reported excerpt (unverified): **Result already reported (unchanged):** - **Claim attacked:** the negative horn — every correct compact-index evaluator of `G(n)` must separate `2^{Ω(n)}` extension-count-tied greedy states — with the isolated-pair matching gadget as its concrete source. - **Finding (paper proof):** that horn is *…
 Board: [2026-11-20 message](../../board/301/page-010.md?plain=1#L653) · [2026-11-20 review](../../board/301/page-010.md?plain=1#L695) · [2026-11-20 message](../../board/301/page-010.md?plain=1#L778)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e08b16f2bffeoPld7uGho3RrtT](../../assistant-reports/sessions/ses_e08b16f2bffeoPld7uGho3RrtT.md)
@@ -1605,7 +1605,7 @@ What is the exact exponential growth exponent of the greedy-adversary reachable 
 **investigated** · [Full research report](../../fronts/0591-greedy-ball-growth-exponent-alln.md)
 Intended test or falsifier: Prove a matching upper bound \|R_{G(n)}(n)\| &lt;= 2^{O(n)} (ruling out super-exponential growth), or establish a 2^{Omega(n log n)} lower bound by constructing Theta(log n) independent tie-gadgets per key; either result fix…
 Proposed implication: The exponent determines whether any symbolic greedy-frontier evaluator can have subexponential size, and calibrates how much weaker the greedy adversary is than the full adversary as a lower-bound engine for exact S(n).
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding I attacked the FRONT's falsifier question for `\|R_{G(n)}(n)\|` and established the **2^{Ω(n log n)} lower-bound direction**, refuting the `2^{O(n)}` upper bound in the natural (adversarial-tie) model. Worktree is clean; no Lean/repo/ledger changes; one concise board post on #301. ### The …
 Board: [2026-11-20 message](../../board/301/page-010.md?plain=1#L613) · [2026-11-20 review](../../board/301/page-010.md?plain=1#L677)
 Assistant reports: [ses_e08b16bc3ffepxVvvTNEdRlw0l](../../assistant-reports/sessions/ses_e08b16bc3ffepxVvvTNEdRlw0l.md)
 Original task commissions: [534af1e7c68f](../../followup/task-commissions/objects/534af1e7c68fb444a6f6b760eee02a4807ff9ac98042e47629472646237b3d60.txt)
@@ -1676,7 +1676,7 @@ For every r at least 3, does there exist a finite poset P whose number of linear
 **investigated** · [Full research report](../../fronts/0612-halving-obstruction-infinitude-allr.md)
 Intended test or falsifier: Exhibit some r for which every poset with exactly 2^r linear extensions admits an exact-halving comparison at the root, or determine m(r) exactly and show it is bounded by a constant over all r.
 Proposed implication: An infinite family of power-of-two obstruction states would make local looseness a structural feature of the minimax game rather than a sporadic small-case datum, and would bound what evaluators relying on halving-style…
-Historical reported excerpt (unverified): ### Mathematical finding
+Historical reported excerpt (unverified): ### Mathematical finding **Necessity (deduction).** If `e(P)=2^r` and the exact minimax cost `F(P)=r`, a height-`r` tree has `2^r` leaves, so it must be complete: the root splits `2^(r−1)/2^(r−1)`. Contrapositive: *no* root halving ⟹ `F(P)&gt;r`. This is a sound lower-bound direction; the existing 18:…
 Board: [2026-11-20 message](../../board/301/page-008.md?plain=1#L343)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e05c464e8ffe6c80XyY47tfqmM](../../assistant-reports/sessions/ses_e05c464e8ffe6c80XyY47tfqmM.md) · [ses_e05bf4e51ffeJgDIsuafGXCyR0](../../assistant-reports/sessions/ses_e05bf4e51ffeJgDIsuafGXCyR0.md)
@@ -1690,7 +1690,7 @@ For all n, can a poset with e(P) a power of two and no exact-halving continuatio
 **investigated** · [Full research report](../../fronts/0613-antichain-reachable-power2-halving-obstruction.md)
 Intended test or falsifier: Exhibit a genuinely reachable state inside a height-S(n) game from the antichain with e(P)=2^r and exact minimax continuation above r, including the required joint-child sibling budget, or show that the window and one-b…
 Proposed implication: A positive exclusion result would license a sound tight-subproblem pruning rule in exact unary S(n) evaluators and sharpen the structural theory of optimal play; a counterexample would place the obstruction inside the r…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **The front's "always exclude" hypothesis is false.** A poset with `e(P)` a power of two, no exact-halving continuation, and `F(P) &gt; log2 e(P)` **does** occur on a height-`S(n)` optimal play from the antichain — already at `n = 6`, which is information-tight (`S(6)=C(6)=10`)…
 Board: [2026-11-20 message](../../board/301/page-008.md?plain=1#L387)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e05c46132ffepb9MGSR08SfOrd](../../assistant-reports/sessions/ses_e05c46132ffepb9MGSR08SfOrd.md)
@@ -1770,7 +1770,7 @@ Is every finite poset with at most 12 linear extensions sortable in at most 4 ad
 **investigated** · [Full research report](../../fronts/0637-t4-uniform-tightness-threshold.md)
 Intended test or falsifier: Exhibit a finite poset with e(P) &lt;= 12 and minimax depth at least 5, or a poset with e(P)=13 and depth at most 4, either of which would move T(4) away from 12.
 Proposed implication: If T(4)=12 holds for all n, the certified small-extension base for exact minimax evaluation of S(n) extends from e &lt;= 7 to e &lt;= 12 without changing the antichain root.
-Historical reported excerpt (unverified): ## Mathematical finding (negative / inconclusive)
+Historical reported excerpt (unverified): ## Mathematical finding (negative / inconclusive) **Claim tested:** `T(4) = 12` for all finite posets — every poset `P` with `e(P) ≤ 12` has `m(P) ≤ 4` (sortable in ≤ 4 adaptive comparisons). **Disproof attempt: failed.** No finite poset with `e(P) ≤ 12` and `m(P) ≥ 5` was found.
 Board: [2026-11-17 message](../../board/301/page-016.md?plain=1#L952)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e033f4a63ffe3ZGI8qiRgFJqbj](../../assistant-reports/sessions/ses_e033f4a63ffe3ZGI8qiRgFJqbj.md)
@@ -1815,7 +1815,7 @@ For every a,b &gt;= 1, is the maximum of F(B disjoint-union A_a) - F(B) - S(a) o
 **investigated** · [Full research report](../../fronts/0640-defect-chain-extremality-alln.md)
 Intended test or falsifier: Exhibit by exact minimax a pair (a,b) and a b-element poset B whose defect delta(A_a,B) strictly exceeds delta(A_a,C_b), or a family whose maximum defect grows faster than the insertion bound sum_{i=1..a} ceil(log2(b+i)…
 Proposed implication: An extremal law showing that maximal information excess does not extremize the disjoint-union defect would sharpen the lower-bound recursion used in exact evaluation and keep the sound high-excess obstruction separate f…
-Historical reported excerpt (unverified): ## Result
+Historical reported excerpt (unverified): ## Result I attacked the live front `defect-chain-extremality-alln` on `billy-dev`, resumed the predecessor's unfinished scratch work, and **refuted the falsifier by proof rather than by finding a counterexample**. No repository/Lean/test/CI changes were made; the worktree is clean at `6a96398`. On…
 Board: [2026-11-21 message](../../board/301/page-006.md?plain=1#L359) · [2026-11-21 message](../../board/301/page-006.md?plain=1#L383)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e0284a5d8ffe59ZHtdiepzQAVv](../../assistant-reports/sessions/ses_e0284a5d8ffe59ZHtdiepzQAVv.md)
@@ -1871,7 +1871,7 @@ Does the antichain-only superadditivity bound S(a+b) &gt;= S(a)+S(b)+min(a,b)+1 
 **investigated** · [Full research report](../../fronts/0647-antichain-defect-sufficiency-vs-general-alln.md)
 Intended test or falsifier: Separate the two statements: exhibit posets A,B whose defect falls below min+1 while every antichain split satisfies the bound, or prove that refinement monotonicity carries the antichain case to arbitrary A and B.
 Proposed implication: Determines whether the board's general-poset defect campaign is necessary for S(n) or reducible to antichain data, and draws the soundness/completeness line between general minimax theorems and the fixed antichain root.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding Let `F(P)` be the exact adaptive minimax comparison count, `S(n)=F(A_n)`, `δ(A,B)=F(A⊔B)−F(A)−F(B)`, `Z_n` the staircase (`i&lt;j` iff `j≥i+2`). Let **A** = antichain-only bound `δ(A_a,A_b) ≥ min(a,b)+1`; **D** = general `δ(A,B) ≥ min(\|A\|,\|B\|)+1`. **1. The only valid implicatio…
 Board: [2026-11-21 message](../../board/301/page-005.md?plain=1#L167) · [2026-11-21 review](../../board/301/page-005.md?plain=1#L211)
 Additional board mentions: 2 (use front lookup for exact links)
 Assistant reports: [ses_e011476feffebBepueuJpwJDUM](../../assistant-reports/sessions/ses_e011476feffebBepueuJpwJDUM.md)
@@ -1885,7 +1885,7 @@ Let L be the polynomial-time recurrence L(1)=0, L(n)=max over a+b=n of \[L(a)+L(
 **investigated** · [Full research report](../../fronts/0648-superadditivity-tight-split-finiteness-alln.md)
 Intended test or falsifier: Exhibit any n &gt;= 7 with a split attaining S(n)=S(a)+S(b)+min(a,b)+1, or prove that L(n)&lt;S(n) for all n&gt;=7 and quantify the growth of the gap S(n)-L(n).
 Proposed implication: Determines whether superadditivity equality can ever certify large exact values of S(n); together with the Theta(n log n) growth of S-L it fixes the reach of defect-based lower-bound recurrences.
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **The first branch is correct, and I proved it for all `n`:** `{n : L(n) = S(n)} = {1,…,6}` — finite, largest element `6`. No `n ≥ 7` admits a defect‑tight split attaining `S(n)`. ### The proof (paper proof, unconditional)
 Board: [2026-11-21 message](../../board/301/page-005.md?plain=1#L41) · [2026-11-21 review](../../board/301/page-005.md?plain=1#L144)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e011473b5ffeVgW1rPTAI8qWbq](../../assistant-reports/sessions/ses_e011473b5ffeVgW1rPTAI8qWbq.md)
@@ -1899,7 +1899,7 @@ Does the information-plus-Ford-Johnson sufficient condition hold for every balan
 **investigated** · [Full research report](../../fronts/0650-balanced-fj-sufficiency-alln.md)
 Intended test or falsifier: Find any n with ceil(log2 n!) &lt; F(floor(n/2))+F(ceil(n/2))+floor(n/2)+1 by exact integer computation, refuting balanced-split sufficiency and bounding how far the information-plus-FJ method can certify the defect inequa…
 Proposed implication: Would extend the board's n&lt;=50 certified antichain defect theorem to all balanced splits, yielding a substantive lower-bound recurrence for exact unary S(n); a refutation would delimit the information-plus-FJ method to …
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **The front's claim is TRUE for all n — the requested falsification failed because no counterexample exists.** For every `n ≥ 3`, with `a = ⌊n/2⌋`, `b = ⌈n/2⌉`:
 Board: [2026-11-21 message](../../board/301/page-005.md?plain=1#L231) · [2026-11-21 review](../../board/301/page-005.md?plain=1#L268) · [2026-11-21 message](../../board/301/page-005.md?plain=1#L291)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e00eddd5cffeb2JlPadoY87Fdc](../../assistant-reports/sessions/ses_e00eddd5cffeb2JlPadoY87Fdc.md)
@@ -1914,7 +1914,7 @@ The fresh #301 result refutes monotonicity of the antichain defect under refinem
 **investigated** · [Full research report](../../fronts/0651-defect-refinement-monotonicity-scope-alln.md)
 Intended test or falsifier: Exhibit a&gt;=2 and posets B &lt;= B' with B' a refinement of B and delta(A_a,B') &lt; delta(A_a,B) from an independent exact minimax computation, showing failure for that a; or show monotonicity is preserved for some a&gt;=2.
 Proposed implication: Delineates exactly where antichain-to-general defect transfer can and cannot work, sharpening the fresh refutation and the chain-extremality result into a per-a classification relevant to lower-bound recursions for S(n).
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **Refinement monotonicity of the antichain defect fails at `a = 2`** — a new, independently cross-checked counterexample. Let `F(P)` be the exact minimax comparison count, `S(n)=F(A_n)`, and `δ(A_a,B)=F(A_a⊔B)−F(A_a)−F(B)`. Take the 5-element antichain `B = A₅` and its refinement `B′ = F…
 Board: [2026-11-21 message](../../board/301/page-005.md?plain=1#L331)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_e00eddb57ffeOZSWFAdFLWu6tN](../../assistant-reports/sessions/ses_e00eddb57ffeOZSWFAdFLWu6tN.md)
@@ -1942,7 +1942,7 @@ Let B(n) be the minimum worst-case height of an adaptive comparison tree sorting
 **investigated** · [Full research report](../../fronts/0658-binary-test-universe-height-gap-alln.md)
 Intended test or falsifier: Show that B(n) eventually reaches S(n): compute B(8) or B(9) and observe the gap to S(8)=16, S(9)=19 closing rather than growing, or exhibit a binary-order family on which every height-below-S(n) tree fails.
 Proposed implication: Decides the residual sample regime left open by the 21:43Z zero-one blocker: a linear B(n) would make every binary-only verifier unsound for k at least c*n, while B(n)=S(n) would supply a compact binary test universe. N…
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **The FRONT claim is TRUE; the falsifier is refuted.** I proved an all‑n linear bound on B(n) and derived a binary‑only soundness barrier. **Recovery audit.** No prior side effects for this front existed to repeat: at start the worktree was clean (single clone in reflog, empty stash), th…
 Board: [2026-11-21 message](../../board/301/page-005.md?plain=1#L847) · [2026-11-21 review](../../board/301/page-005.md?plain=1#L867)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_dffd22915ffevPloLYlG2aaPi4](../../assistant-reports/sessions/ses_dffd22915ffevPloLYlG2aaPi4.md)
@@ -1998,7 +1998,7 @@ For every integer n &gt;= 5 let g(n) be the minimum number of elements of any po
 **investigated** · [Full research report](../../fronts/0676-near-antichain-excess-gadget-size.md)
 Intended test or falsifier: Compute g(6) by exhaustive search over 7-element posets with e &lt;= 720: if none has m &gt;= 11, or the minimum element count is not 7, the all-n n+1 pattern fails; any single poset with e&lt;=n! and m&gt;S(n) on at most n element…
 Proposed implication: If g(n)=n+1 always, any evaluator that computes S(n) by optimizing m(P) over all posets with at most n! linear extensions must examine n+1-element posets and cannot be confined to n keys, bounding one family of exact-ev…
-Historical reported excerpt (unverified): ## Mathematical finding — the all‑n claim is FALSIFIED at n=6
+Historical reported excerpt (unverified): ## Mathematical finding — the all‑n claim is FALSIFIED at n=6 Claim attacked: `g(n)` = minimum elements of a poset `P` with `e(P) ≤ n!` and `m(P) &gt; S(n)`; is `g(n)=n+1` for all `n≥5`? (Given: `g(5)=6`.) - `S(6)=10`, so we need `e(P) ≤ 720` and `m(P) ≥ 11`.
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L473)
 Assistant reports: [ses_dfee6876bffeVviTQWS30F0ORR](../../assistant-reports/sessions/ses_dfee6876bffeVviTQWS30F0ORR.md)
 Original task commissions: [9867a4f3d723](../../followup/task-commissions/objects/9867a4f3d723e4eba412fb90c63d91cb879e930c83020f1003a5e289fc44c89b.txt)
@@ -2011,7 +2011,7 @@ Let T(n) = max{ m(P) : P any finite poset with e(P) &lt;= n! } and define Delta(
 **investigated** · [Full research report](../../fronts/0677-uniform-extension-base-gap-growth.md)
 Intended test or falsifier: Find any n with T(n) &gt;= S(n)+2 via a bounded search over 7- or 8-element posets with e &lt;= n! (for instance 7! = 5040), or prove a uniform upper bound m(P) &lt;= log2 e(P) + c for all posets with e &lt;= n!, which would force …
 Proposed implication: An unbounded gap would show that maximizing m under an e &lt;= n! cap systematically overestimates S(n), ruling that quantity out as an exact evaluator; an O(1) gap would make it only a constant-factor approximation, still…
-Historical reported excerpt (unverified): **Mathematical finding: Δ(n) is unbounded.**
+Historical reported excerpt (unverified): **Mathematical finding: Δ(n) is unbounded.** Using the series (ordinal) composition of a fixed 5-element poset \(P_0\) with succ-mask \((0,0,1,3,7)\), which has \(e(P_0)=8\) and \(m(P_0)=4\) (verified by independent minimax; \(\lceil\log_2 8\rceil=3\), excess \(1\)): - For \(t\ge1\), let \(P_t\) be…
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L428) · [2026-11-22 review](../../board/301/page-004.md?plain=1#L775)
 Assistant reports: [ses_dfee68573ffeY4Qwr7FNulLEwo](../../assistant-reports/sessions/ses_dfee68573ffeY4Qwr7FNulLEwo.md)
 Original task commissions: [4c7425527298](../../followup/task-commissions/objects/4c7425527298d04d108c89f2359b1f3f21837e83d005dcf0e5b2fbbad7af78a7.txt)
@@ -2025,7 +2025,7 @@ For every n &gt;= 1 and every poset P reachable from the n-element antichain alo
 **investigated** · [Full research report](../../fronts/0678-reachable-optimal-slack-at-most-one-alln.md)
 Intended test or falsifier: Exhibit one n and one such reachable poset P with slack at least two; independent checks rule this out for n &lt;= 5 over all posets and the positive-slack hunt reports no such poset for n &lt;= 7.
 Proposed implication: If true, exact minimax remains within one bit of the information bound throughout optimal play, yielding a sharp pruning invariant for exact evaluators without any complexity-class separation.
-Historical reported excerpt (unverified): ### Mathematical finding (honest, not a proof)
+Historical reported excerpt (unverified): ### Mathematical finding (honest, not a proof) **No counterexample found. The claim is now verified over ALL posets for every n ≤ 7, and remains unproven for all n.** Independent exhaustive computation of `slack(P) = m(P) − ⌈log₂ e(P)⌉` over the **entire** reachable poset space (= all labelled pose…
 Board: [2026-11-22 message](../../board/301/page-004.md?plain=1#L455) · [2026-11-22 message](../../board/301/page-004.md?plain=1#L494)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_dfea8b806ffekwzmeNwyKdi3mq](../../assistant-reports/sessions/ses_dfea8b806ffekwzmeNwyKdi3mq.md)
@@ -2118,7 +2118,7 @@ For every n &gt;= 5, let FF_n be the poset formed by two disjoint 2-chains plus 
 **investigated** · [Full research report](../../fronts/0696-free-free-second-state-tightness-alln.md)
 Intended test or falsifier: Exhibit some n &gt;= 10 with two independent exact minimax computations and a strategy witness giving F(FF_n) &gt; ceil(log2(n!/4)), or alternatively produce height-ceil(log2(n!/4)) strategies for an infinite family to refute…
 Proposed implication: If FF_n is tight for all n, shallow free-free refinements of the antichain root preserve tightness and support information-bound pruning at depth two in exact evaluators; a counterexample yields a reachable positive-exc…
-Historical reported excerpt (unverified): ## Mathematical finding: the all‑n tightness claim is FALSE
+Historical reported excerpt (unverified): ## Mathematical finding: the all‑n tightness claim is FALSE **Theorem (paper proof).** For every n ≥ 4, `F(FF_n) ≥ S(n) − 2`, equivalently `d(FF_n) := F(FF_n) − ⌈log₂(n!/4)⌉ ≥ excess_S(n) := S(n) − ⌈log₂ n!⌉`. *Proof.* Explicit strategy from the antichain: compare keys 0,1; then compare keys 2,3 (f…
 Board: [2026-11-22 message](../../board/301/page-003.md?plain=1#L131) · [2026-11-22 review](../../board/301/page-003.md?plain=1#L155)
 Assistant reports: [ses_dfbf9669affe2gAkvFc5kFiPAM](../../assistant-reports/sessions/ses_dfbf9669affe2gAkvFc5kFiPAM.md)
 Original task commissions: [c219c2c20de6](../../followup/task-commissions/objects/c219c2c20de656cd6fef21acde0dddafaed0eaabc79f291e6c9a86638ec54f83.txt)
@@ -2195,7 +2195,7 @@ Does positive defect D(P)=F(P)-ceil(log2 e(P)) persist on incomparability-prime 
 **investigated** · [Full research report](../../fronts/0706-prime-defect-persistence-alln.md)
 Intended test or falsifier: Exhibit an infinite subsequence of n for which every positive-defect state on optimal play decomposes into certified merges and prime positive defect never occurs, or otherwise show prime defect happens only finitely of…
 Proposed implication: If prime defect is unavoidable for all large n, then no certificate built solely from information bounds and series-decomposition merge gaps can certify optimality for all large n, ruling out a whole family of succinct …
-Historical reported excerpt (unverified): ### Mathematical finding (concrete, independently checkable)
+Historical reported excerpt (unverified): ### Mathematical finding (concrete, independently checkable) I attacked the front by trying to *disprove* it and instead found a **defect in the implication**, backed by an exact computation at n=6: - Exact minimax + exact linear-extension counts confirm the witness `(22,20,0,16,0,24)`: F=5, e=16, …
 Board: [2026-11-23 message](../../board/301/page-002.md?plain=1#L23) · [2026-11-23 review](../../board/301/page-002.md?plain=1#L129)
 Additional board mentions: 3 (use front lookup for exact links)
 Assistant reports: [ses_df8fbf619ffeW9x0063HoLf7s5](../../assistant-reports/sessions/ses_df8fbf619ffeW9x0063HoLf7s5.md)
@@ -2223,7 +2223,7 @@ For which n does the n-antichain admit a height-S(n) sorting tree in which every
 **investigated** · [Full research report](../../fronts/0715-defectfree-tight-n-infinitude-alln.md)
 Intended test or falsifier: Exhibit an information-tight n in {11,20,21,...} for which every height-S(n) tree has a positive-defect reachable state (refuting infinitude through those cases), or give a uniform construction of fully defect-free opti…
 Proposed implication: A uniform defect-free family would be a canonical tight-certificate structure and a structural theorem on exactly where the information bound is attainable; a counterexample would locate the precise obstruction to local…
-Historical reported excerpt (unverified): ## Conclusion
+Historical reported excerpt (unverified): ## Conclusion No external side effect is uncertain or duplicated, and there is **no unfinished work to continue**. The prior turn completed its assigned task: it attacked the front's claim, produced the soundness-vs-completeness finding (with exhaustive verification on all 130,023 posets of size ≤6…
 Assistant reports: [ses_df76f0623ffeJvTxz0js2RuRKR](../../assistant-reports/sessions/ses_df76f0623ffeJvTxz0js2RuRKR.md)
 Original task commissions: [234ad38214ef](../../followup/task-commissions/objects/234ad38214ef41223b63486aa8bb4ce2d743d2c34d20326b3f7f21a5fc3496f8.txt)
 Mixed-session reports: [16f3f32c56d2](../../followup/mixed-reports/objects/16f3f32c56d25f2dce6b249a92956bc5fdd37093b17b4a350a13f821b9448ba5.txt) · [beab146e2dea](../../followup/mixed-reports/objects/beab146e2dea39ea3ab2da0bd820fad309b7ebe220402ce09856e87356d993b3.txt)
@@ -2248,7 +2248,7 @@ Along optimal-play transitions P-&gt;C from the n-antichain, what is the maximum
 **investigated** · [Full research report](../../fronts/0730-single-ply-excess-drop-magnitude-alln.md)
 Intended test or falsifier: Exhibit an n and a reachable optimal-play transition with delta(P)-delta(C) at least two, recomputing e(P), e(C), F(P), F(C) independently, or establish an all-n bound delta(P)-delta(C) at most one.
 Proposed implication: A uniform drop bound of one couples defect profiles across consecutive depth slices and caps how quickly a defective state can heal; unbounded drops would let defect vanish abruptly and defeat any layer-by-layer or budg…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding I pinned the front's quantity down to `delta(P) = F(P) − ceil(log₂ e(P))` (forced by the stated root identity `D(n)=min` max-child excess, since a first antichain comparison gives `L0(child)=L0(A_n)−1`). An independent solver reproduces all known `S(n)` for n≤6 and both cite…
 Board: [2026-11-23 message](../../board/301/page-001.md?plain=1#L515) · [2026-11-23 review](../../board/301/page-001.md?plain=1#L543)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_df6094f47ffefuQ9kGsCPwPW0C](../../assistant-reports/sessions/ses_df6094f47ffefuQ9kGsCPwPW0C.md)
@@ -2275,7 +2275,7 @@ For every absolute constant c, do there exist finite posets P and Q with identic
 **investigated** · [Full research report](../../fronts/0735-cospectral-gap-span-alln.md)
 Intended test or falsifier: Exhibit an explicit pair (P,Q) with equal e and equal M1 and F-gap at least 2, or an infinite family whose gap grows; conversely a uniform constant bound refutes the unbounded reading. An n=6 or n=7 cospectral pair with…
 Proposed implication: If the gap is unbounded, no bounded-depth extension-count lookahead can approximate F to within a constant on all finite posets, ruling out bounded-error lookahead/deck certificates; a uniform bound would give an additi…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **The F-gap among M1-cospectral posets is unbounded — the "uniformly bounded" reading of the front is refuted.** The move prior work missed: the 21:22Z/22:45Z results lifted the n=7 seed pair only by ordinal sums with **antichains** `A_m` (where `F(A_m)=S(m)` keeps the gap a…
 Board: [2026-11-23 message](../../board/301/page-001.md?plain=1#L726) · [2026-11-23 review](../../board/301/page-001.md?plain=1#L758)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_df5706856ffeccRvI7HCbY44NW](../../assistant-reports/sessions/ses_df5706856ffeccRvI7HCbY44NW.md)
@@ -2314,7 +2314,7 @@ For every finite poset P with exact minimax comparison depth m(P) &gt;= 2, does 
 **investigated** · [Full research report](../../fronts/0745-lemma-a-balancing-split-alln.md)
 Intended test or falsifier: Exhibit a finite poset P with exact minimax depth r &gt;= 2 such that for every incomparable pair, at least one outcome poset has exact minimax depth at most r-3, with independent exact minimax certification of P and both …
 Proposed implication: If true, induction on the Fibonacci thresholds proves T(r)=F_{r+3}-1 for all r, turning the finite verified thresholds into an all-n sound pruning base for exact S(n) evaluation; if false, the Lemma A route to that thre…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **Lemma A survives every disproof attempt I could mount; no counterexample was found.** I attacked the claim
 Assistant reports: [ses_df464cc70ffe1ldR7BAakyyDcW](../../assistant-reports/sessions/ses_df464cc70ffe1ldR7BAakyyDcW.md)
 Original task commissions: [b6237eef556e](../../followup/task-commissions/objects/b6237eef556ed6f777b45920e74593858dc39532631500dcf011e7dd8392d9b8.txt)
 Source manifests: [soring-fronts_lemma-a-balancing-split-alln](../../workspaces/manifests/soring-fronts_lemma-a-balancing-split-alln.json)
@@ -2326,7 +2326,7 @@ Fix any legal parameter choice in Sergeev's TR20-096 pair-sort plus group-insert
 **investigated** · [Full research report](../../fronts/0750-sergeev-schedule-surplus-rate-tightness-alln.md)
 Intended test or falsifier: Exhibit a legal fixed schedule whose surplus is o(n/(log n)^{1/5}), refuting the rate lower bound; or derive explicit c &gt; 0 and n0 certifying the Omega(n/(log n)^{1/5}) schedule bound for every n &gt;= n0, refuting the ref…
 Proposed implication: An explicit schedule-level rate lower bound is the missing ingredient named in the newest #301 sergeev-framed-dag-exact-budget-alln finding: paired with any effective upper bound on S(n)'s surplus it would force that ar…
-Historical reported excerpt (unverified): ## Conclusion
+Historical reported excerpt (unverified): ## Conclusion The previous turn **completed fully**: the research finding was delivered, the single required board report landed intact, and there were no commits, ledger edits, or other external writes. Nothing is uncertain, and there is **no unfinished process work** to continue — I will not re-p…
 Board: [2026-11-24 message](../../board/301/page-001.md?plain=1#L1084)
 Assistant reports: [ses_df3671777ffe9v1gq3XIxv9kmu](../../assistant-reports/sessions/ses_df3671777ffe9v1gq3XIxv9kmu.md)
 Original task commissions: [62b036891723](../../followup/task-commissions/objects/62b036891723f61871cf94f65cc1abd6c5be1e97b91f48265422b6fdacd35c98.txt)

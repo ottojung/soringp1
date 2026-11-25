@@ -23,7 +23,7 @@ Can a fixed uniform FO(TC) interpreter with explicit combined complexity yield a
 **investigated** · [Full research report](../../fronts/0030-fo-tc-combined-complexity-sort-bound.md)
 Intended test or falsifier: Give an explicit FO(TC) sentence family computing S(n)&lt;=k with combined complexity in some class and a reduction, or prove a barrier (e.g. due to uniformity/model) preventing improvement beyond known bounds.
 Proposed implication: Relates descriptive complexity to the active frontier; founder-selected issue JTsW4AnxTLzN18IBQibXea-fervor targets this.
-Historical reported excerpt (unverified): ### Verdict
+Historical reported excerpt (unverified): ### Verdict **Mathematical finding (barrier):** There is a precise barrier separating data complexity from combined complexity here. - **Data complexity (NL, fixed FO(TC) formula, single input order):** insufficient because the question is `∃` strategy `∀` all permutations (game) not evaluation on …
 Additional board mentions: 2 (use front lookup for exact links)
 Source manifests: [soring-fronts_fo-tc-combined-complexity-sort-bound](../../workspaces/manifests/soring-fronts_fo-tc-combined-complexity-sort-bound.json)
 
@@ -64,7 +64,7 @@ Is there an all-n polynomial-time many-one reduction from some NP-complete langu
 **investigated** · [Full research report](../../fronts/0049-tally-np-membership-collapse.md)
 Intended test or falsifier: Construct an explicit polynomial-time many-one reduction from SAT to SORT-BOUND-U preserving the unary/threshold encoding, or prove NP ∩ TALLY ⊆ P follows from such a reduction in a way inconsistent with Mahaney/Book th…
 Proposed implication: NP membership would be a major structural breakthrough; ruling it out would sharpen the boundary between certificate existence and the sparse/tally structure.
-Historical reported excerpt (unverified): **Finding (mathematical):**
+Historical reported excerpt (unverified): **Finding (mathematical):** - **Reduction/hardness (many-one):** `SORT-BOUND-U` is sparse (≤ O(L²) strings up to length L). By Mahaney’s theorem, if it were NP-hard under polynomial-time many-one reductions then `P=NP`. No explicit all-n poly-time many-one reduction from any NP-complete language is…
 Additional board mentions: 1 (use front lookup for exact links)
 Source manifests: [soring-fronts_tally-np-membership-collapse](../../workspaces/manifests/soring-fronts_tally-np-membership-collapse.json)
 
@@ -251,7 +251,7 @@ Is the pathwidth or the adversarial antichain width of the minimax game tree on 
 **investigated** · [Full research report](../../fronts/0139-adversarial-width-sortbound.md)
 Intended test or falsifier: Show that for every n there is some strategy whose state graph has bounded pathwidth independent in effect or whose adversarial width is O(1), or prove width Omega(n/log n) forces the ATM alternation count to be linear …
 Proposed implication: A width-based obstruction could link the unbounded alternation of the PSPACE ATM simulation to a concrete combinatorial parameter of the sorting game without reducing from arbitrary PSPACE instances.
-Historical reported excerpt (unverified): **Finding (disproof): the premise is false by tree structure.**
+Historical reported excerpt (unverified): **Finding (disproof): the premise is false by tree structure.** - **Model:** A deterministic adaptive sorting strategy is a comparison decision tree (game tree for G(n,k)) whose nodes are sorter/adversary states over partial orders; states reached under the strategy form a **tree** (not a general D…
 Source manifests: [soring-fronts_adversarial-width-sortbound](../../workspaces/manifests/soring-fronts_adversarial-width-sortbound.json)
 
 ## antichain-fo-lfp-definability
@@ -273,7 +273,7 @@ For pairwise comparison tests (a restricted subclass of all possible tests), is 
 **investigated** · [Full research report](../../fronts/0147-comparison-restriction-hardness.md)
 Intended test or falsifier: Give a polynomial-time reduction from an NP-complete problem to SORT-BOUND-U under many-one reductions with correct unary encoding, or prove a complexity-theoretic barrier that blocks such a reduction given the comparis…
 Proposed implication: NP-hardness under many-one reductions would force P=NP by sparsity of SORT-BOUND-U; polynomial-time tractability would separate the comparison-restricted model from arbitrary tests and place computing S(n) in P.
-Historical reported excerpt (unverified): **Conclusion (honest):**
+Historical reported excerpt (unverified): **Conclusion (honest):** - **No polynomial-time many-one reduction from an NP-complete problem to `SORT-BOUND-U` is known.** Given (1)-(3), such a reduction is *highly implausible* under the pairwise-comparison restriction + total-order constraint. - **Sparsity gives a strong conditional barrier:**…
 Source manifests: [soring-fronts_comparison-restriction-hardness](../../workspaces/manifests/soring-fronts_comparison-restriction-hardness.json)
 
 ## fo-lfp-explicit-formula-sorting-bound
@@ -283,7 +283,7 @@ Construct and validate an explicit FO(PFP) formula defining SORT-BOUND-U on orde
 **investigated** · [Full research report](../../fronts/0153-fo-lfp-explicit-formula-sorting-bound.md)
 Intended test or falsifier: Show that no FO(PFP) formula captures SORT-BOUND-U up to encoding without using PSPACE resources in the formula, or construct an explicit FO(LFP) definition contradicting known barriers.
 Proposed implication: An explicit descriptive complexity characterization would give a structural upper bound and clarify the relation between S(n) evaluation and fixed-point logics.
-Historical reported excerpt (unverified): **Mathematical finding (descriptive complexity):**
+Historical reported excerpt (unverified): **Mathematical finding (descriptive complexity):** - **FO(PFP) capture is a theorem, not conjecture.** On ordered finite structures, Immerman–Vardi gives FO(PFP) = PSPACE. `SORT-BOUND-U ∈ PSPACE` (game/ATM) and the unary string `1^n#1^k` is naturally encodable as an ordered structure; hence there *…
 Source manifests: [soring-fronts_fo-lfp-explicit-formula-sorting-bound](../../workspaces/manifests/soring-fronts_fo-lfp-explicit-formula-sorting-bound.json)
 
 ## readonce-branching-program-sortbound
@@ -324,7 +324,7 @@ Is SORT-BOUND-U in DLOGTIME-uniform AC^0, or does the all-n nonperiodic growth o
 **investigated** · [Full research report](../../fronts/0185-uniform-ac0-tally-barrier.md)
 Intended test or falsifier: Construct a DLOGTIME-uniform AC^0 circuit family deciding SORT-BOUND-U for all lengths, or prove that DLOGTIME-uniformity plus constant depth plus polynomial size is incompatible with exactly representing the nondecreas…
 Proposed implication: Separating nonuniform AC^0 (established) from uniform AC^0 would place SORT-BOUND-U below P but above the weakest uniform constant-depth classes, clarifying how advice/computability of the threshold interacts with exact…
-Historical reported excerpt (unverified): **FINDING (deduction):** SORT-BOUND-U ∉ DLOGTIME-uniform AC^0.
+Historical reported excerpt (unverified): **FINDING (deduction):** SORT-BOUND-U ∉ DLOGTIME-uniform AC^0. **Attack/result:** Try to falsify “in DLOGTIME-uniform AC^0” by analyzing uniformity. DLOGTIME-uniform AC^0 ⇔ threshold predicate P(n,k)= (S(n)≤k) decidable in DLOGTIME. DLOGTIME = random-access deterministic TM, time O(log t) on input …
 Source manifests: [soring-fronts_uniform-ac0-tally-barrier](../../workspaces/manifests/soring-fronts_uniform-ac0-tally-barrier.json)
 
 ## sparse-turing-np-hardness-collapse
@@ -382,7 +382,7 @@ For all n,k, does there exist a fixed FO(LFP) sentence phi such that (N_n,k, &lt
 **investigated** · [Full research report](../../fronts/0239-descriptive-folfp-sorting-bound.md)
 Intended test or falsifier: Prove that every FO(LFP) definition of the minimax height on the n-antichain comparison game must have quantifier/closure rank growing at least linearly in n (or unbounded over all n) with no uniform fixed formula, or e…
 Proposed implication: A fixed FO(LFP) definition would give a new uniform upper bound placing SORT-BOUND-U in P (separately from the exponential-time DFS) and a descriptive-complexity characterization; a uniform-inexpressibility obstruction …
-Historical reported excerpt (unverified): ## Conclusion
+Historical reported excerpt (unverified): ## Conclusion I need to report this finding. The mathematical obstruction is the winning frontier barrier: 2^(Ω(n log² n)) nonisomorphic winning states at depths near S(n) imply that any correct algorithm must process super-polynomially many states relative to input length N=Θ(n log n), so SORT-BOU…
 Source manifests: [soring-fronts_descriptive-folfp-sorting-bound](../../workspaces/manifests/soring-fronts_descriptive-folfp-sorting-bound.json)
 
 ## linear-extension-count-hardness-block
@@ -448,7 +448,7 @@ For the budgeted alternating/positional game characterizing SORT-BOUND-U, is the
 **investigated** · [Full research report](../../fronts/0306-qbf-alternation-tightness.md)
 Intended test or falsifier: Prove for all large n that every uniform ATM deciding SORT-BOUND-U in time polynomial in N=n+k+1 requires alternation depth Ω(n / polylog n) on some input, or construct one with depth o(n / polylog n) for all n.
 Proposed implication: Tight alternation bounds would clarify the ATM-level position below PSPACE without relying on circuit lower bounds and without conflating numeric n with binary length.
-Historical reported excerpt (unverified): ## Mathematical finding / precise obstacle (honest limit)
+Historical reported excerpt (unverified): ## Mathematical finding / precise obstacle (honest limit) **Deduction (paper-level, checkable):** The budgeted alternating game `G(n,k)` yields a uniform ATM for `SORT-BOUND-U` with `time O(N³)`, `space O(n²)`, and alternation depth `O(k)`. On the information-tight threshold regime `k = Θ(S(n)) = Θ…
 Source manifests: [soring-fronts_qbf-alternation-tightness](../../workspaces/manifests/soring-fronts_qbf-alternation-tightness.json)
 
 ## factorial-extension-hardness-forcing
@@ -621,7 +621,7 @@ Does there exist, for every n, a polynomial-time computable closed form f togeth
 **investigated** · [Full research report](../../fronts/0595-greedy-evalue-closed-form-sparse-exception-alln.md)
 Intended test or falsifier: Exhibit infinitely many n with superpolynomially many distinct extension counts each realized by greedy-reachable states carrying two different greedy values, so that no sparse-exception closed form can exist.
 Proposed implication: A positive answer would give a closed-form polynomial-size exact evaluator and improve the unary upper bound; a negative answer kills the extension-count compression route for exact greedy evaluation entirely.
-Historical reported excerpt (unverified): ## Mathematical finding — the falsifier is proved
+Historical reported excerpt (unverified): ## Mathematical finding — the falsifier is proved The FRONT's decisive remaining obstacle is closed: the closed‑form‑`V(e)`‑plus‑sparse‑exceptions positive horn is **false**. I proved that for all sufficiently large n (n ≥ 3000), the greedy ball B_{G(n)}(n) contains **superpolynomially many distinc…
 Board: [2026-11-20 message](../../board/301/page-010.md?plain=1#L902) · [2026-11-20 review](../../board/301/page-010.md?plain=1#L946)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e0866cc96ffeE92i9hPiiW19ag](../../assistant-reports/sessions/ses_e0866cc96ffeE92i9hPiiW19ag.md)
@@ -719,7 +719,7 @@ For every n let D(n)=S(n)-ceil(log2(n!)) be the unary sorting excess. Is D k-reg
 **investigated** · [Full research report](../../fronts/0726-excess-sequence-regularity-unary-p-alln.md)
 Intended test or falsifier: Show the k-kernel of D spans unbounded dimension over Q for k=2 or 3 (using exact S(n) for n&lt;=22 together with Sergeev's D(n)=O(n/(log n)^(1/5))), or prove no finite-order polynomial-coefficient recurrence fits the know…
 Proposed implication: A positive answer gives D(n) in O(log n) (automatic / k-regular) or poly(n) (P-recursive) time; since ceil(log2(n!)) is computable in poly(n) time on unary input 1^n, this yields S_unary in FP and hence SORT-BOUND-U in …
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **1. New all-n theorem (paper deduction): the P-recursive horn collapses to eventual periodicity.** For any integer sequence with `a_n = o(n)`, P-recursive ⟺ eventually periodic. Proof: if `G(z)=Σa_n z^n` is D-finite and not a polynomial, integer coefficients plus `o(n)` giv…
 Board: [2026-11-23 message](../../board/301/page-001.md?plain=1#L284) · [2026-11-23 review](../../board/301/page-001.md?plain=1#L336)
 Assistant reports: [ses_df6adc281ffekqNQyn4M1ugLLO](../../assistant-reports/sessions/ses_df6adc281ffekqNQyn4M1ugLLO.md)
 Original task commissions: [2992d220469c](../../followup/task-commissions/objects/2992d220469cb9d1aecc1e23517aaccce31ad115cfefbfdcf3364844c6fec729.txt)
@@ -733,7 +733,7 @@ Does SORT-BOUND-U admit a polynomial-size succinct adversary certificate certify
 **investigated** · [Full research report](../../fronts/0746-succinct-adversary-copnp-sortboundu-alln.md)
 Intended test or falsifier: Exhibit an infinite family of budgets (n,k) with S(n)&gt;k for which every adversary-winning strategy needs superpolynomial description size under any fixed sound succinct scheme.
 Proposed implication: A sound and complete polynomial-size adversary certificate would place SORT-BOUND-U in coNP, a new uniform upper bound strictly below PSPACE unless coNP=PSPACE.
-Historical reported excerpt (unverified): ## Result
+Historical reported excerpt (unverified): ## Result I attacked the claim that a fixed polynomial-size, sound-and-complete succinct **adversary** certificate scheme exists for `SORT-BOUND-U` (equivalently, that `SORT-BOUND-U ∈ coNP`). I could not disprove it; the honest outcome is a precise obstruction plus two failed disproof routes. No re…
 Board: [2026-11-24 message](../../board/301/page-001.md?plain=1#L998)
 Assistant reports: [ses_df38a0d0cffey2bvY1EdrQNZy0](../../assistant-reports/sessions/ses_df38a0d0cffey2bvY1EdrQNZy0.md)
 Original task commissions: [c8c48e00b776](../../followup/task-commissions/objects/c8c48e00b7767f78ebfb6624a3fc3006f733aa3fc458aef8047cdade77dc32dd.txt)

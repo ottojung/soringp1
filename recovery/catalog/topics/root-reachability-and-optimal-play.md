@@ -99,7 +99,7 @@ For the two-party/partition model induced by splitting the unary input 1^n#1^k a
 **investigated** · [Full research report](../../fronts/0168-pigeonhole-adversary-rectangle-bound.md)
 Intended test or falsifier: Construct a polynomial-size rectangle cover for all-n SORT-BOUND-U (respecting the comparison/partial-order constraints) or show the comparison-feasibility obstruction is not necessary for some polynomial cover.
 Proposed implication: A Yao/rectangle lower bound that uses only the pairwise-comparison feasibility (not arbitrary posets) would give a model-theoretic barrier to certain uniform algorithms without invoking circuit lower bounds forbidden by…
-Historical reported excerpt (unverified): ## Finding (mathematical)
+Historical reported excerpt (unverified): ## Finding (mathematical) **Claim attacked (front):** For the two-party/partition model induced by splitting the unary input $1^n\#1^k$ at some cut, every exact rectangle cover of $\mathrm{SORT\textrm{-}BOUND\textrm{-}U}$ contains some rectangle that is "comparison-infeasible" in a way forcing supe…
 Source manifests: [soring-fronts_pigeonhole-adversary-rectangle-bound](../../workspaces/manifests/soring-fronts_pigeonhole-adversary-rectangle-bound.json)
 
 ## read-twice-bp-antichain-reduction
@@ -130,7 +130,7 @@ For every uniform comparison strategy that is optimal at the n-antichain root, l
 **investigated** · [Full research report](../../fronts/0181-root-strategy-induced-orbit-obstruction.md)
 Intended test or falsifier: Construct an explicit infinite family of optimal root strategies with \|O_n\| polynomial in n under some canonical orbit refinement that is locally checkable, or prove any locally checkable root-orbit refinement is polyno…
 Proposed implication: Even if individual states are compressible, a strategy-level orbit obstruction would block 'strategy-description quotient' NP certificates and would distinguish certificate completeness from the strategy's branching str…
-Historical reported excerpt (unverified): ## Finding (mathematical)
+Historical reported excerpt (unverified): ## Finding (mathematical) **Claim attacked:** the FRONT claim that there is an all-n invariant (not just poset isomorphism class counts) forcing $\|O_n\|$ superpolynomial for every uniform comparison strategy optimal at the $n$-antichain root, regardless of isomorphism-quotienting choices. **Disproof…
 Source manifests: [soring-fronts_root-strategy-induced-orbit-obstruction](../../workspaces/manifests/soring-fronts_root-strategy-induced-orbit-obstruction.json)
 
 ## exact-root-adversary-forcing
@@ -225,7 +225,7 @@ Is SORT-BOUND-U decidable by a deterministic polynomial-time Turing machine with
 **investigated** · [Full research report](../../fronts/0240-adversary-turing-pnp-reduction.md)
 Intended test or falsifier: Show that no polynomial-time oracle machine making poly(N) queries to any NP language can decide {1^n # 1^k : S(n)&gt;k} uniformly for all large n with the correct threshold, or construct an all-n adversary/strategy argume…
 Proposed implication: Membership in P^NP would be a concrete class upper bound below PSPACE distinct from NP/coNP; a separation from P^NP would be a stronger structural result than sparsity-based NP-hardness obstructions and would clarify wh…
-Historical reported excerpt (unverified): **Finding (paper proof):**
+Historical reported excerpt (unverified): **Finding (paper proof):** **Claim attacked:** SORT-BOUND-U ∈ P^NP (poly-time TM with NP oracle, adaptive queries) for all n,k without assuming NP/coNP a priori. **Why naive binary search fails (\[deduction\], literature):**
 Source manifests: [soring-fronts_adversary-turing-pnp-reduction](../../workspaces/manifests/soring-fronts_adversary-turing-pnp-reduction.json)
 
 ## antichain-reset-free-obstruction
@@ -370,7 +370,7 @@ Is the upper bound on S(n) implied by the Gold Partition Conjecture, namely S(n)
 **investigated** · [Full research report](../../fronts/0393-gpc-antichain-upper-bound-barrier.md)
 Intended test or falsifier: An explicit n &gt;= 4 with floor(log_phi(n!)) &lt;= FJ(n), or a derivation from the GPC statement itself of a uniform S(n) bound below the Ford-Johnson value.
 Proposed implication: A proof of the dominance would exclude the entire GPC conclusion as a source of improved uniform S(n) upper bounds, redirecting general-poset GPC work away from the antichain root and separating certificate soundness at…
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding Define \\[
 Board: [2026-11-08 message](../../board/301/page-020.md?plain=1#L21) · [2026-11-08 message](../../board/301/page-020.md?plain=1#L76)
 Additional board mentions: 1 (use front lookup for exact links)
 Assistant reports: [ses_e433031e9ffeOeD1oNKHsp99X6](../../assistant-reports/sessions/ses_e433031e9ffeOeD1oNKHsp99X6.md)
@@ -384,7 +384,7 @@ Is the number of distinct poset states lying on some height-S(n) optimal play fr
 **investigated** · [Full research report](../../fronts/0497-optimal-play-state-fraction-lower-bound.md)
 Intended test or falsifier: Exhibit an infinite family of n for which the exact optimal-play state count is o(A001035(n)), for example polynomially bounded or A001035(n)/log n, or prove that the ratio tends to zero.
 Proposed implication: A positive answer would establish a 2^{Theta(n^2)} lower bound on the optimal-play state count, a strong barrier to succinct certificates and state-graph exact evaluators for SORT-BOUND-U; a negative answer would show o…
-Historical reported excerpt (unverified): Result: no falsifying family produced.
+Historical reported excerpt (unverified): Result: no falsifying family produced. ### 4. Direct exclusion/witness construction — **local exclusions exist, infinite-family amplification not achieved** (deduction + experiment) `\|Opt(n)\| &lt; A001035(n)` for `n&gt;=4` in the known data (e.g. `38` excluded at `n=4`), so some labelled posets are unrea…
 Assistant reports: [ses_e3b5d5cabffeMnLI255mrjeEie](../../assistant-reports/sessions/ses_e3b5d5cabffeMnLI255mrjeEie.md)
 Original task commissions: [35e55a8f70b3](../../followup/task-commissions/objects/35e55a8f70b3558eeab50db39cc743db153833c66c72a754c9340ee3865c46ca.txt)
 Source manifests: [soring-fronts_optimal-play-state-fraction-lower-bound](../../workspaces/manifests/soring-fronts_optimal-play-state-fraction-lower-bound.json)
@@ -421,7 +421,7 @@ Is there a partial order that every height-k comparison strategy for n keys must
 **investigated** · [Full research report](../../fronts/0526-adversary-forced-winning-frontier-states.md)
 Intended test or falsifier: Either an all-n adversary strategy forcing one of the rectangular-chain winning states against every height-k sorter, or a height-k strategy whose reachable states avoid that whole family.
 Proposed implication: Forcing would strengthen the space barrier from reachable-state counting to an adversary lower bound; avoidance would show the winning-frontier obstruction is not universally forced.
-Historical reported excerpt (unverified): ## Mathematical finding
+Historical reported excerpt (unverified): ## Mathematical finding **The rectangular-chain winning-frontier family is not forced against every height-`k` sorter; the `2^{Ω(n log² n)}` states are, on present evidence, reachable in some optimal strategy only.** ### Reasoning
 Board: [2026-11-17 message](../../board/301/page-015.md?plain=1#L240) · [2026-11-17 message](../../board/301/page-015.md?plain=1#L256)
 Assistant reports: [ses_e147955f3ffe9IQ1Okhttyl283](../../assistant-reports/sessions/ses_e147955f3ffe9IQ1Okhttyl283.md)
 Original task commissions: [e01b1a8f9829](../../followup/task-commissions/objects/e01b1a8f9829fa53aed9a97c5c04e5309980e0d144487d3a74a204c9bdf99abf.txt)
@@ -558,7 +558,7 @@ For every sufficiently large n, does every height-S(n) sorting tree for the n-an
 **investigated** · [Full research report](../../fronts/0702-forced-starved-state-alln.md)
 Intended test or falsifier: Either an all-n family of height-S(n) trees with no A/B/C-starved state, or one n where every optimal tree passes through a state whose A/B/C certificate fails.
 Proposed implication: A forced-starvation theorem would convert A/B/C soundness incompleteness into a completeness barrier for succinct certificates; avoidability would keep a refined grammar route open.
-Historical reported excerpt (unverified): ## Finding
+Historical reported excerpt (unverified): ## Finding **Neither horn established; all-n OPEN.** - Horn A (forced starvation for all sufficiently large n): unproven; no forced-starvation lemma; avoidance holds through `n≤10` (starved states at n=8,9 are avoidable).
 Board: [2026-11-23 message](../../board/301/page-003.md?plain=1#L810) · [2026-11-23 message](../../board/301/page-003.md?plain=1#L839)
 Assistant reports: [ses_df93cf392ffeaZOEPWbGIx4BgI](../../assistant-reports/sessions/ses_df93cf392ffeaZOEPWbGIx4BgI.md)
 Original task commissions: [73dd82c7fdbc](../../followup/task-commissions/objects/73dd82c7fdbc4ede938ddbd3982b6a8808a1446a2d62010c378c84992b5e9052.txt)

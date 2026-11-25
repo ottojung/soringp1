@@ -81,7 +81,7 @@ def search(index,args):
             consider('mixed',r['title'],r['path'],meta=' '.join(r['workspaces']+r['sessions']+r['fronts']))
     if 'github' in kinds:
         for i in index.get('github',[]):
-            consider('github','#'+i['id']+' '+i['title'],i['path'],meta=i['state'])
+            consider('github',i.get('kind','issue')+' #'+i['id']+' '+i['title'],i['path'],meta=i['state'])
     if 'patch' in kinds:
         for p in index['commits']:
             consider('patch',p['subject'],p['path'],meta=p['id'])
