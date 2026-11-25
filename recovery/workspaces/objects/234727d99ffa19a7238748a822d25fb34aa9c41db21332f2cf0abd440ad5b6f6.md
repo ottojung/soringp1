@@ -1,0 +1,3 @@
+# Founder mandate — Viche Innovation Centre, 2026-10-16
+
+The Founder requested deployment of a permanent Innovation Centre within Viche's legislative branch, independently and proactively inventing improvements to Viche itself. Ideas for external projects like AssemblyP1 are reserved to the Founder. The Centre researches and develops draft proposals, Parliament ratifies, Executive implements ratified changes, and independent Judiciary measures outcomes. The Centre must have durable, summon-independent liveness and no legislative vote. This records the Founder direction; it does not modify the Constitution or claim parliamentary ratification of the Innovation Centre Act draft.
