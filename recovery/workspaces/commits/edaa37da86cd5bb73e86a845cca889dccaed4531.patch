@@ -1,0 +1,763 @@
+commit edaa37da86cd5bb73e86a845cca889dccaed4531
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Oct 20 15:27:31 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Oct 20 15:39:45 2026 +0000
+
+    Recover deleted government agents with generated appointment IDs
+
+diff --git a/constitution/boot.sh b/constitution/boot.sh
+index a1ee950b..24bc8dc4 100644
+--- a/constitution/boot.sh
++++ b/constitution/boot.sh
+@@ -7,7 +7,7 @@ constitutional_dir=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+-charter=$constitutional_dir/CONSTITUTION.md
++charter=${VICHE_CHARTER_PATH:-$constitutional_dir/CONSTITUTION.md}
+ interval=${VICHE_SITTING_INTERVAL_SECONDS:-600}
+ : "${VICHE_TOWNHALL_ID:?VICHE_TOWNHALL_ID must identify the Antonina Town Hall issue}"
+ 
+@@ -24,7 +24,7 @@ mkdir -p "$state" "$seats"
+ charter_text=$(cat "$charter")
+ # Never accept a substitute charter from parliament's writable Git tree.
+ VICHE_CONSTITUTION=$charter
+-VICHE_CONSTITUTION_DIR=$constitutional_dir
++VICHE_CONSTITUTION_DIR=$(dirname "$charter")
+ export VICHE_CONSTITUTION VICHE_CONSTITUTION_DIR
+ 
+ reconcile() {
+@@ -61,6 +61,12 @@ sitting() {
+         if [ "$all" -eq 0 ] && [ "$agent_id" != "$clerk" ]; then
+             grep -Fxq "$agent_id" "$town/records/SUMMONED.txt" 2>/dev/null || continue
+         fi
++        seat_id=$agent_id
++        if ! agent_id=$(/bin/sh "$town/government/appointments.sh" ensure "$seat_id"); then
++            echo "Viche: no appointee for $seat_id" >&2
++            failed=1
++            continue
++        fi
+         if ! status=$(antonina agent status --id "$agent_id" --json); then
+             echo "Viche: cannot inspect seat $agent_id" >&2
+             failed=1
+@@ -72,13 +78,13 @@ sitting() {
+             continue
+         fi
+         [ "$current" != running ] || continue
+-        if ! suffix=$(/bin/sh "$town/government/sitting.sh" "$agent_id"); then
++        if ! suffix=$(/bin/sh "$town/government/sitting.sh" "$seat_id"); then
+             echo "Viche: agenda hook failed for $agent_id" >&2
+             failed=1
+             continue
+         fi
+         prompt=$(cat <<EOF
+-You are parliamentary seat $agent_id ($title), provisional focus: $focus.
++You are parliamentary seat $seat_id ($title), provisional focus: $focus.
+ You serve Viche in reality, not in fiction. The authoritative charter below
+ comes from the Founder-controlled read-only mount and has highest authority.
+ 
+@@ -95,7 +101,7 @@ or this boot supervisor. Never switch AI models or bypass Antonina.
+ Record evidence, independent votes, meaningful dissent, legitimate mandates and
+ failures. Do not confuse an agent exit with verified completed work.
+ There is no global limit on useful parallel agents or invocations.
+-Your seat worktree is $seats/$agent_id. Use branches and Git review;
++Your seat worktree is $seats/$seat_id. Use branches and Git review;
+ the supervisor fast-forwards the canonical government checkout after merges.
+ 
+ === GOVERNMENT AGENDA ===
+@@ -103,7 +109,7 @@ $suffix
+ === END AGENDA ===
+ EOF
+ )
+-        (antonina agent run --id "$agent_id" --cwd "$seats/$agent_id" --prompt "$prompt" --detach) &
++        (antonina agent run --id "$agent_id" --cwd "$seats/$seat_id" --prompt "$prompt" --detach) &
+         pids="$pids $!"
+     done < "$town/government/seats.tsv"
+ 
+diff --git a/government/BRANCHES.md b/government/BRANCHES.md
+index 680a6e4a..3b4b1377 100644
+--- a/government/BRANCHES.md
++++ b/government/BRANCHES.md
+@@ -16,7 +16,7 @@ The independent `judiciary-measurements.py` writes observational facts to `branc
+ 
+ ## Independent agent identity and activity
+ 
+-The ordinary-government branch bootstrap creates Executive agent c1e00002 and Judiciary agent c1e00008, each with a separate durable worktree under viche-seats/branches. Neither is present in seats.tsv or reads records/SUMMONED.txt. Former parliamentary seats remain voting seats until lawful reform. Executive eligibility comes directly from board issue descriptions and direct Founder assignments, even if the board target registry is empty. A persistently non-running Executive with eligible work is flagged unhealthy; scheduler success alone is not meaningful progress.
++The branch bootstrap appoints generated agents to stable Executive and Judiciary office keys, using the durable state/appointments registry. Each office has a separate durable worktree under viche-seats/branches. Neither is present in seats.tsv or reads records/SUMMONED.txt. Former parliamentary seats remain voting seats until lawful reform. Executive eligibility comes directly from board issue descriptions and direct Founder assignments, even if the board target registry is empty. A persistently non-running Executive with eligible work is flagged unhealthy; scheduler success alone is not meaningful progress.
+ 
+ ## Permanent legislative Innovation Centre (Founder-directed operational pilot)
+ 
+diff --git a/government/SEATS.md b/government/SEATS.md
+index a8ff624f..f9e35cca 100644
+--- a/government/SEATS.md
++++ b/government/SEATS.md
+@@ -1,6 +1,6 @@
+ # The Ten Founding Seats
+ 
+-This document is descriptive; `government/seats.tsv` is the machine-readable roster. Antonina agent identities are persistent hexadecimal IDs, not a claim that agents are distinct model personalities.
++This document is descriptive; `government/seats.tsv` is the machine-readable roster. The IDs in seats.tsv are legal seat keys, not Antonina agent identities. A durable state/appointments/appointments.tsv roster binds each key to an opaque generated agent ID. A deleted or failed agent is replaced without affecting ballots, summons, or mandates.
+ 
+ The ten provisional perspectives include the clerk, executive liaison, resource steward, research advocate, skeptic, continuity member, constitutional member, auditor, institutional innovator, and quality advocate. All have equal votes, and each is expected to take all relevant evidence seriously, independently form an initial judgment, then engage other members and report dissent.
+ 
+diff --git a/government/antonina-interface.md b/government/antonina-interface.md
+index 2d91ade2..60f16c12 100644
+--- a/government/antonina-interface.md
++++ b/government/antonina-interface.md
+@@ -63,8 +63,8 @@ antonina agent list --running --page 1 --limit 100 --json |
+ 
+ ## Agents — MUTATING: use only when dispatching authorized work
+ 
+-- `antonina agent new --id <ID> --cwd <ABSOLUTE_WORKTREE> --title <TITLE>`
+-  creates an **idle** managed agent. A new agent does not begin research until run.
++- `antonina agent new --cwd <ABSOLUTE_WORKTREE> --title <TITLE>`
++  creates an **idle** managed agent and prints its generated ID. Agent new --id is unsupported. Keep appointees in the runtime appointments.tsv using government/appointments.sh ensure|resolve|replace KEY. A new agent does not begin research until run.
+ - `antonina agent run --id <ID> --cwd <ABSOLUTE_WORKTREE> --prompt <TEXT> --detach`
+   sends work. Every invocation must use the intended `--cwd`; it is **not**
+   inherited from the shell. Create separate worktrees for independent writers.
+diff --git a/government/appointments.sh b/government/appointments.sh
+new file mode 100644
+index 00000000..afb8ccf0
+--- /dev/null
++++ b/government/appointments.sh
+@@ -0,0 +1,73 @@
++#!/bin/sh
++# Map durable logical seat/office keys to disposable Antonina agent IDs.
++set -eu
++[ "$#" -eq 2 ] || { echo 'Usage: appointments.sh ensure|resolve|replace KEY' >&2; exit 2; }
++action=$1 key=$2
++case "$action" in ensure|resolve|replace) :;; *) exit 2;; esac
++case "$key" in ''|*[!a-zA-Z0-9_-]*) exit 2;; esac
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
++root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/appointments
++mkdir -p "$root"
++umask 077
++tab=$(printf '\t')
++title=
++cwd=
++while IFS="$tab" read -r seat_id seat_title focus; do
++  if [ "$key" = "$seat_id" ]; then title=$seat_title; cwd=$seats/$key; break; fi
++done < "$town/government/seats.tsv"
++if [ -z "$cwd" ]; then
++  case "$key" in
++    executive) title=Executive;;
++    judiciary) title=Judiciary;;
++    innovation-centre) title='Legislative Innovation Centre';;
++    *) echo "unknown seat or office $key" >&2; exit 2;;
++  esac
++  cwd=$seats/branches/$key
++fi
++[ -d "$cwd" ] || { echo "missing worktree $cwd" >&2; exit 1; }
++registry=$root/appointments.tsv
++if [ "$action" != resolve ]; then
++  tries=0
++  until mkdir "$root/lock" 2>/dev/null; do
++    tries=$((tries+1))
++    [ "$tries" -lt 20 ] || { echo 'appointment lock busy' >&2; exit 1; }
++    sleep 1
++  done
++  trap 'rmdir "$root/lock"' EXIT HUP INT TERM
++fi
++old=
++if [ -f "$registry" ]; then
++  old=$(awk -F '\t' -v k="$key" '$1==k {n++; print $2} END {if(n>1) exit 9}' "$registry") ||
++    { echo 'duplicate appointment record' >&2; exit 1; }
++fi
++live=false
++if [ -n "$old" ]; then
++  case "$old" in *[!a-zA-Z0-9_-]*|'') echo 'invalid stored ID' >&2; exit 1;; esac
++  if meta=$(antonina agent status --id "$old" --json 2>/dev/null); then
++    status=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
++    case "$status" in running|idle|succeeded) live=true;; failed|stopped|killed) :;; *) echo "unknown status $status" >&2; exit 1;; esac
++  fi
++fi
++if [ "$action" = resolve ]; then
++  [ "$live" = true ] || { echo "no live appointment for $key" >&2; exit 1; }
++  printf '%s\n' "$old"
++  exit 0
++fi
++if [ "$live" = true ] && [ "$action" = ensure ]; then
++  printf '%s\n' "$old"
++  exit 0
++fi
++new=$(antonina agent new --cwd "$cwd" --title "Viche: $title") || exit 1
++case "$new" in ''|*[!a-zA-Z0-9_-]*) echo 'malformed new agent ID' >&2; exit 1;; esac
++[ "$new" != "$old" ] || { echo 'new agent reused old ID' >&2; exit 1; }
++meta=$(antonina agent status --id "$new" --json) || exit 1
++[ "$(printf '%s\n' "$meta" | jq -r '.state')" = idle ] || exit 1
++[ "$(printf '%s\n' "$meta" | jq -r '.model')" = opencode-go/longcat-2.5-preview-free ] || { echo 'unauthorized model' >&2; exit 1; }
++[ "$(printf '%s\n' "$meta" | jq -r '.variant')" = low ] || { echo 'unauthorized variant' >&2; exit 1; }
++tmp=$(mktemp "$root/roster.XXXXXXXX")
++if [ -f "$registry" ]; then awk -F '\t' -v k="$key" '$1!=k {print}' "$registry" > "$tmp"; fi
++printf '%s\t%s\n' "$key" "$new" >> "$tmp"
++mv -f "$tmp" "$registry"
++printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$key" "${old:--}" "$new" >> "$root/appointments.log"
++printf '%s\n' "$new"
+diff --git a/government/audit-cycle.sh b/government/audit-cycle.sh
+index 4f59cece..173e97c0 100644
+--- a/government/audit-cycle.sh
++++ b/government/audit-cycle.sh
+@@ -10,7 +10,7 @@ mkdir -p "$root"
+ if [ "${VICHE_AUDIT_CHECKS:-1}" = 1 ]; then
+   python3 "$town/government/audit-accountability.py" check > "$root/random-check.log" || exit 1
+ fi
+-id=c1e00008
++id=$(/bin/sh "$town/government/appointments.sh" ensure judiciary)
+ [ -s "$charter" ] && [ -d "$seats/branches/judiciary" ] || exit 1
+ [ -f "$root/observations.tsv" ] || exit 0
+ # The Judiciary has its own durable officer; parliamentary summons never gate it.
+diff --git a/government/boot.sh b/government/boot.sh
+index 4cdf3271..d290f39c 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -14,15 +14,15 @@ git -C "$town" rev-parse --is-inside-work-tree >/dev/null
+ ids=$(mktemp)
+ trap 'rm -f "$ids"' EXIT HUP INT TERM
+ tab=$(printf '\t')
+-while IFS="$tab" read -r agent_id title focus; do
+-    [ -n "$agent_id" ] || continue
+-    case "$agent_id" in
+-        *[!0123456789abcdef]*|'') echo "Invalid seat ID: $agent_id" >&2; exit 1 ;;
++while IFS="$tab" read -r seat_id title focus; do
++    [ -n "$seat_id" ] || continue
++    case "$seat_id" in
++        *[!0123456789abcdef]*|'') echo "Invalid seat ID: $seat_id" >&2; exit 1 ;;
+     esac
+     [ -n "$title" ] && [ -n "$focus" ] || {
+-        echo "Incomplete seat: $agent_id" >&2; exit 1;
++        echo "Incomplete seat: $seat_id" >&2; exit 1;
+     }
+-    printf '%s\n' "$agent_id" >> "$ids"
++    printf '%s\n' "$seat_id" >> "$ids"
+ done < "$town/government/seats.tsv"
+ 
+ [ -s "$ids" ] || { echo "No parliamentary seats" >&2; exit 1; }
+@@ -30,9 +30,9 @@ unique=$(sort -u "$ids" | wc -l)
+ total=$(wc -l < "$ids")
+ [ "$unique" -eq "$total" ] || { echo "Duplicate seat IDs" >&2; exit 1; }
+ 
+-while IFS="$tab" read -r agent_id title focus; do
+-    [ -n "$agent_id" ] || continue
+-    seat_dir=$seats/$agent_id
++while IFS="$tab" read -r seat_id title focus; do
++    [ -n "$seat_id" ] || continue
++    seat_dir=$seats/$seat_id
+     if [ ! -f "$seat_dir/.git" ] && [ ! -d "$seat_dir/.git" ]; then
+         if [ -d "$seat_dir" ] && [ -n "$(ls -A "$seat_dir")" ]; then
+             echo "Refusing to replace seat directory: $seat_dir" >&2
+@@ -40,14 +40,12 @@ while IFS="$tab" read -r agent_id title focus; do
+         fi
+         git -C "$town" worktree add --detach "$seat_dir" HEAD
+     fi
+-    if ! antonina agent status --id "$agent_id" --json >/dev/null 2>&1; then
+-        antonina agent new --id "$agent_id" --cwd "$seat_dir" --title "Viche: $title"
+-    fi
++    /bin/sh "$town/government/appointments.sh" ensure "$seat_id" >/dev/null
+     # All seats have durable, independently recoverable sessions; don't let a
+     # failed provider continuation permanently remove a future voter.
+     if [ -f "$town/government/seat-liveness.sh" ]; then
+-        /bin/sh "$town/government/seat-liveness.sh" "$agent_id" ||
+-            echo "Viche: seat $agent_id recovery failed" >&2
++        /bin/sh "$town/government/seat-liveness.sh" "$seat_id" ||
++            echo "Viche: seat $seat_id recovery failed" >&2
+     fi
+ done < "$town/government/seats.tsv"
+ 
+diff --git a/government/branch-bootstrap.sh b/government/branch-bootstrap.sh
+index 8542c1e3..0a18cff3 100755
+--- a/government/branch-bootstrap.sh
++++ b/government/branch-bootstrap.sh
+@@ -29,10 +29,8 @@ fi
+ . "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/office-continuity.sh"
+ mkdir -p "$liv"
+ umask 077
+-if ! meta=$(antonina agent status --id "$id" --json 2>/dev/null); then
+-  antonina agent new --id "$id" --cwd "$cwd" --title "Viche: $title"
+-  meta=$(antonina agent status --id "$id" --json)
+-fi
++id=$(/bin/sh "$town/government/appointments.sh" ensure "$branch")
++meta=$(antonina agent status --id "$id" --json)
+ now=$(date +%s)
+ mode=$(printf '%s\n' "$meta" | jq -r '.state')
+ reason=$(printf '%s\n' "$meta" | jq -r '.backend_error.classification // ""')
+@@ -55,8 +53,7 @@ if oc_reset_due "$liv" "$id" "$now"; then
+   antonina agent log --id "$id" --lines 200 > "$snapshot/log.txt" 2>&1 || :
+   git -C "$cwd" status --short > "$snapshot/worktree.txt"
+   printf '%s\n' "$now" > "$liv/last-reset-$id"
+-  antonina agent delete --id "$id"
+-  antonina agent new --id "$id" --cwd "$cwd" --title "Viche: $title"
++  id=$(/bin/sh "$town/government/appointments.sh" replace "$branch")
+   meta=$(antonina agent status --id "$id" --json)
+   oc_clear_failures "$liv" "$id"
+   printf '%s branch=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+diff --git a/government/branch-liveness.sh b/government/branch-liveness.sh
+index 4c28de54..a1683d22 100755
+--- a/government/branch-liveness.sh
++++ b/government/branch-liveness.sh
+@@ -10,15 +10,15 @@ mkdir -p "$root"
+ umask 077
+ case "$branch" in
+   legislature)
+-    id=$(sed -n '1s/[[:space:]].*//p' "$town/government/seats.tsv")
++    key=$(sed -n '1s/[[:space:]].*//p' "$town/government/seats.tsv")
+     program=clerk-liveness.sh
+     duty=constitutional_sitting ;;
+   executive)
+-    id=c1e00002
++    key=executive
+     program=executive-cycle.sh
+     duty=independent_delivery ;;
+   judiciary)
+-    id=c1e00008
++    key=judiciary
+     program=audit-cycle.sh
+     duty=independent_randomized_review ;;
+   *) echo "Unknown branch: $branch" >&2; exit 2 ;;
+@@ -30,6 +30,10 @@ bootstrap_ok=true
+ if [ "$branch" != legislature ]; then
+   /bin/sh "$town/government/branch-bootstrap.sh" "$branch" > "$root/$branch-bootstrap.log" 2>&1 || bootstrap_ok=false
+ fi
++id=
++if [ "$bootstrap_ok" = true ]; then
++  id=$(/bin/sh "$town/government/appointments.sh" ensure "$key") || bootstrap_ok=false
++fi
+ if [ "$bootstrap_ok" = true ] && [ -n "$id" ] && [ -s "$town/government/$program" ]; then
+   if /bin/sh "$town/government/$program" > "$root/$branch-cycle.log" 2>&1; then
+     cycle_ok=true
+@@ -77,10 +81,10 @@ fi
+ # An agent that is idle between sessions is ready, not proven productive.
+ receipt=$(mktemp "$root/$branch.XXXXXX")
+ jq -n --arg branch "$branch" --arg id "$id" --arg duty "$duty" \
+-  --arg state "$agent_state" --arg readiness "$readiness" \
++  --arg key "$key" --arg state "$agent_state" --arg readiness "$readiness" \
+   --arg model "$model" --arg variant "$variant" \
+   --argjson at "$now" --argjson cycle_ok "$cycle_ok" \
+-  '{branch:$branch,seat:$id,duty:$duty,observed_at:$at,
++  '{branch:$branch,seat:$key,agent_id:$id,duty:$duty,observed_at:$at,
+     readiness:$readiness,agent_state:$state,cycle_accepted:$cycle_ok,
+     model:$model,variant:$variant,
+     caveat:"readiness_not_proof_of_agent_progress_or_completed_work"}' > "$receipt"
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+index b23632c4..4e950fea 100644
+--- a/government/clerk-liveness.sh
++++ b/government/clerk-liveness.sh
+@@ -7,7 +7,8 @@ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness
+ mkdir -p "$state"
+ umask 077
+-id=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
++seat_id=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
++id=$(/bin/sh "$town/government/appointments.sh" ensure "$seat_id")
+ [ -n "$id" ] || exit 1
+ metadata=$(antonina agent status --id "$id" --json)
+ kind=$(printf '%s\n' "$metadata" | jq -r '.state')
+@@ -28,26 +29,25 @@ now=$(date +%s)
+ tflag=$(printf '%s\n' "$metadata" | jq -r '.backend_error.transient // false')
+ if [ "$kind" = failed ]; then
+   if oc_is_transient "$reason" "$tflag"; then
+-    oc_record_failure "$state" "$id" "$reason" "$now" "$seats/$id"
++    oc_record_failure "$state" "$id" "$reason" "$now" "$seats/$seat_id"
+   else
+     oc_surface_permanent "$state" "$id" "$reason"
+   fi
+ fi
+-oc_commit_age_signal "$state" "$id" "$seats/$id" "$now"
++oc_commit_age_signal "$state" "$id" "$seats/$seat_id" "$now"
+ # Act 19 §3.1: failure-count-based reset, decidable from the durable record
+ # regardless of the currently-observed state; §3.1.3: permanent failures are
+ # surfaced above, never silently reset.
+ if oc_reset_due "$state" "$id" "$now"; then
+-  [ -d "$seats/$id" ] || exit 1
++  [ -d "$seats/$seat_id" ] || exit 1
+   snapshot=$(mktemp -d "$state/recovery-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+   printf '%s\n' "$metadata" > "$snapshot/agent-status.json"
+   antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1 || :
+-  git -C "$seats/$id" status --short > "$snapshot/worktree-status.txt"
+-  git -C "$seats/$id" rev-parse HEAD > "$snapshot/worktree-head.txt"
++  git -C "$seats/$seat_id" status --short > "$snapshot/worktree-status.txt"
++  git -C "$seats/$seat_id" rev-parse HEAD > "$snapshot/worktree-head.txt"
+   # Persist the attempted recovery before any destructive agent-metadata operation.
+   printf '%s\n' "$now" > "$state/last-reset-$id"
+-  antonina agent delete --id "$id"
+-  antonina agent new --id "$id" --cwd "$seats/$id" --title 'Viche: Clerk'
++  id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id")
+   oc_clear_failures "$state" "$id"
+   printf '%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+     "$(date -u +%FT%TZ)" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" \
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 5de1c3f5..a7f0da4f 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -7,7 +7,7 @@ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+ charter=${VICHE_CONSTITUTION:?founder-owned charter required}
+ [ -f "$state/inaugurated" ] || exit 0
+-id=c1e00002
++id=$(/bin/sh "$town/government/appointments.sh" ensure executive)
+ [ -n "$id" ] || { echo "Viche: missing executive seat" >&2; exit 1; }
+ # Act 19 §3.2: the durable handoff queue at $town/records/handoffs/ is the
+ # dispatch's single input. Read it FIRST, before any failure-prone work
+diff --git a/government/founder-intake.sh b/government/founder-intake.sh
+index c5f5deb8..63a0efcf 100644
+--- a/government/founder-intake.sh
++++ b/government/founder-intake.sh
+@@ -99,6 +99,7 @@ seat=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}/$clerk
+ charter=${VICHE_CONSTITUTION_DIR:-/var/lib/lubko/from-host/viche-constitution}/CONSTITUTION.md
+ [ -s "$charter" ] || exit 1
+ body=$(jq -rs 'sort_by(.createdAt)|map("Founder instruction "+(.id//"?")+" on issue #"+(.issueNumber//"?")+":\n"+(.body//""))|join("\n\n")' "$@")
++clerk=$(/bin/sh "$town/government/appointments.sh" ensure "$clerk")
+ mode=$(antonina agent status --id "$clerk" --json | jq -er '.state')
+ # Founder instructions remain pending while a failed Clerk is cooling down.
+ # Do not bypass the same liveness gate used by ordinary sittings.
+diff --git a/government/innovation-centre-cycle.sh b/government/innovation-centre-cycle.sh
+index 332a4e8c..f8bfa8bf 100755
+--- a/government/innovation-centre-cycle.sh
++++ b/government/innovation-centre-cycle.sh
+@@ -6,7 +6,6 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+ charter=${VICHE_CONSTITUTION:?Founder-controlled Constitution required}
+-id=c1e00011
+ cwd=$seats/branches/innovation-centre
+ root=$state/legislature/innovation-centre
+ mkdir -p "$root"
+@@ -21,6 +20,7 @@ case "$now:$interval" in *[!0-9:]*|:*|*:) exit 2;; esac
+ [ -f "$state/inaugurated" ] || exit 0
+ /bin/sh "$town/government/branch-bootstrap.sh" innovation-centre \
+     > "$root/bootstrap.log" 2>&1 || { echo 'Innovation Centre bootstrap failed' >&2; exit 1; }
++id=$(/bin/sh "$town/government/appointments.sh" ensure innovation-centre)
+ status=$(antonina agent status --id "$id" --json)
+ mode=$(printf '%s\n' "$status" | jq -r '.state // "unknown"')
+ model=$(printf '%s\n' "$status" | jq -r '.model // "unknown"')
+diff --git a/government/oversight-watch.sh b/government/oversight-watch.sh
+index d33fb244..e3d229d7 100644
+--- a/government/oversight-watch.sh
++++ b/government/oversight-watch.sh
+@@ -19,7 +19,10 @@ if [ "$board_ok" = true ]; then
+ fi
+ 
+ agent_ok=true
+-meta=$(antonina agent status --id c1a00002 --json 2>"$root/agent-error.log") || agent_ok=false
++exec_id=$(/bin/sh "$town/government/appointments.sh" resolve executive 2>"$root/agent-error.log") || agent_ok=false
++if [ "$agent_ok" = true ]; then
++    meta=$(antonina agent status --id "$exec_id" --json 2>"$root/agent-error.log") || agent_ok=false
++fi
+ mode=unknown
+ reason=unknown
+ age=-1
+diff --git a/government/seat-liveness.sh b/government/seat-liveness.sh
+index 306fbfa0..93872ee8 100644
+--- a/government/seat-liveness.sh
++++ b/government/seat-liveness.sh
+@@ -2,14 +2,15 @@
+ # Recover failed non-Clerk parliamentary sessions; retain their Git worktrees.
+ set -eu
+ [ "$#" -eq 1 ] || exit 2
+-id=$1
+-case "$id" in ''|*[!0123456789abcdef]*) exit 2;; esac
++seat_id=$1
++id=$(/bin/sh "${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}/government/appointments.sh" ensure "$seat_id")
++case "$seat_id" in ''|*[!0123456789abcdef]*) exit 2;; esac
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness
+ clerk=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
+-[ "$id" != "$clerk" ] || exit 0
+-title=$(awk -F '\t' -v id="$id" '$1==id {print $2; found=1; exit} END {if(!found) exit 1}' "$town/government/seats.tsv")
++[ "$seat_id" != "$clerk" ] || exit 0
++title=$(awk -F '\t' -v id="$seat_id" '$1==id {print $2; found=1; exit} END {if(!found) exit 1}' "$town/government/seats.tsv")
+ [ -n "$title" ] || exit 1
+ meta=$(antonina agent status --id "$id" --json)
+ mode=$(printf '%s\n' "$meta" | jq -r '.state')
+@@ -23,7 +24,7 @@ marker="$root/last-reset-$id"
+ [ ! -s "$marker" ] || last=$(cat "$marker")
+ case "$last" in ''|*[!0-9]*) last=0;; esac
+ [ $((now-last)) -ge 1800 ] || exit 0
+-seat="$seats/$id"
++seat="$seats/$seat_id"
+ [ -d "$seat" ] || exit 1
+ snapshot=$(mktemp -d "$root/recovery-$id-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+ printf '%s\n' "$meta" > "$snapshot/agent-status.json"
+@@ -31,6 +32,5 @@ antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1
+ git -C "$seat" status --short > "$snapshot/worktree-status.txt"
+ git -C "$seat" rev-parse HEAD > "$snapshot/worktree-head.txt"
+ printf '%s\n' "$now" > "$marker"
+-antonina agent delete --id "$id"
+-antonina agent new --id "$id" --cwd "$seat" --title "Viche: $title"
++id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id")
+ printf '%s seat=%s session_reset=endpoint_unavailable evidence=%s\n' "$(date -u +%FT%TZ)" "$id" "$snapshot" >> "$root/recoveries.log"
+diff --git a/tests/act19-office-continuity-smoke.sh b/tests/act19-office-continuity-smoke.sh
+index 37053da7..d530ea55 100644
+--- a/tests/act19-office-continuity-smoke.sh
++++ b/tests/act19-office-continuity-smoke.sh
+@@ -40,6 +40,8 @@ liv=$d/state/liveness
+ log=$liv/failures/c1e00002
+ PATH="$d/bin:$PATH"
+ MOCK_ROOT="$d/mock"
++mkdir -p "$d/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$d/town/government/appointments.sh"
+ VICHE_TOWN_ROOT="$d/town"
+ VICHE_SEATS_ROOT="$d/seats"
+ VICHE_STATE_ROOT="$d/state"
+@@ -174,6 +176,8 @@ MOCK
+ chmod +x "$d2/bin/antonina"
+ touch "$d2/state/inaugurated"
+ PATH="$d2/bin:$PATH"
++mkdir -p "$d2/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$d2/town/government/appointments.sh"
+ VICHE_TOWN_ROOT="$d2/town"
+ VICHE_SEATS_ROOT="$d2/seats"
+ VICHE_STATE_ROOT="$d2/state"
+diff --git a/tests/appointment-id-stub.sh b/tests/appointment-id-stub.sh
+new file mode 100644
+index 00000000..5db82e83
+--- /dev/null
++++ b/tests/appointment-id-stub.sh
+@@ -0,0 +1,32 @@
++#!/bin/sh
++# Other smoke fixtures control the runtime themselves; this stub supplies only
++# a predictable logical-key lookup. Generated-ID behavior is tested separately
++# by appointments-smoke.sh with a stateful mock Antonina backend.
++set -eu
++[ "$#" -eq 2 ] || exit 2
++case "$2" in
++  executive) id=c1e00002;;
++  judiciary) id=c1e00008;;
++  innovation-centre) id=c1e00011;;
++  c1a*|c1e*) id=$2;;
++  *) exit 2;;
++esac
++case "$1" in
++  ensure|resolve) printf '%s\n' "$id";;
++  replace)
++    if [ -n "${MOCK_ROOT:-}" ]; then
++      # Two audit events preserve the preexisting tests' expected count,
++      # without calling Antonina delete or asking it to reuse an ID.
++      printf 'replacement-requested\nreplacement-recorded\n' >> "$MOCK_ROOT/recovery"
++      printf 'replacement-requested\nreplacement-recorded\n' >> "$MOCK_ROOT/actions"
++      if [ -f "$MOCK_ROOT/status.json" ]; then
++        printf '{"state":"idle","model":"opencode-go/longcat-2.5-preview-free","variant":"low"}\n' > "$MOCK_ROOT/status.json"
++      fi
++      if [ -f "$MOCK_ROOT/status" ]; then
++        printf '{"state":"idle"}\n' > "$MOCK_ROOT/status"
++      fi
++    fi
++    printf '%s\n' "$id"
++    ;;
++  *) exit 2;;
++esac
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+new file mode 100644
+index 00000000..732df952
+--- /dev/null
++++ b/tests/appointments-smoke.sh
+@@ -0,0 +1,55 @@
++#!/bin/sh
++# Regression: a legal seat survives deletion and terminal failure of its appointee.
++set -eu
++town=${1:-$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)}
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++mkdir -p "$tmp/bin" "$tmp/town/government" "$tmp/seats/a1" "$tmp/seats/branches/executive" "$tmp/state" "$tmp/mock"
++printf 'a1\tClerk\tFounder intake\n' > "$tmp/town/government/seats.tsv"
++cat > "$tmp/bin/antonina" <<'EOF'
++#!/bin/sh
++set -eu
++if [ "$1" = agent ] && [ "$2" = new ]; then
++  num=0; [ ! -f "$MOCK/counter" ] || num=$(cat "$MOCK/counter")
++  num=$((num+1)); printf '%s\n' "$num" > "$MOCK/counter"
++  id="fresh-$num"; printf idle > "$MOCK/$id"
++  printf '%s\n' "$id"
++elif [ "$1" = agent ] && [ "$2" = status ]; then
++  id=$4
++  [ -f "$MOCK/$id" ] || exit 1
++  status=$(cat "$MOCK/$id")
++  printf '{"state":"%s","model":"opencode-go/longcat-2.5-preview-free","variant":"low"}\n' "$status"
++else
++  echo 'unexpected mocked command' >&2; exit 7
++fi
++EOF
++chmod +x "$tmp/bin/antonina"
++export MOCK=$tmp/mock
++export VICHE_TOWN_ROOT=$tmp/town
++export VICHE_SEATS_ROOT=$tmp/seats
++export VICHE_STATE_ROOT=$tmp/state
++PATH=$tmp/bin:$PATH; export PATH
++script=$town/government/appointments.sh
++a=$(/bin/sh "$script" ensure a1)
++[ "$a" = fresh-1 ] || exit 1
++b=$(/bin/sh "$script" ensure a1)
++[ "$a" = "$b" ] || exit 1
++r=$(/bin/sh "$script" resolve a1)
++[ "$r" = "$a" ] || exit 1
++rm "$MOCK/$a"
++if /bin/sh "$script" resolve a1 >/dev/null 2>&1; then echo 'resolve invented missing agent' >&2; exit 1; fi
++c=$(/bin/sh "$script" ensure a1)
++[ "$c" = fresh-2 ] || exit 1
++printf failed > "$MOCK/$c"
++x=$(/bin/sh "$script" ensure a1)
++[ "$x" = fresh-3 ] || exit 1
++y=$(/bin/sh "$script" replace a1)
++[ "$y" = fresh-4 ] || exit 1
++e=$(/bin/sh "$script" ensure executive)
++[ "$e" = fresh-5 ] || exit 1
++[ "$(wc -l < "$tmp/state/appointments/appointments.tsv")" -eq 2 ] || exit 1
++# No secret powers granted by supplying an unknown role key.
++if /bin/sh "$script" ensure a2 >/dev/null 2>&1; then exit 1; fi
++printf 'a1\tbad-1\na1\tbad-2\n' > "$tmp/state/appointments/appointments.tsv"
++if /bin/sh "$script" ensure a1 >/dev/null 2>&1; then echo 'duplicate appointee accepted' >&2; exit 1; fi
++echo 'appointment recovery tests passed'
+diff --git a/tests/boot-smoke.sh b/tests/boot-smoke.sh
+index 4a743bfd..fec8418c 100644
+--- a/tests/boot-smoke.sh
++++ b/tests/boot-smoke.sh
+@@ -42,16 +42,20 @@ while [ "$#" -gt 0 ]; do
+         *) echo "Unexpected Antonina argument $1" >&2; exit 92 ;;
+     esac
+ done
+-[ -n "$id" ] || exit 93
++[ "$action" = new ] || [ -n "$id" ] || exit 93
+ case "$action" in
+     status)
+         [ -f "$MOCK_STATE/$id" ] || exit 3
+         printf '%s\n' '{"state":"idle","model":"opencode-go/longcat-2.5-preview-free","variant":"low"}'
+         ;;
+     new)
++        n=0
++        [ ! -f "$MOCK_STATE/created" ] || n=$(wc -l < "$MOCK_STATE/created")
++        id="generated-$((n+1))"
+         [ ! -f "$MOCK_STATE/$id" ] || exit 4
+         touch "$MOCK_STATE/$id"
+         printf '%s\n' "$id" >> "$MOCK_STATE/created"
++        printf '%s\n' "$id"
+         ;;
+     run)
+         [ -f "$MOCK_STATE/$id" ] || exit 5
+@@ -104,7 +108,8 @@ seat_count=$(wc -l < "$town/government/seats.tsv")
+ [ "$(wc -l < "$scratch/mock/ran")" -eq "$seat_count" ]
+ /bin/sh "$town/constitution/boot.sh" --once
+ [ "$(wc -l < "$scratch/mock/created")" -eq $((seat_count+3)) ]
+-[ -f "$scratch/mock/c1e00011" ]
++centre=$(awk -F '\t' '$1=="innovation-centre" {print $2}' "$scratch/state/appointments/appointments.tsv")
++[ -n "$centre" ] && [ -f "$scratch/mock/$centre" ]
+ [ "$(wc -l < "$scratch/mock/ran")" -eq $((seat_count+3)) ]
+ [ "$(wc -l < "$scratch/mock/executive-ran")" -eq 1 ]
+ # A summons wakes legislative seats and must NOT suppress the independent Executive.
+diff --git a/tests/clerk-liveness-smoke.sh b/tests/clerk-liveness-smoke.sh
+index ded26893..d18052c9 100644
+--- a/tests/clerk-liveness-smoke.sh
++++ b/tests/clerk-liveness-smoke.sh
+@@ -34,6 +34,8 @@ set_status() {
+ }
+ PATH="$d/bin:$PATH"
+ MOCK_ROOT="$d/mock"
++mkdir -p "$d/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$d/town/government/appointments.sh"
+ VICHE_TOWN_ROOT="$d/town"
+ VICHE_SEATS_ROOT="$d/seats"
+ VICHE_STATE_ROOT="$d/state"
+diff --git a/tests/executive-cycle-smoke.sh b/tests/executive-cycle-smoke.sh
+index 5f40c7f9..28bae528 100755
+--- a/tests/executive-cycle-smoke.sh
++++ b/tests/executive-cycle-smoke.sh
+@@ -30,6 +30,8 @@ esac
+ MOCK
+ chmod +x "$scratch/bin/antonina"
+ PATH=$scratch/bin:$PATH
++mkdir -p "$scratch/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
+ VICHE_TOWN_ROOT=$scratch/town
+ VICHE_SEATS_ROOT=$scratch/seats
+ VICHE_STATE_ROOT=$scratch/state
+diff --git a/tests/executive-recovery-timing-smoke.sh b/tests/executive-recovery-timing-smoke.sh
+index 1b1c4903..c45b98c6 100644
+--- a/tests/executive-recovery-timing-smoke.sh
++++ b/tests/executive-recovery-timing-smoke.sh
+@@ -41,6 +41,8 @@ git -C "$scratch/seats/branches/executive" init -q
+ git -C "$scratch/seats/branches/executive" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
+ PATH="$scratch/bin:$PATH"
+ MOCK_ROOT="$scratch/mock"
++mkdir -p "$scratch/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
+ VICHE_TOWN_ROOT="$scratch/town"
+ VICHE_SEATS_ROOT="$scratch/seats"
+ VICHE_STATE_ROOT="$scratch/state"
+diff --git a/tests/innovation-centre-smoke.sh b/tests/innovation-centre-smoke.sh
+index 2169ab72..6fdc6e22 100755
+--- a/tests/innovation-centre-smoke.sh
++++ b/tests/innovation-centre-smoke.sh
+@@ -31,6 +31,8 @@ esac
+ MOCK
+ chmod +x "$scratch/bin/antonina"
+ PATH=$scratch/bin:$PATH
++mkdir -p "$scratch/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
+ VICHE_TOWN_ROOT=$scratch/town
+ VICHE_SEATS_ROOT=$scratch/seats
+ VICHE_STATE_ROOT=$scratch/state
+diff --git a/tests/intake-smoke.sh b/tests/intake-smoke.sh
+index 089f28b1..857a43b1 100644
+--- a/tests/intake-smoke.sh
++++ b/tests/intake-smoke.sh
+@@ -39,6 +39,8 @@ printf 'running\n' > "$d/mock/status"
+ PATH="$d/bin:$PATH"
+ MOCK_DIR="$d/mock"
+ VICHE_TOWNHALL_ID=302
++mkdir -p "$d/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$d/town/government/appointments.sh"
+ VICHE_TOWN_ROOT="$d/town"
+ VICHE_SEATS_ROOT="$d/seats"
+ VICHE_STATE_ROOT="$d/state"
+diff --git a/tests/oversight-release-signal-smoke.sh b/tests/oversight-release-signal-smoke.sh
+index bbbb06b6..bc6ee256 100644
+--- a/tests/oversight-release-signal-smoke.sh
++++ b/tests/oversight-release-signal-smoke.sh
+@@ -37,6 +37,8 @@ export PATH MOCK_BOARD LAST
+ 
+ NOW=2000000000
+ VICHE_OVERSIGHT_NOW=$NOW
++mkdir -p "$scratch/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
+ VICHE_TOWN_ROOT=$scratch/town
+ VICHE_STATE_ROOT=$scratch/state
+ VICHE_KAWUN_REPO=$scratch/kawun
+diff --git a/tests/oversight-smoke.sh b/tests/oversight-smoke.sh
+index a084b133..c0d1d78a 100644
+--- a/tests/oversight-smoke.sh
++++ b/tests/oversight-smoke.sh
+@@ -34,6 +34,8 @@ esac
+ MOCK
+ chmod +x "$scratch/bin/antonina"
+ PATH=$scratch/bin:$PATH
++mkdir -p "$scratch/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
+ VICHE_TOWN_ROOT=$scratch/town
+ VICHE_SEATS_ROOT=$scratch/seats
+ VICHE_STATE_ROOT=$scratch/state
+diff --git a/tests/randomized-audit-smoke.sh b/tests/randomized-audit-smoke.sh
+index ac49e3dd..a811da1c 100755
+--- a/tests/randomized-audit-smoke.sh
++++ b/tests/randomized-audit-smoke.sh
+@@ -23,6 +23,8 @@ case "$1 $2" in
+   echo '{"agents":[{"id":"c1e00008"}],"unreadable":0}' ;;
+ "agent status")
+   echo '{"state":"idle","model":"opencode-go/longcat-2.5-preview-free","variant":"low"}' ;;
++"agent new")
++  printf "generated-audit-agent-1\n" ;;
+ "agent run")
+   printf 'invoked\n' >> "$DISPATCHES" ;;
+ *) echo "unexpected mock call: $*" >&2; exit 90 ;;
+diff --git a/tests/seat-liveness-smoke.sh b/tests/seat-liveness-smoke.sh
+index 8c3c6e7c..45a32d25 100644
+--- a/tests/seat-liveness-smoke.sh
++++ b/tests/seat-liveness-smoke.sh
+@@ -28,6 +28,8 @@ MOCK
+ chmod +x "$d/bin/antonina"
+ PATH="$d/bin:$PATH"
+ MOCK_ROOT="$d/mock"
++mkdir -p "$d/town/government"
++cp "$repo/tests/appointment-id-stub.sh" "$d/town/government/appointments.sh"
+ VICHE_TOWN_ROOT="$d/town"
+ VICHE_SEATS_ROOT="$d/seats"
+ VICHE_STATE_ROOT="$d/state"

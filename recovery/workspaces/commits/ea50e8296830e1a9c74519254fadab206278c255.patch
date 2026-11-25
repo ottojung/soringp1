@@ -1,0 +1,1378 @@
+commit ea50e8296830e1a9c74519254fadab206278c255
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Fri Nov 20 18:41:13 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Fri Nov 20 18:41:13 2026 +0000
+
+    Integrate delivery/act32-budget-engine (operator): Fail closed on unmetered backend CPU and ambiguous budget state
+    
+    Landed by the integration queue (Act 31) as one candidate on main 3e01a60213e2.
+    
+    Delivery-Branch: delivery/act32-budget-engine
+    Delivery-Head: b55fac65ae401ccf0ad84f9e8b481b952746c086
+    Proposed-By: operator
+    Reviewed-By: reviewer-azfg30yxztqxldpep0tduf-bacilli
+    Review-Reason: No LAWS.md/seats.tsv change so no Enacts trailer is required; the fail-closed guard honestly blocks all dispatch given no verified per-session CPU meter, POSIX sh, no records deleted or rewritten, and no active office activation to disrupt.
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/boot.sh b/government/boot.sh
+index 20b900d2..3e518e1d 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -138,6 +138,12 @@ fi
+ # locks so they cannot block Parliament or Judiciary or each other.
+ if grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \(enacted ' "$town/government/LAWS.md" &&
+    [ -s "$town/government/knowledge-office-cycle.sh" ]; then
++    # Act 32 H: after a crash or box restart, reconcile in-flight reservations
++    # before any new dispatch. Deterministic, bounded and fail-closed.
++    if [ -s "$town/government/knowledge-budget.sh" ]; then
++        /bin/sh "$town/government/knowledge-budget.sh" reconcile ||
++            echo "Viche: knowledge budget reconciliation failed" >&2
++    fi
+     knowledge_root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/knowledge/offices
+     for office in statistics foresight strategy spying; do
+         # Same fail-closed verifier as appointments and the office cycle: a
+diff --git a/government/knowledge-budget-tool.py b/government/knowledge-budget-tool.py
+new file mode 100644
+index 00000000..c8c7d7db
+--- /dev/null
++++ b/government/knowledge-budget-tool.py
+@@ -0,0 +1,389 @@
++#!/usr/bin/env python3
++"""Authoritative usage primitives for the Act 32 knowledge-office budget engine.
++
++This helper is the ONLY place that reads the token/cost meter. It never writes
++to the meter database (read-only URI) and never invents a token or cost value:
++if the authoritative source is unreadable it exits non-zero and the POSIX-sh
++engine fails closed.
++
++Token usage is read from the Antonina-managed OpenCode service SQLite database
++(`session_v2`, keyed by the agent's native_session_id). CPU time is read from
++/proc for the agent's runner process (including reaped children). Wall time is
++computed by the shell from authoritative timestamps.
++
++Subcommands:
++  validate CONFIG          validate source-controlled budget config; exit 0/1
++  show CONFIG              print the validated, normalised config as JSON
++  probe DB                 exit 0 only if authoritative token metering is readable
++  snapshot DB SID PID      print a usage snapshot (tokens, reported cost, CPU)
++  aggregate RESDIR WINDOW NOW   sum committed charges over reservations
++  admit CONFIG AGGJSON OFFICE   decide whether a reservation may be admitted
++  overrun CAPSJSON SNAPJSON WALL   decide whether measured usage exceeds caps
++"""
++import json
++import math
++import os
++import pathlib
++import sqlite3
++import sys
++import time
++import urllib.parse
++import tempfile
++
++SCHEMA = "viche-knowledge-budget-v1"
++OFFICES = ("statistics", "foresight", "strategy", "spying")
++CAP_KEYS = ("tokens_total", "cpu_seconds", "wall_seconds")
++TOKEN_FIELDS = ("tokens_input", "tokens_output", "tokens_reasoning",
++                "tokens_cache_read", "tokens_cache_write")
++METER_SOURCE = "opencode-service-session-v2"
++MAX_WINDOW = 45 * 86400
++
++
++def emit(obj, code=0):
++    print(json.dumps(obj, sort_keys=True))
++    return code
++
++
++def fail(msg, code=2):
++    return emit({"ok": False, "reason": msg}, code)
++
++
++# ---- configuration -----------------------------------------------------------
++
++def load_config(path):
++    try:
++        with open(path) as handle:
++            return json.load(handle), []
++    except (OSError, ValueError) as exc:
++        return None, ["config unreadable or not JSON: %s" % exc]
++
++
++def validate_config(cfg):
++    errors = []
++    if not isinstance(cfg, dict):
++        return ["config must be a JSON object"]
++    if cfg.get("schema") != SCHEMA:
++        errors.append("schema must be exactly %s" % SCHEMA)
++    metering = cfg.get("metering")
++    if not isinstance(metering, dict):
++        errors.append("metering must be an object")
++    else:
++        if metering.get("source") != METER_SOURCE:
++            errors.append("metering.source must be exactly %s" % METER_SOURCE)
++        db = metering.get("opencode_db")
++        if not isinstance(db, str) or not db:
++            errors.append("metering.opencode_db must be a non-empty string")
++    cpu_meter = cfg.get("cpu_meter")
++    if not isinstance(cpu_meter, dict) or cpu_meter.get("available") is not False or \
++            cpu_meter.get("source") != "unavailable":
++        errors.append("cpu_meter must explicitly remain unavailable until verified per-office backend attribution is implemented")
++    for key, low, high in (("accounting_window_seconds", 1, MAX_WINDOW),
++                           ("monitor_interval_seconds", 1, 300)):
++        val = cfg.get(key)
++        if isinstance(val, bool) or not isinstance(val, int) or not (low <= val <= high):
++            errors.append("%s must be an integer in [%d,%d]" % (key, low, high))
++    if cfg.get("overrun_action") not in ("kill", "stop"):
++        errors.append("overrun_action must be kill or stop")
++    baseline = cfg.get("baseline")
++    if not isinstance(baseline, dict) or not isinstance(baseline.get("label"), str) \
++            or not isinstance(baseline.get("ref"), str):
++        errors.append("baseline must carry string label and ref")
++    offices = cfg.get("offices")
++    if not isinstance(offices, dict) or set(offices) != set(OFFICES):
++        errors.append("offices must name exactly: %s" % ", ".join(OFFICES))
++    else:
++        for office in OFFICES:
++            entry = offices[office]
++            if not isinstance(entry, dict):
++                errors.append("offices.%s must be an object" % office)
++                continue
++            if not isinstance(entry.get("enabled"), bool):
++                errors.append("offices.%s.enabled must be boolean" % office)
++            ok, cap_errors = check_caps(entry.get("caps"), "offices.%s.caps" % office)
++            errors.extend(cap_errors)
++            if ok:
++                for key in CAP_KEYS:
++                    if entry["caps"][key] <= 0:
++                        errors.append("offices.%s.caps.%s must be positive" % (office, key))
++    aggregate = cfg.get("aggregate")
++    if not isinstance(aggregate, dict):
++        errors.append("aggregate must be an object")
++    else:
++        ok, cap_errors = check_caps(aggregate.get("caps"), "aggregate.caps")
++        errors.extend(cap_errors)
++        if ok and isinstance(offices, dict):
++            for key in CAP_KEYS:
++                if aggregate["caps"][key] <= 0:
++                    errors.append("aggregate.caps.%s must be positive" % key)
++                largest = 0
++                for office in OFFICES:
++                    entry = offices.get(office)
++                    if isinstance(entry, dict) and isinstance(entry.get("caps"), dict):
++                        value = entry["caps"].get(key)
++                        if isinstance(value, int) and not isinstance(value, bool):
++                            largest = max(largest, value)
++                if aggregate["caps"][key] < largest:
++                    errors.append("aggregate.caps.%s must be >= the largest office cap" % key)
++    return errors
++
++
++def check_caps(caps, where):
++    if not isinstance(caps, dict):
++        return False, ["%s must be an object" % where]
++    errors = []
++    for key in CAP_KEYS:
++        val = caps.get(key)
++        if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
++            errors.append("%s.%s must be a positive integer" % (where, key))
++    return (not errors), errors
++
++
++# ---- authoritative meter -----------------------------------------------------
++
++def open_meter(path):
++    if not path or not os.path.isfile(path):
++        raise OSError("OpenCode meter database is missing: %s" % path)
++    uri = "file:%s?mode=ro" % urllib.parse.quote(str(path), safe="/")
++    con = sqlite3.connect(uri, uri=True, timeout=5)
++    con.execute("PRAGMA query_only=1")
++    return con
++
++
++def meter_columns(con):
++    return {row[1] for row in con.execute("PRAGMA table_info(session_v2)")}
++
++
++def cpu_seconds(_pid):
++    # OpenCode's runner PID is not the backend/service CPU attribution. Never
++    # substitute it for the Act 32 machine-time cap. Until a verified service
++    # cgroup/session attribution exists, CPU is explicitly unavailable and the
++    # engine refuses all activations that require this cap.
++    return None, False
++
++
++def snapshot(db, sid, pid):
++    con = open_meter(db)
++    try:
++        columns = meter_columns(con)
++        if not set(TOKEN_FIELDS + ("id", "cost", "time_updated")) <= columns:
++            raise OSError("session_v2 lacks authoritative token/cost columns")
++        row = con.execute(
++            "SELECT %s, cost, time_updated FROM session_v2 WHERE id=?" % ",".join(TOKEN_FIELDS),
++            (sid or "",)).fetchone()
++    finally:
++        con.close()
++    tokens = {}
++    for idx, name in enumerate(TOKEN_FIELDS):
++        if row is None:
++            raise OSError("authoritative session row is absent; usage is unknown")
++        value = row[idx]
++        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++            raise OSError("authoritative token counter is invalid")
++        tokens[name.replace("tokens_", "")] = int(value or 0)
++    tokens["total"] = sum(tokens[k] for k in ("input", "output", "reasoning",
++                                              "cache_read", "cache_write"))
++    reported = bool(row is not None and row[len(TOKEN_FIELDS)] is not None)
++    cost = float(row[len(TOKEN_FIELDS)] or 0) if reported else 0.0
++    cpu, cpu_ok = cpu_seconds(pid)
++    return {
++        "available": True,
++        "source": METER_SOURCE,
++        "at": int(time.time()),
++        "session_id": sid,
++        "session_found": row is not None,
++        "tokens": tokens,
++        "cost": cost,
++        "cost_reported": reported,
++        "cpu_seconds": cpu,
++        "cpu_available": cpu_ok,
++        "time_updated_ms": int(row[len(TOKEN_FIELDS) + 1]) if row[len(TOKEN_FIELDS) + 1] is not None else None,
++    }
++
++
++# ---- accounting --------------------------------------------------------------
++
++def charges(reservations, now, window):
++    """Return (totals, counted_ids, skipped_ids) over in-window reservations."""
++    totals = {"tokens_total": 0, "cpu_seconds": 0.0, "wall_seconds": 0}
++    by_office = {office: {"tokens_total": 0, "cpu_seconds": 0.0, "wall_seconds": 0}
++                 for office in OFFICES}
++    counted = []
++    for path in sorted(pathlib.Path(reservations).glob("*.json")):
++        try:
++            row = json.loads(path.read_text())
++            state = row.get("state")
++            created = int(row.get("created_at", 0))
++        except (OSError, ValueError, TypeError, AttributeError) as exc:
++            raise OSError("reservation record unreadable (%s): %s" % (path.name, exc))
++        if not isinstance(row, dict) or row.get("schema") != "viche-knowledge-budget-reservation-v1":
++            raise OSError("reservation record has invalid schema: %s" % path.name)
++        if row.get("state") not in ("reserved", "active", "held", "closed", "rolled_back", "rejected"):
++            raise OSError("reservation has unknown state: %s" % path.name)
++        if not isinstance(row.get("id"), str) or not isinstance(row.get("office"), str) or \
++                not isinstance(row.get("caps"), dict):
++            raise OSError("reservation lacks required identity/caps: %s" % path.name)
++        if state == "rolled_back" or state == "rejected":
++            continue
++        if created > now + 60:
++            raise OSError("reservation timestamp is in the future: %s" % path.name)
++        if state == "closed" and now - created > window:
++            continue
++        caps = row.get("caps") if isinstance(row.get("caps"), dict) else {}
++        usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
++        charge = row.get("charge") if isinstance(row.get("charge"), dict) else {}
++        source = usage if state == "closed" else (charge if state == "held" else caps)
++        values = {}
++        for key in CAP_KEYS:
++            value = source.get(key, caps.get(key))
++            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
++                raise OSError("reservation has unknown/invalid liability %s: %s" % (key, path.name))
++            values[key] = float(value) if key == "cpu_seconds" else int(value)
++        office = row.get("office")
++        for key in CAP_KEYS:
++            totals[key] += values[key]
++            if office in by_office:
++                by_office[office][key] += values[key]
++        counted.append(row.get("id", path.name))
++    totals["by_office"] = by_office
++    return totals, counted, []
++
++
++def admit(cfg, agg, office):
++    office_caps = cfg["offices"][office]["caps"]
++    total_caps = cfg["aggregate"]["caps"]
++    reasons = []
++    for key in CAP_KEYS:
++        projected = agg.get(key, 0) + office_caps[key]
++        if projected > total_caps[key]:
++            reasons.append("%s projected %s exceeds aggregate cap %s" %
++                           (key, projected, total_caps[key]))
++    return {"admit": not reasons, "reason": "; ".join(reasons) or "within caps"}
++
++
++def overrun(caps, snap, wall):
++    if not snap or snap.get("session_found") is not True:
++        raise ValueError("token meter row missing")
++    if snap.get("cpu_available") is not True or snap.get("cpu_seconds") is None:
++        raise ValueError("authoritative backend CPU meter unavailable")
++    tokens = snap.get("tokens", {}).get("delta_total")
++    cpu = snap.get("cpu_seconds")
++    if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
++        raise ValueError("per-run token delta unavailable")
++    reasons = []
++    if tokens >= caps["tokens_total"]:
++        reasons.append("tokens_total")
++    if cpu >= caps["cpu_seconds"]:
++        reasons.append("cpu_seconds")
++    if wall >= caps["wall_seconds"]:
++        reasons.append("wall_seconds")
++    return {"over": bool(reasons), "reasons": reasons,
++            "tokens_total": tokens, "cpu_seconds": cpu, "wall_seconds": wall}
++
++
++def main(argv):
++    if not argv:
++        return fail("missing subcommand", 2)
++    cmd, args = argv[0], argv[1:]
++    try:
++        if cmd == "validate":
++            cfg, errors = load_config(args[0])
++            errors = validate_config(cfg) if not errors else errors
++            for err in errors:
++                print(err, file=sys.stderr)
++            return emit({"ok": not errors, "errors": errors}, 0 if not errors else 1)
++        if cmd == "show":
++            cfg, errors = load_config(args[0])
++            errors = validate_config(cfg) if not errors else errors
++            if errors:
++                return fail("; ".join(errors), 1)
++            return emit(cfg, 0)
++        if cmd == "probe":
++            con = open_meter(args[0])
++            try:
++                if not set(TOKEN_FIELDS + ("id", "cost", "time_updated")) <= meter_columns(con):
++                    return fail("meter schema missing authoritative columns", 1)
++                con.execute("SELECT id FROM session_v2 LIMIT 1").fetchone()
++            finally:
++                con.close()
++            return emit({"ok": True, "source": METER_SOURCE}, 0)
++        if cmd == "snapshot":
++            return emit(snapshot(args[0], args[1] if len(args) > 1 else "",
++                                 args[2] if len(args) > 2 else ""), 0)
++        if cmd == "delta":
++            baseline = json.loads(args[0])
++            current = json.loads(args[1])
++            if current.get("session_found") is not True or baseline.get("session_found") is not True:
++                return fail("baseline/current meter row is absent", 2)
++            if baseline.get("session_id") != current.get("session_id"):
++                return fail("session identity changed", 2)
++            before = baseline.get("tokens", {})
++            after = current.get("tokens", {})
++            result = {}
++            for key in ("input", "output", "reasoning", "cache_read", "cache_write"):
++                a, b = before.get(key), after.get(key)
++                if isinstance(a, bool) or isinstance(b, bool) or not isinstance(a, int) or not isinstance(b, int) or b < a:
++                    return fail("token counter reset or invalid: %s" % key, 2)
++                result[key] = b - a
++            result["total"] = sum(result.values())
++            current["tokens"]["delta_total"] = result["total"]
++            current["tokens"]["delta"] = result
++            return emit(current, 0)
++        if cmd == "aggregate":
++            totals, counted, skipped = charges(args[0], int(args[2]), int(args[1]))
++            totals["counted"] = counted
++            totals["skipped"] = skipped
++            return emit(totals, 0)
++        if cmd == "admit":
++            cfg, errors = load_config(args[0])
++            if errors or validate_config(cfg):
++                return fail("invalid config", 1)
++            agg = json.loads(args[1])
++            return emit(admit(cfg, agg, args[2]), 0)
++        if cmd == "overrun":
++            caps = json.loads(args[0])
++            snap = json.loads(args[1]) if args[1] and args[1] != "null" else None
++            return emit(overrun(caps, snap, float(args[2])), 0)
++        if cmd == "durable-write":
++            target = pathlib.Path(args[0])
++            target.parent.mkdir(parents=True, exist_ok=True)
++            payload = sys.stdin.buffer.read()
++            fd, temp = tempfile.mkstemp(prefix=".budget-tmp-", dir=str(target.parent))
++            try:
++                with os.fdopen(fd, "wb") as handle:
++                    handle.write(payload)
++                    handle.flush()
++                    os.fsync(handle.fileno())
++                os.replace(temp, target)
++                dirfd = os.open(str(target.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
++                try:
++                    os.fsync(dirfd)
++                finally:
++                    os.close(dirfd)
++            finally:
++                if os.path.exists(temp):
++                    os.unlink(temp)
++            return emit({"ok": True}, 0)
++        if cmd == "durable-mkdir":
++            target = pathlib.Path(args[0])
++            missing = []
++            cursor = target
++            while not cursor.exists():
++                missing.append(cursor)
++                cursor = cursor.parent
++            target.mkdir(parents=True, exist_ok=True)
++            # Persist new directory entries from the deepest parent outward.
++            for directory in reversed(missing):
++                for path in (directory, directory.parent):
++                    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
++                    try:
++                        os.fsync(fd)
++                    finally:
++                        os.close(fd)
++            return emit({"ok": True}, 0)
++    except (IndexError, ValueError, TypeError, OSError, sqlite3.Error) as exc:
++        return fail(str(exc), 2)
++    return fail("unknown subcommand: %s" % cmd, 2)
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv[1:]))
+diff --git a/government/knowledge-budget.conf b/government/knowledge-budget.conf
+new file mode 100644
+index 00000000..fb9204d6
+--- /dev/null
++++ b/government/knowledge-budget.conf
+@@ -0,0 +1,28 @@
++{
++  "schema": "viche-knowledge-budget-v1",
++  "metering": {
++    "source": "opencode-service-session-v2",
++    "opencode_db": "/home/lubko/.local/state/antonina/opencode-service/opencode.db"
++  },
++  "cpu_meter": {
++    "available": false,
++    "source": "unavailable",
++    "reason": "No verified per-office backend CPU attribution; runner PID CPU is not a valid substitute"
++  },
++  "accounting_window_seconds": 3888000,
++  "monitor_interval_seconds": 20,
++  "overrun_action": "kill",
++  "baseline": {
++    "ref": "records/knowledge/baseline-20261119.json",
++    "label": "point-in-time diagnostic only (197 executions, 0 scored outcomes); NOT a frozen verified cost comparator under Act 32 v4 D"
++  },
++  "offices": {
++    "statistics": {"enabled": false, "caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600}},
++    "foresight":  {"enabled": false, "caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600}},
++    "strategy":   {"enabled": false, "caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600}},
++    "spying":     {"enabled": false, "caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600}}
++  },
++  "aggregate": {
++    "caps": {"tokens_total": 1600000, "cpu_seconds": 7200, "wall_seconds": 14400}
++  }
++}
+diff --git a/government/knowledge-budget.sh b/government/knowledge-budget.sh
+new file mode 100644
+index 00000000..34000b64
+--- /dev/null
++++ b/government/knowledge-budget.sh
+@@ -0,0 +1,539 @@
++#!/bin/sh
++# Act 32 amendment H: measured, hard-capped, fail-closed knowledge-office budgets.
++#
++# This is a SPEND budget, not a worker cap (Constitution VII). It never invents a
++# token or cost value: token/cost usage comes only from the authoritative
++# Antonina-managed OpenCode meter (knowledge-budget-tool.py); if that meter is
++# unreadable, every path fails closed. All mutations are serialized by a single
++# flock and persisted by temp-file + atomic rename. A live detached agent is
++# actively monitored and stopped/killed on overrun or expiry; the launcher's
++# own timeout is never relied on. Crashes, restarts and unknown usage are held
++# with a pessimistic charge and reconciled idempotently from verified data.
++#
++# POSIX /bin/sh only. No bashisms.
++set -eu
++
++TOWN=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++STATE=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++TOOL=${VICHE_BUDGET_TOOL:-$TOWN/government/knowledge-budget-tool.py}
++CONFIG=${VICHE_BUDGET_CONFIG:-$TOWN/government/knowledge-budget.conf}
++ROOT=${VICHE_BUDGET_STATE:-$STATE/knowledge/budget}
++RES=$ROOT/reservations
++OFFICES='statistics foresight strategy spying'
++CFG=
++
++log() { printf 'knowledge-budget: %s\n' "$*" >&2; }
++die() { log "$*"; exit 1; }
++
++init() {
++  python3 "$TOOL" durable-mkdir "$RES" >/dev/null 2>&1 || die 'cannot durably create budget state directories'
++  umask 077
++}
++
++# All mutations run in a locked subshell; the lock is held only for the duration
++# of the operation, never while a monitor sleeps.
++with_lock() {
++  ( exec 9>>"$ROOT/lock"; flock -w 30 -x 9; "$@" )
++}
++
++cfg_load() {
++  python3 "$TOOL" validate "$CONFIG" >/dev/null 2>&1 ||
++    die "budget config missing or invalid; fail closed: $CONFIG"
++  CFG=$(python3 "$TOOL" show "$CONFIG") || die 'cannot read budget config'
++}
++
++cfgs() { printf '%s\n' "$CFG" | jq -r "$1"; }
++cfgj() { printf '%s\n' "$CFG" | jq -c "$1"; }
++
++db_path() {
++  if [ -n "${VICHE_BUDGET_DB:-}" ]; then printf '%s\n' "$VICHE_BUDGET_DB";
++  else cfgs '.metering.opencode_db'; fi
++}
++
++probe_or_die() {
++  python3 "$TOOL" probe "$(db_path)" >/dev/null 2>&1 ||
++    die 'authoritative token metering unavailable; activation blocked (no unmeasured budget claimed)'
++}
++
++check_office() {
++  case " $OFFICES " in *" $1 "*) :;; *) die "unknown office: $1";; esac
++}
++
++atomic_write() {
++  _aw_path=$1
++  python3 "$TOOL" durable-write "$_aw_path"
++}
++
++atomic_cp() {
++  _ac_from=$1; _ac_to=$2
++  cat "$_ac_from" | atomic_write "$_ac_to"
++}
++
++new_id() {
++  _ni_tmp=$(mktemp "$RES/.new.XXXXXXXX") || die 'cannot allocate reservation id'
++  _ni_id=r$(date +%s)-$(basename "$_ni_tmp" | sed 's/^\.new\.//')
++  rm -f "$_ni_tmp"
++  printf '%s\n' "$_ni_id"
++}
++
++res_read() {
++  _rr_f="$RES/$1.json"
++  [ -s "$_rr_f" ] || die "unknown reservation: $1"
++  cat "$_rr_f"
++}
++
++res_write() {
++  _rw_id=$1
++  printf '%s\n' "$2" | jq -e . >/dev/null || die "refusing to persist non-JSON reservation"
++  printf '%s\n' "$2" | atomic_write "$RES/$_rw_id.json" || die 'reservation write failed'
++}
++
++res_state() { res_read "$1" | jq -r '.state // ""'; }
++res_field() { res_read "$1" | jq -r "$2"; }
++
++res_find_open() {
++  _fo_office=$1
++  for _fo_f in "$RES"/*.json; do
++    [ -s "$_fo_f" ] || continue
++    [ "$(jq -r '.office // ""' "$_fo_f")" = "$_fo_office" ] || continue
++    case "$(jq -r '.state // ""' "$_fo_f")" in
++      reserved|active|held) jq -r '.id' "$_fo_f";;
++    esac
++  done
++}
++
++refresh_aggregate() {
++  _ra_window=${1:-}
++  [ -n "$_ra_window" ] || _ra_window=$(cfgs '.accounting_window_seconds')
++  _ra_now=$(date +%s)
++  if [ -e "$ROOT/aggregate.json" ]; then
++    jq -e 'type=="object" and (.tokens_total|type=="number") and
++      (.cpu_seconds|type=="number") and (.wall_seconds|type=="number") and
++      (.counted|type=="array") and (.skipped|type=="array")' "$ROOT/aggregate.json" >/dev/null 2>&1 ||
++      die 'aggregate state is corrupt; refusing to release or recompute liability'
++  fi
++  _ra_out=$(python3 "$TOOL" aggregate "$RES" "$_ra_window" "$_ra_now") ||
++    die 'cannot compute aggregate budget'
++  printf '%s\n' "$_ra_out" | atomic_write "$ROOT/aggregate.json"
++}
++
++agent_status() { antonina agent status --id "$1" --json 2>/dev/null; }
++
++stop_or_kill() {
++  _sk_agent=$1; _sk_action=$2
++  if [ "$_sk_action" = stop ]; then antonina agent stop --id "$_sk_agent" >/dev/null 2>&1 || :; fi
++  antonina agent kill --id "$_sk_agent" >/dev/null 2>&1 || :
++}
++
++usage_from_snapshot() {
++  _us_snap=$1; _us_wall=$2
++  printf '%s\n' "$_us_snap" | jq -c --argjson w "$_us_wall" \
++    '{tokens_total:.tokens.total,cpu_seconds:.cpu_seconds,wall_seconds:$w,
++      cost:.cost,cost_reported:.cost_reported,source:.source,at:.at}'
++}
++
++# ---- terminal state transitions (all assume the lock is held) ----------------
++
++hold_locked() {
++  _h_id=$1; _h_reason=$2
++  _h_cur=$(res_read "$_h_id")
++  case "$(printf '%s\n' "$_h_cur" | jq -r '.state')" in
++    held|closed|rolled_back|rejected) return 0;;
++  esac
++  _h_agent=$(printf '%s\n' "$_h_cur" | jq -r '.agent_id // ""')
++  [ -z "$_h_agent" ] || stop_or_kill "$_h_agent" kill
++  _h_caps=$(printf '%s\n' "$_h_cur" | jq -c '.caps')
++  _h_now=$(date +%s)
++  _h_new=$(printf '%s\n' "$_h_cur" | jq -c --arg r "$_h_reason" --argjson now "$_h_now" --argjson c "$_h_caps" \
++    '.state="held" | .charge=$c | .held_at=$now | .held_reason=$r |
++     .history += [{at:$now,event:"held",reason:$r}]')
++  res_write "$_h_id" "$_h_new"
++  refresh_aggregate "$(printf '%s\n' "$_h_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++finalize_locked() {
++  _f_id=$1; _f_reason=$2; _f_snap=${3:-}; _f_wall=${4:-}
++  _f_cur=$(res_read "$_f_id")
++  [ "$(printf '%s\n' "$_f_cur" | jq -r '.state')" = active ] || return 0
++  _f_db=$(printf '%s\n' "$_f_cur" | jq -r '.meter_db')
++  _f_sid=$(printf '%s\n' "$_f_cur" | jq -r '.native_session_id // ""')
++  _f_pid=$(printf '%s\n' "$_f_cur" | jq -r '.runner_pid // ""')
++  if [ -z "$_f_snap" ]; then
++    if ! _f_snap=$(python3 "$TOOL" snapshot "$_f_db" "$_f_sid" "$_f_pid" 2>/dev/null); then
++      hold_locked "$_f_id" 'meter_unreadable_at_finalize'; return 0
++    fi
++  fi
++  _f_started=$(printf '%s\n' "$_f_cur" | jq -r '.started_at')
++  [ -n "$_f_wall" ] || _f_wall=$(( $(date +%s) - _f_started ))
++  _f_agent=$(printf '%s\n' "$_f_cur" | jq -r '.agent_id // ""')
++  [ -z "$_f_agent" ] || stop_or_kill "$_f_agent" "$(printf '%s\n' "$_f_cur" | jq -r '.overrun_action')"
++  _f_usage=$(usage_from_snapshot "$_f_snap" "$_f_wall")
++  _f_now=$(date +%s)
++  _f_new=$(printf '%s\n' "$_f_cur" | jq -c --arg r "$_f_reason" --argjson u "$_f_usage" \
++    --argjson now "$_f_now" --argjson s "$_f_snap" \
++    '.state="closed" | .usage=$u | .meter=$s | .closed_at=$now | .closed_reason=$r |
++     .charge=null | .history += [{at:$now,event:"closed",reason:$r}]')
++  res_write "$_f_id" "$_f_new"
++  refresh_aggregate "$(printf '%s\n' "$_f_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++# ---- reservation lifecycle ---------------------------------------------------
++
++do_reserve_locked() {
++  _dr_office=$1; _dr_agent=$2
++  cfg_load
++  probe_or_die
++  # No trustworthy per-session backend CPU attribution exists on this host.
++  # The runner PID is not the OpenCode service CPU. This Act 32 hard cap is
++  # therefore unavailable and dispatch MUST remain disabled until a supported
++  # source is configured and verified.
++  die 'authoritative per-session backend CPU meter unavailable; activation blocked (runner CPU is not a substitute)'
++  [ "$(cfgs ".offices.\"$_dr_office\".enabled")" = true ] ||
++    die "office $_dr_office is disabled in the budget config; fail closed"
++  _dr_open=$(res_find_open "$_dr_office")
++  [ -z "$_dr_open" ] || die "office $_dr_office already has an open reservation: $_dr_open"
++  _dr_now=$(date +%s)
++  _dr_window=$(cfgs '.accounting_window_seconds')
++  _dr_agg=$(python3 "$TOOL" aggregate "$RES" "$_dr_window" "$_dr_now") || die 'aggregate computation failed'
++  _dr_adm=$(python3 "$TOOL" admit "$CONFIG" "$_dr_agg" "$_dr_office") || die 'admission check failed'
++  [ "$(printf '%s\n' "$_dr_adm" | jq -r '.admit')" = true ] ||
++    die "budget exhausted: $(printf '%s\n' "$_dr_adm" | jq -r '.reason')"
++  _dr_id=$(new_id)
++  _dr_caps=$(cfgj ".offices.\"$_dr_office\".caps")
++  _dr_hash=$(sha256sum "$CONFIG" | awk '{print $1}')
++  _dr_interval=$(cfgs '.monitor_interval_seconds')
++  _dr_action=$(cfgs '.overrun_action')
++  _dr_db=$(db_path)
++  _dr_res=$(jq -cn --arg id "$_dr_id" --arg office "$_dr_office" --arg agent "$_dr_agent" --argjson now "$_dr_now" \
++    --argjson caps "$_dr_caps" --arg hash "$_dr_hash" --arg db "$_dr_db" \
++    --argjson window "$_dr_window" --argjson interval "$_dr_interval" --arg action "$_dr_action" \
++    '{schema:"viche-knowledge-budget-reservation-v1",id:$id,office:$office,
++      state:"reserved",created_at:$now,caps:$caps,config_sha256:$hash,meter_db:$db,
++      accounting_window_seconds:$window,monitor_interval_seconds:$interval,overrun_action:$action,
++      meter:null,baseline:null,usage:null,agent_id:$agent,native_session_id:null,runner_pid:null,
++      started_at:null,expires_at:null,charge:null,monitor_pid:null,
++      history:[{at:$now,event:"reserved",office:$office}]}')
++  res_write "$_dr_id" "$_dr_res"
++  refresh_aggregate "$_dr_window"
++  printf '%s\n' "$_dr_id"
++}
++
++do_start_locked() {
++  _ds_id=$1; _ds_agent=$2
++  cfg_load
++  probe_or_die
++  _ds_cur=$(res_read "$_ds_id")
++  [ "$(printf '%s\n' "$_ds_cur" | jq -r '.state')" = reserved ] ||
++    die "reservation $_ds_id is not in reserved state"
++
++  if ! _ds_meta=$(agent_status "$_ds_agent"); then
++    stop_or_kill "$_ds_agent" kill
++    hold_locked "$_ds_id" 'agent_status_unreadable_after_launch'
++    refresh_aggregate "$(printf '%s\n' "$_ds_cur" | jq -r '.accounting_window_seconds')"
++    die 'agent status unreadable after launch; reservation held at full cap'
++  fi
++  _ds_sid=$(printf '%s\n' "$_ds_meta" | jq -r '.native_session_id // empty')
++  _ds_pid=$(printf '%s\n' "$_ds_meta" | jq -r '.runner_pid // .pid // empty')
++  _ds_db=$(printf '%s\n' "$_ds_cur" | jq -r '.meter_db')
++  _ds_expected=$(printf '%s\n' "$_ds_cur" | jq -r '.agent_id // ""')
++  if [ "$_ds_agent" != "$_ds_expected" ] || [ -z "$_ds_sid" ] ||
++     ! _ds_snap=$(python3 "$TOOL" snapshot "$_ds_db" "$_ds_sid" "$_ds_pid" 2>/dev/null) ||
++     [ "$(printf '%s\n' "$_ds_snap" | jq -r '.session_found')" != true ] ||
++     [ "$(printf '%s\n' "$_ds_snap" | jq -r '.cpu_available')" != true ]; then
++    stop_or_kill "$_ds_agent" kill
++    hold_locked "$_ds_id" 'meter_or_session_binding_unknown_after_launch'
++    refresh_aggregate "$(printf '%s\n' "$_ds_cur" | jq -r '.accounting_window_seconds')"
++    die 'meter/session binding unknown after launch; reservation held at full cap'
++  fi
++  _ds_now=$(date +%s)
++  _ds_expiry=$((_ds_now + $(printf '%s\n' "$_ds_cur" | jq -r '.caps.wall_seconds')))
++  _ds_new=$(printf '%s\n' "$_ds_cur" | jq -c --arg a "$_ds_agent" --arg s "$_ds_sid" \
++    --arg p "$_ds_pid" --argjson now "$_ds_now" --argjson ex "$_ds_expiry" --argjson snap "$_ds_snap" \
++    '.state="active" | .agent_id=$a | .native_session_id=$s | .runner_pid=$p |
++     .started_at=$now | .expires_at=$ex | .meter=$snap |
++     .history += [{at:$now,event:"activated",agent_id:$a,native_session_id:$s}]')
++  res_write "$_ds_id" "$_ds_new"
++  refresh_aggregate "$(printf '%s\n' "$_ds_cur" | jq -r '.accounting_window_seconds')"
++}
++
++mark_dispatched_locked() {
++  _md_id=$1
++  _md_cur=$(res_read "$_md_id")
++  [ "$(printf '%s\n' "$_md_cur" | jq -r '.state')" = reserved ] || return 0
++  _md_now=$(date +%s)
++  _md_agent=$(printf '%s\n' "$_md_cur" | jq -r '.agent_id // ""')
++  [ -n "$_md_agent" ] || die 'reservation lacks exact agent identity'
++  res_write "$_md_id" "$(printf '%s\n' "$_md_cur" | jq -c --argjson now "$_md_now" \
++    '.dispatch_attempted=true | .history += [{at:$now,event:"dispatch_attempted",agent_id:.agent_id}]')"
++}
++
++mark_dispatched() { init; with_lock mark_dispatched_locked "${1:-}"; }
++
++resolve_locked() {
++  _rs_id=$1; _rs_reason=$2
++  [ -n "$_rs_reason" ] || die 'a resolution reason is required'
++  _rs_cur=$(res_read "$_rs_id")
++  [ "$(printf '%s\n' "$_rs_cur" | jq -r '.state')" = held ] ||
++    die 'only a held reservation can be resolved'
++  _rs_db=$(printf '%s\n' "$_rs_cur" | jq -r '.meter_db')
++  _rs_sid=$(printf '%s\n' "$_rs_cur" | jq -r '.native_session_id // ""')
++  _rs_pid=$(printf '%s\n' "$_rs_cur" | jq -r '.runner_pid // ""')
++  _rs_caps=$(printf '%s\n' "$_rs_cur" | jq -c '.caps')
++  _rs_started=$(printf '%s\n' "$_rs_cur" | jq -r '.started_at // 0')
++  _rs_wall=0
++  [ "$_rs_started" -gt 0 ] && _rs_wall=$(( $(date +%s) - _rs_started ))
++  if [ -n "$_rs_sid" ] && _rs_snap=$(python3 "$TOOL" snapshot "$_rs_db" "$_rs_sid" "$_rs_pid" 2>/dev/null); then
++    _rs_usage=$(usage_from_snapshot "$_rs_snap" "$_rs_wall")
++  else
++    # No verified meter observation: keep the pessimistic full-cap charge and
++    # say so. Resolution never fabricates a token reading or a cost.
++    _rs_usage=$(printf '%s\n' "$_rs_caps" | jq -c \
++      '{tokens_total:.tokens_total,cpu_seconds:.cpu_seconds,wall_seconds:.wall_seconds,
++        cost:0,cost_reported:false,source:"unmetered_pessimistic_charge",at:0}')
++  fi
++  _rs_now=$(date +%s)
++  _rs_new=$(printf '%s\n' "$_rs_cur" | jq -c --arg r "$_rs_reason" --argjson u "$_rs_usage" --argjson now "$_rs_now" \
++    '.state="closed" | .usage=$u | .charge=null | .closed_at=$now |
++     .closed_reason=("operator_resolved:" + $r) | .resolved_by="operator" |
++     .history += [{at:$now,event:"operator_resolved",reason:$r}]')
++  res_write "$_rs_id" "$_rs_new"
++  refresh_aggregate "$(printf '%s\n' "$_rs_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++resolve() { init; with_lock resolve_locked "${1:-}" "${2:-}"; }
++
++launch_monitor() {
++  _lm_id=$1
++  _lm_log="$ROOT/monitor-$_lm_id.log"
++  # 9>&- is essential: a launched monitor must not inherit a held flock fd,
++  # or its own locked writes would deadlock against its inherited lock.
++  if command -v setsid >/dev/null 2>&1; then
++    setsid /bin/sh "$0" monitor "$_lm_id" 9>&- </dev/null >> "$_lm_log" 2>&1 &
++  else
++    /bin/sh "$0" monitor "$_lm_id" 9>&- </dev/null >> "$_lm_log" 2>&1 &
++  fi
++  _lm_pid=$!
++  with_lock res_write "$_lm_id" \
++    "$(res_read "$_lm_id" | jq -c --argjson p "$_lm_pid" '.monitor_pid=$p')"
++}
++
++monitor() {
++  _mo_id=$1
++  _mo_cur=$(res_read "$_mo_id")
++  _mo_interval=$(printf '%s\n' "$_mo_cur" | jq -r '.monitor_interval_seconds // 20')
++  while :; do
++    sleep "$_mo_interval"
++    _mo_cur=$(res_read "$_mo_id") || exit 0
++    [ "$(printf '%s\n' "$_mo_cur" | jq -r '.state')" = active ] || exit 0
++    _mo_now=$(date +%s)
++    _mo_exp=$(printf '%s\n' "$_mo_cur" | jq -r '.expires_at')
++    if [ "$_mo_now" -ge "$_mo_exp" ]; then
++      finalize "$_mo_id" 'expiry'; exit 0
++    fi
++    _mo_agent=$(printf '%s\n' "$_mo_cur" | jq -r '.agent_id')
++    if ! _mo_meta=$(agent_status "$_mo_agent"); then
++      hold "$_mo_id" 'status_unreadable'; exit 0
++    fi
++    _mo_mstate=$(printf '%s\n' "$_mo_meta" | jq -r '.state // "unknown"')
++    case "$_mo_mstate" in
++      running) :;;
++      *) finalize "$_mo_id" "agent_terminal_$_mo_mstate"; exit 0;;
++    esac
++    _mo_db=$(printf '%s\n' "$_mo_cur" | jq -r '.meter_db')
++    _mo_sid=$(printf '%s\n' "$_mo_cur" | jq -r '.native_session_id')
++    _mo_pid=$(printf '%s\n' "$_mo_cur" | jq -r '.runner_pid // ""')
++    if ! _mo_snap=$(python3 "$TOOL" snapshot "$_mo_db" "$_mo_sid" "$_mo_pid" 2>/dev/null); then
++      hold "$_mo_id" 'meter_unreadable'; exit 0
++    fi
++    _mo_caps=$(printf '%s\n' "$_mo_cur" | jq -c '.caps')
++    _mo_wall=$((_mo_now - $(printf '%s\n' "$_mo_cur" | jq -r '.started_at')))
++    _mo_ov=$(python3 "$TOOL" overrun "$_mo_caps" "$_mo_snap" "$_mo_wall")
++    if [ "$(printf '%s\n' "$_mo_ov" | jq -r '.over')" = true ]; then
++      _mo_action=$(printf '%s\n' "$_mo_cur" | jq -r '.overrun_action')
++      stop_or_kill "$_mo_agent" "$_mo_action"
++      finalize "$_mo_id" "overrun_$(printf '%s\n' "$_mo_ov" | jq -r '.reasons | join("_")')" \
++        "$_mo_snap" "$_mo_wall"
++      exit 0
++    fi
++    update_meter "$_mo_id" "$_mo_snap" "$_mo_wall" || {
++      hold "$_mo_id" 'state_write_failed'; exit 0
++    }
++  done
++}
++
++update_meter() { with_lock _update_meter "$@"; }
++_update_meter() {
++  _um_id=$1; _um_snap=$2; _um_wall=$3
++  _um_cur=$(res_read "$_um_id")
++  [ "$(printf '%s\n' "$_um_cur" | jq -r '.state')" = active ] || return 0
++  _um_usage=$(usage_from_snapshot "$_um_snap" "$_um_wall")
++  _um_new=$(printf '%s\n' "$_um_cur" | jq -c --argjson m "$_um_snap" --argjson u "$_um_usage" \
++    '.meter=$m | .usage=$u')
++  res_write "$_um_id" "$_um_new"
++  refresh_aggregate "$(printf '%s\n' "$_um_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++hold() { with_lock hold_locked "$@"; }
++finalize() { with_lock finalize_locked "$@"; }
++
++# ---- external subcommands ----------------------------------------------------
++
++guard() {
++  _g_office=$1
++  init
++  cfg_load
++  probe_or_die
++  [ "$(cfgs ".offices.\"$_g_office\".enabled")" = true ] ||
++    die "office $_g_office is disabled in the budget config; fail closed"
++  _g_open=$(res_find_open "$_g_office")
++  [ -z "$_g_open" ] || die "office $_g_office has an open reservation: $_g_open"
++  _g_now=$(date +%s)
++  _g_agg=$(python3 "$TOOL" aggregate "$RES" "$(cfgs '.accounting_window_seconds')" "$_g_now") ||
++    die 'aggregate computation failed'
++  if [ -e "$ROOT/aggregate.json" ]; then
++    jq -e --argjson a "$_g_agg" '.tokens_total==$a.tokens_total and
++      .cpu_seconds==$a.cpu_seconds and .wall_seconds==$a.wall_seconds and
++      .counted==$a.counted' "$ROOT/aggregate.json" >/dev/null 2>&1 ||
++      die 'aggregate record is corrupt or divergent; refusing activation'
++  fi
++  die 'authoritative per-session backend CPU meter unavailable; activation blocked (runner CPU is not a substitute)'
++  _g_adm=$(python3 "$TOOL" admit "$CONFIG" "$_g_agg" "$_g_office") || die 'admission check failed'
++  [ "$(printf '%s\n' "$_g_adm" | jq -r '.admit')" = true ] ||
++    die "budget exhausted: $(printf '%s\n' "$_g_adm" | jq -r '.reason')"
++  printf 'guard ok: %s\n' "$_g_office"
++}
++
++reconcile_locked() {
++  cfg_load
++  _rc_now=$(date +%s)
++  for _rc_f in "$RES"/*.json; do
++    [ -s "$_rc_f" ] || continue
++    _rc_id=$(jq -r '.id // ""' "$_rc_f")
++    _rc_state=$(jq -r '.state // ""' "$_rc_f")
++    [ -n "$_rc_id" ] || continue
++    case "$_rc_state" in
++      reserved)
++        _rc_age=$((_rc_now - $(jq -r '.created_at' "$_rc_f")))
++        _rc_interval=$(jq -r '.monitor_interval_seconds // 20' "$_rc_f")
++        [ "$_rc_age" -gt $((_rc_interval * 3 + 60)) ] || continue
++        if [ "$(jq -r '.dispatch_attempted // false' "$_rc_f")" = true ]; then
++          # A launch was attempted but no agent/meter identity was registered:
++          # usage is genuinely unknown, so hold with a pessimistic full charge
++          # and halt further dispatch until an audited resolution.
++          hold_locked "$_rc_id" 'dispatch_attempted_without_meter_registration'
++        elif [ -z "$(jq -r '.agent_id // ""' "$_rc_f")" ]; then
++          hold_locked "$_rc_id" 'reserved_without_agent_identity'
++        else
++          res_write "$_rc_id" "$(jq -c --argjson now "$_rc_now" \
++            '.state="rolled_back" | .history += [{at:$now,event:"orphaned_reservation_rollback"}]' "$_rc_f")"
++        fi
++        ;;
++      active)
++        # A restart past the hard wall/expiry deadline must stop the session,
++        # not silently re-authorise it (Act 32 amendment B acceptance case).
++        _rc_exp=$(jq -r '.expires_at // 0' "$_rc_f")
++        if [ "$_rc_exp" -le "$_rc_now" ]; then
++          finalize_locked "$_rc_id" 'expiry'; continue
++        fi
++        _rc_agent=$(jq -r '.agent_id' "$_rc_f")
++        if ! _rc_meta=$(agent_status "$_rc_agent"); then
++          hold_locked "$_rc_id" 'status_unreadable_on_reconcile'; continue
++        fi
++        _rc_mstate=$(printf '%s\n' "$_rc_meta" | jq -r '.state // "unknown"')
++        case "$_rc_mstate" in
++          running)
++            _rc_mpid=$(jq -r '.monitor_pid // ""' "$_rc_f")
++            if [ -z "$_rc_mpid" ] || ! kill -0 "$_rc_mpid" 2>/dev/null; then
++              _rc_log="$ROOT/monitor-$_rc_id.log"
++              if command -v setsid >/dev/null 2>&1; then
++                setsid /bin/sh "$0" monitor "$_rc_id" 9>&- </dev/null >> "$_rc_log" 2>&1 &
++              else
++                /bin/sh "$0" monitor "$_rc_id" 9>&- </dev/null >> "$_rc_log" 2>&1 &
++              fi
++              _rc_newpid=$!
++              res_write "$_rc_id" "$(jq -c --argjson p "$_rc_newpid" '.monitor_pid=$p' "$_rc_f")"
++            fi
++            ;;
++          *) finalize_locked "$_rc_id" "agent_terminal_on_reconcile";;
++        esac
++        ;;
++      held)
++        _rc_agent=$(jq -r '.agent_id // ""' "$_rc_f")
++        _rc_db=$(jq -r '.meter_db' "$_rc_f")
++        _rc_sid=$(jq -r '.native_session_id // ""' "$_rc_f")
++        _rc_pid=$(jq -r '.runner_pid // ""' "$_rc_f")
++        if [ -n "$_rc_agent" ] && _rc_meta=$(agent_status "$_rc_agent"); then
++          [ "$(printf '%s\n' "$_rc_meta" | jq -r '.state // "unknown"')" = running ] && continue
++          if _rc_snap=$(python3 "$TOOL" snapshot "$_rc_db" "$_rc_sid" "$_rc_pid" 2>/dev/null); then
++            res_write "$_rc_id" "$(jq -c '.state="active"' "$_rc_f")"
++            finalize_locked "$_rc_id" 'reconciled_terminal' "$_rc_snap" ''
++          fi
++        fi
++        ;;
++    esac
++  done
++  refresh_aggregate "$(cfgs '.accounting_window_seconds')"
++}
++
++config_cmd() {
++  _cc_sub=${1:-}
++  case "$_cc_sub" in
++    validate) python3 "$TOOL" validate "$CONFIG";;
++    show) python3 "$TOOL" show "$CONFIG";;
++    activate)
++      init
++      python3 "$TOOL" validate "$CONFIG" >/dev/null || die 'invalid config; activation refused'
++      with_lock _config_activate ;;
++    rollback) init; with_lock _config_rollback ;;
++    *) die 'usage: config validate|show|activate|rollback';;
++  esac
++}
++
++_config_activate() {
++  _ca_norm=$(python3 "$TOOL" show "$CONFIG") || die 'cannot normalise config'
++  if [ -s "$ROOT/config.active.json" ]; then
++    atomic_cp "$ROOT/config.active.json" "$ROOT/config.previous.json" ||
++      die 'cannot rotate previous config'
++  fi
++  printf '%s\n' "$_ca_norm" | atomic_write "$ROOT/config.active.json" ||
++    die 'cannot write active config'
++  log 'activated validated budget config'
++}
++
++_config_rollback() {
++  [ -s "$ROOT/config.previous.json" ] || die 'no previous config to roll back to'
++  _cb_before=$(sha256sum "$ROOT/config.previous.json" | awk '{print $1}')
++  atomic_cp "$ROOT/config.previous.json" "$ROOT/config.active.json" ||
++    die 'config rollback failed'
++  _cb_after=$(sha256sum "$ROOT/config.active.json" | awk '{print $1}')
++  [ "$_cb_before" = "$_cb_after" ] || die 'config rollback byte check failed'
++  printf 'rolled back active config to %s\n' "$_cb_after"
++}
++
++report() {
++  init
++  printf 'Authoritative meter source: %s\n' "$(db_path 2>/dev/null || printf unknown)"
++  printf 'Baseline: diagnostic only, no frozen verified comparator (Act 32 v4 D)\n'
++  if [ -s "$ROOT/aggregate.json" ]; then cat "$ROOT/aggregate.json";
++  else printf '{}\n'; fi
++  for _rp_f in "$RES"/*.json; do
++    [ -s "$_rp_f" ] || continue
++    jq -c '{id,office,state,caps,usage,charge,closed_reason,held_reason}' "$_rp_f"
++  done
++}
++
++cmd=${1:-}
++[ -n "$cmd" ] || { echo 'usage: knowledge-budget.sh config|guard|reserve|mark-dispatched|start|monitor|reconcile|resolve|report' >&2; exit 2; }
++shift || :
++case "$cmd" in
++  config) config_cmd "$@";;
++  guard) check_office "${1:-}"; guard "$1";;
++  reserve) check_office "${1:-}"; init; with_lock do_reserve_locked "$1";;
++  mark-dispatched) init; with_lock mark_dispatched_locked "${1:-}";;
++  start) init; with_lock do_start_locked "${1:-}" "${2:-}"; launch_monitor "${1:-}"; printf 'active %s\n' "$1";;
++  monitor) init; monitor "${1:-}";;
++  reconcile) init; with_lock reconcile_locked;;
++  resolve) init; with_lock resolve_locked "${1:-}" "${2:-}";;
++  report) report;;
++  *) echo "unknown command: $cmd" >&2; exit 2;;
++esac
+diff --git a/government/knowledge-office-cycle.sh b/government/knowledge-office-cycle.sh
+index 68102343..43045fd1 100644
+--- a/government/knowledge-office-cycle.sh
++++ b/government/knowledge-office-cycle.sh
+@@ -20,6 +20,17 @@ grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \(en
+ # Act and THIS office, with a bounded hard expiry. The shared fail-closed
+ # verifier is the same code boot.sh and appointments.sh use, so the three agree.
+ /bin/sh "$town/government/knowledge-activation-verify.sh" "$office" || exit 0
++# Act 32 H: fail-closed metered budget guard. When the budget engine is not
++# installed (legacy fixtures) there is no budget subsystem to gate on; when it
++# is installed, a missing/corrupt config, absent token meter, exhausted cap or
++# held office blocks dispatch instead of assuming a budget.
++budget=$town/government/knowledge-budget.sh
++if [ -s "$budget" ]; then
++  /bin/sh "$budget" guard "$office" || {
++    echo "Viche $office: budget guard refused activation" >&2
++    exit 0
++  }
++fi
+ [ -s "$town/records/knowledge/baseline-20261119.json" ] || {
+   echo "Knowledge: cannot activate without frozen prelaunch baseline" >&2
+   exit 1
+@@ -122,7 +133,32 @@ EOF
+ )
+ [ ! -s "$town/government/AGENT-REPORTING-POLICY.md" ] ||
+   prompt=$(printf '%s\n\n%s\n' "$prompt" "$(cat "$town/government/AGENT-REPORTING-POLICY.md")")
+-antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1 || exit 1
++# Reserve the hard cap BEFORE the session exists. A refused reservation means
++# no dispatch at all; the live detached agent is then monitored and stopped on
++# overrun/expiry by the budget engine (never by the launcher timeout alone).
++reservation=
++if [ -s "$budget" ]; then
++  reservation=$(/bin/sh "$budget" reserve "$office" "$id") || {
++    echo "Viche $office: budget reservation refused; no dispatch" >&2
++    exit 0
++  }
++fi
++if [ -n "$reservation" ]; then
++  /bin/sh "$budget" mark-dispatched "$reservation" || {
++    echo "Viche $office: cannot record dispatch intent; no session launched" >&2
++    exit 1
++  }
++fi
++antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1 || {
++  [ -z "$reservation" ] || /bin/sh "$budget" reconcile >/dev/null 2>&1 || :
++  exit 1
++}
++if [ -n "$reservation" ]; then
++  /bin/sh "$budget" start "$reservation" "$id" || {
++    echo "Viche $office: could not meter session; session stopped" >&2
++    exit 1
++  }
++fi
+ printf '%s\n' "$now" > "$root/last-dispatch"
+ [ ! -f "$town/government/dispatch-gate.sh" ] ||
+   /bin/sh "$town/government/dispatch-gate.sh" commit "$office"
+diff --git a/records/knowledge/budget-engine-20261120.md b/records/knowledge/budget-engine-20261120.md
+new file mode 100644
+index 00000000..a6bcb593
+--- /dev/null
++++ b/records/knowledge/budget-engine-20261120.md
+@@ -0,0 +1,132 @@
++# Act 32 H: measured, hard-capped, fail-closed knowledge-office budget engine
++
++**Date:** 2026-11-20. **Office:** operator implementation agent (isolated worktree
++`budget-engine-20261120`). **Mandate:** board issue
++`vAucaGpB34ZtetoelXDHF6-extruded` ("implement real metered knowledge-office
++budgets"), coordinating with originating issue
++`SvMHxlO6F1R6u3cQcr3lKA-repeated`. **Authority:** enacted Act 32 amendment H
++(`government/LAWS.md`, enacted 2026-11-20T07:33:00Z, ballot
++`institutional-knowledge-and-communications-act-v4`). This is ordinary-law
++implementation, not a vote, a law, a Founder instruction or an activation order.
++
++## Implementation state after critical review
++
++| File | Role |
++| --- | --- |
++| `government/knowledge-budget-tool.py` | sole meter/validation primitive: config validator, authoritative token/cost reader, CPU reader, aggregate/admission/overrun arithmetic |
++| `government/knowledge-budget.sh` | POSIX `/bin/sh` engine: fail-closed guard/reservation, durable state writes, conservative holds/reconciliation, config activation/rollback |
++| `government/knowledge-budget.conf` | source-controlled config; **all four offices default `enabled:false`**; per-office and aggregate caps |
++| `government/knowledge-office-cycle.sh` | calls `guard` before appointments and `reserve` → `mark-dispatched` → `start` around the detached session |
++| `government/boot.sh` | deterministic `reconcile` sweep before office dispatch each cycle (crash/restart) |
++| `tests/knowledge-budget-smoke.sh` | black-box suite (dash): disabled defaults, missing SID, cumulative-token delta/reset, corrupt reservation/aggregate, stale/ambiguous intent, CPU-metric denial, fsync-backed write, exact rollback |
++
++No deposit to `government/LAWS.md`, `records/knowledge/activation.json`, ballots,
++the Founder Constitution or another host was made. No office was enabled: the
++shipped config keeps Statistics, Foresight, Strategy and Spying disabled, and
++`records/knowledge/activation.json` remains unchanged.
++
++## Metering findings and fail-closed boundary (no invented values)
++
++- Token usage is read **only** from the Antonina-managed OpenCode service SQLite
++  database, `session_v2`, keyed by the agent's `native_session_id` obtained from
++  `antonina agent status --id ... --json`. Fields: `tokens_input`,
++  `tokens_output`, `tokens_reasoning`, `tokens_cache_read`, `tokens_cache_write`;
++  `tokens_total` is their sum. Cost is copied verbatim from the `cost` column
++  with a `cost_reported` provenance flag. For free models this is `0.0`, reported
++  as `0.0`, not converted into an invented dollar figure.
++- The previously attempted CPU value from `/proc/<runner_pid>/stat` was **not**
++  valid service/session CPU attribution (the independent review demonstrated a
++  multi-million-token session with about one second of runner CPU). That metric
++  is removed. `cpu_seconds` is explicitly `null`, `cpu_available=false`.
++- There is no verified per-office/per-session backend CPU cgroup meter available
++  on this host. Consequently `guard` and `reserve` **block dispatch**, even
++  though token metering is available. This is a deliberate fail-closed
++  implementation, not an activation-ready budget or a claim that machine-time
++  caps are enforced. A trustworthy service attribution source is still required.
++- `time_updated` is preserved as `time_updated_ms` (milliseconds), not seconds.
++- The database is opened read-only (`mode=ro`, `PRAGMA query_only=1`); the engine
++  never writes to the meter.
++- **If the database/schema is unreadable or the requested session row is absent,
++  usage is unknown and fails closed.** A missing row can no longer appear as
++  zero tokens.
++- Cumulative OpenCode session counters must be converted to monotone deltas
++  against a captured baseline. The tool now provides and tests the delta
++  operation; a changed session id or any reset/decrease is rejected. Because
++  current production guard blocks on unsupported CPU attribution before any
++  run, this delta is not yet wired into a live activation path.
++- The baseline `records/knowledge/baseline-20261119.json` is labelled in config
++  as a point-in-time **diagnostic**, not a frozen verified cost comparator under
++  Act 32 v4 D. Caps are provisional hard ceilings pending an Economy-produced,
++  frozen, trial-specific denominator; they are not a claim of measured marginal
++  value. `report` prints the same caveat.
++
++## Safety properties implemented; operations deliberately blocked
++
++1. **No current dispatch is admitted.** `knowledge-office-cycle.sh` calls the
++   guard before appointment/launch. Since authoritative backend CPU attribution
++   is unavailable, the guard fails and the office cycle exits before dispatch.
++   Reservation creation independently refuses the same unsupported metric.
++2. **Durable persistence.** The Python durable-write primitive writes a same-
++   directory temporary file, fsyncs it, atomically replaces the destination, and
++   fsyncs the parent directory. Mutations use one exclusive `flock`. Reservations
++   carry exact agent identity and a durable dispatch-intent bit before any
++   launcher call; absent intent proves prelaunch, while intent without binding
++   is held and charged at the full cap.
++3. **Per-office and aggregate cap schema** remains configured for tokens, CPU
++   seconds and wall seconds. Admission is currently fail-closed before launch;
++   the ceilings are not claimed as active metering. This is not a worker cap.
++4. **Corruption is a hard error.** Aggregate accounting fails nonzero on any
++   unreadable/malformed/unknown reservation or missing liability; it never
++   silently skips a file. Corrupt/divergent derived aggregate state blocks the
++   guard rather than being overwritten to zero.
++5. **Holds and conservative reconciliation.** An unreadable status,
++   unreadable meter or a dispatch with no registered meter identity produces a
++   `held` reservation with a **pessimistic full-cap charge**, halting further
++   dispatch for that office. Durable dispatch intent records the exact agent id
++   before launch. An aged reservation without intent is provably prelaunch and
++   can be rolled back; intent without completed binding is held, never released
++   merely due to age. A held reservation does not expire from aggregate
++   accounting. Resolution retains pessimistic charge unless exact, valid meter
++   evidence is available.
++6. **Config validation and exact rollback.** `config validate|show|activate|
++   rollback`. Invalid/missing config blocks both guard and reserve. `activate`
++   validates before atomically rotating `config.active.json` →
++   `config.previous.json`; `rollback` restores the previous bytes atomically and
++   verifies SHA-256 equality. Tested byte-exact across two activations plus a
++   rejected invalid activation.
++
++## Verification actually performed
++
++- `dash tests/knowledge-budget-smoke.sh`: current adversarial cases pass.
++- `dash tests/run-all.sh` on the revised merged tree: **exit 0, "All Viche tests
++  passed"**. The earlier merged-tree run interrupted by SIGKILL was rerun
++  successfully after the safety changes.
++- Before this safety follow-up, no delivery proposal was present. No offices
++  were activated or dispatched.
++
++## Honest limitations and falsifiers
++
++- No live overrun-termination claim is made: current production guard blocks
++  before launch because backend CPU attribution is unavailable. A future
++  activation-ready version must prove actual detached-session termination on
++  overrun with authoritative per-session CPU and token deltas.
++- The `cost` column reflects Antonina/OpenCode's own accounting. On a paid model
++  the engine reports what the source reports; it does not recompute prices.
++- `resolve` is an operator action, not cryptographic authorization; its reason
++  and resulting charge are durable in reservation history.
++- Metering depends on the OpenCode service DB schema `session_v2`. A schema change
++  that removes the token columns is detected by `probe` and fails closed (does
++  not silently pass with zero tokens).
++- No claim is made that any knowledge office produced independent marginal value.
++  Budgets constrain cost; they do not establish benefit under Act 32 v4 E.
++
++## Critical review response status
++
++The independent review on `vAucaGpB34ZtetoelXDHF6-extruded` correctly identified
++that the earlier commit `12997534` was unsafe. This follow-up addresses the
++review's absent-session zero, session-cumulative delta, millisecond timestamp,
++invalid runner CPU attribution, silent corrupt-reservation omission, durable
++fsync writes, and prelaunch intent/ambiguous crash hold. It does **not** yet
++provide a trustworthy backend CPU attribution source or prove live overrun
++termination; dispatch therefore remains blocked. These remain explicit
++acceptance blockers, not claims of completion.
+diff --git a/tests/knowledge-budget-smoke.sh b/tests/knowledge-budget-smoke.sh
+new file mode 100644
+index 00000000..747abb52
+--- /dev/null
++++ b/tests/knowledge-budget-smoke.sh
+@@ -0,0 +1,170 @@
++#!/bin/sh
++# Act 32 H adversarial black-box tests. Production CPU attribution is presently
++# unsupported; the fail-closed gate must therefore prevent every live dispatch.
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++TOOL=$(pwd -P)/government/knowledge-budget-tool.py
++ENGINE=$(pwd -P)/government/knowledge-budget.sh
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++mkdir -p "$d/state/knowledge/budget/reservations" "$d/town/government"
++cp government/knowledge-budget.conf "$d/town/government/"
++export VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" VICHE_BUDGET_TOOL="$TOOL"
++
++fail() { echo "FAIL: $*" >&2; exit 1; }
++no() { if "$@" >/dev/null 2>&1; then fail "$* unexpectedly succeeded"; fi; }
++ok() { "$@" >/dev/null || fail "$* failed"; }
++
++DB=$d/meter.db
++python3 - "$DB" <<'PY'
++import sqlite3,sys
++c=sqlite3.connect(sys.argv[1])
++c.execute("create table session_v2 (id text primary key,tokens_input int,tokens_output int,tokens_reasoning int,tokens_cache_read int,tokens_cache_write int,cost real,time_updated int)")
++c.execute("insert into session_v2 values ('sid',100,20,3,40,5,0.0,1795197102261)")
++c.commit()
++PY
++python3 - "$d/town/government/knowledge-budget.conf" "$DB" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]
++for x in c['offices'].values(): x['enabled']=True
++json.dump(c,open(p,'w'))
++PY
++
++# All shipped office activations are disabled.
++jq -e '[.offices[] | .enabled] | all(. == false)' government/knowledge-budget.conf >/dev/null ||
++  fail 'shipped config did not default all offices disabled'
++
++# Production gate: real token meter exists, but no verified per-session backend
++# CPU attribution exists, so neither guard nor reservation may admit dispatch.
++no /bin/sh "$ENGINE" guard statistics
++no /bin/sh "$ENGINE" reserve statistics test-agent
++[ "$(find "$d/state/knowledge/budget/reservations" -type f | wc -l)" -eq 0 ] ||
++  fail 'reservation was written despite unavailable authoritative CPU meter'
++
++# The production cycle gate must block before appointment creation or detached
++# launch when the budget cannot meter CPU. Verify the real caller ordering using
++# an isolated town fixture and a recording Antonina stub.
++mkdir -p "$d/cycle-town/government" "$d/cycle-town/records/knowledge" "$d/cycle-state" "$d/cycle-bin"
++cp government/knowledge-budget.conf government/knowledge-budget.sh government/knowledge-budget-tool.py \
++  government/knowledge-office-cycle.sh "$d/cycle-town/government/"
++printf '#!/bin/sh\nexit 0\n' > "$d/cycle-town/government/knowledge-activation-verify.sh"
++printf '## Act 32 — Institutional Knowledge and Communications Act (enacted test)\n' > "$d/cycle-town/government/LAWS.md"
++printf 'baseline\n' > "$d/cycle-town/records/knowledge/baseline-20261119.json"
++cp "$DB" "$d/cycle-meter.db"
++python3 - "$d/cycle-town/government/knowledge-budget.conf" "$d/cycle-meter.db" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]; c['offices']['statistics']['enabled']=True; json.dump(c,open(p,'w'))
++PY
++cat > "$d/cycle-bin/antonina" <<'SH'
++#!/bin/sh
++echo "$*" >> "$CYCLE_LOG"
++exit 0
++SH
++chmod +x "$d/cycle-bin/antonina"
++: > "$d/cycle.log"
++export CYCLE_LOG="$d/cycle.log" PATH="$d/cycle-bin:$PATH"
++env VICHE_TOWN_ROOT="$d/cycle-town" VICHE_STATE_ROOT="$d/cycle-state" \
++  VICHE_BUDGET_TOOL="$d/cycle-town/government/knowledge-budget-tool.py" \
++  VICHE_BUDGET_DB="$d/cycle-meter.db" VICHE_CONSTITUTION=/missing \
++  /bin/sh "$d/cycle-town/government/knowledge-office-cycle.sh" statistics >/dev/null 2>&1 ||
++  fail 'cycle budget denial returned an error instead of safe no-dispatch'
++[ ! -s "$d/cycle.log" ] || fail 'cycle reached Antonina after CPU budget guard denied activation'
++
++# Missing SID is an error, not a successful zero-token observation.
++no python3 "$TOOL" snapshot "$DB" absent-session "$$"
++
++# Session reuse must produce a monotone delta; changed SID and counter reset fail.
++BASE=$(python3 "$TOOL" snapshot "$DB" sid "$$")
++python3 - "$DB" <<'PY'
++import sqlite3,sys
++c=sqlite3.connect(sys.argv[1]); c.execute('update session_v2 set tokens_input=125'); c.commit()
++PY
++CUR=$(python3 "$TOOL" snapshot "$DB" sid "$$")
++DELTA=$(python3 "$TOOL" delta "$BASE" "$CUR")
++[ "$(printf '%s\n' "$DELTA" | jq -r '.tokens.delta_total')" -eq 25 ] || fail 'cumulative usage delta wrong'
++no python3 "$TOOL" delta "$BASE" "$(printf '%s\n' "$CUR" | jq '.session_id="other"')"
++python3 - "$DB" <<'PY'
++import sqlite3,sys
++c=sqlite3.connect(sys.argv[1]); c.execute('update session_v2 set tokens_input=1'); c.commit()
++PY
++RESET=$(python3 "$TOOL" snapshot "$DB" sid "$$")
++no python3 "$TOOL" delta "$CUR" "$RESET"
++
++# Authoritative time_updated is explicitly milliseconds, never interpreted as
++# seconds or as a fabricated CPU signal.
++printf '%s\n' "$CUR" | jq -e '.time_updated_ms==1795197102261 and .cpu_available==false and .cpu_seconds==null' >/dev/null ||
++  fail 'meter units/provenance are ambiguous'
++
++# Any malformed/unknown reservation is a hard aggregate error, not skipped.
++printf 'CORRUPT' > "$d/state/knowledge/budget/reservations/unknown.json"
++no python3 "$TOOL" aggregate "$d/state/knowledge/budget/reservations" 3888000 "$(date +%s)"
++no /bin/sh "$ENGINE" guard statistics
++rm "$d/state/knowledge/budget/reservations/unknown.json"
++
++# Unknown state and malformed committed records fail closed.
++cat > "$d/state/knowledge/budget/reservations/unknown.json" <<'JSON'
++{"schema":"viche-knowledge-budget-reservation-v1","id":"unknown","office":"statistics","state":"mystery","created_at":1,"caps":{"tokens_total":5,"cpu_seconds":5,"wall_seconds":5}}
++JSON
++no python3 "$TOOL" aggregate "$d/state/knowledge/budget/reservations" 3888000 "$(date +%s)"
++rm "$d/state/knowledge/budget/reservations/unknown.json"
++
++# Crash after durable dispatch-intent but before session binding is held at the
++# full reservation; age alone must never release it. An aged reservation with
++# no dispatch intent is provably prelaunch (intent is fsynced before launcher)
++# and may be rolled back.
++mkdir -p "$d/bin"
++cat > "$d/bin/antonina" <<'SH'
++#!/bin/sh
++case "$1 $2" in
++  'agent status') printf '{"state":"running","native_session_id":"sid"}\n' ;;
++  'agent kill'|'agent stop') exit 0 ;;
++  *) exit 5 ;;
++esac
++SH
++chmod +x "$d/bin/antonina"
++export PATH="$d/bin:$PATH"
++NOW=$(date +%s)
++jq -n --argjson now "$NOW" '{schema:"viche-knowledge-budget-reservation-v1",id:"ambiguous",office:"statistics",state:"reserved",created_at:($now-1000),caps:{tokens_total:100,cpu_seconds:10,wall_seconds:60},accounting_window_seconds:3888000,monitor_interval_seconds:1,overrun_action:"kill",meter_db:"none",agent_id:"agent-1",dispatch_attempted:true,history:[]}' > "$d/state/knowledge/budget/reservations/ambiguous.json"
++ok /bin/sh "$ENGINE" reconcile
++[ "$(jq -r '.state' "$d/state/knowledge/budget/reservations/ambiguous.json")" = held ] || fail 'ambiguous launch intent was released after age'
++[ "$(jq -r '.charge.tokens_total' "$d/state/knowledge/budget/reservations/ambiguous.json")" -eq 100 ] || fail 'ambiguous launch lacks pessimistic charge'
++no /bin/sh "$ENGINE" guard statistics
++rm "$d/state/knowledge/budget/reservations/ambiguous.json"
++jq -n --argjson now "$NOW" '{schema:"viche-knowledge-budget-reservation-v1",id:"prelaunch",office:"statistics",state:"reserved",created_at:($now-1000),caps:{tokens_total:100,cpu_seconds:10,wall_seconds:60},accounting_window_seconds:3888000,monitor_interval_seconds:1,overrun_action:"kill",meter_db:"none",agent_id:"agent-1",dispatch_attempted:false,history:[]}' > "$d/state/knowledge/budget/reservations/prelaunch.json"
++ok /bin/sh "$ENGINE" reconcile
++[ "$(jq -r '.state' "$d/state/knowledge/budget/reservations/prelaunch.json")" = rolled_back ] || fail 'provably prelaunch stale reservation not rolled back'
++rm "$d/state/knowledge/budget/reservations/prelaunch.json"
++
++# An aggregate record that is corrupt or diverges from source reservations
++# prevents activation. This remains true even when there are no reservations.
++printf 'not-json\n' > "$d/state/knowledge/budget/aggregate.json"
++no /bin/sh "$ENGINE" guard statistics
++
++# Missing/corrupt meter schema fails closed and never creates a reservation.
++printf 'not a database' > "$d/bad.db"
++python3 - "$d/town/government/knowledge-budget.conf" "$d/bad.db" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]; json.dump(c,open(p,'w'))
++PY
++no /bin/sh "$ENGINE" reserve statistics test-agent
++
++# Durable write uses file fsync + atomic replace + parent-directory fsync.
++python3 "$TOOL" durable-mkdir "$d/durable/a/b" >/dev/null
++printf 'old' | python3 "$TOOL" durable-write "$d/durable/a/file" >/dev/null
++printf 'new' | python3 "$TOOL" durable-write "$d/durable/a/file" >/dev/null
++[ "$(cat "$d/durable/a/file")" = new ] || fail 'durable replacement mismatch'
++
++# Config activation validates before replacing; rollback restores exact bytes.
++rm -f "$d/state/knowledge/budget/aggregate.json"
++ok /bin/sh "$ENGINE" config activate
++H1=$(sha256sum "$d/state/knowledge/budget/config.active.json" | awk '{print $1}')
++python3 - "$d/town/government/knowledge-budget.conf" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['aggregate']['caps']['tokens_total']+=1; json.dump(c,open(p,'w'))
++PY
++ok /bin/sh "$ENGINE" config activate
++ok /bin/sh "$ENGINE" config rollback
++H2=$(sha256sum "$d/state/knowledge/budget/config.active.json" | awk '{print $1}')
++[ "$H1" = "$H2" ] || fail 'rollback was not byte-exact'
++
++echo 'knowledge budget: disabled defaults; missing SID, CPU, corruption, cumulative deltas, durable writes, and rollback fail closed/pass'

@@ -1,0 +1,110 @@
+commit e746bcb3f175cc54d2aa08556df9a44fe77c1c02
+Author:     Viche Executive Innovation Office <innovation-office@viche.local>
+AuthorDate: Sun Nov 8 07:13:51 2026 +0000
+Commit:     Viche Executive Innovation Office <innovation-office@viche.local>
+CommitDate: Sun Nov 8 07:13:51 2026 +0000
+
+    Name the accountable manual closure path and validate its artifact
+    
+    The Clerk found the independent-closure gate incomplete: the collector stopped
+    automatic closure but nothing stated who may close a case or what evidence the
+    case must carry. Closure is a recorded manual decision by the Clerk after
+    inspecting an independent Judiciary disposition. Document that in the standing
+    policy and the collector docstring, and mechanically require a case-bound
+    closure_evidence object with a recognised disposition, verified_by=judiciary,
+    an accountable verifier, a durable evidence_ref and recorded_by=clerk.
+    
+    This is a completeness check, not proof of truth: the collector never sets
+    verified_closed and does not judge the disposition. The smoke test now shows a
+    complete independent artifact accepted, while a self-declared Executive
+    artifact stays listed as unresolved.
+
+diff --git a/government/AGENT-REPORTING-POLICY.md b/government/AGENT-REPORTING-POLICY.md
+index d94f9235..82b380d6 100644
+--- a/government/AGENT-REPORTING-POLICY.md
++++ b/government/AGENT-REPORTING-POLICY.md
+@@ -105,3 +105,14 @@ two green polls nor an agent exit, review, code merge or archived report may
+ close a case. Do not implement the judgment with a new schema, watchdog or
+ case-specific script. Use existing managed agents and a single durable handoff
+ when a real obligation remains.
++
++**Accountable closure recorder.** The Clerk is the accountable office for
++marking a corrective case closed. The Clerk does so manually, only after
++inspecting a filed independent Judiciary disposition, by writing a
++`closure_evidence` object on that case with: `closure_eligible: true`, a
++recognised `disposition` (`confirmed_resolved`, `superseded` or `withdrawn`),
++`verified_by: "judiciary"`, the accountable `verifier`, a durable
++`evidence_ref`, and `recorded_by: "clerk"`. The collector mechanically rejects
++a missing or incomplete artifact and keeps the case visible as unresolved; it
++does not judge whether the disposition is substantively correct. The Executive
++investigates and repairs; it does not close its own case.
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 00881df2..236813c5 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -4,6 +4,11 @@
+ A case is a monitored obligation, NOT a Judiciary verdict or an authorization
+ to enact law. Observation and routing remain deterministic even if every model
+ is down. Existing independent Judiciary/Parliament/Executive powers remain.
++
++This collector never closes a case. Closure is a recorded manual decision by
++the Clerk after independently inspecting a Judiciary disposition. The Clerk
++writes a case-bound closure_evidence artifact; the mechanical check below only
++verifies that the artifact is complete and attributed, never that it is true.
+ """
+ import argparse
+ import json
+@@ -148,11 +153,17 @@ def reconcile():
+     return active
+ 
+ 
++def nonempty_text(value):
++    return isinstance(value, str) and bool(value.strip())
++
++
+ def closure_unsubstantiated(case):
+-    """True for a closed case whose closure is not backed by a case artifact.
++    """True for a closed case whose closure is not backed by a complete artifact.
+ 
+     Historical closures from the absent-signal path carry no closure_evidence.
+-    An artifact explicitly marked closure_eligible=false is likewise not
++    Closure is a recorded manual decision by the Clerk after an independent
++    Judiciary disposition; this is a mechanical completeness check, not proof
++    of the disposition's truth. An incomplete or self-declared artifact is not
+     resolution.
+     """
+     if case.get("state") != "verified_closed":
+@@ -160,7 +171,14 @@ def closure_unsubstantiated(case):
+     evidence = case.get("closure_evidence")
+     if not isinstance(evidence, dict) or not evidence:
+         return True
+-    return evidence.get("closure_eligible") is False
++    if evidence.get("closure_eligible") is not True:
++        return True
++    if evidence.get("verified_by") != "judiciary":
++        return True
++    if evidence.get("disposition") not in ("confirmed_resolved", "superseded", "withdrawn"):
++        return True
++    return not all(nonempty_text(evidence.get(key))
++                   for key in ("verifier", "evidence_ref", "recorded_by"))
+ 
+ 
+ def report():
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 1e76489b..c7845d87 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -101,6 +101,13 @@ VICHE_CASE_NOW=1500 python3 "$repo/government/institutional-cases.py" reconcile
+ test "$(sha256sum "$d/state/institutional-cases/addendum-fixture.json" | cut -d ' ' -f1)" = "$addendum_sum"
+ jq -e '.unresolved_without_closure_evidence | map(.id) | index("legacy_closed:900") != null' "$d/state/institutional-cases/index.json" >/dev/null
+ jq -e '.state=="verified_closed"' "$d/state/institutional-cases/legacy_closed.json" >/dev/null
++# A complete Clerk-recorded closure artifact that cites an independent
++# Judiciary disposition is accepted; an incomplete or self-declared one is not.
++printf '{"id":"legacy_closed_ok:901","signal":"legacy_closed_ok","state":"verified_closed","first_seen":901,"last_seen":901,"closure_evidence":{"closure_eligible":true,"disposition":"confirmed_resolved","verified_by":"judiciary","verifier":"judge-a","evidence_ref":"fixture:independent-review","recorded_by":"clerk"}}\n' > "$d/state/institutional-cases/legacy_closed_ok.json"
++printf '{"id":"legacy_closed_bad:902","signal":"legacy_closed_bad","state":"verified_closed","first_seen":902,"last_seen":902,"closure_evidence":{"closure_eligible":true,"disposition":"confirmed_resolved","verified_by":"executive","evidence_ref":"fixture:self-declared","recorded_by":"executive"}}\n' > "$d/state/institutional-cases/legacy_closed_bad.json"
++VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.unresolved_without_closure_evidence | map(.id) | index("legacy_closed_ok:901") == null' "$d/state/institutional-cases/index.json" >/dev/null
++jq -e '.unresolved_without_closure_evidence | map(.id) | index("legacy_closed_bad:902") != null' "$d/state/institutional-cases/index.json" >/dev/null
+ 
+ # After a real enactment, new Executive work has a clean worktree, separate
+ # from the historical legislative one. Mock only the dispatcher prerequisites.

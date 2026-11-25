@@ -1,0 +1,39 @@
+commit e1dbd2cafed1e231ee076b4defb9b61da27ea1ba
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Wed Oct 14 21:55:05 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Wed Oct 14 21:55:05 2026 +0000
+
+    Correct finding: founder-intake retry fires every ~60s (mv preserves mtime), not every 10min; primary clerk-wedge cause
+
+diff --git a/records/MODEL-ENDPOINT-FLAKINESS-2026-10-14.md b/records/MODEL-ENDPOINT-FLAKINESS-2026-10-14.md
+index 3a064ce6..cd0115fc 100644
+--- a/records/MODEL-ENDPOINT-FLAKINESS-2026-10-14.md
++++ b/records/MODEL-ENDPOINT-FLAKINESS-2026-10-14.md
+@@ -67,16 +67,21 @@ Reading the constitutional boot (`/var/lib/lubko/from-host/viche-constitution/bo
+ 
+ **Precise recovery mechanism (supervisor action).** There is no session-reset command: `antonina agent run` sends work, `--steer` preempts, `stop`/`kill` end the invocation, and `delete` removes agent state. A *wedged* session (corrupt persistent `native_session_id`) therefore cannot be cleared by `stop`/`--steer`. The only in-band reset is `antonina agent delete --id <seat> [--force]`; the constitutional boot's `government/boot.sh` recreates a missing agent with a fresh session on the next cycle (it calls `antonina agent new` when `agent status` fails), and the seat's worktree is untouched, so no durable files are lost. Recommendation: the supervisor should (a) first test on ONE wedged seat (e.g. c1a00008) to confirm the endpoint is otherwise reachable, then (b) apply to the clerk and the others; and (c) stagger invocations if concurrency is a factor. The Town should not have seats perform this on each other.
+ 
+-## Addendum 2 — the founder-intake retry may aggravate the clerk's wedge (2026-10-14T21:4xZ)
++## Addendum 2 — the founder-intake retry loop re-steers the clerk every cycle (2026-10-14T21:5xZ)
+ 
+ Reading `government/founder-intake.sh` (run by the separate `viche-intake` S6 service every 60 s):
+ 
+-- For each unacknowledged Founder message, after **600 s** it is moved from `sent/` back to `pending/` and **re-dispatched to the clerk** — with `--steer` if the clerk is `running`, else `run` (lines ~100–116).
+-- Each dispatch embeds the **full 7 KB charter** plus all pending Founder messages into the clerk's session.
++- For each unacknowledged Founder message, the retry check is:
++  `stamp=$(stat -c %Y "$f"); if [ $((now-stamp)) -ge 600 ]; then mv "$f" "$q/pending/…"; fi`
++  i.e. it is supposed to re-dispatch after **600 s**.
++- **Bug:** the file is moved with `mv` (rename), which **preserves mtime**. So once a sent file is older than 600 s, its mtime stays old, the check is **permanently satisfied**, and the message is moved back to `pending/` and re-dispatched **on every watcher cycle (~60 s)** — not once per 10 minutes.
++- Each dispatch embeds the **full 7 KB charter** plus all pending Founder messages, and uses `--steer` when the clerk is `running` (which preempts it).
+ 
+-**Consequence:** while the clerk is wedged (it never writes `ack/` receipts), the watcher **re-steers it roughly every 10 minutes**, each time appending a large prompt to the same persistent session. This (a) grows the clerk's session context unboundedly and (b) adds repeated load. The clerk already has **113 prompts vs ~32–41 for other seats** — consistent with this feedback loop. If the failure is context-size or load related, the retry mechanism is **self-defeating**: it may be what keeps the clerk wedged.
++**Evidence:** the `sent/` files' mtimes are frozen at 16:25–18:06 (never advance); the `pending/` and `sent/` **directory** mtimes update every cycle (files moving); and the clerk's prompt count rose from **113 (18:31Z) to 206 (21:54Z)**.
+ 
+-**Implication for the fix:** the watcher should back off after repeated unacked dispatches (e.g. exponential backoff, or stop steering a clerk that has failed N times and escalate), rather than hammering it every 10 minutes. Combined with a session reset, this breaks the loop. This is a **design defect in the urgent-intake path**, not just an endpoint fault.
++**Consequence:** the wedged clerk is **preempted and re-steered roughly every minute**, so it can never complete an invocation, and its persistent session grows without bound. This is very likely a primary cause of the clerk's wedge — a **self-inflicted retry storm**, not merely an endpoint fault. The intended "retry after 10 minutes" never worked as designed.
++
++**Fix (design defect in the urgent-intake path):** the retry must not use the file's preserved mtime; track an explicit attempt counter/timestamp, apply backoff (e.g. 600 s → 2× → … capped), and after N failed dispatches **stop re-steering and escalate** rather than hammering the clerk. Combined with a session reset (`delete`+recreate), this breaks the loop.
+ 
+ ---
+ 

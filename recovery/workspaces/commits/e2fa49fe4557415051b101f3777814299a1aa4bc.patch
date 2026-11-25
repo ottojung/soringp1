@@ -1,0 +1,355 @@
+commit e2fa49fe4557415051b101f3777814299a1aa4bc
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 24 16:02:03 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 24 16:02:03 2026 +0000
+
+    Record appointment replacement provenance
+
+diff --git a/government/appointments.sh b/government/appointments.sh
+index 5d66c720..4c195191 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -1,13 +1,23 @@
+ #!/bin/sh
+ # Map durable logical seat/office keys to disposable Antonina agent IDs.
+ set -eu
+-{ [ "$#" -eq 2 ] || { [ "$#" -eq 3 ] && [ "$1" = replace ]; }; } ||
+-  { echo 'Usage: appointments.sh ensure|resolve|replace KEY [EXPECTED_ID]' >&2; exit 2; }
++{ [ "$#" -eq 2 ] || { [ "$#" -eq 6 ] && [ "$1" = replace ]; }; } ||
++  { echo 'Usage: appointments.sh ensure|resolve KEY | replace KEY EXPECTED_ID CALLER TRIGGER REASON' >&2; exit 2; }
+ action=$1 key=$2
+ expected=${3:-}
++caller=${4:-}
++trigger=${5:-}
++reason=${6:-}
+ case "$expected" in ''|*[!a-zA-Z0-9_-]*) [ -z "$expected" ] || exit 2;; esac
+ case "$action" in ensure|resolve|replace) :;; *) exit 2;; esac
+ case "$key" in ''|*[!a-zA-Z0-9_-]*) exit 2;; esac
++if [ "$action" = replace ]; then
++  case "$expected" in '') echo 'replacement requires expected prior ID' >&2; exit 2;; esac
++  case "$caller" in ''|*[!a-zA-Z0-9_.-]*) echo 'replacement requires explicit caller identity' >&2; exit 2;; esac
++  case "$trigger" in ''|*[!a-zA-Z0-9_.-]*) echo 'replacement requires explicit trigger' >&2; exit 2;; esac
++  case "$reason" in '') echo 'replacement requires explicit reason' >&2; exit 2;; esac
++  case "$reason" in *'	'*|*'\n'*) echo 'invalid replacement reason' >&2; exit 2;; esac
++fi
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/appointments
+@@ -83,6 +93,9 @@ if [ "$action" = ensure ] && [ -n "$old" ] && [ "${status:-}" = failed ] &&
+    printf '%s\n' "$meta" | /bin/sh "$town/government/restart-orphan.sh"; then
+   restart_orphan=yes
+   expected=$old
++  caller=appointments.ensure
++  trigger=restart_orphan
++  reason='confirmed PID1 restart orphan; no prompt replay'
+   action=replace
+ fi
+ if [ "$action" = ensure ] && [ -n "$old" ]; then
+@@ -92,6 +105,10 @@ if [ "$action" = ensure ] && [ -n "$old" ]; then
+   printf '%s\n' "$old"
+   exit 0
+ fi
++if [ "$action" = replace ] && [ "$old" != "$expected" ]; then
++  echo "Viche: stale recovery appointment $expected for $key; actual is $old" >&2
++  exit 1
++fi
+ # The Act 19 supervisors need evidence of real failed invocations. Historically
+ # 'ensure' replaced a failed appointee BEFORE they could observe it. Capture
+ # exact terminal status, last log and worktree identity BEFORE replacement.
+@@ -115,16 +132,86 @@ if [ "$live" = true ] && [ "$action" = ensure ]; then
+   printf '%s\n' "$old"
+   exit 0
+ fi
+-new=$(antonina agent new --cwd "$cwd" --title "Viche: $title") || exit 1
++new=
++transaction=
++if [ "$action" = replace ] && [ -d "$root/replacement-intents" ]; then
++  for candidate_intent in "$root"/replacement-intents/*.json; do
++    [ -f "$candidate_intent" ] || continue
++    if jq -e --arg office "$key" --arg prior "$old" --arg caller "$caller" \
++      --arg trigger "$trigger" --arg reason "$reason" \
++      '.state=="prepared" and .office==$office and .expected_prior_id==$prior and
++       .caller==$caller and .trigger==$trigger and .reason==$reason' \
++      "$candidate_intent" >/dev/null 2>&1; then
++      candidate=$(jq -r '.proposed_successor' "$candidate_intent")
++      if candidate_meta=$(antonina agent status --id "$candidate" --json 2>/dev/null) &&
++         [ "$(printf '%s\n' "$candidate_meta" | jq -r '.state')" = idle ]; then
++        new=$candidate
++        transaction=$(jq -r '.transaction' "$candidate_intent")
++        intent=$candidate_intent
++        break
++      fi
++    fi
++  done
++fi
++if [ -z "$new" ]; then
++  new=$(antonina agent new --cwd "$cwd" --title "Viche: $title") || exit 1
++fi
+ case "$new" in ''|*[!a-zA-Z0-9_-]*) echo 'malformed new agent ID' >&2; exit 1;; esac
+ [ "$new" != "$old" ] || { echo 'new agent reused old ID' >&2; exit 1; }
+ meta=$(antonina agent status --id "$new" --json) || exit 1
+ [ "$(printf '%s\n' "$meta" | jq -r '.state')" = idle ] || exit 1
++if [ -z "$transaction" ]; then transaction=$(date -u +%Y%m%dT%H%M%SZ)-$$-$key-$new; fi
+ tmp=$(mktemp "$root/roster.XXXXXXXX")
+ if [ -f "$registry" ]; then awk -F '\t' -v k="$key" '$1!=k {print}' "$registry" > "$tmp"; fi
+ printf '%s\t%s\n' "$key" "$new" >> "$tmp"
+-mv -f "$tmp" "$registry"
+-printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$key" "${old:--}" "$new" >> "$root/appointments.log"
++if [ "$action" = replace ]; then
++  if [ -z "${intent:-}" ]; then
++    prepared=$(mktemp "$root/replacement-intent.XXXXXXXX")
++    jq -cn --arg transaction "$transaction" --arg at "$(date -u +%FT%TZ)" --arg office "$key" \
++      --arg previous "$old" --arg successor "$new" --arg caller "$caller" \
++      --arg trigger "$trigger" --arg reason "$reason" \
++      '{transaction:$transaction,at:$at,state:"prepared",office:$office,
++        expected_prior_id:$previous,proposed_successor:$successor,caller:$caller,
++        trigger:$trigger,reason:$reason}' > "$prepared"
++    mkdir -p "$root/replacement-intents"
++    intent=$root/replacement-intents/$transaction.json
++    mv -f "$prepared" "$intent"
++  fi
++fi
++if [ "${VICHE_TEST_FAIL_REGISTRY_SWAP:-}" = yes ]; then
++  rm -f "$tmp"
++  echo 'injected registry swap failure' >&2
++  exit 1
++fi
++if ! mv -f "$tmp" "$registry"; then
++  rm -f "$tmp"
++  echo 'appointment registry swap failed; prior registry remains authoritative' >&2
++  exit 1
++fi
++# Registry plus the durable prepared intent is the commit/reconciliation
++# evidence. Failure to install the committed provenance row leaves the intent
++# prepared and cannot turn an already-committed replacement into a failed call.
++if [ "$action" = replace ]; then
++  provenance=$root/replacement-provenance.jsonl
++  provenance_tmp=$(mktemp "$root/replacement-provenance.XXXXXXXX")
++  copied=true
++  if [ -f "$provenance" ]; then
++    cp "$provenance" "$provenance_tmp" 2>/dev/null || copied=false
++  fi
++  if [ "$copied" = true ] && jq -c --arg at "$(date -u +%FT%TZ)" \
++      '. + {state:"committed",completed_at:$at,successor:.proposed_successor}' "$intent" \
++      >> "$provenance_tmp" 2>/dev/null; then
++    if [ "${VICHE_TEST_FAIL_PROVENANCE_RENAME:-}" != yes ] &&
++       mv -f "$provenance_tmp" "$provenance" 2>/dev/null; then
++      rm -f "$intent" 2>/dev/null || :
++    else
++      rm -f "$provenance_tmp" 2>/dev/null || :
++    fi
++  else
++    rm -f "$provenance_tmp" 2>/dev/null || :
++  fi
++fi
++printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$key" "${old:--}" "$new" >> "$root/appointments.log" 2>/dev/null || :
+ if [ "$restart_orphan" = yes ]; then
+   # A discrete audited incarnation handoff, not an Act19 transient reset.
+   # The terminal evidence directory was persisted before the new appointment.
+@@ -133,6 +220,6 @@ if [ "$restart_orphan" = yes ]; then
+     --arg evidence "terminal-evidence/$old" \
+     '{at:$at,kind:"container_restart_orphan_new_appointment_no_prompt_replay",
+       office:$office,previous:$previous,successor:$successor,
+-      evidence:$evidence}' >> "$root/restart-renewals.jsonl"
++       evidence:$evidence}' >> "$root/restart-renewals.jsonl" 2>/dev/null || :
+ fi
+ printf '%s\n' "$new"
+diff --git a/government/branch-bootstrap.sh b/government/branch-bootstrap.sh
+index a1ed3cb7..ef6af099 100755
+--- a/government/branch-bootstrap.sh
++++ b/government/branch-bootstrap.sh
+@@ -61,7 +61,7 @@ if [ "$reset_due" = true ]; then
+   antonina agent log --id "$id" --lines 200 > "$snapshot/log.txt" 2>&1 || :
+   git -C "$cwd" status --short > "$snapshot/worktree.txt"
+   oc_quiesce_for_reset "$id" || exit 1
+-  id=$(/bin/sh "$town/government/appointments.sh" replace "$branch" "$id")
++  id=$(/bin/sh "$town/government/appointments.sh" replace "$branch" "$id" branch-bootstrap act19_failure_threshold 'Act 19 threshold reset after durable failure evidence and quiescence')
+   printf '%s\n' "$now" > "$liv/last-reset-$branch"
+   meta=$(antonina agent status --id "$id" --json)
+   oc_clear_failures "$liv" "$branch"
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+index f8ccdc15..1e15a4a3 100644
+--- a/government/clerk-liveness.sh
++++ b/government/clerk-liveness.sh
+@@ -47,7 +47,7 @@ if [ "$reset_due" = true ]; then
+   git -C "$seats/$seat_id" rev-parse HEAD > "$snapshot/worktree-head.txt"
+   # Persist the attempted recovery before any destructive agent-metadata operation.
+   oc_quiesce_for_reset "$id" || exit 1
+-  id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id" "$id")
++  id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id" "$id" clerk-liveness act19_failure_threshold 'Act 19 threshold reset after durable failure evidence and quiescence')
+   printf '%s\n' "$now" > "$state/last-reset-$seat_id"
+   oc_clear_failures "$state" "$seat_id"
+   printf '%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+diff --git a/government/seat-liveness.sh b/government/seat-liveness.sh
+index f00cba5f..98be723e 100644
+--- a/government/seat-liveness.sh
++++ b/government/seat-liveness.sh
+@@ -42,7 +42,7 @@ antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1
+ git -C "$seat" status --short > "$snapshot/worktree-status.txt"
+ git -C "$seat" rev-parse HEAD > "$snapshot/worktree-head.txt"
+ oc_quiesce_for_reset "$id" || exit 1
+-id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id" "$id")
++id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id" "$id" seat-liveness act19_failure_threshold 'Act 19 threshold reset after durable failure evidence and quiescence')
+ printf '%s\n' "$now" > "$root/last-reset-$seat_id"
+ oc_clear_failures "$root" "$seat_id"
+ printf '%s seat=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index 234ea8e2..11b1c71d 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -106,7 +106,7 @@ id4=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve "$office")
+ test "$id4" != "$id3"
+ # A concurrent supervisor still holding the old agent identity must NOT
+ # replace the new appointment after another observer won the reset.
+-if /bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" replace executive "$id3" >/dev/null 2>&1; then
++if /bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" replace executive "$id3" concurrency-test stale_supervisor 'stale contender' >/dev/null 2>&1; then
+   echo 'Stale supervisor overwrote newly recovered appointment' >&2; exit 1
+ fi
+ test "$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve executive)" = "$id4"
+@@ -115,6 +115,8 @@ test "$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve executive)
+ test "$(cat "$MOCK_ROOT/next")" -eq 1 || { echo 'Multiple replacements for one Act19 threshold event' >&2; exit 1; }
+ test "$(wc -l < "$VICHE_STATE_ROOT/liveness/recoveries.log")" -eq 1
+ test "$(wc -l < "$ledger")" -eq 3
++jq -e --arg prior "$id3" '.caller=="branch-bootstrap" and .trigger=="act19_failure_threshold" and .expected_prior_id==$prior and .reason!=""' \
++  "$VICHE_STATE_ROOT/appointments/replacement-provenance.jsonl" >/dev/null
+ # A failed stop may not begin reset cooldown or replace a live appointee.
+ oc_quiesce_for_reset_test_id=$id4
+ set_status running "$((base+5))" run-running idle false true "$oc_quiesce_for_reset_test_id"
+@@ -222,4 +224,6 @@ seat_after=$(/bin/sh "$d/town/government/appointments.sh" resolve c1a00007)
+ [ "$seat_after" != "$seat" ] || { echo 'Parliamentary seat did not reset on three distinct failures' >&2; exit 1; }
+ [ "$(awk -F '\t' '$1=="c1a00007"{n++} END{print n+0}' "$d/state/appointments/appointments.tsv")" -eq 1 ]
+ test "$(grep -c 'seat=c1a00007 session_reset=' "$d/state/liveness/recoveries.log")" -eq 1
++jq -e --arg prior "$seat" '.caller=="seat-liveness" and .trigger=="act19_failure_threshold" and .expected_prior_id==$prior and .reason!=""' \
++  "$d/state/appointments/replacement-provenance.jsonl" >/dev/null
+ echo 'appointment recovery integration tests passed'
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+index 8f097d02..ccecc42c 100644
+--- a/tests/appointments-smoke.sh
++++ b/tests/appointments-smoke.sh
+@@ -62,13 +62,29 @@ if /bin/sh "$script" ensure a1 >/dev/null 2>&1; then echo 'unreadable agent was
+ # Even confirmed stopped stays assigned until explicit supervisor replacement.
+ printf stopped > "$MOCK/$a"
+ [ "$(/bin/sh "$script" ensure a1)" = fresh-1 ]
+-c=$(/bin/sh "$script" replace a1)
++if VICHE_TEST_FAIL_REGISTRY_SWAP=yes /bin/sh "$script" replace a1 "$a" appointments-smoke fixture 'injected failed swap'; then
++  echo 'injected registry swap unexpectedly succeeded' >&2; exit 1
++fi
++[ "$(/bin/sh "$script" resolve a1)" = "$a" ] || { echo 'failed swap changed incumbent' >&2; exit 1; }
++intent=$(printf '%s\n' "$tmp"/state/appointments/replacement-intents/*.json)
++[ -s "$intent" ] || { echo 'failed swap lost prepared intent' >&2; exit 1; }
++jq -e --arg prior "$a" '.state=="prepared" and .caller=="appointments-smoke" and
++  .trigger=="fixture" and .expected_prior_id==$prior and .proposed_successor=="fresh-2" and
++  .reason=="injected failed swap" and .transaction!=""' "$intent" >/dev/null
++test "$(cat "$MOCK/counter")" -eq 2
++if /bin/sh "$script" replace a1 "$a" >/dev/null 2>&1; then echo 'replacement accepted missing context' >&2; exit 1; fi
++c=$(/bin/sh "$script" replace a1 "$a" appointments-smoke fixture 'injected failed swap')
+ [ "$c" = fresh-2 ] || exit 1
++[ "$(cat "$MOCK/counter")" -eq 2 ] || { echo 'retry created a duplicate replacement agent' >&2; exit 1; }
++[ "$(/bin/sh "$script" resolve a1)" = "$c" ]
++jq -e --arg prior "$a" --arg successor "$c" '.state=="committed" and
++  .expected_prior_id==$prior and .successor==$successor and .transaction!=""' \
++  "$tmp/state/appointments/replacement-provenance.jsonl" >/dev/null
+ jq -e '.state=="stopped" and .agent_id=="fresh-1"' \
+   "$tmp/state/appointments/terminal-evidence/fresh-1/event.json" >/dev/null
+ printf failed > "$MOCK/$c"
+ [ "$(/bin/sh "$script" ensure a1)" = fresh-2 ]
+-x=$(/bin/sh "$script" replace a1)
++x=$(/bin/sh "$script" replace a1 "$c" appointments-smoke fixture 'confirmed failed fixture agent')
+ [ "$x" = fresh-3 ] || exit 1
+ # Preserve the real failed status, no duplicate observation of this invocation.
+ jq -e '.state=="failed" and .agent_id=="fresh-2" and .office=="a1" and
+@@ -90,15 +106,15 @@ sed -i '/"agent_id":"fresh-2"/d' "$tmp/state/appointments/terminal-events.jsonl"
+ [ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 2 ]
+ [ "$(/bin/sh "$script" ensure a1)" = fresh-3 ]
+ [ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 2 ]
+-y=$(/bin/sh "$script" replace a1)
++y=$(/bin/sh "$script" replace a1 "$x" appointments-smoke fixture 'confirmed failed fixture agent')
+ [ "$y" = fresh-4 ] || exit 1
+ e=$(/bin/sh "$script" ensure executive)
+ [ "$e" = fresh-5 ] || exit 1
+ # A confirmed nontransient terminal failure must retain false, not be erased
+ # into null by jq's alternative operator (false // null is null).
+ printf failed-permanent > "$MOCK/$e"
+-[ "$(/bin/sh "$script" ensure executive)" = fresh-5 ]
+-f=$(/bin/sh "$script" replace executive)
++[ "$(/bin/sh "$script" ensure executive)" = "$e" ]
++f=$(/bin/sh "$script" replace executive "$e" appointments-smoke fixture 'permanent failure fixture')
+ [ "$f" = fresh-6 ] || exit 1
+ jq -e '.state=="failed" and .failure_class=="invalid_api_key" and
+         .transient==false and .automatic_retry_safe==false and
+@@ -117,21 +133,24 @@ jq -e '.kind=="container_restart_orphan_new_appointment_no_prompt_replay" and
+   "$tmp/state/appointments/restart-renewals.jsonl" >/dev/null
+ [ "$(/bin/sh "$script" ensure executive)" = "$g" ]
+ [ "$(wc -l < "$tmp/state/appointments/restart-renewals.jsonl")" -eq 1 ]
++jq -e '.caller=="appointments.ensure" and .trigger=="restart_orphan" and
++       .expected_prior_id=="fresh-6" and .reason=="confirmed PID1 restart orphan; no prompt replay"' \
++  "$tmp/state/appointments/replacement-provenance.jsonl" >/dev/null
+ # An unrelated failure that happened after this incarnation began must NOT
+ # be mistaken for an orphan, even if the error text was identical.
+ printf failed-restart-late > "$MOCK/$g"
+ [ "$(/bin/sh "$script" ensure executive)" = "$g" ]
+-h=$(/bin/sh "$script" replace executive "$g")
++h=$(/bin/sh "$script" replace executive "$g" appointments-smoke fixture 'late restart signature fixture')
+ [ "$h" = fresh-8 ]
+ # A backend error is not a missing-container-process error.
+ printf failed-restart-with-error > "$MOCK/$h"
+ [ "$(/bin/sh "$script" ensure executive)" = "$h" ]
+-i=$(/bin/sh "$script" replace executive "$h")
++i=$(/bin/sh "$script" replace executive "$h" appointments-smoke fixture 'backend error fixture')
+ [ "$i" = fresh-9 ]
+ # Pending steers require explicit review; do not discard their intent.
+ printf failed-restart-with-steer > "$MOCK/$i"
+ [ "$(/bin/sh "$script" ensure executive)" = "$i" ]
+-j=$(/bin/sh "$script" replace executive "$i")
++j=$(/bin/sh "$script" replace executive "$i" appointments-smoke fixture 'pending steer fixture')
+ [ "$j" = fresh-10 ]
+ # Even true container orphans may not bypass an explicit unsafe hold.
+ mkdir -p "$tmp/state/liveness/unsafe-holds"
+@@ -139,6 +158,19 @@ printf 'executive\told-id\tunsafe\n' > "$tmp/state/liveness/unsafe-holds/executi
+ printf failed-restart > "$MOCK/$j"
+ [ "$(/bin/sh "$script" ensure executive)" = "$j" ]
+ [ "$(wc -l < "$tmp/state/appointments/restart-renewals.jsonl")" -eq 1 ]
++# A post-registry provenance rename failure is a successful replacement with
++# its prepared intent retained for reconciliation, never a failed retry signal.
++printf stopped > "$MOCK/$y"
++before=$(cat "$MOCK/counter")
++recovered=$(VICHE_TEST_FAIL_PROVENANCE_RENAME=yes /bin/sh "$script" replace a1 "$y" appointments-smoke fixture 'provenance rename failure')
++[ "$(/bin/sh "$script" resolve a1)" = "$recovered" ]
++test "$(cat "$MOCK/counter")" -eq "$((before+1))"
++prepared=$(printf '%s\n' "$tmp"/state/appointments/replacement-intents/*.json)
++jq -e --arg prior "$y" --arg successor "$recovered" \
++  '.state=="prepared" and .expected_prior_id==$prior and .proposed_successor==$successor and
++   .caller=="appointments-smoke" and .reason=="provenance rename failure"' "$prepared" >/dev/null
++[ "$(/bin/sh "$script" ensure a1)" = "$recovered" ]
++test "$(cat "$MOCK/counter")" -eq "$((before+1))"
+ # No secret powers granted by supplying an unknown role key.
+ if /bin/sh "$script" ensure a2 >/dev/null 2>&1; then exit 1; fi
+ printf 'a1\tbad-1\na1\tbad-2\n' > "$tmp/state/appointments/appointments.tsv"
+diff --git a/tests/summons-smoke.sh b/tests/summons-smoke.sh
+index 69de2329..1738dda4 100644
+--- a/tests/summons-smoke.sh
++++ b/tests/summons-smoke.sh
+@@ -4,11 +4,12 @@ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ scratch=$(mktemp -d)
+ trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+-mkdir -p "$scratch/government" "$scratch/records/summons"
++mkdir -p "$scratch/government" "$scratch/records/summons" "$scratch/state"
+ printf 'c1a00001\tClerk\tintake\nc1a00002\tExecutive\tdelivery\nc1a00004\tResearch\tmetrics\nc1a00005\tResource\taudit\n' > "$scratch/government/seats.tsv"
+ printf '%s\n' 'UNIQUE ACT 10 CGROUP ASSIGNMENT' > "$scratch/records/summons/c1a00004.md"
+ VICHE_TOWN_ROOT=$scratch
+ VICHE_TOWNHALL_ID=302
++VICHE_STATE_ROOT=$scratch/state
+ # Constitutional boot normally appoints seats before rendering a sitting.
+ # Model benign managed statuses so the summons assertions test routing only.
+ mkdir -p "$scratch/bin"
+@@ -23,7 +24,7 @@ printf '{"state":"idle"}\n'
+ ANTONINA
+ chmod +x "$scratch/government/appointments.sh" "$scratch/bin/antonina"
+ PATH="$scratch/bin:$PATH"; export PATH
+-export VICHE_TOWN_ROOT VICHE_TOWNHALL_ID
++export VICHE_TOWN_ROOT VICHE_TOWNHALL_ID VICHE_STATE_ROOT
+ 
+ printf '%s\n' 'UNIQUE LIVE KAWUN EXECUTIVE ASSIGNMENT' > "$scratch/records/summons/c1a00002.md"
+ /bin/sh "$repo/government/sitting.sh" c1a00002 > "$scratch/executive.txt"

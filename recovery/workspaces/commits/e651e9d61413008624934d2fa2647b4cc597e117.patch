@@ -1,0 +1,604 @@
+commit e651e9d61413008624934d2fa2647b4cc597e117
+Author:     Viche Executive <executive@viche.local>
+AuthorDate: Mon Nov 9 10:07:23 2026 +0000
+Commit:     Viche Executive <executive@viche.local>
+CommitDate: Mon Nov 9 10:07:23 2026 +0000
+
+    Bounded re-probe for transient 'unknown' and visible dispatch failures
+    
+    Single squashed rebuild of delivery/executive-unknown-state-20261108 (tip
+    8677d2e) as one direct child of current main, per Act 28 s3(2), so the fix can
+    pass an Act 26 pre-landing check. Contents unchanged from the reviewed branch:
+    - new government/agent-state.sh shared bounded re-read helper;
+    - executive-cycle.sh, appointments.sh and branch-liveness.sh treat a transient
+      'unknown' as unknown-but-retryable, with a named diagnostic, instead of the
+      false 'unhealthy' class;
+    - innovation-centre-cycle.sh, recovery-steward-cycle.sh and audit-cycle.sh no
+      longer swallow a dispatch message into dispatch.log and no longer have a
+      silent '*' arm;
+    - tests/agent-state-helper-smoke.sh and tests/unknown-status-transient-smoke.sh
+      added; existing cycle smokes updated.
+
+diff --git a/government/agent-state.sh b/government/agent-state.sh
+new file mode 100644
+index 00000000..1a9f5465
+--- /dev/null
++++ b/government/agent-state.sh
+@@ -0,0 +1,62 @@
++#!/bin/sh
++# Shared POSIX helpers for probing a managed Antonina agent's state.
++# Sourced, never executed. No network, no scheduler, no state of its own.
++#
++# Why: Antonina intermittently reports state "unknown" (or fails the status
++# query) while a session transitions or recovers. One such sample is not
++# evidence that an office is dead, and it is also not evidence that it is idle.
++# Callers must therefore re-probe boundedly and then decide; this helper only
++# reports what was observed and never invents a state.
++#
++# agent_state_probe <agent-id> [retries] [delay-seconds]
++#   Sets:
++#     AGENT_STATE           final observed state, or "unknown"
++#     AGENT_STATE_ATTEMPTS  number of status probes performed
++#     AGENT_STATE_REASON    why the final value is not a recognized state
++#     AGENT_STATE_RAW       single-line, truncated last raw status
++#     AGENT_STATE_META      last raw status JSON, or empty
++#   Always returns 0.
++agent_state_probe() {
++  as_id=$1
++  as_retries=${2:-3}
++  as_delay=${3:-1}
++  case "$as_retries" in ''|*[!0-9]*|0) as_retries=1 ;; esac
++  case "$as_delay" in ''|*[!0-9]*) as_delay=1 ;; esac
++  AGENT_STATE_ATTEMPTS=0
++  AGENT_STATE_REASON=
++  AGENT_STATE_RAW=
++  AGENT_STATE=
++  AGENT_STATE_META=
++  while [ "$AGENT_STATE_ATTEMPTS" -lt "$as_retries" ]; do
++    AGENT_STATE_ATTEMPTS=$((AGENT_STATE_ATTEMPTS + 1))
++    if as_meta=$(antonina agent status --id "$as_id" --json 2>/dev/null); then
++      AGENT_STATE_META=$as_meta
++      AGENT_STATE_RAW=$(printf '%s' "$as_meta" | tr '\n' ' ' | cut -c1-200)
++      AGENT_STATE=$(printf '%s\n' "$as_meta" | jq -r '.state // empty' 2>/dev/null) || AGENT_STATE=
++      [ -n "$AGENT_STATE" ] || AGENT_STATE=unknown
++    else
++      AGENT_STATE=unknown
++      AGENT_STATE_REASON="status query failed"
++    fi
++    case "$AGENT_STATE" in
++      unknown) [ -n "$AGENT_STATE_REASON" ] || AGENT_STATE_REASON="agent reports 'unknown'" ;;
++      *) return 0 ;;
++    esac
++    [ "$AGENT_STATE_ATTEMPTS" -lt "$as_retries" ] || break
++    sleep "$as_delay"
++  done
++  return 0
++}
++
++# dispatch_failure_log <logfile>
++# Surface the captured dispatch log instead of hiding the concrete cause in a
++# file only an operator would find. Prints the path and its last lines to stderr.
++dispatch_failure_log() {
++  df_log=$1
++  if [ -s "$df_log" ]; then
++    printf 'Viche: dispatch log %s (last lines):\n' "$df_log" >&2
++    tail -n 5 "$df_log" 2>/dev/null | sed 's/^/Viche:   /' >&2 || :
++  else
++    printf 'Viche: dispatch log %s is empty or missing\n' "$df_log" >&2
++  fi
++}
+diff --git a/government/appointments.sh b/government/appointments.sh
+index 43cc1189..dbcafb92 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -69,6 +69,19 @@ if [ -n "$old" ]; then
+     exit 1
+   fi
+   status=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
++  # One "unknown" sample is a transient runtime observation, not a terminal
++  # state: re-probe a bounded number of times before deciding. A persistent
++  # unknown still fails closed for mutations below.
++  probe=0
++  while [ "$status" = unknown ] && [ "$probe" -lt 3 ]; do
++    probe=$((probe + 1))
++    sleep 1
++    if meta=$(antonina agent status --id "$old" --json 2>/dev/null); then
++      status=$(printf '%s\n' "$meta" | jq -er '.state' 2>/dev/null) || status=unknown
++    else
++      status=unknown
++    fi
++  done
+   case "$status" in
+     running|idle|clearexit) live=true;;
+     failed|stopped|killed) :;;
+@@ -79,7 +92,7 @@ if [ -n "$old" ]; then
+       # sample breaks every caller (sitting, liveness, oversight). Mutations
+       # still require a positively identified terminal state.
+       if [ "$action" = resolve ]; then live=unknown
+-      else echo "unknown status $status" >&2; exit 1
++      else echo "Viche: appointed agent $old still reports '$status' after $probe re-probe(s); refuse $action until a terminal state is proven" >&2; exit 1
+       fi;;
+   esac
+ fi
+diff --git a/government/audit-cycle.sh b/government/audit-cycle.sh
+index ea803d44..0e6043f2 100644
+--- a/government/audit-cycle.sh
++++ b/government/audit-cycle.sh
+@@ -16,9 +16,17 @@ id=$(/bin/sh "$town/government/appointments.sh" ensure judiciary)
+ [ -s "$charter" ] && [ -d "$seats/branches/judiciary" ] || exit 1
+ [ -f "$root/observations.tsv" ] || exit 0
+ # The Judiciary has its own durable officer; parliamentary summons never gate it.
+-meta=$(antonina agent status --id "$id" --json)
+-kind=$(printf '%s\n' "$meta" | jq -r '.state')
+-case "$kind" in running) exit 0;; failed) echo 'Judiciary: failed agent, independent recovery required' >&2; exit 1;; idle|clearexit) :;; *) exit 1;; esac
++. "$town/government/agent-state.sh"
++agent_state_probe "$id"
++kind=$AGENT_STATE
++case "$kind" in
++  running) exit 0 ;;
++  failed) echo 'Judiciary: failed agent, independent recovery required' >&2; exit 1 ;;
++  idle|clearexit) : ;;
++  *) echo "Judiciary state '$kind' unresolved after $AGENT_STATE_ATTEMPTS probe(s): $AGENT_STATE_REASON" >&2
++     echo "Viche: raw_status=$AGENT_STATE_RAW" >&2
++     exit 1 ;;
++esac
+ 
+ # Investigate an incident at least every half hour; also run independent
+ # broad audits at least once every six hours when there is no incident.
+diff --git a/government/branch-liveness.sh b/government/branch-liveness.sh
+index 4f85dabb..fe6e4cef 100755
+--- a/government/branch-liveness.sh
++++ b/government/branch-liveness.sh
+@@ -42,6 +42,16 @@ fi
+ if [ -z "$id" ]; then bootstrap_ok=false; fi
+ if [ "$bootstrap_ok" = true ] && [ -n "$id" ] && [ -s "$town/government/$program" ]; then
+   current=$(antonina agent status --id "$id" --json 2>/dev/null | jq -r '.state // "unknown"') || current=unknown
++  # "unknown" is a transient runtime sample, not positive evidence of death
++  # (see appointments.sh resolve). Re-probe briefly before withholding the
++  # cycle; a persistent unknown still withholds it, but was not declared on one
++  # arbitrary sample.
++  root_probe=0
++  while [ "$current" = unknown ] && [ "$root_probe" -lt 3 ]; do
++    root_probe=$((root_probe + 1))
++    sleep 1
++    current=$(antonina agent status --id "$id" --json 2>/dev/null | jq -r '.state // "unknown"' 2>/dev/null) || current=unknown
++  done
+   case "$current" in
+     stopped|killed|unknown) bootstrap_ok=false ;;
+     failed)
+@@ -64,11 +74,28 @@ readable=false
+ agent_state=unknown
+ model=unknown
+ variant=unknown
+-if [ -n "$id" ] && meta=$(antonina agent status --id "$id" --json 2>/dev/null); then
+-  if agent_state=$(printf '%s\n' "$meta" | jq -er '.state' 2>/dev/null); then
+-    readable=true
+-    model=$(printf '%s\n' "$meta" | jq -r '.model // "unknown"')
+-    variant=$(printf '%s\n' "$meta" | jq -r '.variant // "unknown"')
++if [ -n "$id" ]; then
++  meta=$(antonina agent status --id "$id" --json 2>/dev/null) || meta=
++  # Same transient-unknown rule: do not report "unhealthy" on one unreadable or
++  # transitional sample. Re-probe a bounded number of times.
++  meta_probe=0
++  while [ "$meta_probe" -lt 3 ]; do
++    if [ -n "$meta" ]; then
++      probe_state=$(printf '%s\n' "$meta" | jq -r '.state // "unknown"' 2>/dev/null) || probe_state=unknown
++    else
++      probe_state=unknown
++    fi
++    [ "$probe_state" = unknown ] || break
++    meta_probe=$((meta_probe + 1))
++    sleep 1
++    meta=$(antonina agent status --id "$id" --json 2>/dev/null) || meta=
++  done
++  if [ -n "$meta" ]; then
++    if agent_state=$(printf '%s\n' "$meta" | jq -er '.state' 2>/dev/null); then
++      readable=true
++      model=$(printf '%s\n' "$meta" | jq -r '.model // "unknown"')
++      variant=$(printf '%s\n' "$meta" | jq -r '.variant // "unknown"')
++    fi
+   fi
+ fi
+ readiness=unhealthy
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index e4262b9f..ca2bca3b 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -27,8 +27,40 @@ fi
+ # a pre-read failure; the open handoff remains and the next successful run
+ # honours it.
+ handoffs=$(/bin/sh "$town/government/handoff-queue.sh" list-open "$town") || exit 1
+-status=$(antonina agent status --id "$id" --json)
+-current=$(printf "%s\n" "$status" | jq -r ".state")
++# A transient backend failure can make Antonina return 'unknown' or an
++# unparseable status. Re-read a bounded number of times before deciding, and on
++# exhaustion fail with a distinct, actionable diagnostic. 'unknown' is NEVER
++# treated as idle: dispatching to an agent whose state is unknown could
++# duplicate work on an agent that is actually running.
++state_retries=${VICHE_AGENT_STATE_RETRIES:-3}
++state_delay=${VICHE_AGENT_STATE_DELAY:-1}
++case "$state_retries" in ''|*[!0-9]*|0) state_retries=1 ;; esac
++case "$state_delay" in ''|*[!0-9]*) state_delay=1 ;; esac
++attempt=1
++reason=
++while :; do
++  if ! status=$(antonina agent status --id "$id" --json 2>/dev/null); then
++    current=
++    reason="status query failed"
++  else
++    current=$(printf '%s\n' "$status" | jq -r '.state // empty' 2>/dev/null) || current=
++    [ -n "$current" ] || reason="status has no parseable .state field"
++  fi
++  case "$current" in
++    running|failed|idle|clearexit) reason=; break ;;
++  esac
++  [ -n "$reason" ] || reason="unrecognized agent state '$current'"
++  [ "$attempt" -lt "$state_retries" ] || break
++  attempt=$((attempt+1))
++  sleep "$state_delay"
++done
++if [ -n "$reason" ]; then
++  raw=$(printf '%s' "${status:-}" | tr '\n' ' ' | cut -c1-200)
++  echo "Viche: executive agent '$id' has no usable state after $attempt attempt(s): $reason" >&2
++  echo "Viche: raw_status=$raw" >&2
++  echo "Viche: refusing to dispatch on an unknown state; re-read later. Check 'antonina agent status --id $id --json'; if the agent no longer exists, re-resolve with 'appointments.sh ensure executive'." >&2
++  exit 1
++fi
+ case "$current" in
+   running) exit 0 ;;
+   failed)
+diff --git a/government/innovation-centre-cycle.sh b/government/innovation-centre-cycle.sh
+index c921b484..86735548 100755
+--- a/government/innovation-centre-cycle.sh
++++ b/government/innovation-centre-cycle.sh
+@@ -21,8 +21,10 @@ case "$now:$interval" in *[!0-9:]*|:*|*:) exit 2;; esac
+ /bin/sh "$town/government/branch-bootstrap.sh" innovation-centre \
+     > "$root/bootstrap.log" 2>&1 || { echo 'Innovation Centre bootstrap failed' >&2; exit 1; }
+ id=$(/bin/sh "$town/government/appointments.sh" ensure innovation-centre)
+-status=$(antonina agent status --id "$id" --json)
+-mode=$(printf '%s\n' "$status" | jq -r '.state // "unknown"')
++. "$town/government/agent-state.sh"
++agent_state_probe "$id"
++status=$AGENT_STATE_META
++mode=$AGENT_STATE
+ last=0
+ [ ! -s "$root/last-dispatch" ] || last=$(cat "$root/last-dispatch")
+ case "$last" in ''|*[!0-9]*) echo 'Invalid Innovation Centre timestamp' >&2; exit 1;; esac
+@@ -120,13 +122,16 @@ policy_file="$town/government/AGENT-REPORTING-POLICY.md"
+ prompt=$(printf '%s\n\n%s\n' "$prompt" "$(cat "$policy_file")")
+       antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach \
+         > "$root/dispatch.log" 2>&1 ||
+-        { echo 'Innovation Centre dispatch failed' >&2; exit 1; }
++        { echo "Innovation Centre dispatch failed for agent $id" >&2
++          dispatch_failure_log "$root/dispatch.log"; exit 1; }
+       printf '%s\n' "$now" > "$root/last-dispatch"
+       last=$now
+       readiness=dispatched
+       dispatched=true
+     fi ;;
+-  *) echo "Innovation Centre unhealthy: $mode" >&2; exit 1 ;;
++  *) echo "Innovation Centre state '$mode' unresolved after $AGENT_STATE_ATTEMPTS probe(s): $AGENT_STATE_REASON" >&2
++     echo "Viche: raw_status=$AGENT_STATE_RAW" >&2
++     exit 1 ;;
+ esac
+ activity=$(printf '%s\n' "$status" | jq -r '.last_activity_at // 0 | floor')
+ case "$activity" in ''|*[!0-9]*) activity=0;; esac
+diff --git a/government/recovery-steward-cycle.sh b/government/recovery-steward-cycle.sh
+index 7aa8460a..6bdd1d35 100644
+--- a/government/recovery-steward-cycle.sh
++++ b/government/recovery-steward-cycle.sh
+@@ -15,8 +15,11 @@ if [ ! -f "$cwd/.git" ] && [ ! -d "$cwd/.git" ]; then
+   git -C "$town" worktree add --detach "$cwd" HEAD
+ fi
+ id=$(/bin/sh "$town/government/appointments.sh" ensure recovery-steward)
+-meta=$(antonina agent status --id "$id" --json)
+-mode=$(printf '%s\n' "$meta" | jq -er '.state')
++. "$town/government/agent-state.sh"
++agent_state_probe "$id"
++meta=$AGENT_STATE_META
++mode=$AGENT_STATE
++[ -n "$meta" ] || meta='{}'
+ fresh=no
+ case "$mode" in
+   running) exit 0 ;;
+@@ -27,7 +30,9 @@ case "$mode" in
+     id=$(/bin/sh "$town/government/appointments.sh" replace recovery-steward "$id" recovery-steward terminal_new_session 'Fresh recovery investigator after terminal failure; no prompt or tool replay')
+     fresh=yes ;;
+   idle|clearexit) : ;;
+-  *) echo "Unrecognized recovery runner state: $mode" >&2; exit 1 ;;
++  *) echo "Recovery steward state '$mode' unresolved after $AGENT_STATE_ATTEMPTS probe(s): $AGENT_STATE_REASON" >&2
++     echo "Viche: raw_status=$AGENT_STATE_RAW" >&2
++     exit 1 ;;
+ esac
+ now=$(date +%s)
+ last=0
+@@ -58,7 +63,11 @@ EOF
+ policy_file="$town/government/AGENT-REPORTING-POLICY.md"
+ [ -s "$policy_file" ] || { echo "Viche: mandatory Founder agent policy missing" >&2; exit 1; }
+ prompt=$(printf '%s\n\n%s\n' "$prompt" "$(cat "$policy_file")")
+-antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1
++if ! antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1; then
++  echo "Recovery steward dispatch failed for agent $id" >&2
++  dispatch_failure_log "$root/dispatch.log"
++  exit 1
++fi
+ printf '%s\n' "$now" > "$root/last-dispatch"
+ printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$id" "$fresh" >> "$root/dispatches.tsv"
+ echo "Recovery steward dispatched: $id"
+diff --git a/tests/agent-state-helper-smoke.sh b/tests/agent-state-helper-smoke.sh
+new file mode 100755
+index 00000000..6b1454f1
+--- /dev/null
++++ b/tests/agent-state-helper-smoke.sh
+@@ -0,0 +1,70 @@
++#!/bin/sh
++# Shared agent-state probe: a transient "unknown" is retried boundedly, a
++# persistent one is reported with a reason, and a failed dispatch log is
++# surfaced instead of hidden. Unit test of government/agent-state.sh.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++mkdir -p "$d/bin"
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  "agent status")
++    n=$(cat "$MOCK_ROOT/unknown_left" 2>/dev/null || echo 0)
++    if [ "$n" -gt 0 ]; then
++      printf '%s\n' $((n - 1)) > "$MOCK_ROOT/unknown_left"
++      case "${MOCK_SHAPE:-state}" in
++        empty) printf '{}\n' ;;
++        fail) exit 3 ;;
++        *) printf '{"state":"unknown","model":"m","variant":"low"}\n' ;;
++      esac
++    else
++      printf '{"state":"%s","last_activity_at":123,"model":"m","variant":"low"}\n' \
++        "$(cat "$MOCK_ROOT/mode")"
++    fi ;;
++  "agent run") exit "${MOCK_RUN_RC:-0}" ;;
++  *) echo "unexpected: $*" >&2; exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock"
++mkdir -p "$d/mock"
++printf 'idle\n' > "$d/mock/mode"
++. "$repo/government/agent-state.sh"
++
++# 1. One transient sample, then a recognized state.
++printf '1\n' > "$d/mock/unknown_left"
++agent_state_probe probe-agent 3 0
++[ "$AGENT_STATE" = idle ]
++[ "$AGENT_STATE_ATTEMPTS" -eq 2 ]
++
++# 2. Persistent unknown: reported, not invented as idle.
++printf '9\n' > "$d/mock/unknown_left"
++agent_state_probe probe-agent 3 0
++[ "$AGENT_STATE" = unknown ]
++[ "$AGENT_STATE_ATTEMPTS" -eq 3 ]
++printf '%s' "$AGENT_STATE_REASON" | grep -Fq "unknown"
++
++# 3. A status payload without .state is unknown, not a crash.
++printf '9\n' > "$d/mock/unknown_left"
++MOCK_SHAPE=empty agent_state_probe probe-agent 2 0
++[ "$AGENT_STATE" = unknown ]
++[ "$AGENT_STATE_ATTEMPTS" -eq 2 ]
++
++# 4. A failing status query is unknown with a reason.
++printf '9\n' > "$d/mock/unknown_left"
++MOCK_SHAPE=fail agent_state_probe probe-agent 2 0
++[ "$AGENT_STATE" = unknown ]
++printf '%s' "$AGENT_STATE_REASON" | grep -Fq "status query failed"
++
++# 5. Dispatch failure surfaces the log tail, not an anonymous error.
++: > "$d/log"
++i=1
++while [ "$i" -le 8 ]; do printf 'line%s\n' "$i" >> "$d/log"; i=$((i + 1)); done
++dispatch_failure_log "$d/log" 2> "$d/err"
++grep -Fq "line8" "$d/err"
++grep -Fq "line4" "$d/err"
++if grep -Fq "line3" "$d/err"; then exit 1; fi
++echo 'Agent-state probe and dispatch-log transparency smoke passed'
+diff --git a/tests/audit-cycle-identity-smoke.sh b/tests/audit-cycle-identity-smoke.sh
+index 89a64dd2..4045f07d 100644
+--- a/tests/audit-cycle-identity-smoke.sh
++++ b/tests/audit-cycle-identity-smoke.sh
+@@ -6,6 +6,7 @@ d=$(mktemp -d)
+ trap 'rm -rf "$d"' EXIT HUP INT TERM
+ mkdir -p "$d/town/government" "$d/state/oversight/random" "$d/seats/branches/judiciary" "$d/bin"
+ cp "$repo/government/audit-cycle.sh" "$d/town/government/audit-cycle.sh"
++cp "$repo/government/agent-state.sh" "$d/town/government/agent-state.sh"
+ cp "$repo/government/AGENT-REPORTING-POLICY.md" "$d/town/government/AGENT-REPORTING-POLICY.md"
+ printf 'Charter\n' > "$d/charter"
+ printf 'observation\n' > "$d/state/oversight/observations.tsv"
+diff --git a/tests/executive-cycle-smoke.sh b/tests/executive-cycle-smoke.sh
+index 2fd4524c..7ad7e3de 100755
+--- a/tests/executive-cycle-smoke.sh
++++ b/tests/executive-cycle-smoke.sh
+@@ -25,7 +25,15 @@ case "$1 $2" in
+   "board show")
+     echo '{"body":"All agent execution and development work must happen on billy-dev.","messages":[]}' ;;
+   "agent status")
+-    printf '{"state":"%s","model":"%s","variant":"low"}\n' "$MODE" "$MODEL" ;;
++    if [ "$MODE" = sequence ]; then
++        n=0
++        [ ! -f "$MOCK_STATE/status-calls" ] || n=$(cat "$MOCK_STATE/status-calls")
++        n=$((n+1)); printf '%s\n' "$n" > "$MOCK_STATE/status-calls"
++        if [ "$n" -eq 1 ]; then printf '%s\n' '{"state":"unknown"}'
++        else printf '%s\n' '{"state":"running"}'; fi
++    else
++        printf '{"state":"%s","model":"%s","variant":"low"}\n' "$MODE" "$MODEL"
++    fi ;;
+   "agent run")
+     case "$*" in *"Founder charter fixture"*"301"*) : ;; *) exit 8 ;; esac
+     case "$*" in *"SoringP1"*"research-plan.md"*) : ;; *) exit 8 ;; esac
+@@ -46,6 +54,9 @@ MODE=idle MODEL=test-provider/example
+ OUTPUT=$scratch/dispatched
+ SORING_FRONTIER_STATE=$scratch/frontier.json
+ export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION MODE MODEL OUTPUT SORING_FRONTIER_STATE
++MOCK_STATE=$scratch
++MOCK_STATE=$MOCK_STATE
++export MOCK_STATE
+ grep -Fq "Before interacting with Antonina board or agents" "$repo/government/executive-cycle.sh"
+ grep -Fq "government/antonina-interface.md" "$repo/government/executive-agenda.md"
+ sh "$repo/government/executive-cycle.sh"
+@@ -70,4 +81,23 @@ BOARD_DOWN=yes
+ export MODE MODEL BOARD_DOWN
+ if sh "$repo/government/executive-cycle.sh" 2>/dev/null; then exit 1; fi
+ test "$(wc -l < "$OUTPUT")" -eq 3
++# A transient 'unknown' is re-read, not fatal and not treated as idle.
++MODE=sequence
++VICHE_AGENT_STATE_RETRIES=3 VICHE_AGENT_STATE_DELAY=0
++export MODE VICHE_AGENT_STATE_RETRIES VICHE_AGENT_STATE_DELAY
++rm -f "$MOCK_STATE/status-calls"
++sh "$repo/government/executive-cycle.sh"
++test "$(cat "$MOCK_STATE/status-calls")" -eq 2
++test "$(wc -l < "$OUTPUT")" -eq 3
++
++# A persistent 'unknown' fails closed with a specific diagnostic and no dispatch.
++MODE=unknown
++export MODE
++if sh "$repo/government/executive-cycle.sh" 2>"$scratch/unknown.err"; then
++    echo 'FAIL: persistent unknown state must not be treated as success' >&2; exit 1
++fi
++grep -q 'has no usable state' "$scratch/unknown.err"
++grep -q "unrecognized agent state 'unknown'" "$scratch/unknown.err"
++test "$(wc -l < "$OUTPUT")" -eq 3
++
+ echo 'Independent Executive dispatch and fail-closed assignment smoke passed'
+diff --git a/tests/innovation-centre-smoke.sh b/tests/innovation-centre-smoke.sh
+index 64b348f7..5a943865 100755
+--- a/tests/innovation-centre-smoke.sh
++++ b/tests/innovation-centre-smoke.sh
+@@ -39,6 +39,7 @@ mkdir -p "$scratch/town/government"
+ cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
+ cp "$repo/government/AGENT-REPORTING-POLICY.md" "$scratch/town/government/AGENT-REPORTING-POLICY.md"
+ cp "$repo/government/delivery-candidates.py" "$scratch/town/government/delivery-candidates.py"
++cp "$repo/government/agent-state.sh" "$scratch/town/government/agent-state.sh"
+ # Fixture law, deliberately WITHOUT the Executive Innovation Office heading.
+ # Four scripts grep LAWS.md for that heading to choose the office model; this
+ # fixture asserts the LEGISLATIVE path, so it supplies a minimal law that does
+diff --git a/tests/oversight-smoke.sh b/tests/oversight-smoke.sh
+index 549271db..20274dfc 100644
+--- a/tests/oversight-smoke.sh
++++ b/tests/oversight-smoke.sh
+@@ -38,6 +38,7 @@ mkdir -p "$scratch/town/government"
+ cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
+ cp "$repo/government/AGENT-REPORTING-POLICY.md" "$scratch/town/government/AGENT-REPORTING-POLICY.md"
+ cp "$repo/government/delivery-candidates.py" "$scratch/town/government/delivery-candidates.py"
++cp "$repo/government/agent-state.sh" "$scratch/town/government/agent-state.sh"
+ VICHE_TOWN_ROOT=$scratch/town
+ VICHE_SEATS_ROOT=$scratch/seats
+ VICHE_STATE_ROOT=$scratch/state
+diff --git a/tests/recovery-steward-smoke.sh b/tests/recovery-steward-smoke.sh
+index d01bdb5b..6f412c06 100644
+--- a/tests/recovery-steward-smoke.sh
++++ b/tests/recovery-steward-smoke.sh
+@@ -41,6 +41,7 @@ chmod +x "$d/bin/antonina" "$d/town/government/appointments.sh"
+ export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock"
+ cp "$repo/government/AGENT-REPORTING-POLICY.md" "$d/town/government/AGENT-REPORTING-POLICY.md"
+ cp "$repo/government/delivery-candidates.py" "$d/town/government/delivery-candidates.py"
++cp "$repo/government/agent-state.sh" "$d/town/government/agent-state.sh"
+ export VICHE_TOWN_ROOT="$d/town" VICHE_SEATS_ROOT="$d/seats"
+ export VICHE_STATE_ROOT="$d/state" VICHE_CONSTITUTION="$d/charter"
+ # Exercise the service's actual profile/strict-mode prefix. Both errexit and
+diff --git a/tests/unknown-status-transient-smoke.sh b/tests/unknown-status-transient-smoke.sh
+new file mode 100755
+index 00000000..c26b5f56
+--- /dev/null
++++ b/tests/unknown-status-transient-smoke.sh
+@@ -0,0 +1,92 @@
++#!/bin/sh
++# A transient Antonina "unknown" status sample must not abort the Executive
++# cycle or mark the branch unhealthy; a persistent unknown still fails closed
++# with an actionable message and performs no dispatch.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++mkdir -p "$d/bin" "$d/town/government" "$d/town/records/handoffs" \
++  "$d/seats/branches/executive" "$d/state" "$d/mock"
++printf 'c1a00001\tClerk\tintake\n' > "$d/town/government/seats.tsv"
++printf 'Founder charter fixture\n' > "$d/charter"
++cp "$repo/government/appointments.sh" "$repo/government/branch-bootstrap.sh" \
++  "$repo/government/branch-liveness.sh" "$repo/government/executive-cycle.sh" \
++  "$repo/government/office-continuity.sh" "$repo/government/handoff-queue.sh" \
++  "$repo/government/predict-scorer.py" "$repo/government/eligible-work.py" \
++  "$repo/government/research-frontier-status.py" \
++  "$repo/government/delivery-candidates.py" "$repo/government/AGENT-REPORTING-POLICY.md" \
++  "$d/town/government/"
++git -C "$d/town" init -q
++git -C "$d/town" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm town
++git -C "$d/town" update-ref refs/remotes/origin/main HEAD
++git -C "$d/seats/branches/executive" init -q
++git -C "$d/seats/branches/executive" -c user.name=test -c user.email=test@example.test \
++  commit --allow-empty -qm baseline
++mkdir -p "$d/state/appointments"
++printf 'executive\tid-exec\n' > "$d/state/appointments/appointments.tsv"
++printf '{"fronts":[],"curator":{"exit_state":"clearexit","added":0,"last_finished_at":1000}}\n' \
++  > "$d/frontier.json"
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  "board list") echo '[{"number":"301","title":"SoringP1"}]' ;;
++  "board show") echo '{"body":"x","messages":[]}' ;;
++  "agent status")
++    n=$(cat "$MOCK_ROOT/unknown_left" 2>/dev/null || echo 0)
++    if [ "$n" -gt 0 ]; then
++      printf '%s\n' $((n - 1)) > "$MOCK_ROOT/unknown_left"
++      printf '{"state":"unknown","model":"m","variant":"low"}\n'
++    else
++      printf '{"state":"%s","model":"m","variant":"low"}\n' "$(cat "$MOCK_ROOT/mode")"
++    fi ;;
++  "agent run") printf 'run\n' >> "$MOCK_ROOT/runs" ;;
++  *) echo "unexpected Antonina call: $*" >&2; exit 9 ;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock" VICHE_TOWN_ROOT="$d/town" \
++  VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state" \
++  VICHE_CONSTITUTION="$d/charter" SORING_FRONTIER_STATE="$d/frontier.json"
++mode_executive() { printf '%s\n' "$1" > "$d/mock/mode"; }
++unknown_samples() { printf '%s\n' "$1" > "$d/mock/unknown_left"; }
++runs() { wc -l < "$d/mock/runs" 2>/dev/null || echo 0; }
++touch "$d/state/inaugurated"
++cycle=$d/town/government/executive-cycle.sh
++
++# 1. One transient unknown sample: the cycle must still dispatch, not abort.
++mode_executive idle
++unknown_samples 1
++/bin/sh "$cycle"
++test "$(runs)" -eq 1
++
++# 2. Persistent unknown: fail closed, no dispatch, actionable message.
++unknown_samples 99
++if /bin/sh "$cycle" 2>"$d/err"; then
++  echo "persistent unknown must not be treated as healthy" >&2
++  exit 1
++fi
++test "$(runs)" -eq 1
++grep -Fq "re-probe" "$d/err"
++
++# 3. Transient unknown in the supervisor: readiness must not be unhealthy.
++unknown_samples 1
++out=$(/bin/sh "$d/town/government/branch-liveness.sh" executive 2>&1) || {
++  echo "$out" >&2
++  echo "transient unknown marked the executive branch unhealthy" >&2
++  exit 1
++}
++jq -e '.readiness=="ready" and .cycle_accepted==true' \
++  "$d/state/branches/executive.json" >/dev/null
++
++# 4. Persistent unknown in the supervisor: still unhealthy and no dispatch.
++before=$(runs)
++unknown_samples 99
++if /bin/sh "$d/town/government/branch-liveness.sh" executive >/dev/null 2>&1; then
++  echo "persistent unknown must surface as unhealthy" >&2
++  exit 1
++fi
++test "$(runs)" -eq "$before"
++jq -e '.readiness=="unhealthy"' "$d/state/branches/executive.json" >/dev/null
++echo 'Transient-versus-persistent unknown-status smoke passed'

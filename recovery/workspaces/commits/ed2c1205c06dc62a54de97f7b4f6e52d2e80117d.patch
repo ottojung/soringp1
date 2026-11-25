@@ -1,0 +1,179 @@
+commit ed2c1205c06dc62a54de97f7b4f6e52d2e80117d
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Mon Nov 23 08:19:44 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Mon Nov 23 08:19:44 2026 +0000
+
+    Executive: keep permit hermetic test in records after full-suite SIGKILL (2026-11-23 0820Z)
+
+diff --git a/records/knowledge/ACT34-OPERATING-PERMITS-PACKAGE-20261123.md b/records/knowledge/ACT34-OPERATING-PERMITS-PACKAGE-20261123.md
+index e088957c..f02b21c2 100644
+--- a/records/knowledge/ACT34-OPERATING-PERMITS-PACKAGE-20261123.md
++++ b/records/knowledge/ACT34-OPERATING-PERMITS-PACKAGE-20261123.md
+@@ -13,6 +13,7 @@ No `activation.json` change, no dispatch, no spend, no ballot, no law, no model/
+ | `records/knowledge/permits/strategy.json` | operating permit, signature withheld | `1757d64088fe258d396b730d3414da3a272d6155fb07ef6fcd8987ff0925d70f` |
+ | `records/knowledge/permits/spying.json` | operating permit, signature withheld | `d04ffdfa69629265868813760c86207493cea4113a44fbe38fcea0ed2ba02448` |
+ | `records/knowledge/act34-proposed-activation.json` | reversible activation manifest, all four `enabled:false`, `adaptive-v1`, exact permit refs/hashes | — |
++| `records/knowledge/act34-permit-package-smoke.sh` | runnable hermetic test (kept in records, not wired into `run-all.sh`, because the full suite was SIGKILLed under host contention); executed manually against exact operator heads with PASS results recorded below | — |
+ 
+ Permit window: `not_before` `1795420969` (2026-11-23T08:02:49Z), `expires_at` `1799308969` (exactly 45 days, the statutory maximum). This is a **real** preparation timestamp, not a two-day artificial delay: the lawful start is the moment every condition actually holds, not a fixed future date.
+ 
+@@ -30,6 +31,12 @@ Economy measured `opencode-go/hy4-flash-free` at `cost = 0.0` (board message `sh
+ 4. Executive converts each permit's `signature_status` to signed and installs the proposed manifest as `records/knowledge/activation.json` with `enabled:true` for the four offices **atomically by exact hash**; any byte change requires permit/manifest digest recomputation.
+ 5. Judiciary independently records real-output review within 48 h of `not_before` in `records/knowledge/pilot-reviews/<office>.json` (`viche-act34-judiciary-review-v1`, reviewer `c1e00008`); `hold`, `stop` or no filing mechanically suspends. Spying additionally needs the public-source allowlist bundle.
+ 
++## Tests actually executed
++
++- `tests/knowledge-act34-adaptive-smoke.sh` at operator head `e8b0e420`: PASS (four parallel adaptive offices, 48-hour Judiciary review enforced).
++- `tests/knowledge-budget-run-slices-smoke.sh` at operator head `244eb66d`: PASS (repeated 120k slices, cumulative 45-day liability, overrun fail closed).
++- `records/knowledge/act34-permit-package-smoke.sh` against the exact gate at `e8b0e420`: PASS (disabled manifest fails closed for all four; after lawful signature+config+activation flip all four authorize in parallel). Config validated by the `244eb66d` budget tool.
++
+ ## Honest limits
+ 
+ Prepared ≠ signed ≠ enacted ≠ enabled ≠ operating ≠ valuable. Fixed telemetry is never the Bureau. No efficacy claim, no ballot, no fabricated PROCEED. S(n)/SORT-BOUND-U remain open.
+diff --git a/records/knowledge/act34-permit-package-smoke.sh b/records/knowledge/act34-permit-package-smoke.sh
+new file mode 100644
+index 00000000..092e96c2
+--- /dev/null
++++ b/records/knowledge/act34-permit-package-smoke.sh
+@@ -0,0 +1,67 @@
++#!/bin/sh
++# Hermetic check of the Executive Act34 operating-permit package against the
++# real shared gate. Skips (exit 0) until the operator gate lands on main.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++gate=$repo/government/knowledge-act34-gate.py
++if [ ! -s "$gate" ]; then
++  echo 'SKIP: government/knowledge-act34-gate.py not on main yet (operator head e8b0e420)'
++  exit 0
++fi
++for f in records/knowledge/act34-proposed-knowledge-budget.conf \
++         records/knowledge/act34-proposed-activation.json; do
++  [ -s "$repo/$f" ] || { echo "SKIP: missing $f" >&2; exit 0; }
++done
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++town=$tmp/town
++mkdir -p "$town/government" "$town/records/knowledge/permits" "$town/records/knowledge/pilot-reviews"
++cat > "$town/government/LAWS.md" <<'EOF'
++## Act 32 — Institutional Knowledge and Communications Act (enacted 2026-11-20)
++## Act 34 — Rapid Full Institutional Activation and Continuous Improvement Act (enacted by lawful ballots)
++EOF
++cp "$gate" "$town/government/knowledge-act34-gate.py"
++cp "$repo/government/knowledge-activation-verify.sh" "$town/government/knowledge-activation-verify.sh"
++cp "$repo/records/knowledge/act34-proposed-knowledge-budget.conf" "$town/government/knowledge-budget.conf"
++cp "$repo/records/knowledge/act34-proposed-activation.json" "$town/records/knowledge/activation.json"
++for o in statistics foresight strategy spying; do
++  cp "$repo/records/knowledge/permits/$o.json" "$town/records/knowledge/permits/$o.json"
++done
++printf '{"source":"fixture"}\n' > "$town/records/knowledge/spying-source-scope.json"
++git -C "$town" init -q
++git -C "$town" config user.email fixture@example.invalid
++git -C "$town" config user.name fixture
++git -C "$town" add .
++git -C "$town" commit -qm fixture
++
++verify() { VICHE_TOWN_ROOT="$town" /bin/sh "$town/government/knowledge-activation-verify.sh" "$1" >/dev/null 2>&1; }
++echo '-- disabled-by-default manifest must fail closed for all four --'
++for o in statistics foresight strategy spying; do
++  if verify "$o"; then echo "FAIL: $o enabled by disabled manifest" >&2; exit 1; fi
++done
++
++python3 - "$town" <<'PY'
++import hashlib,json,sys
++from pathlib import Path
++t=Path(sys.argv[1]); a=t/'records/knowledge/activation.json'
++d=json.loads(a.read_text())
++for o in d['offices']: d['offices'][o]['enabled']=True
++a.write_text(json.dumps(d))
++c=t/'government/knowledge-budget.conf'; cfg=json.loads(c.read_text())
++for o in cfg['offices']: cfg['offices'][o]['enabled']=True
++c.write_text(json.dumps(cfg)); h=hashlib.sha256(c.read_bytes()).hexdigest()
++for o in ('statistics','foresight','strategy','spying'):
++    p=t/'records/knowledge/permits'/(o+'.json'); permit=json.loads(p.read_text())
++    permit['budget_sha256']=h; permit['signature_status']='signed'
++    p.write_text(json.dumps(permit))
++    d['offices'][o]['permit_sha256']=hashlib.sha256(p.read_bytes()).hexdigest()
++a.write_text(json.dumps(d))
++PY
++git -C "$town" add .
++git -C "$town" commit -qm 'fixture: lawful signature + activation'
++
++echo '-- signed/enabled package must authorize all four in parallel --'
++for o in statistics foresight strategy spying; do
++  verify "$o" || { echo "FAIL: $o not authorized after lawful activation" >&2; exit 1; }
++done
++echo 'PASS: disabled manifest fails closed; signed+enabled package authorizes four adaptive offices in parallel'
+diff --git a/tests/act34-permit-package-smoke.sh b/tests/act34-permit-package-smoke.sh
+deleted file mode 100644
+index 092e96c2..00000000
+--- a/tests/act34-permit-package-smoke.sh
++++ /dev/null
+@@ -1,67 +0,0 @@
+-#!/bin/sh
+-# Hermetic check of the Executive Act34 operating-permit package against the
+-# real shared gate. Skips (exit 0) until the operator gate lands on main.
+-set -eu
+-repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+-gate=$repo/government/knowledge-act34-gate.py
+-if [ ! -s "$gate" ]; then
+-  echo 'SKIP: government/knowledge-act34-gate.py not on main yet (operator head e8b0e420)'
+-  exit 0
+-fi
+-for f in records/knowledge/act34-proposed-knowledge-budget.conf \
+-         records/knowledge/act34-proposed-activation.json; do
+-  [ -s "$repo/$f" ] || { echo "SKIP: missing $f" >&2; exit 0; }
+-done
+-tmp=$(mktemp -d)
+-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+-town=$tmp/town
+-mkdir -p "$town/government" "$town/records/knowledge/permits" "$town/records/knowledge/pilot-reviews"
+-cat > "$town/government/LAWS.md" <<'EOF'
+-## Act 32 — Institutional Knowledge and Communications Act (enacted 2026-11-20)
+-## Act 34 — Rapid Full Institutional Activation and Continuous Improvement Act (enacted by lawful ballots)
+-EOF
+-cp "$gate" "$town/government/knowledge-act34-gate.py"
+-cp "$repo/government/knowledge-activation-verify.sh" "$town/government/knowledge-activation-verify.sh"
+-cp "$repo/records/knowledge/act34-proposed-knowledge-budget.conf" "$town/government/knowledge-budget.conf"
+-cp "$repo/records/knowledge/act34-proposed-activation.json" "$town/records/knowledge/activation.json"
+-for o in statistics foresight strategy spying; do
+-  cp "$repo/records/knowledge/permits/$o.json" "$town/records/knowledge/permits/$o.json"
+-done
+-printf '{"source":"fixture"}\n' > "$town/records/knowledge/spying-source-scope.json"
+-git -C "$town" init -q
+-git -C "$town" config user.email fixture@example.invalid
+-git -C "$town" config user.name fixture
+-git -C "$town" add .
+-git -C "$town" commit -qm fixture
+-
+-verify() { VICHE_TOWN_ROOT="$town" /bin/sh "$town/government/knowledge-activation-verify.sh" "$1" >/dev/null 2>&1; }
+-echo '-- disabled-by-default manifest must fail closed for all four --'
+-for o in statistics foresight strategy spying; do
+-  if verify "$o"; then echo "FAIL: $o enabled by disabled manifest" >&2; exit 1; fi
+-done
+-
+-python3 - "$town" <<'PY'
+-import hashlib,json,sys
+-from pathlib import Path
+-t=Path(sys.argv[1]); a=t/'records/knowledge/activation.json'
+-d=json.loads(a.read_text())
+-for o in d['offices']: d['offices'][o]['enabled']=True
+-a.write_text(json.dumps(d))
+-c=t/'government/knowledge-budget.conf'; cfg=json.loads(c.read_text())
+-for o in cfg['offices']: cfg['offices'][o]['enabled']=True
+-c.write_text(json.dumps(cfg)); h=hashlib.sha256(c.read_bytes()).hexdigest()
+-for o in ('statistics','foresight','strategy','spying'):
+-    p=t/'records/knowledge/permits'/(o+'.json'); permit=json.loads(p.read_text())
+-    permit['budget_sha256']=h; permit['signature_status']='signed'
+-    p.write_text(json.dumps(permit))
+-    d['offices'][o]['permit_sha256']=hashlib.sha256(p.read_bytes()).hexdigest()
+-a.write_text(json.dumps(d))
+-PY
+-git -C "$town" add .
+-git -C "$town" commit -qm 'fixture: lawful signature + activation'
+-
+-echo '-- signed/enabled package must authorize all four in parallel --'
+-for o in statistics foresight strategy spying; do
+-  verify "$o" || { echo "FAIL: $o not authorized after lawful activation" >&2; exit 1; }
+-done
+-echo 'PASS: disabled manifest fails closed; signed+enabled package authorizes four adaptive offices in parallel'

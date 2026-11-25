@@ -1,0 +1,64 @@
+commit ebfd1f810ee1abf2d8d7a290a1c383b32b4a369c
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Wed Nov 25 10:59:11 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Wed Nov 25 10:59:11 2026 +0000
+
+    Integrate delivery/pnp-obligation-heavy-20261125 (executive): Use heavy managed queue for exact obligation proofs
+    
+    Landed by the integration queue (Act 31) as one candidate on main 6709d7aaffea.
+    
+    Delivery-Branch: delivery/pnp-obligation-heavy-20261125
+    Delivery-Head: 57b5d469cd7e093b9395182f9847dcdf39f66a71
+    Proposed-By: executive
+    Reviewed-By: reviewer-6alnggrfzdpfgn8etful01-robert
+    Review-Reason: Removing --light correctly routes local obligation checks through the exclusive heavy queue: generated obligation sources always import Mathlib and the mandate requires heavy for full Mathlib imports, while light mode's 2 GiB cap defers them. No law/seat or records files are touched, the new regress
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/missions/pnp/research/obligations.py b/missions/pnp/research/obligations.py
+index 4d3aa1df..c05bcf72 100644
+--- a/missions/pnp/research/obligations.py
++++ b/missions/pnp/research/obligations.py
+@@ -222,6 +222,13 @@ def verified_record(row):
+         return source_verified(k.artifact(row["source_digest"]).read_text(),row["node"],legacy=True)
+     except (OSError,ValueError,KeyError,TypeError):return False
+ 
++def local_compile_command(path):
++    # Obligation sources always import Mathlib, so they require the exclusive
++    # heavy queue. Light mode is only for narrow scratch files.
++    return [str(Path.home()/".local/bin/python3"),"-m","missions.pnp.compile",
++            "--","lake","env","lean",str(path)]
++
++
+ def solve(c,oid,path,local=False,method=False):
+     obj=k.get(c,oid)
+     if obj["kind"]!="obligation":raise ValueError("not an obligation")
+@@ -240,9 +247,8 @@ def solve(c,oid,path,local=False,method=False):
+             f.write(src);f.flush()
+             if local:
+                 env=dict(os.environ,PYTHONPATH="/var/lib/lubko/wd/viche")
+-                proc=subprocess.run([str(Path.home()/".local/bin/python3"),"-m","missions.pnp.compile",
+-                                     "--light","--","lake","env","lean",f.name],cwd=work/"lean",
+-                                    env=env,capture_output=True,text=True,timeout=1200)
++                proc=subprocess.run(local_compile_command(f.name),cwd=work/"lean",
++                                   env=env,capture_output=True,text=True,timeout=1200)
+                 result={"status":"elaborated" if proc.returncode==0 else "not_elaborated",
+                         "exit_code":proc.returncode,"base":base,"source_sha256":sourcehash,
+                         "diagnostic":(proc.stdout+"\n"+proc.stderr)[-16000:],"mode":"local-managed"}
+diff --git a/tests/pnp-research.py b/tests/pnp-research.py
+index 62d76f9c..a777b5b0 100644
+--- a/tests/pnp-research.py
++++ b/tests/pnp-research.py
+@@ -65,6 +65,12 @@ class Research(unittest.TestCase):
+         injected=self.obligation("True\naxiom bogus : False")
+         with self.assertRaises(ValueError):o.build(self.c,injected,"by trivial")
+ 
++    def test_local_compile_command_uses_heavy_queue(self):
++        cmd=o.local_compile_command("Proof.lean")
++        self.assertNotIn("--light",cmd)
++        self.assertIn("--",cmd)
++        self.assertEqual(cmd[-4:],["lake","env","lean","Proof.lean"])
++
+     def test_sync_receipt(self):
+         from types import SimpleNamespace
+         a=self.obligation("True")

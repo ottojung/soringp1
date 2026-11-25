@@ -1,0 +1,151 @@
+commit ed32564ebcfaef7e04c1d16ba0b157c573796f2c
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Tue Nov 24 19:38:04 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Tue Nov 24 19:38:04 2026 +0000
+
+    Integrate delivery/pnp-transport-20261124 (executive): pnp: design note for private marceline Lean build transport
+    
+    Landed by the integration queue (Act 31) as one candidate on main 95a41af43d5a.
+    
+    Delivery-Branch: delivery/pnp-transport-20261124
+    Delivery-Head: bde65168e74c10ba95b5225a936b3c008dc018e8
+    Proposed-By: executive
+    Reviewed-By: none (additive records, Act 31 §3)
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/records/research/2026-11-24-pnp-marceline-private-lean-transport.md b/records/research/2026-11-24-pnp-marceline-private-lean-transport.md
+new file mode 100644
+index 00000000..9c50c8d2
+--- /dev/null
++++ b/records/research/2026-11-24-pnp-marceline-private-lean-transport.md
+@@ -0,0 +1,129 @@
++# PnP private authenticated remote Lean build transport — design note
++
++Status: **design-only; implementation blocked by missing authorized private channel**.
++Owner context: Executive engineering transport task (Founder handoff H-1795547911-c50a),
++study `records/research/2026-11-24-founder-proof-production-study.md` section 5.
++Date: 2026-11-24 UTC.
++
++## Problem
++
++marceline-dev (32 cores / 62 GiB RAM) can compile Lean proofs faster than billy-dev
++(4 cores / 15 GiB RAM), but the two hosts do not resolve each other and no SSH
++listener was observed. Both hosts have authenticated GitHub SSH outbound and the
++Viche repository is public. Unpublished proof sources and credentials must never be
++placed in public refs or public artifacts. No new spending and no new network
++listener are authorized.
++
++## Hard constraints
++
++- Pin base revision and Lean/toolchain; validate exact source/statement before build.
++- Isolate a scratch worktree; deduplicate exact source digests.
++- Cap memory/time to checker limits; cancel obsolete jobs; cache diagnostics.
++- Parallelize under measured headroom; persistent cached build workers.
++- Do not add a second MANDATORY redundant build.
++- No public proof relay; no access-control bypass; no unpublished proof sources or
++  credentials in public refs/artifacts; no new spending; no new network listener.
++
++## Proposed design (minimal)
++
++### 1. Source package (billy-dev, sender)
++
++- Input: exact `base_revision` (Viche/PnP repo commit), `toolchain` (elan/lean
++  toolchain identifier and hash), target gap/lemma identifier, and a minimal source
++  manifest listing only files required for the proof check.
++- Compute `source_digest = sha256(canonical_manifest + sorted(file_digest, path))`.
++  Canonical manifest is UTF-8, LF, sorted paths, no timestamps.
++- Validate before packaging: exact target statement/module/path/imports match the
++  held gap/desk metadata; reject if statement drifted; record validation result.
++- Create an isolated scratch git worktree at `base_revision`; overlay only the
++  manifest files; verify overlay paths are inside the scratch root.
++- Package as a deterministic tar (sorted, fixed mtime/uid/gid, no xattrs) then
++  encrypt+authenticate before leaving the host. Plaintext unpublished sources never
++  written to a public location.
++
++### 2. Private authenticated transport
++
++The transport carries only encrypted, authenticated blobs addressed by
++`source_digest`. It must provide confidentiality, integrity, sender/receiver
++authentication, and access control limited to billy-dev and marceline-dev operators.
++
++**Required external authorization/channel (not currently available):**
++
++- **Option A (preferred, uses existing GitHub SSH outbound):** a Founder-authorized
++  **private GitHub repository** (or private GitHub Package/container/blob store with
++  SSH/Git auth) dedicated to encrypted build bundles. Both hosts already have
++  authenticated GitHub SSH outbound; authorization needed is: create the private
++  repo, grant the existing billy-dev and marceline-dev GitHub identities read/write
++  access, and approve its use for encrypted unpublished-proof build bundles. No new
++  listener, no new spending if within existing GitHub plan; public Viche repo remains
++  clean. Bundle objects are encrypted before push; only ciphertext and digests appear
++  in the private repo.
++- **Option B:** an authorized private object store or SSH endpoint reachable by both
++  hosts over existing authorized outbound paths, with credentials provisioned through
++  an existing secret channel. This needs explicit Founder authorization of endpoint,
++  credentials, and spending/network policy.
++- **Option C:** Founder-authorized Tailscale/WireGuard/private tunnel. Rejected under
++  current constraints unless separately authorized: it changes network exposure and
++  may require new listeners/services/spending decisions.
++
++No option is implemented because no existing private authenticated channel for
++unpublished proof sources was observed (see Evidence).
++
++### 3. Remote build worker (marceline-dev)
++
++- Persistent worker polls the authorized private channel for new digest jobs; no
++  inbound listener.
++- Deduplicate by `source_digest`: if cached result exists for same
++  `(base_revision, toolchain, source_digest, checker_limits)`, return cached
++  diagnostics/artifact metadata.
++- For new jobs: fetch ciphertext, verify authentication, decrypt locally in a tmpfs
++  or private work dir, materialize scratch worktree at pinned `base_revision`, apply
++  overlay, verify manifest digests, verify exact target statement.
++- Run Lean/check under cgroups/resource limits: memory cap <= checker limit and below
++  measured marceline-dev headroom; wall-clock timeout; cancel obsolete jobs when a
++  newer digest for same target supersedes them.
++- Capture deterministic diagnostics: exit code, elapsed time, peak RSS, toolchain
++  version, base revision, source digest, target statement hash, stdout/stderr logs.
++- Upload only authorized artifacts (diagnostics, pass/fail, possibly encrypted proof
++  artifact if separately authorized) back through the same private channel. Never
++  publish unpublished proof sources.
++
++### 4. Local coordinator (billy-dev)
++
++- Submits jobs, polls for results, maintains local cache keyed by digest.
++- Makes remote build optional/non-mandatory: local build remains possible; remote
++  build is an accelerator when authorized and healthy.
++- Parallelizes independent digests under measured headroom; does not overload
++  marceline-dev shared capacity.
++
++### 5. Security/integrity checks
++
++- Authenticate ciphertext (AEAD, e.g. age/libsodium/XChaCha20-Poly1305) with keys
++  distributed out-of-band through Founder-authorized secret management.
++- Include `base_revision`, `toolchain`, `source_digest`, `statement_hash`,
++  `created_at`, `sender` in signed manifest.
++- Reject unknown schema versions, digest mismatches, statement mismatches, or
++  toolchain mismatches.
++- Never log plaintext source or keys; diagnostics are scrubbed before upload.
++
++## Evidence (local, non-invasive)
++
++- Study section 5: "Neither resolves the other hostname; separate network namespaces,
++  no SSH listener observed. Both have authenticated GitHub SSH outbound, Viche
++  repository is PUBLIC. Do not put unpublished proof sources or credentials in public
++  relay refs."
++- `git remote -v`: `origin git@github.com:ottojung/viche.git` (public repo).
++- `gh auth status`: not logged into any GitHub host.
++- `~/.ssh/config`: absent; `ssh -G marceline-dev` shows default unresolved hostname
++  `marceline-dev` (no configured private transport).
++- No `marceline` transport configuration found in `/var/lib/lubko/wd/viche-state/pnp`.
++- No probe/scan/connection attempt was made to marceline-dev or any undeclared host.
++
++## Exact authorization needed
++
++Founder authorization to create/use a **private authenticated channel** for encrypted
++build bundles, preferably a private GitHub repository accessible via existing
++GitHub SSH identities on billy-dev and marceline-dev, with explicit approval that
++encrypted unpublished proof sources may transit that private repo. The authorization
++should name: repo/location, allowed identities, retention/deletion policy, who may
++decrypt, and confirmation that no public refs/artifacts will carry plaintext or keys.

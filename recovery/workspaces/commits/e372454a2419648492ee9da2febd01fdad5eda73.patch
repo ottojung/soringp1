@@ -1,0 +1,76 @@
+commit e372454a2419648492ee9da2febd01fdad5eda73
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Mon Nov 23 07:17:33 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Mon Nov 23 07:17:33 2026 +0000
+
+    Permit only strictly zero-provider Act33 first Statistics preflight
+    
+    The only proven hard provider cap is exactly zero model requests. Former positive tokens_cap check made model-free trial impossible and encouraged certifying retrospective billing as hard. Require deterministic-v1, zero provider calls and zero token allowance; retain strictly positive CPU UPPER_BOUND and all independent gates. Added explicit negative tests for positive token caps, model mode and absent zero-provider claims.
+
+diff --git a/government/statistics-first-trial.py b/government/statistics-first-trial.py
+index b7817959..ae97e312 100644
+--- a/government/statistics-first-trial.py
++++ b/government/statistics-first-trial.py
+@@ -466,10 +466,21 @@ class Verifier:
+                 problems.append("safety.%s is not true" % key)
+         if safety.get("stop_on_detection") is not False:
+             problems.append("cap is stop-on-detection, not a strictly enforced hard cap")
+-        for key in ("tokens_cap", "host_cpu_upper_bound"):
+-            val = safety.get(key)
+-            if not is_int(val) or val <= 0:
+-                problems.append("safety.%s missing or non-positive" % key)
++        # The only currently demonstrated strict provider spending bound is
++        # zero: the first-trial deterministic runner has no model/provider
++        # request path. Requiring >0 token spending would reject the safe
++        # option and encourage falsely certifying the retrospective OpenCode
++        # monitor as a hard cap. Positive token spending needs separate
++        # separately verified per-request admission technology, NOT this gate.
++        if safety.get("execution_mode") != "deterministic-v1":
++            problems.append("only independently verified model-free first-trial mode is permitted")
++        if safety.get("provider_requests_max") != 0:
++            problems.append("first trial must permit exactly zero provider requests")
++        if not is_int(safety.get("tokens_cap")) or safety["tokens_cap"] != 0:
++            problems.append("model-free first-trial hard token cap must be exactly zero")
++        if (not is_int(safety.get("host_cpu_upper_bound"))
++                or safety["host_cpu_upper_bound"] <= 0):
++            problems.append("safety.host_cpu_upper_bound missing or non-positive")
+         if safety.get("host_cpu_tag") != "UPPER_BOUND":
+             problems.append("host CPU is not tagged UPPER_BOUND")
+         if not nonempty(safety.get("negative_test_digest")):
+diff --git a/tests/statistics-first-trial-smoke.sh b/tests/statistics-first-trial-smoke.sh
+index 1f630504..36d67b18 100644
+--- a/tests/statistics-first-trial-smoke.sh
++++ b/tests/statistics-first-trial-smoke.sh
+@@ -164,7 +164,8 @@ record={
+  "sources":sources,"evidence_digest":digest,
+  "safety":{"hard_cap":True,"strict_inflight":True,"stop_on_detection":False,
+            "enforced":True,"accumulate_across_trials":True,
+-           "tokens_cap":400000,"host_cpu_upper_bound":1800,"host_cpu_tag":"UPPER_BOUND",
++           "execution_mode":"deterministic-v1","provider_requests_max":0,
++           "tokens_cap":0,"host_cpu_upper_bound":1800,"host_cpu_tag":"UPPER_BOUND",
+            "negative_test_digest":"sha256:fixture-negative-cap-test",
+            "meter":"opencode-session-v2 plus proc-stat-host-busy-upper-bound"},
+  "order":{"office":"statistics","act":33,"host":"billy-dev",
+@@ -280,6 +281,21 @@ cp "$d/corr.good" "$corr/20261122.json"
+ set_field safety.hard_cap false
+ expect_deny 'unavailable hard cap' run_preflight statistics
+ restore
++# A strictly prepaid zero-provider run must be accepted, but setting a
++# fictional positive provider budget may never pass as strict in-flight
++# enforcement (OpenCode continuations have empirically breached limits).
++set_field safety.tokens_cap 400000
++expect_deny 'positive provider token cap without per-request hard limit' run_preflight statistics
++restore
++set_field safety.execution_mode '"model-driven"'
++expect_deny 'LLM mode cannot use zero-provider clearance' run_preflight statistics
++restore
++set_field safety.provider_requests_max 1
++expect_deny 'one unbounded provider call is not permitted' run_preflight statistics
++restore
++del_field safety.execution_mode
++expect_deny 'missing explicit model-free execution mode' run_preflight statistics
++restore
+ set_field safety.stop_on_detection true
+ expect_deny 'stop-on-detection cap' run_preflight statistics
+ restore

@@ -1,0 +1,1236 @@
+commit ed31229463917e7fad1a49fd67b83adfa86edef4
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 18:46:57 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 18:47:35 2026 +0000
+
+    Restore continuous Executive research staffing and reusable proof search
+
+diff --git a/government/boot.sh b/government/boot.sh
+index 6281c48d..f4bf9364 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -123,6 +123,9 @@ fi
+ # Task-independent lifecycle hooks. One failed mission cannot block the Town.
+ if [ -s "$town/government/mission-cycle.sh" ]; then
+     nonblocking_office missions 180 /bin/sh "$town/government/mission-cycle.sh"
++    # Standing mechanical Executive orders must run even when its reasoning
++    # session is occupied with another responsibility. Hooks are task-local.
++    nonblocking_office executive-missions 30 /bin/sh "$town/government/mission-cycle.sh" executive
+ fi
+ 
+ # The innovation office is an Executive unit ONLY after parliamentary enactment.
+diff --git a/government/executive-agenda.md b/government/executive-agenda.md
+index 5fc761a4..20c01e4c 100644
+--- a/government/executive-agenda.md
++++ b/government/executive-agenda.md
+@@ -133,3 +133,11 @@ invitation to retry its old prompt or silently restart it. Never clear a
+ hold without case-bound evidence and authorized review. This duty
+ persists across rotations; review the roster and name the successor
+ Executive coordinator when the current appointment changes.
++
++
++Standing deterministic mission orders may run in the Executive's independent
++mission hook even while its model session is occupied. They execute only
++explicitly prescribed routine duties, not discretionary allocation choices.
++The Executive remains accountable for actual continuity, decisions and
++replenishment; inspect hook failures and choose further independent work.
++Do not substitute a completed pass or old note for a continuing obligation.
+diff --git a/government/mission-cycle.sh b/government/mission-cycle.sh
+index 4184c8f2..9ca323a0 100755
+--- a/government/mission-cycle.sh
++++ b/government/mission-cycle.sh
+@@ -4,10 +4,25 @@
+ set -eu
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++mode=${1:-normal}
++case "$mode" in normal|executive) ;; *) exit 2 ;; esac
+ for mission in "$town"/missions/*; do
+     [ -d "$mission" ] || continue
+     name=${mission##*/}
+     case "$name" in ''|*[!a-z0-9-]*) continue ;; esac
++    if [ "$mode" = executive ]; then
++        [ -f "$mission/executive.sh" ] && [ -s "$mission/mandate.md" ] || continue
++        dir=$state/missions/$name
++        mkdir -p "$dir" || continue
++        # Executive's standing, deterministic duties only. No model turn,
++        # other office, or mission hook may serialize this delegated path.
++        (
++            flock -n 9 || exit 0
++            timeout -k 5 240 /bin/sh "$mission/executive.sh" ||
++                echo "Viche: delegated Executive duty $name deferred; retry" >&2
++        ) 9>"$dir/executive.lock" >>"$dir/executive.log" 2>&1 </dev/null &
++        continue
++    fi
+     [ -f "$mission/cycle.sh" ] || [ -f "$mission/status.sh" ] || continue
+     dir=$state/missions/$name
+     mkdir -p "$dir" || continue
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index de1e600b..e4ab4873 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -23,8 +23,8 @@ deterministic publisher; it survives the researcher exiting or a tool timeout.
+ 
+ Workers: once the candidate is complete, call `submit` directly. Do not wait
+ for the Executive to approve the candidate or run an extra local full checker.
+-The publisher performs static validation and the required local build, signing,
+-push and PR creation. The town monitors the result in the gap state and
++The publisher performs static validation, signing, push and PR creation, then
++checks the exact published revision concurrently with upstream. The town monitors the result in the gap state and
+ `publisher.log`. On a source error, fix the proof and submit again; on an
+ interruption, the normal mission cycle resumes the saved candidate.
+ 
+@@ -55,7 +55,7 @@ Live desk instructions are re-read into `cache/join.txt` at startup; the stale
+ 
+ `/bin/sh tests/pnp-pipeline-smoke.sh` runs both mocked tests and real local
+ Git/GPG integration tests. None claims a live desk gap, pushes, or opens a
+-real PR. A proof must pass the pinned local Lean build before submission.
++real PR. Local Lean validation follows publication unless exact successful build evidence already exists.
+ The upstream PR checker is the authoritative acceptance test.
+ 
+ The Viche boot cycle runs `missions/pnp/cycle.sh` independently to renew
+@@ -75,3 +75,25 @@ under government. The status.sh adapter reports leaderboard movement plus
+ actual Antonina P vs NP worker visibility; only Executive dispatches them.
+ 
+ The Executive runs python3 -m missions.pnp.staff --baseline to maintain one general researcher per researchable lease, and the staff batch helper for extra distinct approaches on the selected focus. Findings flow directly through the bound guard and portfolio inspect. Manual acquisition is reserved for maintenance while the allocator is stopped. Raw desk next calls mutate state and are not diagnostics.
++
++
++## Reusable mathematical search
++
++From any scratch directory with canonical PYTHONPATH:
++```sh
++python3 -m missions.pnp.proofs search spec.json --seconds 60 --checkpoint rows.json
++```
++Example spec: {"n":3,"gates":4,"ops":["and","or"],"edges":[[0,1],[0,2],[1,2]]}.
++The optional "extra" list describes additional OR wires (empty list is false);
++"fixed" is a list of fixed prefix gates, e.g. [["or",0,1]]; "ones" can replace
++"edges" with explicit truth-table masks. Inputs are numbered before extra
++wires and gates. The solver uses optional python-sat/CaDiCaL195; it reports
++unavailable if absent. Bounds are 12 variables and 24 gates. Every witness
++is independently checked on all rows. UNSAT is an encoding result, not
++formal acceptance. Timeout is unknown. Checkpoints retain CEGIS rows, not
++solver learned clauses; use an outer timeout for a hard process deadline.
++
++From a bound workspace, `proofs share FILE --message RESULT` snapshots a
++Lean helper, and `proofs fragments --all-attempts` lists immutable helper
++sources with provenance and digests. No claim of compilation is inferred
++from a snapshot. These are direct peer tools, not submission gates.
+diff --git a/missions/pnp/assignment.py b/missions/pnp/assignment.py
+index 1c00d22b..76e9253f 100644
+--- a/missions/pnp/assignment.py
++++ b/missions/pnp/assignment.py
+@@ -78,12 +78,12 @@ def first_attempt(gap):
+ 
+ def prepare(gap, checkout=True, worker=None, base=None):
+     """Executive calls once per assignment. Never relabel an old checkout."""
+-    from . import gitctl
++    from . import gitctl, focus
+     if not isinstance(gap, str) or not config.GAP_ID_RE.fullmatch(gap):
+         raise ValueError("invalid gap")
+     with state.lock(gap):
+         rec = state.load(gap)
+-        if not rec or rec.get("state") not in ("LEASED", "RESEARCHING") or not rec.get("lease"):
++        if not rec or (rec.get("state") not in ("LEASED", "RESEARCHING") and not focus.correction(rec)) or not rec.get("lease"):
+             raise ValueError("no live research assignment")
+         lease = rec["lease"]
+         root = Path(state.gap_dir(gap))
+@@ -125,7 +125,7 @@ def prepare(gap, checkout=True, worker=None, base=None):
+         finally:
+             os.close(fd)
+         latest = state.load(gap)
+-        if not latest or latest.get("lease") != lease or latest.get("state") not in ("LEASED", "RESEARCHING"):
++        if not latest or latest.get("lease") != lease or (latest.get("state") not in ("LEASED", "RESEARCHING") and not focus.correction(latest)):
+             raise ValueError("assignment ended during checkout preparation")
+     return {"gap": gap, "cwd": str(path), "guard": "python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py guard",
+             "compile": "PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile"}
+diff --git a/missions/pnp/build_control.py b/missions/pnp/build_control.py
+index a9b34f32..d221ff8f 100644
+--- a/missions/pnp/build_control.py
++++ b/missions/pnp/build_control.py
+@@ -49,6 +49,9 @@ def obsolete(gap=None, lease=None):
+         return not (rec.get("state") == "PR_OPEN"
+                     and rec.get("commit_sha") == os.environ["PNP_POSTCHECK_SHA"]
+                     and rec.get("local_check_status") == "pending")
++    from . import focus
++    if focus.correction(rec):
++        return False
+     return rec.get("state") in ("STALE", "RELEASED", "ACCEPTED", "PR_OPEN")
+ 
+ 
+diff --git a/missions/pnp/continuity.py b/missions/pnp/continuity.py
+new file mode 100644
+index 00000000..9f0738bb
+--- /dev/null
++++ b/missions/pnp/continuity.py
+@@ -0,0 +1,174 @@
++"""Execute the Executive's standing staffing orders, not new allocation choices."""
++import hashlib
++import json
++from pathlib import Path
++import subprocess
++import time
++
++from . import assignment, config, focus, staff, state, status, support
++
++SUPPORT = {
++    "knowledge": "Find checked equivalents, opposite conclusions, stronger reusable proofs and admissible imports. Send verified applicability and concrete proof fragments, not just scores.",
++    "methods": "Independently attack the focused claim. Derive a concrete sublemma, construction, refutation or identify a precise false premise. Use full-function checks; never duplicate an existing search.",
++    "flow": "Investigate actual idle time, duplicated computation, correction and publication delay. Deliver concrete improvements that increase checked contributions; do not monitor tool calls.",
++    "portfolio": "Use portfolio inspect and compare all live leases using their researchers' findings and actual artifacts. Make the evidence-based switch decision directly with portfolio switch if justified.",
++    "lease-evaluation": "Use portfolio inspect. Investigate actual mathematical blockers and alternatives. Decide justified releases through portfolio release; never release because of vacancies, age alone or temporary compiler contention.",
++}
++FRONTS = (
++    ("integrator", "Identify the precise missing inference, split the Lean proof into independent lemmas, reuse peer sources and checked upstream proofs, assemble and submit the exact theorem as soon as complete."),
++    ("alternative", "Pursue a genuinely independent construction or refutation using the exact statement. First inspect existing peer findings and checked sources; use reusable finite search when applicable."),
++)
++
++
++def live():
++    return [r for g in state.all_gaps() if (r := state.load(g)) and
++            support.active(r) and not r.get("queued_lease")]
++
++
++def signature(role, records, selected):
++    scope = records if role in support.DECISION_ROLES else (
++        [selected] if selected and support.active(selected) else records)
++    # Only changes in assignments or primary mathematical evidence warrant a
++    # completed support pass. Its own advice does not trigger itself.
++    data = [(support.attempt(r), sorted([f["id"] for f in support.findings(r)] + [a["id"] for a in support.read(r) if a["kind"] == "checked"]))
++            for r in scope]
++    return hashlib.sha256(json.dumps(sorted(data)).encode()).hexdigest()
++
++
++def support_pass(role, records, selected, agents):
++    path = Path(config.STATE_ROOT, "swarm", "standing-support", role)
++    path.mkdir(parents=True, exist_ok=True)
++    receipt = path / "dispatch.json"
++    sig = signature(role, records, selected)
++    existing = [a for a in agents if role in support.roles(a)]
++    if any(a.get("state") == "running" for a in existing):
++        return {"role": role, "status": "already running"}
++    if any(a.get("state") not in staff._REUSABLE for a in existing):
++        return {"role": role, "status": "uncertain"}
++    try:
++        old = json.loads(receipt.read_text())
++    except (OSError, ValueError):
++        old = {}
++    owner = next((a for a in existing if a.get("id") == old.get("agent")), None)
++    if old.get("signature") == sig and old.get("launched") and owner and owner.get("state") in ("clearexit", "idle"):
++        if not old.get("completed"):
++            old["completed"] = True
++            state.atomic_write(str(receipt), json.dumps(old) + "\n")
++        return {"role": role, "status": "completed same evidence"}
++    if old.get("signature") == sig and time.time() - old.get("at", 0) < 120:
++        return {"role": role, "status": "retry deferred"}
++    reusable = next((a for a in existing if a.get("state") in ("idle", "clearexit")
++                     and a.get("cwd") == str(path)), None)
++    aid = reusable["id"] if reusable else staff.antonina(
++        "new", "--cwd", str(path), "--title", support.PREFIX + " " + role)
++    # Save before launch; a timeout is not permission to create a duplicate.
++    state.atomic_write(str(receipt), json.dumps(
++        {"signature": sig, "agent": aid, "at": time.time()}) + "\n")
++    prompt = (
++        "You are performing a bounded Executive-delegated research support pass. "
++        "Read /var/lib/lubko/wd/viche/missions/pnp/mandate.md. "
++        "Use PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.support targets "
++        "and python3 -m missions.pnp.portfolio inspect. "
++        "Deliver substantive evidence directly via support advise (or portfolio decisions). "
++        "Do not launch/steer agents, acquire leases, edit other workspaces, or open PRs. "
++        "Finish when no further useful distinct work remains. "
++        "Do not repeat the previous pass without a material reason.\n" + SUPPORT[role])
++    answer = json.loads(staff.antonina("run", "--id", aid, "--cwd", str(path),
++                                     "--prompt", prompt, "--detach", "--json"))
++    if answer.get("state") != "running":
++        raise ValueError("support launch not confirmed")
++    state.atomic_write(str(receipt), json.dumps(
++        {"signature": sig, "agent": aid, "at": time.time(), "launched": True}) + "\n")
++    return {"role": role, "status": "started", "id": aid}
++
++
++def required_support(records):
++    return (list(support.ROLES) + ["lease-evaluation"] +
++            (["portfolio"] if len(records) > 1 else [])) if records else []
++
++
++def completed_roles(records, selected):
++    done = set()
++    for role in required_support(records):
++        try:
++            receipt = json.loads(Path(config.STATE_ROOT, "swarm", "standing-support",
++                                      role, "dispatch.json").read_text())
++            if receipt.get("completed") and receipt.get("signature") == signature(role, records, selected):
++                done.add(role)
++        except (OSError, ValueError, AttributeError):
++            pass
++    return done
++
++
++def focus_plans(selected, agents):
++    if not selected or not focus.eligible(selected):
++        return []
++    labels = []
++    for a in agents:
++        if a.get("state") != "running" or not a.get("cwd"):
++            continue
++        cwd = Path(a["cwd"])
++        if assignment.binding(cwd) == focus.key(selected) and not assignment.general(cwd):
++            labels.append(assignment.worker_label(cwd) or "")
++    if focus.correction(selected):
++        return [] if labels else [("correction", "Repair exact published source using checker diagnostics.")]
++    has_integrator = any("integrat" in label.lower() for label in labels)
++    has_alternative = any("integrat" not in label.lower() for label in labels)
++    return [p for p in FRONTS if not (has_integrator if p[0]=="integrator" else has_alternative)]
++
++
++def already_covered(records, selected, observed):
++    # The cheap running-only snapshot is sufficient to prove coverage.
++    # Historical registry pagination is necessary only when there is a vacancy.
++    general = set()
++    for a in observed["agents"]:
++        if not a.get("cwd"):
++            continue
++        cwd = Path(a["cwd"])
++        bound = assignment.binding(cwd)
++        if assignment.general(cwd):
++            general.add(bound)
++    if any(focus.key(r) not in general for r in records):
++        return False
++    if focus_plans(selected, observed["agents"]):
++        return False
++    roles = {role for a in observed["support"] for role in a["roles"]}
++    return set(required_support(records)) <= roles | completed_roles(records, selected)
++
++
++def execute():
++    records = live()
++    selected = focus.current()
++    if not records and not selected:
++        return {"status": "no research"}
++    observed = status.workers()
++    if observed["coverage"] != "complete":
++        return {"status": "worker coverage unknown"}
++    if already_covered(records, selected, observed):
++        return {"status": "covered"}
++    with staff.staffing_lock():
++        # One registry snapshot, while the same lock excludes model-invoked
++        # staff batches. Baseline is prescribed for every live lease.
++        agents = staff.roster()
++        result = {"baseline": staff.baseline(agents, locked=True), "focus": [], "support": []}
++        selected = focus.current()
++        plans = focus_plans(selected, agents)
++        if plans:
++            try:
++                result["focus"] = staff.dispatch(selected["gap_id"], plans, agents, locked=True)
++            except (OSError, ValueError, subprocess.SubprocessError) as exc:
++                result["focus"] = [{"status": "deferred", "detail": str(exc)[:300]}]
++        records = live()
++        for role in required_support(records):
++            try:
++                result["support"].append(support_pass(role, records, selected, agents))
++            except (OSError, ValueError, subprocess.SubprocessError) as exc:
++                result["support"].append({"role": role, "status": "deferred", "detail": str(exc)[:300]})
++        return result
++
++
++if __name__ == "__main__":
++    try:
++        print(json.dumps(execute(), ensure_ascii=False))
++    except (OSError, ValueError, subprocess.SubprocessError) as exc:
++        print(json.dumps({"status": "deferred", "detail": str(exc)[:300]}))
+diff --git a/missions/pnp/executive.sh b/missions/pnp/executive.sh
+new file mode 100644
+index 00000000..02f7bd75
+--- /dev/null
++++ b/missions/pnp/executive.sh
+@@ -0,0 +1,7 @@
++#!/bin/sh
++# Standing Executive allocation order; not part of the desk allocator.
++set -eu
++. "$(dirname "$0")/runtime.sh"
++export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:/bin:$PATH
++cd "$town"
++python3 -m missions.pnp.continuity
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 1ce5d3fa..d091a60e 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -451,3 +451,47 @@ Do not generate empty progress reports. Evaluators use portfolio inspect to
+ read these findings and the actual agent logs; they should seek clarification
+ or more mathematical evidence when necessary, not impose an extra review gate.
+ The allocator must never infer mathematical abandonment from agent absence.
++
++
++## Standing Executive continuity order (Founder priority, supersedes vacancy holds)
++
++The Executive's prescribed mechanical staffing duties run through the generic
++Executive mission hook independently of its reasoning session. This is the
++Executive executing a standing order, NOT the desk allocator, an external
++assistant, a support agent, or a new discretionary scheduler. The Executive
++retains lifecycle authority and chooses additional approaches, intervenes on
++duplicates, and resolves resource or model failures. Do not manually run the
++live hook from another office. The hook uses the same staffing lock as the
++Executive's interactive commands; only the existing allocator claims leases.
++
++Every researchable lease has an actively reasoning general researcher.
++A completed bounded pass is NOT a reason to leave a reserve empty. Reuse the
++workspace and prior findings; change approach or give the lease evaluator
++specific evidence of exhaustion. Only a valid release, publication, or
++demonstrated resource/model blocker ends this obligation. Prior records holding
++vacancies until a new idea appears are superseded. The standing allocation
++order also supplies an integrator and at least one independent alternative when
++those fronts are uncovered, and a correction owner when the selected PR needs repair.
++These are starting roles, never a maximum; the Executive chooses additional
++useful distinct approaches. Support passes are replenished on new assignments
++or substantive primary evidence, not identical status polling. No additional
++report, approval or publication gate is introduced.
++
++Use the shared bounded finite-search tool (proofs search) for suitable
++circuit questions. Verify every witness against the full truth table; an
++UNSAT search is only evidence for its exact encoding and is not a checked
++Lean refutation. For difficult transplanted/generated proofs, use managed
++compilation as early as useful, especially before risky publication, without
++requiring redundant full checks for a complete high-confidence proof.
++
++
++Parallel formalization: integrator identifies exact missing lemmas and splits
++them into independently testable pieces. Each specialist can snapshot a helper
++using `python3 -m missions.pnp.proofs share FILE --message RESULT` (from the
++bound workspace, with canonical PYTHONPATH). Peers retrieve paths and exact
++content digests with `proofs fragments --all-attempts`. These immutable
++sources survive agent exits and new leases; status is self-described, never
++an assertion of kernel checking. Use narrow scratch imports and the managed
++light queue when possible; the integrator checks the combined exact file.
++Proof reuse hints in `proofs find` include relaxed conclusion/hypothesis
++matches; a high score is NOT a proof of implication.
+diff --git a/missions/pnp/portfolio.py b/missions/pnp/portfolio.py
+index aea96688..f9762788 100644
+--- a/missions/pnp/portfolio.py
++++ b/missions/pnp/portfolio.py
+@@ -45,7 +45,23 @@ def view():
+                     "log_command": "antonina agent log --id " + a["id"] + " --lines 50"}
+                    for a in roster["agents"] if a.get("id") and a.get("cwd")
+                    and support.assignment.binding(Path(a["cwd"])) == focus.key(rec)]
+-        rows.append({**item, "workers":workers,"title": rec.get("gap_title"),
++        # Exited workers' actual findings/logs remain useful to the evaluator.
++        # Staffing receipts are attempt-scoped; never relabel an old lease.
++        prior = {}
++        try:
++            for line in Path(state.events_path(item["gap"])).read_text().splitlines():
++                event = json.loads(line)
++                detail = event.get("detail", {})
++                if event.get("kind") != "staffing" or detail.get("attempt") != item["attempt"]:
++                    continue
++                for worker in detail.get("workers", []):
++                    aid = worker.get("agent")
++                    if isinstance(aid,str):
++                        prior[aid] = {**worker, "at":event.get("at"),
++                                      "log_command":"antonina agent log --id "+aid+" --lines 50"}
++        except (OSError,ValueError,TypeError,AttributeError):
++            pass
++        rows.append({**item, "workers":workers, "staffing_history":list(prior.values()),"title": rec.get("gap_title"),
+                      "hard": rec.get("acquisition_hard"),
+                      "candidate_queued": bool(rec.get("queued_lease")),
+                      "remaining_seconds": max(0, round(rec["lease_expires_at"]-time.time())),
+diff --git a/missions/pnp/proofs/__main__.py b/missions/pnp/proofs/__main__.py
+index 267828a2..d31bbcb3 100644
+--- a/missions/pnp/proofs/__main__.py
++++ b/missions/pnp/proofs/__main__.py
+@@ -4,7 +4,7 @@ import json
+ from pathlib import Path
+ 
+ from .. import assignment, state
+-from . import corpus, circuit, synthesis
++from . import corpus, circuit, synthesis, search, fragments
+ 
+ 
+ def main():
+@@ -20,7 +20,32 @@ def main():
+     syn = sub.add_parser("synthesize")
+     syn.add_argument("--output", type=Path)
+     sub.add_parser("index")
++    sat = sub.add_parser("search", help="bounded finite circuit SAT/CEGIS search")
++    sat.add_argument("specification", type=Path)
++    sat.add_argument("--seconds", type=float, default=30)
++    sat.add_argument("--checkpoint", type=Path)
++    share = sub.add_parser("share", help="snapshot a reusable Lean source for peers")
++    share.add_argument("file",type=Path)
++    share.add_argument("--message",required=True)
++    listing = sub.add_parser("fragments")
++    listing.add_argument("--all-attempts",action="store_true")
+     args = p.parse_args()
++    if args.command in ("share","fragments"):
++        try:
++            result = (fragments.share(args.file,args.message) if args.command=="share"
++                      else fragments.inventory(args.all_attempts))
++        except (OSError,ValueError) as exc:
++            p.error(str(exc))
++        print(json.dumps(result,ensure_ascii=False,indent=2))
++        return
++    if args.command == "search":
++        try:
++            result = search.solve(json.loads(args.specification.read_text()),
++                                  args.seconds, args.checkpoint)
++        except (OSError, ValueError) as exc:
++            p.error(str(exc))
++        print(json.dumps(result, ensure_ascii=False, indent=2))
++        return
+     if args.command in ("find", "source", "index"):
+         with corpus.open_index() as db:
+             revision = corpus.update(db)
+diff --git a/missions/pnp/proofs/corpus.py b/missions/pnp/proofs/corpus.py
+index 2b0599cd..26a05cfb 100644
+--- a/missions/pnp/proofs/corpus.py
++++ b/missions/pnp/proofs/corpus.py
+@@ -76,6 +76,41 @@ def update(db, mirror=gitctl.MIRROR, revision="refs/remotes/upstream/main"):
+     return sha
+ 
+ 
++def shape(s):
++    """Heuristic skeleton, NOT a semantic implication or alpha-equivalence test."""
++    s = re.sub(r"\((\d+) : ℕ\)", r"\1", s)
++    s = s.replace("Bool.false", "false").replace("Bool.true", "true")
++    s = re.sub(r"\b(x\d+|[a-z]|[CDGH]|h[a-z0-9]+)\b", "V", s)
++    return re.sub(r"[()\s]", "", s)
++
++
++def hypotheses(s):
++    parts = []
++    depth = 0
++    start = 0
++    for i,c in enumerate(s):
++        if c in "([{⟨":
++            depth += 1
++        elif c in ")]}⟩":
++            depth -= 1
++        elif c == "→" and depth == 0:
++            parts.append(s[start:i])
++            start = i+1
++    return parts, s[start:]
++
++
++def structural_hint(query, stmt):
++    qh, qc = hypotheses(query)
++    sh, sc = hypotheses(stmt)
++    # Variables are intentionally relaxed, so even a perfect score is only a
++    # suggestion to instantiate and verify the actual theorem.
++    haystack = shape(query)
++    matched = sum(bool(shape(h)) and shape(h) in haystack for h in sh)
++    same = bool(shape(qc)) and shape(qc) == shape(sc)
++    return {"same_conclusion_shape": same, "hypotheses_matched": matched,
++            "hypotheses_total": len(sh)}
++
++
+ def search(db, query, allowed=(), limit=8):
+     q = terms(query)
+     rows = list(db.execute("select path,blob,statement,tactics,imports from proof"))
+@@ -86,12 +121,16 @@ def search(db, query, allowed=(), limit=8):
+     found = []
+     for row, d in zip(rows, doc_terms):
+         rank = score(d)
+-        if rank <= 0:
+-            continue
+         path, blob, stmt, tactics, imports = row
++        hint = structural_hint(query, stmt)
++        if rank <= 0 and not hint["same_conclusion_shape"]:
++            continue
++        rank += (8 if hint["same_conclusion_shape"] else 0)
++        if hint["hypotheses_total"]:
++            rank += 2 * hint["hypotheses_matched"] / hint["hypotheses_total"]
+         module = path.removeprefix("lean/").removesuffix(".lean").replace("/", ".")
+         found.append({"path": path, "blob": blob, "module": module,
+-                      "score": round(rank, 4), "statement": stmt,
++                      "score": round(rank, 4), "statement": stmt, "structural_hint": hint,
+                       "tactics": json.loads(tactics), "imports": json.loads(imports),
+                       "direct_import_allowed": module in allowed})
+     return sorted(found, key=lambda r: (-r["score"], r["path"]))[:limit]
+diff --git a/missions/pnp/proofs/fragments.py b/missions/pnp/proofs/fragments.py
+new file mode 100644
+index 00000000..f9526904
+--- /dev/null
++++ b/missions/pnp/proofs/fragments.py
+@@ -0,0 +1,80 @@
++"""Immutable, content-addressed Lean fragments for parallel formalization."""
++import hashlib
++import json
++from pathlib import Path
++import re
++import subprocess
++import time
++
++from .. import assignment, config, state, support
++
++
++def share(file, message, cwd=None):
++    cwd = Path(cwd or Path.cwd())
++    bound = assignment.binding(cwd)
++    found = assignment.workspace(cwd)
++    if not bound or not found:
++        raise ValueError("run in a bound research workspace")
++    if not isinstance(message,str) or not message.strip() or len(message)>3500:
++        raise ValueError("describe the fragment's theorem and status")
++    gap, lease = bound
++    file = Path(file).resolve()
++    if file.suffix != ".lean" or not file.is_relative_to(found[1].resolve()) or not file.is_file():
++        raise ValueError("share a Lean source in your own workspace")
++    with file.open("rb") as f:
++        data = f.read(config.MAX_FILE_BYTES+1)
++    if len(data)>config.MAX_FILE_BYTES or not data:
++        raise ValueError("fragment is empty or exceeds the proof size limit")
++    source = data.decode("utf-8")
++    digest = hashlib.sha256(data).hexdigest()
++    try:
++        base = subprocess.check_output(["git","-C",str(found[1]),"rev-parse","HEAD"],
++                                       text=True,timeout=5).strip()
++    except (OSError,subprocess.SubprocessError):
++        base = None
++    with state.lock(gap):
++        rec = state.load(gap)
++        if not support.active(rec) or rec["lease"] != lease:
++            raise ValueError("assignment ended")
++        folder = support.directory(rec)/"fragments"
++        path = folder/(digest+".lean")
++        info = {"digest":digest,"attempt":support.attempt(rec),"worker":assignment.worker_label(cwd),
++                "source":file.name,"base":base,"bytes":len(data),"message":message,
++                "verified_by_tool":False,"at":time.time()}
++        if not path.exists():
++            state.atomic_write(str(path),source)
++        meta = folder/(digest+".json")
++        if not meta.exists():
++            state.atomic_write(str(meta),json.dumps(info,ensure_ascii=False)+"\n")
++    # Reuse the existing peer evidence channel, not a new approval process.
++    try:
++        support.finding(str(path),message,cwd)
++    except ValueError:
++        pass
++    return {**info,"path":str(path)}
++
++
++def inventory(all_attempts=False,cwd=None):
++    bound=assignment.binding(Path(cwd or Path.cwd()))
++    if not bound:
++        raise ValueError("run in a bound research workspace")
++    gap,lease=bound
++    rec=state.load(gap)
++    if not support.active(rec) or rec["lease"]!=lease:
++        raise ValueError("assignment ended")
++    root=Path(state.gap_dir(gap),"support")
++    dirs=list(root.glob("*/fragments")) if all_attempts else [support.directory(rec)/"fragments"]
++    result=[]
++    for folder in dirs:
++        for meta in sorted(folder.glob("*.json")):
++            if not re.fullmatch(r"[0-9a-f]{64}",meta.stem):
++                continue
++            try:
++                obj=json.loads(meta.read_text())
++                file=meta.with_suffix(".lean")
++                if file.stat().st_size>config.MAX_FILE_BYTES or hashlib.sha256(file.read_bytes()).hexdigest()!=meta.stem or obj.get("digest")!=meta.stem:
++                    continue
++                result.append({**obj,"path":str(file),"current_attempt":obj.get("attempt")==support.attempt(rec)})
++            except (OSError,ValueError,AttributeError):
++                continue
++    return result
+diff --git a/missions/pnp/proofs/search.py b/missions/pnp/proofs/search.py
+new file mode 100644
+index 00000000..a69d98d0
+--- /dev/null
++++ b/missions/pnp/proofs/search.py
+@@ -0,0 +1,189 @@
++"""Bounded exact finite circuit search; SAT witnesses checked on every row.
++
++The gate budget is an upper bound: unused gates and repeated inputs are legal.
++No undocumented minimality/essential-wire assumptions. UNSAT is solver evidence,
++not a Lean proof. Checkpoints preserve CEGIS rows, not learned SAT clauses.
++"""
++import hashlib
++import json
++from pathlib import Path
++import time
++
++from .. import state
++
++
++def spec(raw):
++    if not isinstance(raw, dict) or set(raw) - {"n", "gates", "ops", "edges", "ones", "extra", "fixed"}:
++        raise ValueError("unknown or malformed specification field")
++    n, budget = raw.get("n"), raw.get("gates")
++    if type(n) is not int or not 1 <= n <= 12 or type(budget) is not int or not 0 <= budget <= 24:
++        raise ValueError("supported bounds: 1..12 variables, 0..24 gates")
++    ops = raw.get("ops", ["and", "or", "not"])
++    if not isinstance(ops, list) or not ops or any(x not in ("and", "or", "not") for x in ops) or len(set(ops)) != len(ops):
++        raise ValueError("ops must be a nonempty subset of and, or, not")
++    if ("edges" in raw) == ("ones" in raw):
++        raise ValueError("provide exactly one of edges or ones")
++    def indices(xs, limit):
++        return isinstance(xs, list) and all(type(x) is int and 0 <= x < limit for x in xs)
++    if "edges" in raw:
++        edges = raw["edges"]
++        if not isinstance(edges, list) or any(not indices(e, n) or len(e) != 2 or e[0] == e[1] for e in edges):
++            raise ValueError("invalid edge list")
++        ones = [r for r in range(1 << n) if any(r >> a & 1 and r >> b & 1 for a,b in edges)]
++    else:
++        ones = raw["ones"]
++        if not indices(ones, 1 << n):
++            raise ValueError("invalid truth-table ones")
++    extra = raw.get("extra", [])
++    if not isinstance(extra, list) or len(extra) > 12 or any(not indices(x, n) for x in extra):
++        raise ValueError("extra inputs must be ORs of base inputs; [] means false")
++    fixed = raw.get("fixed", [])
++    if not isinstance(fixed, list) or len(fixed) > budget:
++        raise ValueError("invalid fixed gate prefix")
++    prefix = []
++    for i, g in enumerate(fixed):
++        if not isinstance(g, list) or not g or g[0] not in ops or len(g) != (2 if g[0] == "not" else 3) or not indices(g[1:], n+len(extra)+i):
++            raise ValueError("invalid fixed gate")
++        prefix.append([g[0], *g[1:]])
++    return {"n": n, "gates": budget, "ops": sorted(ops), "ones": sorted(set(ones)),
++            "extra": [sorted(set(x)) for x in extra], "fixed": prefix}
++
++
++def inputs(s, row):
++    bits = [(row >> i) & 1 for i in range(s["n"])]
++    return bits + [int(any(bits[j] for j in xs)) for xs in s["extra"]]
++
++
++def evaluate(s, gates, output, row):
++    wires = inputs(s, row)
++    for op, *args in gates:
++        if op not in s["ops"] or len(args) != (1 if op == "not" else 2) or any(type(a) is not int or not 0 <= a < len(wires) for a in args):
++            raise ValueError("invalid witness gate")
++        a = wires[args[0]]
++        wires.append(1-a if op == "not" else a & wires[args[1]] if op == "and" else a | wires[args[1]])
++    if type(output) is not int or not 0 <= output < len(wires):
++        raise ValueError("invalid output")
++    return wires[output]
++
++
++def counterexamples(s, gates, output):
++    if len(gates) > s["gates"] or gates[:len(s["fixed"])] != s["fixed"]:
++        raise ValueError("witness violates gate budget or fixed prefix")
++    ones = set(s["ones"])
++    return [r for r in range(1 << s["n"])
++            if evaluate(s,gates,output,r) != int(r in ones)]
++
++
++def solve(raw, seconds=30, checkpoint=None):
++    s = spec(raw)
++    checkpoint = Path(checkpoint).resolve() if checkpoint else None
++    if not 0 < seconds <= 3600:
++        raise ValueError("seconds must be in (0,3600]")
++    # Optional dependency, never needed to use or publish other proofs.
++    try:
++        from pysat.formula import IDPool
++        from pysat.card import CardEnc, EncType
++        from pysat.solvers import Cadical195
++    except ImportError:
++        return {"result": "unavailable", "reason": "python-sat with CaDiCaL195 is required"}
++    digest = hashlib.sha256(json.dumps(s,sort_keys=True).encode()).hexdigest()
++    initial = {0, (1 << s["n"])-1, *s["ones"][:16]}
++    initial.update(1 << i for i in range(s["n"]))
++    if checkpoint and Path(checkpoint).exists():
++        data = json.loads(Path(checkpoint).read_text())
++        if data.get("spec") != digest:
++            raise ValueError("checkpoint belongs to another specification")
++        rows = data.get("rows")
++        if not isinstance(rows,list) or any(type(x) is not int or not 0 <= x < 1 << s["n"] for x in rows):
++            raise ValueError("invalid checkpoint rows")
++        initial.update(rows)
++    p = IDPool(); V = p.id
++    ni = s["n"] + len(s["extra"]); ng = s["gates"]; ops = s["ops"]
++    cnf = []
++    def onehot(xs):
++        cnf.extend(CardEnc.equals(xs, 1, vpool=p, encoding=EncType.seqcounter).clauses)
++    def sel(i,d,w): return V(("selector",i,d,w))
++    def op(i,k): return V(("op",i,k))
++    def out(w): return V(("out",w))
++    for i in range(ng):
++        onehot([op(i,k) for k in ops])
++        for d in (0,1):
++            onehot([sel(i,d,w) for w in range(ni+i)])
++        # Commutativity only; equal binary operands and unused wires are valid.
++        for k in ("and","or"):
++            if k in ops:
++                for a in range(ni+i):
++                    for b in range(a):
++                        cnf.append([-op(i,k),-sel(i,0,a),-sel(i,1,b)])
++        if "not" in ops:
++            for a in range(ni+i):
++                cnf.append([-op(i,"not"),-sel(i,0,a),sel(i,1,a)])
++        if i < len(s["fixed"]):
++            k,*args = s["fixed"][i]
++            # For fixed binary prefixes preserve the exact given ordering
++            # in the decoded witness; internal selectors are canonical.
++            a,b = (args[0],args[0]) if k == "not" else sorted(args)
++            cnf.extend([[op(i,k)],[sel(i,0,a)],[sel(i,1,b)]])
++    onehot([out(w) for w in range(ni+ng)])
++    rows=set(); ones=set(s["ones"])
++    def add_row(r, solver):
++        if r in rows:
++            return
++        rows.add(r)
++        def val(w): return V(("value",r,w))
++        def add(c): solver.add_clause(c)
++        for w,b in enumerate(inputs(s,r)):
++            add([val(w) if b else -val(w)])
++        for i in range(ng):
++            a,b,g = V(("a",r,i)),V(("b",r,i)),val(ni+i)
++            for d,z in ((0,a),(1,b)):
++                for w in range(ni+i):
++                    q=sel(i,d,w)
++                    add([-q,-z,val(w)]);add([-q,z,-val(w)])
++            for k,clauses in (
++                ("and",[[-g,a],[-g,b],[g,-a,-b]]),
++                ("or",[[g,-a],[g,-b],[-g,a,b]]),
++                ("not",[[g,a],[-g,-a]])):
++                if k in ops:
++                    for c in clauses:
++                        add([-op(i,k),*c])
++        for w in range(ni+ng):
++            add([-out(w),val(w) if r in ones else -val(w)])
++    def save():
++        if checkpoint:
++            state.atomic_write(str(checkpoint),json.dumps({"spec":digest,"rows":sorted(rows)})+"\n")
++    start=time.monotonic()
++    with Cadical195(bootstrap_with=cnf) as solver:
++        for r in sorted(initial):
++            add_row(r,solver)
++        save()
++        rounds=0
++        while time.monotonic()-start < seconds:
++            # Bounded conflict slices retain learning inside this invocation.
++            solver.conf_budget(2000)
++            result=solver.solve_limited()
++            rounds+=1
++            if result is None:
++                continue
++            if result is False:
++                return {"result":"unsat_encoding","rows":len(rows),"rounds":rounds,
++                        "formal_refutation":False,"spec":digest}
++            m=set(solver.get_model())
++            gates=[]
++            for i in range(ng):
++                k=next(k for k in ops if op(i,k) in m)
++                a=next(w for w in range(ni+i) if sel(i,0,w) in m)
++                b=next(w for w in range(ni+i) if sel(i,1,w) in m)
++                gates.append([k,a] if k=="not" else [k,a,b])
++            gates[:len(s["fixed"])]=s["fixed"]
++            output=next(w for w in range(ni+ng) if out(w) in m)
++            bad=counterexamples(s,gates,output)
++            if not bad:
++                return {"result":"verified_witness","gates":gates,"output":output,
++                        "cases":1<<s["n"],"rows":len(rows),"spec":digest}
++            if any(r in rows for r in bad):
++                raise RuntimeError("SAT encoding disagrees with independent evaluator")
++            for r in bad[:8]:
++                add_row(r,solver)
++            save()
++        return {"result":"unknown","rows":len(rows),"rounds":rounds,"spec":digest}
+diff --git a/missions/pnp/staff.py b/missions/pnp/staff.py
+index 80e9a62f..578a590c 100644
+--- a/missions/pnp/staff.py
++++ b/missions/pnp/staff.py
+@@ -6,6 +6,7 @@ workspace, not mutable titles; uncertainty never authorizes duplicate starts.
+ """
+ import argparse
+ import concurrent.futures
++import contextlib
+ import fcntl
+ import json
+ import os
+@@ -88,7 +89,12 @@ def prompt(rec, approach, general=False):
+         "approach; communicate useful sublemmas and artifacts to the other researchers "
+         "on this same gap. No unrelated gap acquisition, no direct desk or GitHub "
+         "mutation, no agent launches. Use the local managed compiler and guard from "
+-        "your bound cwd. Use the checked proof corpus where applicable. Preserve "
++        "your bound cwd. Use proofs find/source first and proofs search for bounded "
++        "finite circuit synthesis, with a durable CEGIS checkpoint. Verify any witness "
++        "on the full domain; solver UNSAT alone is not a Lean proof. Reuse peer source "
++        "fragments and previous attempts rather than restarting equivalent work. Use proofs share FILE "
++        "--message RESULT to snapshot a reusable Lean helper; proofs fragments --all-attempts "
++        "lists available helpers. Preserve "
+         "work when the lease ends. When a complete exact proof exists, immediately "
+         "invoke python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py submit GAP FILE "
+         "with actual gap and file; never wait for an extra review. If the guard "
+@@ -107,36 +113,48 @@ def prompt(rec, approach, general=False):
+            "and submit a complete proof directly. A focus change does not end your assignment. "
+            if general else "You are a focused specialist. If focus moves, preserve your findings "
+            "and finish cooperatively; the general researcher remains. ")
++        + (f"CORRECTION: existing PR {rec.get('pr_url')}; inspect the exact published proof "
++           f"and local diagnostic {rec.get('local_check_log', '')[-2000:]}. Correct the same "
++           "PR through submit; no new PR. Use the saved candidate in the gap state directory. "
++           if focus.correction(rec) else "")
+         + f"Assigned approach: {approach}"
+     )
+ 
+ 
+ def current_matches(rec, general=False):
+     latest = state.load(rec["gap_id"])
+-    if not support.active(latest) or latest.get("queued_lease") or focus.key(latest) != focus.key(rec):
++    if not focus.eligible(latest) or latest.get("queued_lease") or focus.key(latest) != focus.key(rec):
+         return False
+     if general:
+-        return True
++        return support.active(latest)
+     selected = focus.current()
+     return selected is not None and focus.key(selected) == focus.key(rec)
+ 
+ 
+-def dispatch(gap, plans, agents=None):
++@contextlib.contextmanager
++def staffing_lock():
++    os.makedirs(config.STATE_ROOT, exist_ok=True)
++    fd = os.open(os.path.join(config.STATE_ROOT, "staff.lock"), os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        yield
++    finally:
++        os.close(fd)
++
++
++def dispatch(gap, plans, agents=None, locked=False):
+     """adopt by exact cwd; ``agents`` may be a baseline's single snapshot."""
+     rec = state.load(gap)
+-    if not support.active(rec) or rec.get("queued_lease"):
+-        raise ValueError("not a live research lease")
+-    if not all(label == "general" or current_matches(rec) for label, _ in plans):
++    if not focus.eligible(rec) or rec.get("queued_lease"):
++        raise ValueError("not a live research or correction assignment")
++    if not all(current_matches(rec, label == "general") for label, _ in plans):
+         raise ValueError("only the general researcher may be dispatched on a nonfocused lease")
+     if not plans or len({label for label, _ in plans}) != len(plans):
+         raise ValueError("distinct nonempty approach labels required")
+     for label, approach in plans:
+         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", label) or not approach.strip():
+             raise ValueError("invalid worker label or empty approach")
+-    os.makedirs(config.STATE_ROOT, exist_ok=True)
+-    fd = os.open(os.path.join(config.STATE_ROOT, "staff.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+-    try:
+-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    with (contextlib.nullcontext() if locked else staffing_lock()):
+         # A direct dispatch still reads the roster itself; baseline passes a
+         # snapshot it already fetched so N live gaps cost one pagination, not N.
+         if agents is None:
+@@ -201,12 +219,10 @@ def dispatch(gap, plans, agents=None):
+             # that fails must not surface as a failed dispatch (which could be
+             # replayed into a duplicate worker) or gate liveness.
+             try:
+-                state.event(gap, "staffing", {"workers": workers})
++                state.event(gap, "staffing", {"workers": workers, "attempt": support.attempt(rec)})
+             except Exception as exc:
+                 print("staffing event log unavailable: %s" % exc, file=sys.stderr)
+         return results
+-    finally:
+-        os.close(fd)
+ 
+ 
+ GENERAL_APPROACH = ("Develop a broad mathematical understanding of the exact problem. "
+@@ -216,7 +232,10 @@ GENERAL_APPROACH = ("Develop a broad mathematical understanding of the exact pro
+                     "obstacles and viable next steps with all researchers and evaluators.")
+ 
+ 
+-def baseline():
++def baseline(agents=None, locked=False):
++    if not locked:
++        with staffing_lock():
++            return baseline(agents, locked=True)
+     live = []
+     for gap in state.all_gaps():
+         rec = state.load(gap)
+@@ -229,14 +248,15 @@ def baseline():
+     # reusing the snapshot here is safe because each live gap has a distinct
+     # bound workspace and cannot collide with another gap's dispatch.
+     try:
+-        agents = roster()
++        if agents is None:
++            agents = roster()
+     except (OSError, ValueError, subprocess.SubprocessError) as exc:
+         return [{"gap": g, "status": "deferred", "detail": str(exc)[:300]} for g in live]
+     out = []
+     for gap in live:
+         try:
+             out.extend({"gap": gap, **row} for row in
+-                       dispatch(gap, [("general", GENERAL_APPROACH)], agents=agents))
++                       dispatch(gap, [("general", GENERAL_APPROACH)], agents=agents, locked=True))
+         except (OSError, ValueError, subprocess.SubprocessError) as exc:
+             out.append({"gap": gap, "status": "deferred", "detail": str(exc)[:300]})
+     return out
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index de5e9337..4532232c 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -126,9 +126,11 @@ def snapshot():
+         if type(held) is int and type(parallel) is int and held < parallel:
+             related.append({"gap": gid, "title": item.get("title"), "held": held, "parallel": parallel})
+     related.sort(key=lambda x: (x["held"], x["gap"]))
++    from missions.pnp import continuity
++    missing_fronts = [p[0] for p in continuity.focus_plans(selected,w["agents"])] if w["coverage"]=="complete" else []
+     coordination_due = bool(w["coverage"] == "complete" and (
+         stale_workers or unstaffed or missing_general or off_focus or
+-        (focus_gap and len(focus_workers) < 2)))
++        missing_fronts))
+     # Support agents are never counted as leased researchers. Coverage is
+     # a coordination signal, not an agent-number quota or a proof gate.
+     scouts = w.pop("support", [])
+@@ -139,7 +141,8 @@ def snapshot():
+         needed.add("lease-evaluation")
+     if len(active) > 1:
+         needed.add("portfolio")
+-    missing_support = sorted(needed - covered) if w["coverage"] == "complete" else []
++    complete = continuity.completed_roles(continuity.live(), selected)
++    missing_support = sorted(needed - covered - complete) if w["coverage"] == "complete" else []
+     try:
+         memory = json.loads((STATE / "pnp/allocator.json").read_text())
+         decisions = {k: memory.get("last_"+k) for k in ("switch","release")}
+@@ -163,13 +166,13 @@ def snapshot():
+     return {
+         "observed": len(rows), "by_state": by_state, "recent": rows[-12:],
+         "leaderboard": score, "workers": w,
+-        "research_support": {"agents": scouts, "coverage_missing": missing_support,
++        "research_support": {"agents": scouts, "completed_current_evidence": sorted(complete), "coverage_missing": missing_support,
+                              "coordination_findings": findings,
+                              "portfolio_decisions": decisions,
+                              "action": "Executive owns staffing and material steering; support findings are advisory and arrive directly in worker guards."},
+         "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
+         "frontier_fresh": bool(observed), "active_lease_gaps": active,
+-        "research_focus": focus_gap, "focus_workers": focus_workers, "reserve_gaps": reserves,
++        "research_focus": focus_gap, "missing_focus_fronts": missing_fronts, "focus_workers": focus_workers, "reserve_gaps": reserves,
+         "general_workers": general_workers, "missing_general": missing_general,
+         "baseline_command":"python3 -m missions.pnp.staff --baseline",
+         "focus_details": ({k: selected.get(k) for k in ("gap_title", "statement", "imports", "context")}
+diff --git a/missions/pnp/watchdog.py b/missions/pnp/watchdog.py
+index 57c9e67a..53a8347e 100644
+--- a/missions/pnp/watchdog.py
++++ b/missions/pnp/watchdog.py
+@@ -138,6 +138,9 @@ def stop_if_terminal(entry, expected, pending, now):
+                         return None
+                 except (OSError, ValueError):
+                     pass
++            from . import focus
++            if not superseded and focus.correction(rec):
++                return None
+             if rec.get("state") not in TERMINAL and not superseded:
+                 return None
+             # Recheck after acquiring the gap lock. A replaced PID or cwd
+diff --git a/tests/mission-boundary-smoke.sh b/tests/mission-boundary-smoke.sh
+index 3b2f1db7..9a0a4fb1 100755
+--- a/tests/mission-boundary-smoke.sh
++++ b/tests/mission-boundary-smoke.sh
+@@ -42,3 +42,23 @@ done
+ [ -s "$d/state/missions/alpha/cycle.lock" ] || [ -f "$d/state/missions/alpha/cycle.lock" ]
+ [ -f "$d/state/missions/bravo/cycle.lock" ]
+ echo 'Task-independent mission dispatch and error isolation passed'
++
++cat > "$d/town/missions/alpha/executive.sh" <<'HOOK'
++#!/bin/sh
++printf '%s\n' "executive alpha ran" > "$VICHE_STATE_ROOT/alpha-executive"
++HOOK
++echo 'standing order' > "$d/town/missions/alpha/mandate.md"
++cat > "$d/town/missions/bravo/executive.sh" <<'HOOK'
++#!/bin/sh
++touch "$VICHE_STATE_ROOT/bravo-unauthorized"
++HOOK
++VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
++    /bin/sh "$d/town/government/mission-cycle.sh" executive
++n=0
++while [ ! -f "$d/state/alpha-executive" ] && [ "$n" -lt 50 ]; do
++    sleep .04
++    n=$((n+1))
++done
++[ "$(cat "$d/state/alpha-executive")" = "executive alpha ran" ]
++[ ! -e "$d/state/bravo-unauthorized" ]
++echo 'Executive standing orders are independent and require a mission mandate'
+diff --git a/tests/pnp-continuity.py b/tests/pnp-continuity.py
+new file mode 100644
+index 00000000..76a321d1
+--- /dev/null
++++ b/tests/pnp-continuity.py
+@@ -0,0 +1,88 @@
++#!/usr/bin/env python3
++"""Hermetic tests of standing Executive orders and correction liveness."""
++import contextlib
++import json
++from pathlib import Path
++import sys
++import tempfile
++import time
++import unittest
++from unittest.mock import patch
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
++from missions.pnp import assignment, build_control, config, continuity, focus, staff, state, support
++from missions.pnp.proofs import fragments
++
++class Tests(unittest.TestCase):
++    def setUp(self):
++        self.tmp=tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        root=self.tmp.name
++        p=patch.multiple(config,STATE_ROOT=root,GAPS_DIR=root+"/gaps",CACHE_DIR=root+"/cache")
++        p.start();self.addCleanup(p.stop)
++        self.a=state.create("L-meta-1",state="LEASED",lease="a",statement="True",lease_expires_at=time.time()+600)
++        self.b=state.create("L-meta-2",state="LEASED",lease="b",statement="True",lease_expires_at=time.time()+600)
++    def test_baseline_and_focus_are_not_model_turns(self):
++        observed={"coverage":"complete","agents":[],"support":[]}
++        with patch.object(continuity.status,"workers",return_value=observed), \
++             patch.object(staff,"roster",return_value=[]), \
++             patch.object(staff,"baseline",return_value=[]) as baseline, \
++             patch.object(staff,"dispatch",return_value=[]) as dispatch, \
++             patch.object(continuity,"support_pass",return_value={}) as scout:
++            continuity.execute()
++        baseline.assert_called_once_with([],locked=True)
++        self.assertEqual(dispatch.call_count,1)
++        self.assertEqual([p[0] for p in dispatch.call_args.args[1]],["integrator","alternative"])
++        self.assertEqual(scout.call_count,5)
++    def test_unknown_roster_does_not_dispatch(self):
++        with patch.object(continuity.status,"workers",return_value={"coverage":"partial"}),patch.object(staff,"roster") as roster:
++            self.assertEqual(continuity.execute()["status"],"worker coverage unknown")
++            roster.assert_not_called()
++    def test_focus_integrator_replenished_independently(self):
++        path=assignment.prepare(self.a["gap_id"],checkout=False,worker="construction")["cwd"]
++        agents=[{"cwd":path,"state":"running"}]
++        self.assertEqual([p[0] for p in continuity.focus_plans(self.a,agents)],["integrator"])
++        self.assertEqual([p[0] for p in continuity.focus_plans(self.b,agents)],["integrator","alternative"])
++    def test_support_receipt_no_repeat_without_changed_evidence(self):
++        role="knowledge"
++        path=str(Path(config.STATE_ROOT,"swarm","standing-support",role))
++        records=[self.a,self.b]
++        with patch.object(staff,"antonina",side_effect=["agent-id",json.dumps({"state":"running"})]) as wire:
++            self.assertEqual(continuity.support_pass(role,records,self.a,[])["status"],"started")
++            self.assertEqual(wire.call_count,2)
++        done=[{"id":"agent-id","title":support.PREFIX+" "+role,"state":"clearexit","cwd":path}]
++        with patch.object(staff,"antonina") as wire:
++            self.assertEqual(continuity.support_pass(role,records,self.a,done)["status"],"completed same evidence")
++            wire.assert_not_called()
++        self.assertEqual(continuity.completed_roles(records,self.a),{role})
++        support.advise(self.a["gap_id"],support.attempt(self.a),"checked","proof","new exact match")
++        self.assertFalse(continuity.completed_roles(records,self.a))
++    def test_correction_workspace_and_compilation(self):
++        rec=state.create("L-meta-3",state="PR_OPEN",lease="old",statement="True",pr_number=42,
++                         local_check_status="failed",external_verdict="pending",lease_expires_at=0)
++        with patch.object(focus,"current",return_value=rec):
++            self.assertTrue(staff.current_matches(rec))
++            self.assertFalse(staff.current_matches(rec,general=True))
++            a=assignment.prepare(rec["gap_id"],checkout=False,worker="correction")
++            self.assertEqual(assignment.binding(Path(a["cwd"])),(rec["gap_id"],"old"))
++        self.assertFalse(build_control.obsolete(rec["gap_id"],"old"))
++        self.assertTrue(build_control.obsolete(rec["gap_id"],"superseded"))
++        state.update(rec["gap_id"],queued_lease="old")
++        self.assertTrue(build_control.obsolete(rec["gap_id"],"old"))
++    def test_fragment_survives_source_edit_and_reacquisition(self):
++        path=Path(assignment.prepare(self.a["gap_id"],checkout=False,worker="general")["cwd"])
++        path.mkdir(parents=True)
++        source=path/"Helper.lean";source.write_text("lemma helper : True := by trivial\n")
++        with patch.object(fragments.subprocess,"check_output",return_value="base\n"):
++            fragment=fragments.share(source,"helper, not checked",path)
++        source.write_text("different")
++        self.assertIn("lemma helper",Path(fragment["path"]).read_text())
++        self.assertEqual(len(fragments.inventory(cwd=path)),1)
++        state.update(self.a["gap_id"],lease="new")
++        new=Path(assignment.prepare(self.a["gap_id"],checkout=False,worker="general")["cwd"])
++        self.assertEqual(fragments.inventory(cwd=new),[])
++        old,=fragments.inventory(True,cwd=new)
++        self.assertFalse(old["current_attempt"])
++        self.assertFalse(old["verified_by_tool"])
++
++if __name__=="__main__":
++    unittest.main(verbosity=2)
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index 4cbeea47..3754abd3 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -13,3 +13,5 @@ python3 tests/pnp-support.py
+ python3 tests/pnp-allocator.py
+ 
+ /bin/sh tests/pnp-runtime-isolation-smoke.sh
++
++python3 tests/pnp-continuity.py
+diff --git a/tests/pnp-proof-tools.py b/tests/pnp-proof-tools.py
+index 9fc89c58..508d295d 100644
+--- a/tests/pnp-proof-tools.py
++++ b/tests/pnp-proof-tools.py
+@@ -9,7 +9,7 @@ import tempfile
+ import unittest
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+-from missions.pnp.proofs import corpus, circuit, synthesis
++from missions.pnp.proofs import corpus, circuit, synthesis, search
+ from missions.pnp import validate
+ 
+ META = {"id": "L-meta-12345",
+@@ -49,6 +49,46 @@ class ProofTools(unittest.TestCase):
+         bad = dict(meta, statement=meta["statement"].replace("≤ 3","≤ 2"))
+         self.assertIsNone(synthesis.candidate(bad)["candidate"])
+ 
++    def test_sat_exact_against_independent_two_variable_enumeration(self):
++        import itertools
++        # Independently enumerate all functions realizable with up to two
++        # gates (including repeated inputs, NOT and any output wire).
++        functions = {0b1010,0b1100}
++        frontier = {(0b1010,0b1100)}
++        for budget in range(3):
++            if budget:
++                new=set()
++                for wires in frontier:
++                    values={15^a for a in wires}
++                    values.update(a&b for a in wires for b in wires)
++                    values.update(a|b for a in wires for b in wires)
++                    new.update(wires+(v,) for v in values)
++                    functions.update(values)
++                frontier=new
++            for truth in range(16):
++                raw={"n":2,"gates":budget,"ones":[r for r in range(4) if truth>>r&1]}
++                result=search.solve(raw,5)
++                if result["result"]=="unavailable":
++                    self.skipTest("optional SAT solver unavailable")
++                self.assertEqual(result["result"],"verified_witness" if truth in functions else "unsat_encoding",(raw,result))
++    def test_sat_checkpoint_and_fixed_prefix(self):
++        raw={"n":3,"gates":2,"edges":[[0,1],[0,2]],"ops":["and","or"],"fixed":[["or",2,1]]}
++        with tempfile.TemporaryDirectory() as tmp:
++            cp=Path(tmp,"rows.json")
++            r=search.solve(raw,5,cp)
++            if r["result"]=="unavailable":
++                self.skipTest("optional SAT solver unavailable")
++            self.assertEqual(r["result"],"verified_witness")
++            self.assertEqual(r["gates"][0],["or",2,1])
++            self.assertTrue(cp.exists())
++            self.assertEqual(search.solve(raw,5,cp)["result"],"verified_witness")
++            with self.assertRaises(ValueError):
++                search.solve(dict(raw,gates=3),5,cp)
++    def test_structural_hints_not_implication_verdicts(self):
++        hint=corpus.structural_hint("P → Q → R","Q → R")
++        self.assertTrue(hint["same_conclusion_shape"])
++        self.assertEqual(hint["hypotheses_matched"],1)
++
+     def test_corpus_incremental_and_allowed_import(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             db = sqlite3.connect(":memory:")
+diff --git a/tests/pnp-runtime-isolation-smoke.sh b/tests/pnp-runtime-isolation-smoke.sh
+index d29c4783..d9507baa 100644
+--- a/tests/pnp-runtime-isolation-smoke.sh
++++ b/tests/pnp-runtime-isolation-smoke.sh
+@@ -5,7 +5,7 @@ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ tmp=$(mktemp -d)
+ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+ mkdir -p "$tmp/town/missions/pnp" "$tmp/bin"
+-for f in runtime.sh cycle.sh heartbeat.sh allocator.sh status.sh; do
++for f in runtime.sh cycle.sh heartbeat.sh allocator.sh executive.sh status.sh; do
+     cp "$repo/missions/pnp/$f" "$tmp/town/missions/pnp/$f"
+ done
+ # If any launch proceeds past the guard, the fake marker will detect it.
+@@ -16,7 +16,7 @@ touch "$tmp/town/missions/pnp/cli.py" "$tmp/town/missions/pnp/allocator.py"
+ export PNP_TEST_MARKER="$tmp/side-effect" PATH="$tmp/bin:$PATH"
+ export VICHE_TOWN_ROOT="$tmp/town" VICHE_STATE_ROOT="$tmp/state"
+ unset PNP_STATE_ROOT
+-for f in cycle.sh heartbeat.sh allocator.sh; do
++for f in cycle.sh heartbeat.sh allocator.sh executive.sh; do
+     timeout 3 /bin/sh "$tmp/town/missions/pnp/$f" 2>"$tmp/err"
+     grep -q 'skipped outside canonical deployment' "$tmp/err"
+ done
+@@ -26,7 +26,7 @@ test ! -e "$PNP_TEST_MARKER"
+ # Even if a copied launcher inherits production roots, its actual pathname
+ # still disqualifies it. This exercises the most dangerous test configuration.
+ unset VICHE_TOWN_ROOT VICHE_STATE_ROOT
+-for f in cycle.sh heartbeat.sh allocator.sh; do
++for f in cycle.sh heartbeat.sh allocator.sh executive.sh; do
+     timeout 3 /bin/sh "$tmp/town/missions/pnp/$f" 2>"$tmp/err"
+     grep -q 'skipped outside canonical deployment' "$tmp/err"
+ done

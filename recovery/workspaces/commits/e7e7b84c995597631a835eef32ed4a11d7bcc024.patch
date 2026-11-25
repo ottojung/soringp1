@@ -1,0 +1,72 @@
+commit e7e7b84c995597631a835eef32ed4a11d7bcc024
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 23:01:52 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 23:01:52 2026 +0000
+
+    Match compliance evidence to required suite
+
+diff --git a/government/suite-compliance-check.sh b/government/suite-compliance-check.sh
+index 677c6517..f5abdd0b 100644
+--- a/government/suite-compliance-check.sh
++++ b/government/suite-compliance-check.sh
+@@ -47,6 +47,9 @@ try:
+         paths=[p for p in paths if p.startswith(('government/','tests/','records/'))]
+         if not paths:
+             continue
++        expected_suite=('tests/records-smoke.sh'
++                        if all(p.startswith('records/') for p in paths)
++                        else 'tests/run-all.sh')
+         tree=git('rev-parse',commit+'^{tree}')
+         # Require the record commit to precede the main change. The record must
+         # name that exact commit and its tree; a matching parent is insufficient
+@@ -55,6 +58,8 @@ try:
+         for rc,r,source in records:
+             if r.get('result') not in ('green','red') or r.get('tree') != tree:
+                 continue
++            if r.get('suite') != expected_suite:
++                continue
+             candidate=r.get('commit','')
+             try:
+                 if git('rev-parse','--verify',candidate+'^{tree}') != tree:
+@@ -75,7 +80,8 @@ try:
+         elif greens:
+             status='compliant'; reason='preceding green record for exact commit/tree ('+','.join(sorted(set(source for _,_,source in greens)))+')'
+         elif any(r.get('result')=='red' and r.get('commit')==commit
+-                 and r.get('tree')==tree for _,r,_source in records):
++                 and r.get('tree')==tree and r.get('suite')==expected_suite
++                 for _,r,_source in records):
+             status='violation'; reason='red suite recorded for exact commit/tree (after change)'
+         else:
+             status='unreadable'; reason='no preceding exact-commit/tree suite record'
+diff --git a/tests/suite-compliance-smoke.sh b/tests/suite-compliance-smoke.sh
+index c412a7da..d486c2df 100644
+--- a/tests/suite-compliance-smoke.sh
++++ b/tests/suite-compliance-smoke.sh
+@@ -24,10 +24,15 @@ printf 'changed\n' > "$tmp/government/base"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm candidate
+ green_change=$(git -C "$tmp" rev-parse HEAD)
+ green_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000}\n' \
+-    "$green_change" "$green_tree" > "$VICHE_STATE_ROOT/delivery/verified-$green_change.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/records-smoke.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000}\n' \
++    "$green_change" "$green_tree" > "$VICHE_STATE_ROOT/delivery/verified-wrong-suite.json"
+ git -C "$tmp" checkout -q main
+ git -C "$tmp" merge --ff-only -q main-candidate
++# A green record for the wrong suite does not satisfy the code-change gate.
++out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
++printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["compliant"]==0; assert x["unreadable"]>0'
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000}\n' \
++    "$green_change" "$green_tree" > "$VICHE_STATE_ROOT/delivery/verified-$green_change.json"
+ # A main change with no matching prior verification is unreadable.
+ printf 'unverified\n' > "$tmp/tests/unverified"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm unverified-change
+@@ -36,7 +41,7 @@ printf 'red\n' > "$tmp/tests/red"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm red-change
+ red_commit=$(git -C "$tmp" rev-parse HEAD)
+ red_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
+-printf '{"result":"red","commit":"%s","tree":"%s"}\n' "$red_commit" "$red_tree" > "$tmp/records/suite-status.json"
++printf '{"result":"red","suite":"tests/run-all.sh","commit":"%s","tree":"%s"}\n' "$red_commit" "$red_tree" > "$tmp/records/suite-status.json"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm red-record
+ out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
+ printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["status"]=="measured"; assert x["compliant"]==1; assert x["unreadable"]>0; assert x["main_red_episodes"]==1; assert x["violations"]==1'

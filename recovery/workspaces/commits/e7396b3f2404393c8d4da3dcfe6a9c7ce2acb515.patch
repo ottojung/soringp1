@@ -1,0 +1,101 @@
+commit e7396b3f2404393c8d4da3dcfe6a9c7ce2acb515
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 21:37:36 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 21:37:36 2026 +0000
+
+    Report malformed case documents in the generated index
+    
+    Review of 1401bd9 found that an unguarded stderr diagnostic could abort
+    reconcile on a failing stderr, leaving the index stale. Replace the console
+    diagnostic with a durable 'malformed' list in the generated index: no stderr
+    dependency, no new failure mode, and a malformed case-like document stays
+    visible to monitoring instead of disappearing. Regression covers detection,
+    non-indexing, a failing stderr (2>/dev/full), and recovery once the malformed
+    file is removed.
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 029fe114..9452dedb 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -395,24 +395,26 @@ def reconcile():
+         elif not case:
+             continue
+         atomic(path, case)
+-    open_cases = _case_documents()
++    open_cases, malformed = _case_documents()
+     active = [x for x in open_cases if x.get("state") == "open"]
+     atomic(STORE / "index.json", {
+         "observed_at": now, "active": [x["id"] for x in active],
+-        "count": len(active), "caveat": "operational health, not proof of delivery",
++        "count": len(active), "malformed": malformed,
++        "caveat": "operational health, not proof of delivery",
+     })
+     return active
+ 
+ 
+ def _case_documents():
+-    """Return usable case documents, never failing the pass on foreign JSON.
++    """Return (usable case documents, names of malformed case-like documents).
+ 
+     The store also holds non-case documents (an evidence list, an empty
+-    placeholder). Those are skipped. A dict that looks like a case but has no
+-    id is malformed: skipping it silently could hide a real obligation, so it
+-    is reported on stderr while the pass continues.
++    placeholder). Those are skipped. A non-empty dict without an id is
++    malformed: skipping it silently could hide a real obligation, so its name
++    is returned for durable reporting in the generated index.
+     """
+     cases = []
++    malformed = []
+     for path in sorted(STORE.glob("*.json")):
+         if path.name == "index.json":
+             continue
+@@ -422,13 +424,12 @@ def _case_documents():
+         if document.get("id"):
+             cases.append(document)
+             continue
+-        print("institutional-cases: case document without id: {}".format(path.name),
+-              file=sys.stderr)
+-    return cases
++        malformed.append(path.name)
++    return cases, malformed
+ 
+ 
+ def report():
+-    return [case for case in _case_documents() if case.get("state") == "open"]
++    return [case for case in _case_documents()[0] if case.get("state") == "open"]
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 57717f4e..597e4dfc 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -249,15 +249,21 @@ assert index["count"] == len(index["active"]), index
+ report = json.load(open(sys.argv[1] + "/reconcile-noncase.json"))["open_cases"]
+ assert all(isinstance(c, dict) and c.get("id") for c in report), report
+ PY
+-# A dict that looks like a case but has no id must be surfaced, not silently
+-# dropped from the index.
++# A dict that looks like a case but has no id must be surfaced durably in the
++# generated index rather than silently dropped.
+ printf '{"signal":"mystery","state":"open","first_seen":10}\n' \
+   > "$d/state/institutional-cases/mystery_no_id.json"
+-VICHE_CASE_NOW=1800 python3 "$repo/government/institutional-cases.py" reconcile \
+-  > "$d/reconcile-noid.json" 2> "$d/reconcile-noid.err"
+-grep -Fq 'mystery_no_id.json' "$d/reconcile-noid.err"
++VICHE_CASE_NOW=1840 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.malformed | index("mystery_no_id.json")' "$d/state/institutional-cases/index.json" >/dev/null
+ ! jq -e '.active | index("mystery_no_id")' "$d/state/institutional-cases/index.json" >/dev/null 2>&1
++# A failing stderr must not abort the pass or leave a stale index; the durable
++# report lives in the index, not on the console.
++VICHE_CASE_NOW=1850 python3 "$repo/government/institutional-cases.py" reconcile \
++  > "$d/reconcile-noid-again.json" 2>/dev/full
++jq -e '.observed_at==1850 and (.malformed | index("mystery_no_id.json"))' "$d/state/institutional-cases/index.json" >/dev/null
+ rm "$d/state/institutional-cases/mystery_no_id.json"
++VICHE_CASE_NOW=1860 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.observed_at==1860 and (.malformed|length)==0' "$d/state/institutional-cases/index.json" >/dev/null
+ VICHE_CASE_NOW=1800 python3 "$repo/government/institutional-cases.py" report > "$d/report-noncase.json"
+ python3 -c 'import json,sys; cases=json.load(open(sys.argv[1]))["open_cases"]; assert all(isinstance(c,dict) and c.get("id") for c in cases), cases' "$d/report-noncase.json"
+ 

@@ -1,0 +1,119 @@
+commit eda6747ab126c057301a1472eb97497258226d7d
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sun Nov 8 06:41:42 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sun Nov 8 06:41:42 2026 +0000
+
+    Keep evidence-less closures visible and the case collector crash-free
+    
+    Addendum/evidence files are stored beside case objects and one live addendum is
+    a top-level JSON list. read() therefore returned a list, and reconcile() died
+    on .get(), leaving index.json stale. Guard non-dict records without treating
+    them as cases, and filter the index inputs to real case objects.
+    
+    Also surface historical verified_closed cases that carry no case-bound closure
+    artifact under unresolved_without_closure_evidence. This does not reopen or
+    rewrite any case object and does not change open-case dispatch; it keeps the
+    obligation discoverable until an authorized reconciliation supplies evidence,
+    as Act 23 §5.1/§7 require. On a copy of the live store this lists nine
+    historical evidence-less closures and exits 0.
+    
+    Extend the institutional smoke test with a non-case addendum record and a
+    historical closure, asserting the addendum is preserved byte-for-byte, the
+    collector exits 0, and the closure remains listed as unresolved.
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 3d130dc6..84eac6eb 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -92,6 +92,11 @@ def reconcile():
+             continue
+         path = STORE / (signal + ".json")
+         case = read(path)
++        # Addendum/evidence files live beside case objects. A list-shaped or
++        # malformed record is evidence to preserve, never a reason for the
++        # collector to crash and leave its index stale.
++        if not isinstance(case, dict):
++            case = {}
+         if signal in signals:
+             if not case or case.get("state") == "verified_closed":
+                 case = {
+@@ -118,18 +123,49 @@ def reconcile():
+         elif not case:
+             continue
+         atomic(path, case)
+-    open_cases = [read(p) for p in sorted(STORE.glob("*.json"))]
+-    active = [x for x in open_cases if x.get("state") == "open"]
++    records = [x for x in (read(p) for p in sorted(STORE.glob("*.json")))
++               if isinstance(x, dict) and x.get("id")]
++    active = [x for x in records if x.get("state") == "open"]
++    # A closed label without a case-bound closure artifact is not resolution.
++    # Historical cases closed by the removed absent-signal path stay visible
++    # to monitoring and to the responsible office until an authorized
++    # reconciliation supplies the evidence. This does not reopen or rewrite
++    # any case object, and it does not change open-case dispatch.
++    unresolved = [x for x in records if closure_unsubstantiated(x)]
+     atomic(STORE / "index.json", {
+-        "observed_at": now, "active": [x["id"] for x in active],
+-        "count": len(active), "caveat": "operational health, not proof of delivery",
++        "observed_at": now,
++        "active": [x["id"] for x in active],
++        "count": len(active),
++        "unresolved_without_closure_evidence": [
++            {"id": x.get("id"), "signal": x.get("signal"), "state": x.get("state"),
++             "reason": "verified_closed without a case-bound closure artifact"}
++            for x in unresolved],
++        "unresolved_without_closure_evidence_count": len(unresolved),
++        "total_obligations": len(active) + len(unresolved),
++        "caveat": "operational health, not proof of delivery; a closed label "
++                  "without a case-bound closure artifact is listed as unresolved",
+     })
+     return active
+ 
+ 
++def closure_unsubstantiated(case):
++    """True for a closed case whose closure is not backed by a case artifact.
++
++    Historical closures from the absent-signal path carry no closure_evidence.
++    An artifact explicitly marked closure_eligible=false is likewise not
++    resolution.
++    """
++    if case.get("state") != "verified_closed":
++        return False
++    evidence = case.get("closure_evidence")
++    if not isinstance(evidence, dict) or not evidence:
++        return True
++    return evidence.get("closure_eligible") is False
++
++
+ def report():
+-    return [read(p) for p in sorted(STORE.glob("*.json"))
+-            if p.name != "index.json" and read(p).get("state") == "open"]
++    return [x for x in (read(p) for p in sorted(STORE.glob("*.json")))
++            if isinstance(x, dict) and x.get("id") and x.get("state") == "open"]
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 35216628..84998b44 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -76,6 +76,18 @@ VICHE_CASE_NOW=1300 python3 "$repo/government/institutional-cases.py" reconcile
+ VICHE_CASE_NOW=1400 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ 
++# Evidence files that are not case objects (for example an addendum JSON list)
++# must never crash the collector or be mistaken for a case. A historical
++# verified_closed label without a case-bound closure artifact must remain
++# visible as unresolved rather than silently counting as resolution.
++printf '[{"case":"legacy","note":"evidence only"}]\n' > "$d/state/institutional-cases/addendum-fixture.json"
++printf '{"id":"legacy_closed:900","signal":"legacy_closed","state":"verified_closed","first_seen":900,"last_seen":900,"verification":"two successive deterministic health checks without signal"}\n' > "$d/state/institutional-cases/legacy_closed.json"
++addendum_sum=$(sha256sum "$d/state/institutional-cases/addendum-fixture.json" | cut -d ' ' -f1)
++VICHE_CASE_NOW=1500 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++test "$(sha256sum "$d/state/institutional-cases/addendum-fixture.json" | cut -d ' ' -f1)" = "$addendum_sum"
++jq -e '.unresolved_without_closure_evidence | map(.id) | index("legacy_closed:900") != null' "$d/state/institutional-cases/index.json" >/dev/null
++jq -e '.state=="verified_closed"' "$d/state/institutional-cases/legacy_closed.json" >/dev/null
++
+ # After a real enactment, new Executive work has a clean worktree, separate
+ # from the historical legislative one. Mock only the dispatcher prerequisites.
+ git -C "$d/town" init -q
