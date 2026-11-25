@@ -1,0 +1,59 @@
+commit ce73391a92d00ea2545a4d506c09b8b8f6423c8a
+Author:     Viche Executive Innovation Office <innovation-office@viche.local>
+AuthorDate: Mon Nov 9 08:00:49 2026 +0000
+Commit:     Viche Executive Innovation Office <innovation-office@viche.local>
+CommitDate: Mon Nov 9 08:00:49 2026 +0000
+
+    Filter non-dict evidence from reconcile index and report
+    
+    Independent review found the per-signal guard did not cover the final index
+    build or report(), so a JSON-list addendum beside case state still crashed both.
+    Filter to dict case objects at both consumers and add the regression: reconcile
+    and report both exit 0 and the addendum is preserved byte-for-byte.
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 36674c7a..04992477 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -128,8 +128,9 @@ def reconcile():
+         elif not case:
+             continue
+         atomic(path, case)
+-    open_cases = [read(p) for p in sorted(STORE.glob("*.json"))]
+-    active = [x for x in open_cases if x.get("state") == "open"]
++    records = [x for x in (read(p) for p in sorted(STORE.glob("*.json")))
++               if isinstance(x, dict) and x.get("id")]
++    active = [x for x in records if x.get("state") == "open"]
+     atomic(STORE / "index.json", {
+         "observed_at": now, "active": [x["id"] for x in active],
+         "count": len(active), "caveat": "operational health, not proof of delivery",
+@@ -138,8 +139,8 @@ def reconcile():
+ 
+ 
+ def report():
+-    return [read(p) for p in sorted(STORE.glob("*.json"))
+-            if p.name != "index.json" and read(p).get("state") == "open"]
++    return [x for x in (read(p) for p in sorted(STORE.glob("*.json")))
++            if isinstance(x, dict) and x.get("id") and x.get("state") == "open"]
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index b0712a28..5bd764b7 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -83,6 +83,14 @@ printf '{"id":"judiciary_mailbox_pending:1","signal":"judiciary_mailbox_pending"
+ VICHE_CASE_NOW=1500 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.owner=="judiciary" and .state=="open"' "$d/state/institutional-cases/judiciary_mailbox_pending.json" >/dev/null
+ 
++# A JSON-list evidence file beside case objects must be preserved without
++# crashing either reconcile or report.
++printf '[{"case":"evidence","note":"list"}]\n' > "$d/state/institutional-cases/addendum-fixture.json"
++addendum_sum=$(sha256sum "$d/state/institutional-cases/addendum-fixture.json" | cut -d ' ' -f1)
++VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" report >/dev/null
++test "$(sha256sum "$d/state/institutional-cases/addendum-fixture.json" | cut -d ' ' -f1)" = "$addendum_sum"
++
+ # After a real enactment, Executive unit runs on preserved worktree, not a
+ # parliamentary summons. Mock only the branch-bootstrap and deployment.
+ printf '## Act 23 — Executive Innovation Office Act (enacted 2026-10-25 by recorded vote)\n' > "$d/town/government/LAWS.md"

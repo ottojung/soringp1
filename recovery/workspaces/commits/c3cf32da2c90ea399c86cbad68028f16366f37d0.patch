@@ -1,0 +1,55 @@
+commit c3cf32da2c90ea399c86cbad68028f16366f37d0
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Fri Nov 20 18:11:08 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Fri Nov 20 18:11:08 2026 +0000
+
+    Avoid placeholder-substring bypass in public Post guard
+
+diff --git a/government/post_guard.py b/government/post_guard.py
+index 34afa572..9044c2f6 100644
+--- a/government/post_guard.py
++++ b/government/post_guard.py
+@@ -27,9 +27,11 @@ ASSIGNMENT = re.compile(
+     r"\b(?:password|api[_-]?key|access[_-]?token|client[_-]?secret|"
+     r"secret[_-]?key|private[_-]?key)\s*[:=]\s*['\"]?"
+     r"(?P<value>[A-Za-z0-9_+./=-]{12,})", re.I)
++# Only explicit entire-value placeholders are exempt. A real secret may
++# contain words such as "test" or "example" as a substring.
+ PLACEHOLDER = re.compile(
+-    r"(?:redacted|placeholder|dummy|example|fake|sample|test|changeme|"
+-    r"xxxxxxxx|00000000)", re.I)
++    r"^(?:redacted|placeholder|dummy|example|fake|sample|test)"
++    r"(?:[_-](?:value|token|secret))?$|^(?:changeme|x{8,}|0{8,})$", re.I)
+ 
+ 
+ def detect(value):
+@@ -37,7 +39,7 @@ def detect(value):
+     text = value if isinstance(value, str) else str(value)
+     hits = {name for name, pattern in PATTERNS.items() if pattern.search(text)}
+     for match in ASSIGNMENT.finditer(text):
+-        if not PLACEHOLDER.search(match.group("value")):
++        if not PLACEHOLDER.fullmatch(match.group("value")):
+             hits.add("credential-assignment")
+     return sorted(hits)
+ 
+diff --git a/tests/test_post_guard.py b/tests/test_post_guard.py
+index 230ae03f..4990bda0 100644
+--- a/tests/test_post_guard.py
++++ b/tests/test_post_guard.py
+@@ -108,6 +108,15 @@ class PostGuardTest(unittest.TestCase):
+         self.assertNotIn(sample,json.dumps(details))
+         self.assertEqual(self.cli("archive-scan")["newly_quarantined"],0)
+ 
++    def test_placeholder_substring_cannot_hide_secret(self):
+[REDACTED CREDENTIAL-LIKE LINE]
++        err=self.cli("send","--public","--sender","office-a",
++                     "--to","office-b","--subject","Disguised",
++                     "--body",disguised,ok=False)
++        self.assertIn("credential-assignment",err)
++        self.assertNotIn(disguised,err)
++        self.assertEqual(self.cli("health")["messages"],0)
++
+     def test_placeholder_examples_do_not_block(self):
+         sample="Documentation: password=REDACTED, api_key=PLACEHOLDER"
+         self.assertEqual(self.send(sample)["delivered"],1)

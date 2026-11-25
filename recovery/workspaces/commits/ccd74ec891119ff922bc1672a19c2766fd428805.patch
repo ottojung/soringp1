@@ -1,0 +1,850 @@
+commit ccd74ec891119ff922bc1672a19c2766fd428805
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Tue Nov 24 20:15:16 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Tue Nov 24 20:15:16 2026 +0000
+
+    Integrate delivery/pnp-bench-20261124 (executive): PnP bench: retrospective graph-circuit generator benchmark
+    
+    Landed by the integration queue (Act 31) as one candidate on main 5da1e54ae4fa.
+    
+    Delivery-Branch: delivery/pnp-bench-20261124
+    Delivery-Head: 55c80e2756219499b52e198d91e90bb57fc90224
+    Proposed-By: executive
+    Reviewed-By: reviewer-ndpfaxx6lexzvl1dczxhpn-mare
+    Review-Reason: Adds a self-contained retrospective PnP generator benchmark with independent truth-table verification and family/time holdouts; the 5 new tests pass and the note's reported figures reproduce exactly against the public corpus snapshot. No LAWS.md/seats.tsv change (no Enacts trailer needed), no record
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/missions/pnp/bench/__init__.py b/missions/pnp/bench/__init__.py
+new file mode 100644
+index 00000000..e94d7d92
+--- /dev/null
++++ b/missions/pnp/bench/__init__.py
+@@ -0,0 +1,6 @@
++"""Retrospective benchmark for PnP graph-circuit-construction generators.
++
++Loads only public checked-corpus metadata and generator outputs. It does not
++execute untrusted proof code; it evaluates bound satisfaction, gate count and
++independent truth-table semantics.
++"""
+diff --git a/missions/pnp/bench/__main__.py b/missions/pnp/bench/__main__.py
+new file mode 100644
+index 00000000..eb53e2f3
+--- /dev/null
++++ b/missions/pnp/bench/__main__.py
+@@ -0,0 +1,3 @@
++from .cli import main
++
++raise SystemExit(main())
+diff --git a/missions/pnp/bench/cli.py b/missions/pnp/bench/cli.py
+new file mode 100644
+index 00000000..8a7416a6
+--- /dev/null
++++ b/missions/pnp/bench/cli.py
+@@ -0,0 +1,136 @@
++"""CLI for the retrospective PnP graph-circuit-construction benchmark."""
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from pathlib import Path
++
++from .corpus import DEFAULT_DB, load_graph_circuits
++from .evaluate import evaluate_row, evaluate_with_holdouts, summarize
++from .generators import GENERATORS, get as get_generator
++
++
++def _load_output_file(path):
++    data = json.loads(Path(path).read_text())
++    if isinstance(data, dict) and "outputs" in data:
++        data = data["outputs"]
++    if not isinstance(data, list):
++        raise ValueError("generator output file must be a JSON list or {outputs:[...]}")
++    return data
++
++
++def _index_rows(rows):
++    by_module = {r["module"]: r for r in rows}
++    by_path = {r["path"]: r for r in rows}
++    return by_module, by_path
++
++
++def evaluate_loaded_outputs(rows, output_records, generator_name=None):
++    by_module, by_path = _index_rows(rows)
++    results = []
++    for rec in output_records:
++        key = rec.get("module") or rec.get("path")
++        row = by_module.get(key) or by_path.get(key)
++        if row is None:
++            continue
++        gates = rec.get("gates")
++        output = rec.get("output")
++        if gates is None or output is None:
++            raise ValueError(f"output record missing gates/output: {key!r}")
++        res = evaluate_row(row, gates, output)
++        res["generator"] = generator_name or rec.get("generator")
++        res["family"] = f"n{row['n']}-e{row['edge_count']}"
++        results.append(res)
++    return results
++
++
++def build_report(rows, generators, output_files, test_fraction):
++    reports = []
++    for name in generators:
++        gen = get_generator(name)
++        reports.append(evaluate_with_holdouts(rows, gen, name, test_fraction=test_fraction))
++    for spec in output_files:
++        if "=" in spec:
++            name, path = spec.split("=", 1)
++        else:
++            path = spec
++            name = Path(spec).stem
++        records = _load_output_file(path)
++        results = evaluate_loaded_outputs(rows, records, generator_name=name)
++        reports.append({
++            "generator": name,
++            "source": str(path),
++            "overall": summarize(results),
++            "results": results,
++        })
++    return reports
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--corpus-db", default=str(DEFAULT_DB),
++                        help="Public checked-corpus sqlite index (read-only).")
++    parser.add_argument("--generator", action="append", default=[],
++                        choices=sorted(GENERATORS),
++                        help="Generator to run. May be given multiple times.")
++    parser.add_argument("--outputs", action="append", default=[],
++                        help="Generator outputs JSON file, or name=path.")
++    parser.add_argument("--limit", type=int, default=None,
++                        help="Limit number of corpus rows (for quick smoke runs).")
++    parser.add_argument("--test-fraction", type=float, default=0.25,
++                        help="Group/tail fraction for holdouts.")
++    parser.add_argument("--json", action="store_true",
++                        help="Emit JSON report.")
++    parser.add_argument("--pretty", action="store_true",
++                        help="Pretty-print JSON.")
++    parser.add_argument("--no-results", action="store_true",
++                        help="Omit per-row results from JSON.")
++    args = parser.parse_args(argv)
++
++    rows = load_graph_circuits(args.corpus_db, limit=args.limit)
++    if not rows:
++        print("no graph-circuit constructions found in corpus", file=sys.stderr)
++        return 2
++
++    generators = args.generator or (["legacy_greedy", "exact_star_cover"] if not args.outputs else [])
++    reports = build_report(rows, generators, args.outputs, args.test_fraction)
++
++    payload = {
++        "corpus_db": str(args.corpus_db),
++        "rows": len(rows),
++        "test_fraction": args.test_fraction,
++        "reports": reports,
++    }
++    if args.no_results:
++        for r in payload["reports"]:
++            r.pop("results", None)
++
++    if args.json or args.pretty:
++        json.dump(payload, sys.stdout, indent=2 if args.pretty else None, sort_keys=True)
++        if args.pretty:
++            sys.stdout.write("\n")
++        return 0
++
++    print(f"corpus_rows={len(rows)} db={args.corpus_db}")
++    for r in reports:
++        o = r["overall"]
++        rate = o["checked_bound_satisfaction_rate"]
++        rate_s = "n/a" if rate is None else f"{rate:.3%}"
++        print(f"\n== {r['generator']} ==")
++        print(f"checked_bound_satisfaction={o['checked_bound_satisfied']}/{o['total']} ({rate_s})")
++        print(f"bound_satisfied={o['bound_satisfied']}/{o['total']} truth_table_verified={o['truth_table_verified']}/{o['total']}")
++        print(f"gate_count_mean={o['gate_count_mean']:.3f} gate_count_max={o['gate_count_max']} bound_margin_mean={o['bound_margin_mean']:.3f}")
++        for hk in ("family_holdout", "time_holdout"):
++            h = r.get(hk)
++            if not h:
++                continue
++            hs = h["summary"]
++            hr = hs["checked_bound_satisfaction_rate"]
++            hr_s = "n/a" if hr is None else f"{hr:.3%}"
++            print(f"  {hk}: {hs['checked_bound_satisfied']}/{hs['total']} ({hr_s}) groups/modules={len(h.get('test_groups', h.get('test_modules', [])))}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/missions/pnp/bench/corpus.py b/missions/pnp/bench/corpus.py
+new file mode 100644
+index 00000000..22ad366b
+--- /dev/null
++++ b/missions/pnp/bench/corpus.py
+@@ -0,0 +1,87 @@
++"""Load public checked-corpus metadata for graph-circuit-construction rows.
++
++Only public corpus metadata is read. The loader uses the upstream proof-corpus
++index built by missions.pnp.proofs.corpus and filters rows whose statements
++match the finite graph-circuit construction shape recognized by
++missions.pnp.proofs.synthesis.parse.
++"""
++from __future__ import annotations
++
++import json
++import sqlite3
++from pathlib import Path
++
++from missions.pnp import config
++from missions.pnp.proofs import synthesis
++
++
++DEFAULT_DB = Path(config.CACHE_DIR) / "proof-corpus.sqlite"
++
++
++def _open_ro(path):
++    path = Path(path)
++    uri = f"file:{path}?mode=ro"
++    return sqlite3.connect(uri, uri=True, timeout=15)
++
++
++def load_graph_circuits(db_path=DEFAULT_DB, limit=None):
++    """Return checked-corpus graph-circuit construction metadata rows.
++
++    Each row contains only public metadata derived from the checked corpus:
++    path, module, blob, n, bound, edges, edge_count, imports, statement. The
++    statement is included because it is public checked proof metadata and is
++    needed for independent evaluation; callers should not treat it as private.
++    """
++    db = _open_ro(db_path)
++    try:
++        rows = db.execute(
++            "select path, blob, statement, imports from proof order by path"
++        ).fetchall()
++    finally:
++        db.close()
++
++    out = []
++    for path, blob, statement, imports_json in rows:
++        parsed = synthesis.parse(statement)
++        if not parsed:
++            continue
++        n, bound, edges = parsed
++        module = path.removeprefix("lean/").removesuffix(".lean").replace("/", ".")
++        out.append(
++            {
++                "path": path,
++                "module": module,
++                "blob": blob,
++                "n": n,
++                "bound": bound,
++                "edges": [list(e) for e in sorted(edges)],
++                "edge_count": len(edges),
++                "imports": json.loads(imports_json),
++                "statement": statement,
++            }
++        )
++        if limit is not None and len(out) >= limit:
++            break
++    return out
++
++
++def family_key(row):
++    """Stable family label for holdouts.
++
++    Family is based on the public structural shape: input count and edge count.
++    This keeps holdouts coarse and avoids memorizing individual instances.
++    """
++    return f"n{row['n']}-e{row['edge_count']}"
++
++
++def time_key(row):
++    """Stable chronological-ish key for time-based holdouts.
++
++    Uses the numeric suffix in the module name when present; falls back to path.
++    This is a public metadata ordering, not a private timestamp.
++    """
++    module = row.get("module", "")
++    digits = "".join(ch if ch.isdigit() else " " for ch in module).split()
++    if digits:
++        return (0, int(digits[-1]), module)
++    return (1, 0, row.get("path", ""))
+diff --git a/missions/pnp/bench/evaluate.py b/missions/pnp/bench/evaluate.py
+new file mode 100644
+index 00000000..aa0ffe42
+--- /dev/null
++++ b/missions/pnp/bench/evaluate.py
+@@ -0,0 +1,179 @@
++"""Evaluate generator outputs against checked-corpus metadata.
++
++Scoring uses only public metadata and generated circuits. Truth-table
++verification is independent of the generator implementation: it evaluates the
++gate list directly against the edge-function semantics.
++"""
++from __future__ import annotations
++
++from collections import defaultdict
++
++from .corpus import family_key, time_key
++
++
++class EvalError(ValueError):
++    pass
++
++
++def normalize_edges(edges):
++    norm = []
++    for e in edges:
++        if len(e) != 2:
++            raise EvalError(f"bad edge: {e!r}")
++        a, b = int(e[0]), int(e[1])
++        if a == b:
++            raise EvalError(f"self-loop: {e!r}")
++        norm.append(tuple(sorted((a, b))))
++    return tuple(sorted(set(norm)))
++
++
++def independent_truth_table(n, edges, gates, output):
++    """Independently verify circuit semantics by exhaustive truth table.
++
++    Returns (ok, detail). This does not trust generator-side verification.
++    """
++    if not isinstance(n, int) or n < 0 or n > 16:
++        return False, {"error": "unsupported_n", "n": n}
++    edges = normalize_edges(edges)
++    if any(b >= n for _, b in edges):
++        return False, {"error": "edge_out_of_range"}
++    if not isinstance(gates, list):
++        return False, {"error": "gates_not_list"}
++    if not isinstance(output, int):
++        return False, {"error": "output_not_int"}
++    if not (0 <= output < n + len(gates)):
++        return False, {"error": "output_out_of_range", "output": output}
++
++    for idx, g in enumerate(gates):
++        if not (isinstance(g, (tuple, list)) and len(g) == 3):
++            return False, {"error": "bad_gate_shape", "gate_index": idx}
++        op, a, b = g
++        if op not in ("and", "or"):
++            return False, {"error": "bad_op", "gate_index": idx, "op": op}
++        wire_limit = n + idx
++        if not (isinstance(a, int) and isinstance(b, int)):
++            return False, {"error": "bad_wire_type", "gate_index": idx}
++        if not (0 <= a < wire_limit and 0 <= b < wire_limit):
++            return False, {"error": "wire_out_of_range", "gate_index": idx}
++
++    for mask in range(1 << n):
++        wires = [(mask >> i) & 1 for i in range(n)]
++        for op, a, b in gates:
++            va, vb = wires[a], wires[b]
++            wires.append((va & vb) if op == "and" else (va | vb))
++        expected = 1 if any(wires[a] and wires[b] for a, b in edges) else 0
++        got = wires[output]
++        if got != expected:
++            return False, {
++                "error": "semantic_mismatch",
++                "counterexample_mask": mask,
++                "expected": expected,
++                "got": got,
++            }
++    return True, {"cases": 1 << n}
++
++
++def evaluate_row(row, gates, output):
++    """Score one generator output against one corpus metadata row."""
++    n = int(row["n"])
++    bound = int(row["bound"])
++    edges = normalize_edges(row["edges"])
++    ok, detail = independent_truth_table(n, edges, gates, output)
++    gate_count = len(gates)
++    bound_satisfied = gate_count <= bound
++    checked = bool(ok and bound_satisfied)
++    return {
++        "module": row.get("module"),
++        "path": row.get("path"),
++        "n": n,
++        "bound": bound,
++        "edge_count": len(edges),
++        "gate_count": gate_count,
++        "bound_satisfied": bound_satisfied,
++        "truth_table_verified": bool(ok),
++        "checked_bound_satisfied": checked,
++        "verification": detail,
++    }
++
++
++def summarize(results):
++    total = len(results)
++    bound_ok = sum(r["bound_satisfied"] for r in results)
++    tt_ok = sum(r["truth_table_verified"] for r in results)
++    checked = sum(r["checked_bound_satisfied"] for r in results)
++    gates = [r["gate_count"] for r in results]
++    margins = [r["bound"] - r["gate_count"] for r in results]
++    return {
++        "total": total,
++        "bound_satisfied": bound_ok,
++        "truth_table_verified": tt_ok,
++        "checked_bound_satisfied": checked,
++        "checked_bound_satisfaction_rate": (checked / total) if total else None,
++        "gate_count_mean": (sum(gates) / total) if total else None,
++        "gate_count_max": max(gates) if gates else None,
++        "bound_margin_mean": (sum(margins) / total) if total else None,
++    }
++
++
++def holdout_split(rows, key_fn, test_fraction=0.25):
++    """Deterministic holdout split by a key function.
++
++    Groups rows by key, sorts groups by key, then assigns the tail fraction of
++    groups to test. Group-level splitting avoids leaking near-identical family
++    members across train/test.
++    """
++    groups = defaultdict(list)
++    for row in rows:
++        groups[key_fn(row)].append(row)
++    keys = sorted(groups)
++    if not keys:
++        return [], []
++    test_group_count = max(1, int(round(len(keys) * test_fraction)))
++    test_keys = set(keys[-test_group_count:])
++    train, test = [], []
++    for k in keys:
++        (test if k in test_keys else train).extend(groups[k])
++    return train, test
++
++
++def evaluate_generator(rows, generator, generator_name=None):
++    results = []
++    for row in rows:
++        gates, output = generator(row["n"], [tuple(e) for e in row["edges"]])
++        res = evaluate_row(row, gates, output)
++        res["generator"] = generator_name
++        res["family"] = family_key(row)
++        results.append(res)
++    return results
++
++
++def evaluate_with_holdouts(rows, generator, generator_name=None, test_fraction=0.25):
++    all_results = evaluate_generator(rows, generator, generator_name)
++    _, fam_test = holdout_split(rows, family_key, test_fraction)
++    fam_test_keys = {r["module"] for r in fam_test}
++    fam_results = [r for r in all_results if r["module"] in fam_test_keys]
++
++    ordered = sorted(rows, key=time_key)
++    cut = max(1, int(round(len(ordered) * (1 - test_fraction)))) if ordered else 0
++    time_test = ordered[cut:]
++    time_test_keys = {r["module"] for r in time_test}
++    time_results = [r for r in all_results if r["module"] in time_test_keys]
++
++    return {
++        "generator": generator_name,
++        "overall": summarize(all_results),
++        "family_holdout": {
++            "split": "group_tail_by_family_key",
++            "family_key": "n{n}-e{edge_count}",
++            "test_fraction": test_fraction,
++            "test_groups": sorted({family_key(r) for r in fam_test}),
++            "summary": summarize(fam_results),
++        },
++        "time_holdout": {
++            "split": "tail_by_public_module_time_key",
++            "test_fraction": test_fraction,
++            "test_modules": [r["module"] for r in time_test],
++            "summary": summarize(time_results),
++        },
++        "results": all_results,
++    }
+diff --git a/missions/pnp/bench/generators.py b/missions/pnp/bench/generators.py
+new file mode 100644
+index 00000000..b58834ad
+--- /dev/null
++++ b/missions/pnp/bench/generators.py
+@@ -0,0 +1,139 @@
++"""Graph-circuit generators for the retrospective PnP benchmark.
++
++Generators take (n, edges) where edges are sorted unique (u,v), u<v, and return
++(gates, output). Gates are (op, a, b) with op in {"and","or"} and wire indices
++referring to inputs [0,n) or previous gates [n, n+len(gates)).
++"""
++from __future__ import annotations
++
++import itertools
++
++
++def _disjoin(gates, memo, n, xs):
++    xs = list(xs)
++    result = xs[0]
++    for x in xs[1:]:
++        key = ("or", *sorted((result, x)))
++        if key not in memo:
++            memo[key] = n + len(gates)
++            gates.append(key)
++        result = memo[key]
++    return result
++
++
++def legacy_greedy(n, edges):
++    """Legacy greedy block-cover generator (pre-star-cover synthesis).
++
++    Covers edges by stars or complete bipartite blocks, sharing OR
++    subexpressions. Tries three ranking strategies and returns the smallest
++    circuit found. This is the historical generator compared in the
++    2026-11-24 founder proof-production study.
++    """
++    edges = set(tuple(sorted(e)) for e in edges)
++    neighbors = {
++        i: {b if a == i else a for a, b in edges if i in (a, b)}
++        for i in range(n)
++    }
++    blocks = set()
++    for i in range(n):
++        if neighbors[i]:
++            blocks.add(((i,), tuple(sorted(neighbors[i]))))
++    for k in range(2, min(4, n) + 1):
++        for left in itertools.combinations(range(n), k):
++            right = set.intersection(*(neighbors[i] for i in left))
++            if right:
++                blocks.add((left, tuple(sorted(right))))
++    blocks = sorted(blocks)
++
++    best = None
++    for strategy in range(3):
++        gates, memo, remaining, outputs = [], {}, set(edges), []
++
++        def gate(op, a, b):
++            key = (op, *sorted((a, b)))
++            if key not in memo:
++                memo[key] = n + len(gates)
++                gates.append(key)
++            return memo[key]
++
++        def disjoin(xs):
++            return _disjoin(gates, memo, n, xs)
++
++        while remaining:
++            choices = []
++            for a, b in blocks:
++                covered = {tuple(sorted((u, v))) for u in a for v in b} & remaining
++                if not covered:
++                    continue
++                cost = len(a) + len(b)
++                if strategy == 0:
++                    rank = (len(covered) / cost, len(covered))
++                elif strategy == 1:
++                    rank = (len(covered), -cost)
++                else:
++                    rank = (len(covered) - cost, -cost)
++                choices.append((rank, a, b, covered))
++            _, a, b, covered = max(choices, key=lambda t: (t[0], t[1], t[2]))
++            outputs.append(gate("and", disjoin(a), disjoin(b)))
++            remaining -= covered
++        output = disjoin(outputs)
++        if best is None or len(gates) < len(best[0]):
++            best = (gates, output)
++    return best
++
++
++def exact_star_cover(n, edges):
++    """Exact minimum vertex cover with single ownership of each edge.
++
++    Finds a minimum vertex cover and assigns every edge to exactly one cover
++    endpoint, forming a star. This avoids paying for an edge twice. It is an
++    upper bound on optimal circuit size, not a claim of globally optimal
++    circuits. This is the generator reported by the 2026-11-24 founder
++    proof-production study as meeting all 42 recognized accepted constructions.
++    """
++    edges = set(tuple(sorted(e)) for e in edges)
++    vertices = sorted(set(itertools.chain.from_iterable(edges)))
++    centers = None
++    for k in range(0, len(vertices) + 1):
++        for s in itertools.combinations(vertices, k):
++            if all(a in s or b in s for a, b in edges):
++                centers = s
++                break
++        if centers is not None:
++            break
++    stars = {v: [] for v in centers}
++    for a, b in sorted(edges):
++        owner = a if a in stars else b
++        other = b if owner == a else a
++        stars[owner].append(other)
++
++    gates = []
++
++    def gate(op, a, b):
++        gates.append((op, a, b))
++        return n + len(gates) - 1
++
++    def disjoin(xs):
++        r = xs[0]
++        for x in xs[1:]:
++            r = gate("or", r, x)
++        return r
++
++    outputs = [gate("and", v, disjoin(ns)) for v, ns in sorted(stars.items()) if ns]
++    if not outputs:
++        # Empty edge set is outside the normal benchmark shape, but keep the
++        # generator total.
++        return [], 0
++    return gates, disjoin(outputs)
++
++
++GENERATORS = {
++    "legacy_greedy": legacy_greedy,
++    "exact_star_cover": exact_star_cover,
++}
++
++
++def get(name):
++    if name not in GENERATORS:
++        raise KeyError(f"unknown generator {name!r}; known: {sorted(GENERATORS)}")
++    return GENERATORS[name]
+diff --git a/records/research/2026-11-24-pnp-generator-benchmark.md b/records/research/2026-11-24-pnp-generator-benchmark.md
+new file mode 100644
+index 00000000..781fa778
+--- /dev/null
++++ b/records/research/2026-11-24-pnp-generator-benchmark.md
+@@ -0,0 +1,103 @@
++# PnP retrospective generator benchmark (2026-11-24)
++
++Durable note for Founder handoff H-1795547911-c50a / study
++`records/research/2026-11-24-founder-proof-production-study.md` (canonical Viche).
++
++## What this is
++
++`missions/pnp/bench/` is a self-contained retrospective benchmark for
++graph-circuit-construction generators. It loads only public checked-corpus
++metadata from the PnP proof-corpus SQLite index and generator outputs, then
++scores:
++
++- **bound satisfaction**: `gate_count <= bound`
++- **gate count**: reported per row and summarized
++- **independent truth-table verification**: exhaustive semantic check of the
++  generated gate list against the edge-function, independent of generator code
++- **checked-bound satisfaction**: truth table verified AND bound satisfied
++
++It reports family-level holdouts (`n{n}-e{edge_count}` group tail split) and
++time-based holdouts (tail by public module numeric key), so it measures
++generalization rather than memorization.
++
++No network services, no credentials, no unpublished proof sources. It does not
++execute untrusted proof code.
++
++## Corpus
++
++Current public checked-corpus snapshot (`proof-corpus.sqlite`, revision
++`5558ab4fa2fde8e9b642e634327daa66f48603b3`, index v2): 1269 checked proof rows,
++55 match the finite graph-circuit construction shape recognized by
++`missions.pnp.proofs.synthesis.parse` (all `n=8`, edges 4-7, bounds 7-11,
++modules `PEqualNP.Outside.L_meta_1143`..`L_meta_1206` with gaps).
++
++The 2026-11-24 study identified ~42 recognized accepted constructions across the
++top six; this benchmark evaluates all shape-matching checked constructions in the
++current public corpus snapshot and reports holdouts. Results should be read as a
++retrospective benchmark, not a claim about unpublished or unheld gaps.
++
++## Measured results (full current snapshot, 55 rows)
++
++Command:
++
++```sh
++cd /var/lib/lubko/wd/viche-state/pnp/swarm/engineering/benchmark
++PYTHONPATH=. python3 -m missions.pnp.bench --pretty --no-results
++```
++
++| Generator | Checked-bound | Rate | Bound sat | TT verified | Gate mean | Gate max | Margin mean |
++|---|---:|---:|---:|---:|---:|---:|---:|
++| legacy_greedy | 35/55 | 63.636% | 35/55 | 55/55 | 9.182 | 13 | -0.382 |
++| exact_star_cover | 55/55 | 100.000% | 55/55 | 55/55 | 8.800 | 11 | 0.000 |
++
++Holdouts:
++
++| Generator | Family holdout (n8-e7, 37 rows) | Time holdout (tail 14 modules) |
++|---|---:|---:|
++| legacy_greedy | 20/37 = 54.054% | 6/14 = 42.857% |
++| exact_star_cover | 37/37 = 100.000% | 14/14 = 100.000% |
++
++Small sample (5 rows, `--limit 5`): legacy_greedy 5/5, exact_star_cover 5/5;
++both truth-table verified. The small sample is not representative; use the full
++snapshot for comparison.
++
++## How to run
++
++Full benchmark (default generators, default public corpus cache DB):
++
++```sh
++PYTHONPATH=. python3 -m missions.pnp.bench --pretty --no-results
++```
++
++Quick smoke sample:
++
++```sh
++PYTHONPATH=. python3 -m missions.pnp.bench --limit 5
++```
++
++JSON for tooling:
++
++```sh
++PYTHONPATH=. python3 -m missions.pnp.bench --json --no-results > /tmp/pnp-bench.json
++```
++
++Evaluate precomputed generator outputs:
++
++```sh
++PYTHONPATH=. python3 -m missions.pnp.bench --outputs mygen=outputs.json --no-results
++```
++
++Tests:
++
++```sh
++PYTHONPATH=. python3 tests/pnp-bench.py
++```
++
++## Notes
++
++- `legacy_greedy` is the pre-star-cover 3-strategy block-cover search.
++- `exact_star_cover` computes an exact minimum vertex cover and assigns each
++  edge to exactly one cover endpoint (single ownership). It is an upper bound,
++  not a globally optimal circuit claim.
++- Independent verification rejects semantic mismatches, out-of-range wires, bad
++  ops, and output/bound failures even if a generator reports success.
+diff --git a/tests/pnp-bench.py b/tests/pnp-bench.py
+new file mode 100644
+index 00000000..4bd60005
+--- /dev/null
++++ b/tests/pnp-bench.py
+@@ -0,0 +1,120 @@
++#!/usr/bin/env python3
++"""Offline tests for missions.pnp.bench retrospective generator benchmark."""
++import json
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from missions.pnp.bench import corpus, evaluate, generators
++from missions.pnp.bench.cli import main as bench_main
++
++
++def _stmt(edges, n=8, bound=8):
++    rhs = " || ".join(f"(x {a} && x {b})" for a, b in edges)
++    return (
++        "∃ C : PEqualNP.CircuitLowerBounds.Circuit, "
++        "PEqualNP.MetaComplexity.Monotone2 C ∧ "
++        f"C.size ≤ {bound} ∧ ∀ x : Fin {n} → Bool, "
++        f"C.eval (List.ofFn x) = (fun x : Fin {n} → Bool => {rhs}) x"
++    )
++
++
++def _make_db(rows):
++    fd, path = tempfile.mkstemp(suffix=".sqlite")
++    Path(path).unlink()  # we'll create via sqlite
++    db = sqlite3.connect(path)
++    db.execute("create table proof(path text primary key, blob text, statement text, source text, tactics text, imports text)")
++    db.execute("create table metadata(key text primary key, value text)")
++    for i, (module, edges, bound) in enumerate(rows):
++        path_lean = "lean/" + module.replace(".", "/") + ".lean"
++        stmt = _stmt(edges, bound=bound)
++        db.execute("insert into proof values(?,?,?,?,?,?)",
++                   (path_lean, f"blob{i}", stmt, "", "[]", json.dumps(["PEqualNP.Defs"])))
++    db.execute("insert into metadata values('revision','test')")
++    db.execute("insert into metadata values('index_version','2')")
++    db.commit()
++    db.close()
++    return path
++
++
++class BenchTests(unittest.TestCase):
++    def test_generators_satisfy_known_row(self):
++        edges = [(0, 2), (0, 3), (1, 2), (1, 3)]
++        expected_max = {"legacy_greedy": 3, "exact_star_cover": 5}
++        for name, gen in generators.GENERATORS.items():
++            gates, out = gen(4, edges)
++            ok, detail = evaluate.independent_truth_table(4, edges, gates, out)
++            self.assertTrue(ok, (name, detail))
++            self.assertLessEqual(len(gates), expected_max[name], name)
++
++    def test_independent_verifier_catches_bad_output(self):
++        edges = [(0, 1), (2, 3)]
++        gates, out = generators.exact_star_cover(4, edges)
++        ok, _ = evaluate.independent_truth_table(4, edges, gates, out)
++        self.assertTrue(ok)
++        bad_gates = list(gates)
++        bad_gates[-1] = ("and", 0, 1)  # corrupt last gate
++        ok, detail = evaluate.independent_truth_table(4, edges, bad_gates, out)
++        self.assertFalse(ok)
++        self.assertIn(detail["error"], {"semantic_mismatch", "wire_out_of_range", "output_out_of_range"})
++
++    def test_corpus_load_and_evaluate(self):
++        rows = [
++            ("PEqualNP.Outside.L_meta_1", [(0, 1), (2, 3)], 3),
++            ("PEqualNP.Outside.L_meta_2", [(0, 1), (0, 2), (1, 3)], 4),
++            ("PEqualNP.Outside.L_meta_3", [(0, 1), (0, 2), (0, 3), (1, 4)], 5),
++        ]
++        db_path = _make_db(rows)
++        try:
++            loaded = corpus.load_graph_circuits(db_path)
++            self.assertEqual(len(loaded), 3)
++            for name, gen in generators.GENERATORS.items():
++                report = evaluate.evaluate_with_holdouts(loaded, gen, name, test_fraction=0.34)
++                s = report["overall"]
++                self.assertEqual(s["total"], 3)
++                self.assertEqual(s["truth_table_verified"], 3)
++                self.assertEqual(s["checked_bound_satisfied"], 3)
++                self.assertIn("family_holdout", report)
++                self.assertIn("time_holdout", report)
++        finally:
++            Path(db_path).unlink(missing_ok=True)
++
++    def test_cli_json(self):
++        import io, contextlib
++        rows = [
++            ("PEqualNP.Outside.L_meta_10", [(0, 1), (2, 3)], 3),
++            ("PEqualNP.Outside.L_meta_11", [(0, 1), (0, 2), (1, 3)], 4),
++        ]
++        db_path = _make_db(rows)
++        try:
++            buf = io.StringIO()
++            with contextlib.redirect_stdout(buf):
++                rc = bench_main(["--corpus-db", db_path, "--json", "--no-results"])
++            self.assertEqual(rc, 0)
++            report = json.loads(buf.getvalue())
++            self.assertEqual(report["rows"], 2)
++            self.assertEqual(len(report["reports"]), 2)
++        finally:
++            Path(db_path).unlink(missing_ok=True)
++
++    def test_holdout_group_split(self):
++        rows = []
++        for i in range(8):
++            rows.append({"module": f"M{i}", "n": 8, "edge_count": 4, "edges": [[0, 1]], "bound": 1, "path": f"p{i}"})
++        for i in range(4):
++            rows.append({"module": f"N{i}", "n": 8, "edge_count": 7, "edges": [[0, 1]], "bound": 1, "path": f"q{i}"})
++        train, test = evaluate.holdout_split(rows, corpus.family_key, test_fraction=0.25)
++        self.assertTrue(train)
++        self.assertTrue(test)
++        train_fams = {corpus.family_key(r) for r in train}
++        test_fams = {corpus.family_key(r) for r in test}
++        self.assertFalse(train_fams & test_fams)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index e088a0ac..8b077e3c 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -7,6 +7,7 @@ python3 tests/pnp-pipeline.py
+ python3 tests/pnp-real-smoke.py
+ python3 tests/pnp-watchdog-smoke.py
+ python3 tests/pnp-proof-tools.py
++python3 tests/pnp-bench.py
+ 
+ python3 tests/pnp-support.py
+ 

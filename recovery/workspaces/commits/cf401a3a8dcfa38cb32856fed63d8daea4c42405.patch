@@ -1,0 +1,161 @@
+commit cf401a3a8dcfa38cb32856fed63d8daea4c42405
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Fri Nov 20 16:36:07 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Fri Nov 20 16:36:07 2026 +0000
+
+    Integrate delivery/act27-marker-review-binding-r3-20261120 (executive): Merge origin/main into Act 27 review-binding work; retain durable Clerk-review binding and explicit git-show fixture stu
+    
+    Landed by the integration queue (Act 31) as one candidate on main 0b41612f44a0.
+    
+    Delivery-Branch: delivery/act27-marker-review-binding-r3-20261120
+    Delivery-Head: 02b01f5b83ce4e2dcf88ebaf680d245ec9bab116
+    Proposed-By: executive
+    Reviewed-By: reviewer-lb2oo0c7y8jeomik10pddg-hussars
+    Review-Reason: Fixes the Act 27 marker schema to match the enacted markers and binds effectiveness to the landed durable Clerk review; both allowlisted markers validate on real town data and all seven hermetic tests pass. No records were deleted or rewritten and no LAWS.md/seats.tsv change requires an Enacts trail
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+index 4773d53a..ffc60d3b 100644
+--- a/government/audit-accountability.py
++++ b/government/audit-accountability.py
+@@ -88,10 +88,8 @@ def committed_confirmed_correction(case_id):
+     if len(marker_rows) > 1:
+         raise ValueError("duplicate legacy markers")
+     marker = marker_rows[0] if marker_rows else None
+-    review_rows = [item for _, _, _, item in decoded
+-                   if isinstance(item, dict) and item.get("type") == "legacy_no_identity_review"]
+-    if marker is not None and len(review_rows) == 1:
+-        marker_reviewed = _effective_legacy_review(marker, review_rows[0], case_id)
++    if marker is not None:
++        marker_reviewed = _effective_legacy_review(marker, case_id, town)
+     for idx, line, raw_line, row in decoded:
+         if not isinstance(row, dict):
+             raise ValueError(f"committed correction row {idx} wrong case or type")
+@@ -101,11 +99,6 @@ def committed_confirmed_correction(case_id):
+                 raise ValueError("duplicate or misplaced legacy marker")
+             _validate_legacy_marker(row, case_id, idx, decoded, town)
+             continue
+-        if row.get("type") == "legacy_no_identity_review":
+-            if marker is None:
+-                raise ValueError("legacy marker review precedes marker")
+-            marker_reviewed = _effective_legacy_review(marker=marker, review=row, case_id=case_id)
+-            continue
+         if row.get("case_id") != case_id:
+             raise ValueError(f"committed correction row {idx} wrong case")
+         if row.get("correction") is not True:
+@@ -188,29 +181,47 @@ def _validate_legacy_marker(marker, case_id, marker_position, decoded, town):
+         seen.add(position)
+ 
+ 
+-def _effective_legacy_review(marker, review, case_id):
+-    """A review row is effective only when it names this exact marker and satisfies §3(3)."""
++def _effective_legacy_review(marker, case_id, town):
++    """Check the durable Clerk review against the exact marker bytes it reviewed."""
++    review_path = "records/reviews/CLERK-ACT27-LEGACY-MARKER-INDEPENDENT-REVIEW-20261120.md"
++    review_result = subprocess.run(
++        ["git", "-C", town, "show", f"HEAD:{review_path}"],
++        capture_output=True, text=True, timeout=15)
++    if review_result.returncode:
++        return False
++    review_text = review_result.stdout
++    reviewer_match = re.search(r"Reviewer: Clerk `([^`]+)`", review_text)
++    marker_commit_match = re.search(r"marker commit `([0-9a-f]{40})`", review_text)
++    if not reviewer_match or not marker_commit_match:
++        return False
++    reviewer = reviewer_match.group(1)
++    marker_commit = marker_commit_match.group(1)
+     signature = marker.get("signature", {}) if isinstance(marker, dict) else {}
+-    reviewer = review.get("reviewer")
+-    # Act 27 sponsor is c1a00007; signer officer is excluded along with the
+-    # filing office. The normal path is Clerk c1a00001. Judiciary fallback
+-    # requires a recorded Clerk-unavailability basis.
+-    basis = review.get("independence_basis")
+-    return (
+-        review.get("case_id", case_id) == case_id
+-        and review.get("marker_sha256") == hashlib.sha256(
+-            json.dumps(marker, sort_keys=True).encode()).hexdigest()
+-        and reviewer in {"c1a00001", "c1e00008"}
+-        and reviewer != signature.get("officer")
+-        and reviewer != "c1a00007"
+-        and isinstance(basis, str) and bool(basis.strip())
+-        and (reviewer != "c1e00008" or
+-             (review.get("clerk_unavailable") is True and
+-              isinstance(review.get("clerk_unavailability_ref"), str) and
+-              bool(review["clerk_unavailability_ref"].strip())))
+-        and review.get("hashes_match") is True
+-        and review.get("rows_unmodified") is True
+-        and review.get("no_identity_claimed") is True)
++    if (reviewer != "c1a00001" or reviewer == signature.get("officer") or
++            reviewer == "c1a00007" or "**APPROVE the narrow marker-integrity review.**" not in review_text or
++            "independently derives hashes" not in review_text or
++            "different office from the Judiciary filer" not in review_text or
++            "Hashing includes each row's trailing LF" not in review_text or
++            "markers remain ineffective until the Executive implements Act 27 §6" not in review_text):
++        return False
++    marker_path = f"records/oversight/corrections/{case_id}.jsonl"
++    exact = subprocess.run(["git", "-C", town, "show", f"{marker_commit}:{marker_path}"],
++                           capture_output=True, timeout=15)
++    if exact.returncode:
++        return False
++    exact_rows = exact.stdout.splitlines(keepends=True)
++    matching = []
++    for line in exact_rows:
++        try:
++            candidate = json.loads(line)
++        except (TypeError, ValueError):
++            return False
++        if isinstance(candidate, dict) and candidate.get("type") == "legacy_no_identity":
++            matching.append((candidate, line))
++    if len(matching) != 1 or matching[0][0] != marker:
++        return False
++    return all(citation.get("sha256_row_bytes_including_LF") in review_text
++               for citation in marker.get("rows", []) if isinstance(citation, dict))
+ 
+ 
+ def append_correction(case_id, record):
+diff --git a/tests/audit-act27-legacy-smoke.py b/tests/audit-act27-legacy-smoke.py
+index 9d50b397..4903668a 100644
+--- a/tests/audit-act27-legacy-smoke.py
++++ b/tests/audit-act27-legacy-smoke.py
+@@ -67,12 +67,25 @@ class LegacyMarkerTests(unittest.TestCase):
+             m = {"type": "legacy_no_identity", "rows": rows,
+                  "signature": {"filing_office": "judiciary", "officer": "c1e00008"},
+                  "statement": "These rows predate the anchor rule; no cycle identity exists or is asserted."}
+-            appended.append(m)
++            with path.open("ab") as f:
++                f.write((json.dumps(m, sort_keys=True) + "\n").encode())
++            self.commit(path)
++            self.marker_commit = subprocess.check_output(
++                ["git", "-C", str(self.town), "rev-parse", "HEAD"], text=True).strip()
+             if review:
+-                appended.append({"case_id": CASE, "type": "legacy_no_identity_review",
+-                    "marker_sha256": hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest(),
+-                    "reviewer": "c1a00001", "independence_basis": "Clerk is not filing office or sponsor.",
+-                    "hashes_match": True, "rows_unmodified": True, "no_identity_claimed": True})
++                review_path = self.town / "records/reviews/CLERK-ACT27-LEGACY-MARKER-INDEPENDENT-REVIEW-20261120.md"
++                review_path.parent.mkdir(parents=True, exist_ok=True)
++                review_path.write_text(
++                    "# Clerk independent review\n\n"
++                    "Reviewer: Clerk `c1a00001`\n"
++                    f"marker commit `{self.marker_commit}`\n"
++                    "**APPROVE the narrow marker-integrity review.**\n"
++                    "The Clerk independently derives hashes from introducing-commit Git blobs.\n"
++                    "The source review is performed by a different office from the Judiciary filer.\n"
++                    "Hashing includes each row's trailing LF, as specified.\n"
++                    "markers remain ineffective until the Executive implements Act 27 §6\n"
++                    + "\n".join(item["sha256_row_bytes_including_LF"] for item in rows) + "\n")
++                self.commit(review_path)
+         if post:
+             appended.append({"case_id": CASE, "correction": True, "confirmed": False,
+                              "at": 1795000000, "verdict": "finding"})
+@@ -98,7 +111,8 @@ class LegacyMarkerTests(unittest.TestCase):
+         try:
+             original = audit.subprocess.run
+             def run(args, **kwargs):
+-                if len(args) > 4 and args[4].startswith(self.source_commit + ":"):
++                if (len(args) > 4 and args[0] == "git" and args[3] == "show" and
++                        args[-1].startswith(self.source_commit + ":")):
+                     return subprocess.CompletedProcess(args, 0, stdout=self.legacy_raw, stderr=b"")
+                 return original(args, **kwargs)
+             with patch.object(audit.subprocess, "run", side_effect=run):

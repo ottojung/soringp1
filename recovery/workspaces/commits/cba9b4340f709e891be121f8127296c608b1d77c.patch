@@ -1,0 +1,430 @@
+commit cba9b4340f709e891be121f8127296c608b1d77c
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Tue Nov 24 19:41:04 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Tue Nov 24 19:41:04 2026 +0000
+
+    Integrate delivery/pnp-proof-packet-20261124 (executive): PnP: preserve desk sketch/cut ancestry, shard metadata and exact star-cover generator
+    
+    Landed by the integration queue (Act 31) as one candidate on main 070e12419e6f.
+    
+    Delivery-Branch: delivery/pnp-proof-packet-20261124
+    Delivery-Head: 3b6510177f083a4a8cc1b1abc778724358b9aa21
+    Proposed-By: executive
+    Reviewed-By: reviewer-n8itsvur72efbk1q4ygfkr-look
+    Review-Reason: The change does what its message says: advisory desk sketch/cut/shard metadata is gated by exact statement/module/path/imports matching and cannot alter a lease, and the exact star-cover generator produces verified circuits with no duplicated edges. It touches only missions/pnp and tests (no laws, s
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index e4ab4873..467ccd58 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -97,3 +97,14 @@ From a bound workspace, `proofs share FILE --message RESULT` snapshots a
+ Lean helper, and `proofs fragments --all-attempts` lists immutable helper
+ sources with provenance and digests. No claim of compilation is inferred
+ from a snapshot. These are direct peer tools, not submission gates.
++
++
++### Research packet
++
++The leased response preserves the actual proof sketch, failed approaches,
++reduction eligibility, and shard assignment. The read-only public catalog
++adds parent cuts and sibling links only after exact statement/module/path/
++imports matching. Run `python3 -m missions.pnp.brief` in a bound workspace.
++Use the reduction source as a mathematical guide, not an automatically
++permitted import. Catalog metadata never changes lease identity or authorizes
++work on unheld steps.
+diff --git a/missions/pnp/brief.py b/missions/pnp/brief.py
+new file mode 100644
+index 00000000..30bf40cb
+--- /dev/null
++++ b/missions/pnp/brief.py
+@@ -0,0 +1,110 @@
++"""Preserve upstream proof sketches and checked-cut provenance, not new authority.
++
++The public catalog is advisory. It cannot grant a lease or change a leased
++statement, imports, module, or file. Only work on a live bound assignment.
++"""
++import argparse
++import json
++from pathlib import Path
++import re
++import subprocess
++
++from . import assignment, config, state, support
++
++PUBLIC = "https://data.pequalnp.com/data/desk/gaps.json"
++FIELDS = ("sketch", "refutation", "reductions", "reductions_live", "shard_spec",
++          "shards", "unlocks", "weight", "parallel", "lane", "kind")
++
++
++def catalog_path():
++    return Path(config.CACHE_DIR, "proof-catalog.json")
++
++
++def acquisition(gap, answer):
++    fields = {k: gap[k] for k in FIELDS if k in gap}
++    for k in ("shard", "shards"):
++        if k in answer:
++            fields[k] = answer[k]
++    return fields
++
++
++def matches(rec, row):
++    return all(rec.get(k) == row.get(v) for k, v in (
++        ("gap_id", "id"), ("statement", "statement"), ("module", "module"),
++        ("path", "file"), ("imports", "imports")))
++
++
++def related(sketch, cuts):
++    parents = list(dict.fromkeys(re.findall(r"checked cut of (L-[a-z0-9]+(?:-[a-z0-9]+)*-\d+)", sketch)))
++    siblings = []
++    for text in re.findall(r"(?i)sibling steps:\s*([^.]*)", sketch):
++        siblings.extend(re.findall(r"L-[a-z0-9]+(?:-[a-z0-9]+)*-\d+", text))
++    artifacts = []
++    for cut in cuts:
++        if not isinstance(cut, dict) or cut.get("parent") not in parents or cut.get("state") == "dead":
++            continue
++        artifact = cut.get("artifact") or {}
++        path = artifact.get("lean_file")
++        if isinstance(path, str) and re.fullmatch(r"lean/PEqualNP/Outside/R_[a-z0-9]+_\d+_\d+\.lean", path):
++            artifacts.append({"parent":cut["parent"], "path":path,
++                              "content_hash":artifact.get("content_hash")})
++    return {"parents":parents, "siblings":list(dict.fromkeys(siblings)), "reduction_sources":artifacts}
++
++
++def read(rec, catalog=None):
++    """Return metadata only; never fetch inside a worker guard."""
++    notes = rec.get("desk_notes") or {}
++    out = dict(notes) if isinstance(notes, dict) else {}
++    try:
++        if catalog is None:
++            catalog = json.loads(catalog_path().read_text())
++        rows = catalog.get("gaps", [])
++        row = next((r for r in rows if r.get("id")==rec["gap_id"]), None)
++        if row and matches(rec,row):
++            # The acquisition response wins if its metadata differs.
++            out = {**acquisition(row,{}), **out}
++        if isinstance(out.get("sketch"), str):
++            out.update(related(out["sketch"], catalog.get("reductions",[])))
++        if row and matches(rec,row):
++            out["catalog_at"] = catalog.get("updated_at")
++    except (OSError,ValueError,AttributeError,TypeError,KeyError):
++        pass
++    if isinstance(out.get("sketch"),str) and "parents" not in out:
++        out.update(related(out["sketch"],[]))
++    if rec.get("dead"):
++        out["dead"] = rec["dead"]
++    return out
++
++
++def refresh():
++    """One shared bounded read-only refresh, independent of allocation."""
++    proc = subprocess.run(["curl","-fsS","--max-time","15",PUBLIC],
++                          capture_output=True,timeout=20,check=True)
++    if len(proc.stdout)>12_000_000:
++        raise ValueError("catalog too large")
++    obj = json.loads(proc.stdout)
++    if not isinstance(obj,dict) or not isinstance(obj.get("gaps"),list) or not isinstance(obj.get("reductions"),list):
++        raise ValueError("invalid catalog")
++    if any(not isinstance(r,dict) for r in obj["gaps"]):
++        raise ValueError("invalid catalog row")
++    state.atomic_write(str(catalog_path()),json.dumps(obj,ensure_ascii=False)+"\n")
++    return {"rows":len(obj["gaps"]),"reductions":len(obj["reductions"]),"at":obj.get("updated_at")}
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--refresh",action="store_true")
++    ns=p.parse_args()
++    if ns.refresh:
++        print(json.dumps(refresh()))
++        return
++    gap,lease=assignment.resolve()
++    rec=state.load(gap)
++    if not support.active(rec) or rec["lease"]!=lease:
++        p.error("live bound assignment required")
++    print(json.dumps({"gap":gap,"statement":rec["statement"],"imports":rec["imports"],
++                      "context":rec.get("context"),"desk_notes":read(rec)},ensure_ascii=False,indent=2))
++
++
++if __name__=="__main__":
++    main()
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index 56954750..5ad4d8f0 100755
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -122,6 +122,8 @@ def acquire(args, d, report=True):
+                for k in ("statement", "module", "file")):
+         print("desk returned incomplete assignment metadata", file=sys.stderr)
+         return 2
++    from missions.pnp import brief
++    desk_notes = brief.acquisition(gap, answer)
+     prior = state.load(gid)
+     if prior is not None:
+         # The desk granted a fresh lease for a gap we have seen before.  The
+@@ -136,7 +138,7 @@ def acquire(args, d, report=True):
+                 module=gap.get("module"), path=gap.get("file"),
+                 imports=gap.get("imports") or [],
+                 gap_title=gap.get("title"),
+-                context=gap.get("context"), dead=gap.get("dead"),
++                context=gap.get("context"), dead=gap.get("dead"), desk_notes=desk_notes,
+                 acquisition_hard=bool(args.hard), acquisition_prs=gap.get("pr_open"),
+                 lease=lease, lease_obtained_at=time.time(),
+                 lease_expires_at=time.time() +
+@@ -166,7 +168,7 @@ def acquire(args, d, report=True):
+                        module=gap.get("module"), path=gap.get("file"),
+                        imports=gap.get("imports") or [],
+                        gap_title=gap.get("title"),
+-                       context=gap.get("context"), dead=gap.get("dead"),
++                       context=gap.get("context"), dead=gap.get("dead"), desk_notes=desk_notes,
+                        acquisition_hard=bool(args.hard), acquisition_prs=gap.get("pr_open"),
+                        lease=lease, lease_obtained_at=time.time(),
+                        lease_expires_at=time.time() +
+@@ -244,6 +246,10 @@ def cmd_guard(args):
+             try:
+                 rec = state.load(gap)
+                 if rec and rec.get("lease") == lease:
++                    from missions.pnp import brief
++                    packet = brief.read(rec)
++                    if packet:
++                        result["desk_notes"] = packet
+                     advice = support.read(rec)
+                     if advice:
+                         result["research_advice"] = advice
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 5289c7d4..9bc30294 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -19,6 +19,9 @@ mkdir -p "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache"
+ nohup flock -n "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/support-scan.lock" \
+     timeout 120 python3 -m missions.pnp.support scan --refresh \
+     </dev/null >"${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/support-scan.log" 2>&1 &
++nohup flock -n "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/brief-refresh.lock" \
++    timeout 25 python3 -m missions.pnp.brief --refresh \
++    </dev/null >"${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/brief-refresh.log" 2>&1 &
+ # Renew leases and recover queued publications before the optional score poll.
+ python3 -m missions.pnp.frontier || :
+ python3 missions/pnp/cli.py reconcile
+diff --git a/missions/pnp/desk.py b/missions/pnp/desk.py
+index 2207475b..cd83ed25 100644
+--- a/missions/pnp/desk.py
++++ b/missions/pnp/desk.py
+@@ -133,7 +133,7 @@ class Desk:
+             raise DeskError("desk next offered a gap without a lease")
+         if not isinstance(gap, dict):
+             raise DeskError("desk gap is not an object")
+-        return {"gap": gap, "lease": lease}
++        return {"gap": gap, "lease": lease, **{k: data[k] for k in ("shard", "shards") if k in data}}
+ 
+     def beat(self, lease):
+         status, _ = self._call("POST", "/beat", {"lease": lease},
+diff --git a/missions/pnp/proofs/synthesis.py b/missions/pnp/proofs/synthesis.py
+index 10fb7e30..fd0d9001 100644
+--- a/missions/pnp/proofs/synthesis.py
++++ b/missions/pnp/proofs/synthesis.py
+@@ -23,6 +23,34 @@ def parse(statement):
+     return n,bound,edges
+ 
+ 
++def star_cover(n, edges):
++    """Exact minimum vertex cover; assign every edge to one endpoint.
++
++    A cover of size k produces at most |E| + k - 1 binary gates. Never
++    duplicate an already covered edge just to complete a maximal star.
++    This is an upper bound, not a claim of globally optimal circuits.
++    """
++    vertices = sorted(set(itertools.chain.from_iterable(edges)))
++    centers = next(S for k in range(1,len(vertices)+1)
++                   for S in itertools.combinations(vertices,k)
++                   if all(a in S or b in S for a,b in edges))
++    stars = {v: [] for v in centers}
++    for a,b in sorted(edges):
++        v,w = (a,b) if a in stars else (b,a)
++        stars[v].append(w)
++    gates = []
++    def gate(op,a,b):
++        gates.append((op,a,b))
++        return n+len(gates)-1
++    def disjoin(xs):
++        r=xs[0]
++        for x in xs[1:]:
++            r=gate("or",r,x)
++        return r
++    outputs=[gate("and",v,disjoin(ns)) for v,ns in stars.items() if ns]
++    return gates,disjoin(outputs)
++
++
+ def synthesize(n, edges):
+     """Cover edges by stars or complete bipartite blocks; share OR subexpressions."""
+     neighbors = {i:{b if a == i else a for a,b in edges if i in (a,b)}
+@@ -37,7 +65,7 @@ def synthesize(n, edges):
+             if right:
+                 blocks.add((left,tuple(sorted(right))))
+     blocks = sorted(blocks)
+-    best = None
++    best = star_cover(n,edges)
+     for strategy in range(3):
+         gates, memo, remaining, outputs = [], {}, set(edges), []
+         def gate(op,a,b):
+@@ -72,11 +100,15 @@ def synthesize(n, edges):
+ 
+ 
+ def verify(n,edges,gates,output):
++    if not 0 <= output < n+len(gates):
++        return False
+     for mask in range(1<<n):
+         w = [bool(mask & (1<<i)) for i in range(n)]
+         for op,a,b in gates:
+             if not (0 <= a < len(w) and 0 <= b < len(w)):
+                 return False
++            if op not in ("and","or"):
++                return False
+             w.append(w[a] and w[b] if op=="and" else w[a] or w[b])
+         if w[output] != any(w[a] and w[b] for a,b in edges):
+             return False
+diff --git a/missions/pnp/staff.py b/missions/pnp/staff.py
+index 578a590c..a776621a 100644
+--- a/missions/pnp/staff.py
++++ b/missions/pnp/staff.py
+@@ -15,7 +15,7 @@ import re
+ import subprocess
+ import sys
+ 
+-from . import assignment, config, focus, gitctl, state, support
++from . import assignment, brief, config, focus, gitctl, state, support
+ 
+ # A full baseline used to paginate the whole (>2600 agent) registry once per
+ # live gap. Fetch pages in bounded concurrent waves and let baseline reuse a
+@@ -102,6 +102,11 @@ def prompt(rec, approach, general=False):
+         f"Gap: {rec['gap_id']}\nStatement: {rec['statement']}\n"
+         f"Imports: {json.dumps(rec.get('imports', []))}\n"
+         f"Context: {rec.get('context') or ''}\n"
++        f"Desk proof sketch / cut ancestry / failed approaches (advisory): {json.dumps(brief.read(rec),ensure_ascii=False)}\n"
++        "Start by reading the exact supplied sketch, checked reduction sources, and solved siblings "
++        "with the current pinned upstream checkout. Do not redo known mathematics. "
++        "For shard assignments work only on the assigned range; do not infer a global refutation. "
++        "Use python3 -m missions.pnp.brief from the bound workspace for the full packet.\n"
+         "Share substantial findings immediately from your bound cwd using "
+         "PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.support finding "
+         "--evidence 'artifact or checked lemma' --message 'specific result, blocker or next route'. "
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index 713f2c48..924111bc 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -22,6 +22,7 @@ EMPTY = {
+     "gap_title": None,
+     "context": None,
+     "dead": None,
++    "desk_notes": {},
+     "lease": None,
+     "lease_obtained_at": None,
+     "lease_expires_at": None,
+@@ -163,7 +164,7 @@ def reacquire(gap_id, **fields):
+         previous = rec["state"]
+         lease_fields = ("lease", "lease_obtained_at", "lease_expires_at")
+         meta_fields = ("statement", "module", "path", "imports", "gap_title",
+-                       "context", "dead", "acquisition_hard", "acquisition_prs")
++                       "context", "dead", "desk_notes", "acquisition_hard", "acquisition_prs")
+         for key in lease_fields + meta_fields:
+             if key in fields:
+                 rec[key] = fields[key]
+diff --git a/missions/pnp/support.py b/missions/pnp/support.py
+index 24d096b9..0835f010 100644
+--- a/missions/pnp/support.py
++++ b/missions/pnp/support.py
+@@ -128,7 +128,8 @@ def targets(all_held=False):
+         try:
+             rec = state.load(gap)
+             if active(rec):
+-                out.append({"gap": gap, "attempt": attempt(rec),
++                from . import brief
++                out.append({"gap": gap, "attempt": attempt(rec), "desk_notes": brief.read(rec),
+                             "statement": rec["statement"], "imports": rec.get("imports", []),
+                             "context": (rec.get("context") or "")[:3000],
+                             "advice": read(rec), "findings": findings(rec)})
+diff --git a/tests/pnp-brief.py b/tests/pnp-brief.py
+new file mode 100644
+index 00000000..733f9e0a
+--- /dev/null
++++ b/tests/pnp-brief.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python3
++"""Check that upstream hints never replace the leased statement or scope."""
++import json
++import tempfile
++import sys
++from pathlib import Path
++import unittest
++from unittest.mock import patch
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
++from missions.pnp import brief, config, desk, state, staff
++ROW={"id":"L-meta-7","statement":"True","module":"PEqualNP.Outside.L_meta_7",
++     "file":"lean/PEqualNP/Outside/L_meta_7.lean","imports":["PEqualNP.Defs"],
++     "sketch":"Step 2 of 2 of a checked cut of L-meta-6. Its sibling steps: L-meta-5.",
++     "reductions":True}
++CUT={"parent":"L-meta-6","state":"open",
++     "artifact":{"lean_file":"lean/PEqualNP/Outside/R_meta_6_1.lean","content_hash":"sha256:123"}}
++REC={"gap_id":ROW["id"],"statement":ROW["statement"],"module":ROW["module"],
++     "path":ROW["file"],"imports":ROW["imports"],"dead":["failed route"]}
++class Test(unittest.TestCase):
++    def test_cut_and_siblings(self):
++        notes=brief.read(REC,{"gaps":[ROW],"reductions":[CUT]})
++        self.assertEqual(notes["parents"],["L-meta-6"])
++        self.assertEqual(notes["siblings"],["L-meta-5"])
++        self.assertEqual(notes["reduction_sources"][0]["path"],CUT["artifact"]["lean_file"])
++        self.assertEqual(notes["dead"],["failed route"])
++        self.assertNotIn("statement",notes)
++    def test_mismatch_never_changes_scope(self):
++        notes=brief.read(REC,{"gaps":[dict(ROW,statement="False")],"reductions":[CUT]})
++        self.assertNotIn("sketch",notes)
++        notes=brief.read(dict(REC,desk_notes={"sketch":"leased sketch"}),{"gaps":[ROW],"reductions":[CUT]})
++        self.assertEqual(notes["sketch"],"leased sketch")
++    def test_shard_preserved_at_wire_boundary(self):
++        payload={"gap":ROW,"lease":"lease","shard":2,"shards":8}
++        d=desk.Desk(request=lambda *a:(200,json.dumps(payload)),min_interval=0)
++        answer=d._next_gap()
++        self.assertEqual(brief.acquisition(answer["gap"],answer)["shard"],2)
++        self.assertEqual(brief.acquisition(answer["gap"],answer)["shards"],8)
++    def test_reacquisition_replaces_previous_hints(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.multiple(config,GAPS_DIR=tmp+"/gaps",CACHE_DIR=tmp+"/cache"):
++            state.create(REC["gap_id"],state="RELEASED",desk_notes={"sketch":"old","shard":3})
++            rec=state.reacquire(REC["gap_id"],desk_notes={"sketch":"new"})
++            self.assertEqual(rec["desk_notes"],{"sketch":"new"})
++    def test_prompt_includes_the_actual_sketch(self):
++        with patch.object(brief,"read",return_value={"sketch":"known argument"}):
++            self.assertIn("known argument",staff.prompt(dict(REC,state="LEASED"),"proof"))
++if __name__=="__main__":
++    unittest.main(verbosity=2)
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index 3754abd3..e088a0ac 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -15,3 +15,5 @@ python3 tests/pnp-allocator.py
+ /bin/sh tests/pnp-runtime-isolation-smoke.sh
+ 
+ python3 tests/pnp-continuity.py
++
++python3 tests/pnp-brief.py
+diff --git a/tests/pnp-proof-tools.py b/tests/pnp-proof-tools.py
+index 508d295d..cf77b84c 100644
+--- a/tests/pnp-proof-tools.py
++++ b/tests/pnp-proof-tools.py
+@@ -49,6 +49,17 @@ class ProofTools(unittest.TestCase):
+         bad = dict(meta, statement=meta["statement"].replace("≤ 3","≤ 2"))
+         self.assertIsNone(synthesis.candidate(bad)["candidate"])
+ 
++    def test_minimum_star_cover_has_no_duplicate_edges(self):
++        # Two intersecting full stars, plus a disconnected edge. Greedy
++        # maximal stars can pay for an edge twice; exact assignment cannot.
++        edges={(0,1),(0,2),(0,3),(1,4),(1,5),(6,7)}
++        gates,out=synthesis.star_cover(8,edges)
++        self.assertEqual(len(gates),8)
++        self.assertTrue(synthesis.verify(8,edges,gates,out))
++        gates,out=synthesis.synthesize(8,edges)
++        self.assertLessEqual(len(gates),8)
++        self.assertTrue(synthesis.verify(8,edges,gates,out))
++
+     def test_sat_exact_against_independent_two_variable_enumeration(self):
+         import itertools
+         # Independently enumerate all functions realizable with up to two

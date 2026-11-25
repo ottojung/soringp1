@@ -1,0 +1,84 @@
+commit c7f6648ff88188ea3375c69d2dc6cf189df47b6d
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 18:50:14 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 18:50:14 2026 +0000
+
+    Bound judicial prompt data while preserving audit details
+
+diff --git a/government/judiciary-measurements.py b/government/judiciary-measurements.py
+index 7f05aa5a..f69d8b3c 100644
+--- a/government/judiciary-measurements.py
++++ b/government/judiciary-measurements.py
+@@ -8,7 +8,7 @@ POSIX /bin/sh (government/board-trail-check.sh); this file aggregates its facts
+ into the durable measurement report. The same-model / measurement-reliability
+ limitation is reported, not hidden.
+ """
+-import json, os, shutil, subprocess, time
++import hashlib, json, os, shutil, subprocess, time
+ from pathlib import Path
+ 
+ root=Path(os.environ.get('VICHE_STATE_ROOT','/var/lib/lubko/wd/viche-state'))
+@@ -106,6 +106,25 @@ def suite_compliance():
+         data=json.loads(done.stdout)
+         if done.returncode:
+             return {'status':'unreadable','reason':done.stderr.strip()[-200:]}
++        # The full per-change audit can be large. Preserve it as a durable,
++        # separately addressable detail record; keep this prompt-facing summary
++        # bounded so the Clerk's next boot dispatch remains within argv limits.
++        per_change=data.pop('per_change',None)
++        if per_change is not None:
++            red_changes=data.pop('changes_reaching_main_red',[])
++            detail=root/'branches'/('suite-compliance-%d.json' % now)
++            full={'observed_at':now,'summary':data,
++                  'changes_reaching_main_red':red_changes,'per_change':per_change}
++            blob=(json.dumps(full,
++                             sort_keys=True,indent=2)+'\n').encode()
++            detail.parent.mkdir(parents=True,exist_ok=True)
++            tmp=detail.with_suffix('.json.tmp')
++            tmp.write_bytes(blob)
++            tmp.replace(detail)
++            data['per_change_count']=len(per_change)
++            data['red_change_count']=len(red_changes)
++            data['details_ref']=str(detail)
++            data['details_sha256']=hashlib.sha256(blob).hexdigest()
+         return data
+     except (subprocess.TimeoutExpired,OSError,ValueError) as err:
+         return {'status':'unreadable','reason':str(err)[:200]}
+diff --git a/tests/boot-smoke.sh b/tests/boot-smoke.sh
+index 9166ec4b..b7b1de97 100644
+--- a/tests/boot-smoke.sh
++++ b/tests/boot-smoke.sh
+@@ -86,10 +86,11 @@ export RESOURCE_SAFETY_CGROUP_DIR VICHE_AUDIT_CHECKS VICHE_AUDIT_SELECTION VICHE
+ VICHE_TOWN_ROOT=$town
+ VICHE_SEATS_ROOT=$scratch/seats
+ VICHE_STATE_ROOT=$scratch/state
++VICHE_SENTINEL_STATE=$scratch/sentinel
+ VICHE_TEST_NO_SYNC=1
+ VICHE_TOWNHALL_ID=999
+ export MOCK_STATE PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT
+-export VICHE_STATE_ROOT VICHE_TEST_NO_SYNC VICHE_TOWNHALL_ID
++export VICHE_STATE_ROOT VICHE_SENTINEL_STATE VICHE_TEST_NO_SYNC VICHE_TOWNHALL_ID
+ 
+ # Periodic broad audit is separately tested. Suppress its timer in bootstrap smoke.
+ mkdir -p "$scratch/state/oversight"
+@@ -105,6 +106,19 @@ seat_count=$(wc -l < "$town/government/seats.tsv")
+ /bin/sh "$town/constitution/boot.sh" --once
+ [ "$(wc -l < "$scratch/mock/created")" -eq $((seat_count+2)) ]
+ [ "$(wc -l < "$scratch/mock/ran")" -eq "$seat_count" ]
++python3 - "$scratch/state/branches/judiciary-measurements.json" "$scratch/state/branches" <<'PY'
++import hashlib, json, pathlib, sys
++report=json.loads(pathlib.Path(sys.argv[1]).read_text())
++block=report['suite_compliance']
++assert 'per_change' not in block
++detail=pathlib.Path(block['details_ref'])
++assert detail.is_file() and str(detail).startswith(sys.argv[2])
++blob=detail.read_bytes()
++assert hashlib.sha256(blob).hexdigest()==block['details_sha256']
++detail_data=json.loads(blob)
++assert len(detail_data['per_change'])==block['per_change_count']
++assert len(detail_data['changes_reaching_main_red'])==block['red_change_count']
++PY
+ /bin/sh "$town/constitution/boot.sh" --once
+ [ "$(wc -l < "$scratch/mock/created")" -eq $((seat_count+3)) ]
+ centre=$(awk -F '\t' '$1=="innovation-centre" {print $2}' "$scratch/state/appointments/appointments.tsv")

@@ -1,0 +1,174 @@
+commit c435b593cf2a76feb551d3de710d7d3aa9933c20
+Author:     Viche operator <operator@localhost>
+AuthorDate: Fri Nov 20 16:41:06 2026 +0000
+Commit:     Viche operator <operator@localhost>
+CommitDate: Fri Nov 20 16:41:06 2026 +0000
+
+    Prototype durable fail-closed knowledge dispatch reservations
+
+diff --git a/government/knowledge-budget.py b/government/knowledge-budget.py
+new file mode 100644
+index 00000000..1b56d797
+--- /dev/null
++++ b/government/knowledge-budget.py
+@@ -0,0 +1,75 @@
++#!/usr/bin/env python3
++"""Conservative, durable dispatch reservations for Act 32 knowledge offices.
++
++A reservation is a maximum liability, not a measurement of actual consumption.
++No refunds are allowed without separately verified metering and reconciliation.
++"""
++import json
++import os
++import sqlite3
++import sys
++import time
++from pathlib import Path
++
++OFFICES = ("statistics", "foresight", "strategy", "spying")
++DIMENSIONS = ("tokens", "cpu_seconds", "wall_seconds")
++
++
++def positive_limits(value):
++    if not isinstance(value, dict) or set(value) != set(DIMENSIONS):
++        raise ValueError("missing resource dimensions")
++    if any(type(value[k]) is not int or value[k] <= 0 for k in DIMENSIONS):
++        raise ValueError("invalid resource ceiling")
++    return value
++
++
++def reserve(config_path, db_path, office, key):
++    if office not in OFFICES or not key or len(key) > 128:
++        raise ValueError("invalid reservation identity")
++    cfg = json.loads(Path(config_path).read_text())
++    if cfg.get("schema") != "viche-knowledge-budget-v1":
++        raise ValueError("unapproved budget schema")
++    if set(cfg.get("offices", {})) != set(OFFICES):
++        raise ValueError("missing office budget")
++    aggregate = positive_limits(cfg["aggregate"])
++    limits = {name: positive_limits(cfg["offices"][name]["limit"]) for name in OFFICES}
++    claims = {name: positive_limits(cfg["offices"][name]["per_dispatch"]) for name in OFFICES}
++    now = int(time.time())
++    if type(cfg.get("expires_at")) is not int or now >= cfg["expires_at"]:
++        raise ValueError("budget expired")
++    db = sqlite3.connect(db_path, timeout=15, isolation_level=None)
++    try:
++        db.execute("PRAGMA busy_timeout=15000")
++        db.execute("PRAGMA synchronous=FULL")
++        db.execute("BEGIN IMMEDIATE")
++        db.execute("CREATE TABLE IF NOT EXISTS reservations (key TEXT PRIMARY KEY, office TEXT NOT NULL, tokens INTEGER NOT NULL, cpu_seconds INTEGER NOT NULL, wall_seconds INTEGER NOT NULL)")
++        if db.execute("SELECT 1 FROM reservations WHERE key=?", (key,)).fetchone():
++            raise ValueError("duplicate reservation")
++        for scope, cap in ((office, limits[office]), (None, aggregate)):
++            where = "WHERE office=?" if scope else ""
++            params = (scope,) if scope else ()
++            sums = db.execute("SELECT COALESCE(SUM(tokens),0),COALESCE(SUM(cpu_seconds),0),COALESCE(SUM(wall_seconds),0) FROM reservations " + where, params).fetchone()
++            if any(sums[i] + claims[office][dim] > cap[dim] for i, dim in enumerate(DIMENSIONS)):
++                raise ValueError("resource budget exhausted")
++        values = [claims[office][dim] for dim in DIMENSIONS]
++        db.execute("INSERT INTO reservations VALUES (?,?,?,?,?)", (key, office, *values))
++        db.execute("COMMIT")
++    except BaseException:
++        if db.in_transaction:
++            db.execute("ROLLBACK")
++        raise
++    finally:
++        db.close()
++
++
++if __name__ == "__main__":
++    try:
++        if len(sys.argv) != 5 or sys.argv[1] != "reserve":
++            raise ValueError("usage: knowledge-budget.py reserve CONFIG DB OFFICE:KEY")
++        office, sep, key = sys.argv[4].partition(":")
++        if not sep:
++            raise ValueError("missing key")
++        reserve(sys.argv[2], sys.argv[3], office, key)
++    except (OSError, ValueError, sqlite3.Error, KeyError, TypeError) as exc:
++        print(f"knowledge budget denied: {exc}", file=sys.stderr)
++        sys.exit(1)
+diff --git a/tests/test_knowledge_budget.py b/tests/test_knowledge_budget.py
+new file mode 100644
+index 00000000..f78aa9e4
+--- /dev/null
++++ b/tests/test_knowledge_budget.py
+@@ -0,0 +1,79 @@
++import importlib.util
++import json
++import multiprocessing
++import tempfile
++import unittest
++from pathlib import Path
++
++SOURCE = Path(__file__).resolve().parents[1] / "government/knowledge-budget.py"
++spec = importlib.util.spec_from_file_location("budget", SOURCE)
++budget = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(budget)
++
++LIMIT = {"tokens": 20, "cpu_seconds": 20, "wall_seconds": 20}
++CLAIM = {"tokens": 10, "cpu_seconds": 10, "wall_seconds": 10}
++
++
++def worker(args):
++    try:
++        budget.reserve(*args)
++        return True
++    except ValueError:
++        return False
++
++
++class BudgetTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        root = Path(self.tmp.name)
++        self.cfg = root / "config.json"
++        self.db = root / "budget.sqlite3"
++        self.data = {
++            "schema": "viche-knowledge-budget-v1",
++            "expires_at": 4102444800,
++            "aggregate": LIMIT.copy(),
++            "offices": {name: {"limit": LIMIT.copy(), "per_dispatch": CLAIM.copy()} for name in budget.OFFICES},
++        }
++        self.save()
++
++    def save(self):
++        self.cfg.write_text(json.dumps(self.data))
++
++    def reserve(self, office="statistics", key="one"):
++        budget.reserve(self.cfg, self.db, office, key)
++
++    def test_exhaustion_and_no_replay(self):
++        self.reserve()
++        self.reserve(key="two")
++        with self.assertRaises(ValueError):
++            self.reserve(key="three")
++        with self.assertRaises(ValueError):
++            self.reserve(key="one")
++
++    def test_aggregate_across_offices(self):
++        self.reserve()
++        self.reserve("foresight", "two")
++        with self.assertRaises(ValueError):
++            self.reserve("strategy", "three")
++
++    def test_missing_and_expired_fail_closed(self):
++        self.data["expires_at"] = 1
++        self.save()
++        with self.assertRaises(ValueError):
++            self.reserve()
++        self.data["expires_at"] = 4102444800
++        del self.data["offices"]["spying"]
++        self.save()
++        with self.assertRaises(ValueError):
++            self.reserve()
++
++    def test_concurrent_reservations(self):
++        args = [(self.cfg, self.db, "statistics", str(i)) for i in range(12)]
++        with multiprocessing.Pool(6) as pool:
++            outcomes = pool.map(worker, args)
++        self.assertEqual(sum(outcomes), 2)
++
++
++if __name__ == "__main__":
++    unittest.main()

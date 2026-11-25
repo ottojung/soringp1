@@ -1,0 +1,85 @@
+commit cd2b27135ead9119ab1b2f86ecfbb47cebe5bfb0
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Thu Oct 15 11:32:14 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Thu Oct 15 11:32:14 2026 -0700
+
+    Fix TSV corruption when no agents are running (#16)
+    
+    * Keep metrics TSV valid when no agents are running
+    
+    * Regress zero-process and missing-pgrep sampler cases
+    
+    * Exercise sampler when process count is zero
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index 953105d2..cfc8bcea 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -31,6 +31,8 @@ jobs:
+         run: dash tests/seat-liveness-smoke.sh
+       - name: Exercise targeted parliamentary summons
+         run: dash tests/summons-smoke.sh
++      - name: Check sampler TSV with zero agents
++        run: dash tests/sample-metrics-smoke.sh
+       - name: Exercise legislative tally
+         run: dash tests/tally-smoke.sh
+       - name: Exercise urgent Founder intake independently of sittings
+diff --git a/records/research/sample-metrics.sh b/records/research/sample-metrics.sh
+index bbf90c78..a3eae6d8 100644
+--- a/records/research/sample-metrics.sh
++++ b/records/research/sample-metrics.sh
+@@ -14,7 +14,10 @@ cgroup_mem_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+ cgroup_max_hits=$(awk '/^max /{print $2}' /sys/fs/cgroup/memory.events 2>/dev/null || echo 0)
+ cgroup_oom_kill=$(awk '/^oom_kill /{print $2}' /sys/fs/cgroup/memory.events 2>/dev/null || echo 0)
+ load=$(uptime | sed 's/.*load average: //')
+-seat_agents=$(pgrep -c opencode 2>/dev/null || echo 0)
++# pgrep -c prints 0 but exits 1 when no process matches. Do not echo a second
++# 0: an embedded newline would corrupt this tab-separated row.
++seat_agents=$(pgrep -c opencode 2>/dev/null || :)
++seat_agents=${seat_agents:-0}
+ seat_rss=$(ps -eo rss,comm | awk '/opencode/{sum+=$1} END{printf "%.0f", sum/1024}')
+ cpus=$(nproc)
+ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+diff --git a/tests/sample-metrics-smoke.sh b/tests/sample-metrics-smoke.sh
+new file mode 100644
+index 00000000..3e2fd1f6
+--- /dev/null
++++ b/tests/sample-metrics-smoke.sh
+@@ -0,0 +1,36 @@
++#!/bin/sh
++# The sampler must produce exactly one TSV data row even when pgrep reports 0
++# matches with exit status 1 (and when it is unavailable).
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin"
++cat > "$scratch/bin/pgrep" <<'SH'
++#!/bin/sh
++printf '0\n'
++exit 1
++SH
++chmod +x "$scratch/bin/pgrep"
++PATH=$scratch/bin:$PATH
++VICHE_TOWN_ROOT=$repo
++export PATH VICHE_TOWN_ROOT
++/bin/sh "$repo/records/research/sample-metrics.sh" no-running-agents > "$scratch/sample"
++awk -F '\t' '
++    NR == 1 { if (NF != 15) exit 1 }
++    NR == 2 { if (NF != 15 || $6 != "0") exit 1 }
++    END { if (NR != 2) exit 1 }
++' "$scratch/sample"
++
++cat > "$scratch/bin/pgrep" <<'SH'
++#!/bin/sh
++exit 127
++SH
++chmod +x "$scratch/bin/pgrep"
++/bin/sh "$repo/records/research/sample-metrics.sh" pgrep-unavailable > "$scratch/sample"
++awk -F '\t' '
++    NR == 1 { if (NF != 15) exit 1 }
++    NR == 2 { if (NF != 15 || $6 != "0") exit 1 }
++    END { if (NR != 2) exit 1 }
++' "$scratch/sample"
++echo 'Sampler empty-process checks passed'

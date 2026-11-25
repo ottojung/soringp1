@@ -1,0 +1,396 @@
+commit cab6e9b2fe354de13b868942d5bace42e753e3ea
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sun Nov 8 06:36:27 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sun Nov 8 06:36:27 2026 +0000
+
+    Preserve unadopted institutional-case validation prototype (evidence only)
+    
+    This snapshot is the predecessor's 200+ line JSON case-validation prototype.
+    It is NOT adopted and must not be integrated as-is; the Founder direction
+    prefers agent-led investigation over a new schema/state machine. It is
+    committed only so the work survives a clean worktree transition. Exact patch
+    SHA-256: 72cbb0545d08a1be5d47b29ffa7cdd93c3c9d9b401a3b6cf0a7b9a53f12d73c9.
+    Durable copy with checksums: state appointments terminal-evidence
+    XeVHIig4xEZe5lHe6exIj2-hoped-manual-investigation-20261108.
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 75104b3c..a839b61f 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -1,11 +1,30 @@
+ #!/usr/bin/env python3
+-"""Durable cross-branch corrective cases, with evidence-based operational closure.
++"""Durable cross-branch corrective cases, closed only on reviewed evidence.
+ 
+ A case is a monitored obligation, NOT a Judiciary verdict or an authorization
+ to enact law. Observation and routing remain deterministic even if every model
+-is down. Existing independent Judiciary/Parliament/Executive powers remain.
++is down.
++
++Closure is never automatic. A health signal disappearing from the watchdog
++proves only that the probe stopped reporting it; it does not prove the failure
++was repaired. A cleared signal therefore starts an accountability chain:
++
++  1. An agent with the assigned owner files an evidence-backed investigation at
++     $VICHE_STATE_ROOT/institutional-cases/evidence/<signal>/investigation.json
++     stating what it inspected, why the failure is gone (or why the case should
++     be superseded/withdrawn), and a durable evidence reference.
++  2. The independent Judiciary files its own assessment at
++     .../evidence/<signal>/verification.json, citing evidence it inspected
++     independently of the investigator.
++
++The checks below are mechanical safety checks: required fields, timestamp
++ordering, matching case identity, and separation of investigator from verifier.
++They gate eligibility for closure. They do NOT establish that the underlying
++assessment is true; that remains the responsibility of the agents and of the
++independent reviewer. A JSON label alone is never proof of delivery.
+ """
+ import argparse
++import hashlib
+ import json
+ import os
+ import pathlib
+@@ -14,6 +33,15 @@ import time
+ 
+ ROOT = pathlib.Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state"))
+ STORE = ROOT / "institutional-cases"
++EVIDENCE = STORE / "evidence"
++HISTORY = STORE / "history"
++
++ACTIVE_STATES = ("open", "awaiting_investigation", "awaiting_verification")
++CLOSING_DISPOSITIONS = ("confirmed_resolved", "superseded", "withdrawn")
++VERIFICATION_DISPOSITIONS = CLOSING_DISPOSITIONS + (
++    "confirmed_open", "inconclusive",
++)
++CLOCK_SKEW_SECONDS = 300
+ 
+ 
+ def read(path):
+@@ -38,6 +66,32 @@ def atomic(path, item):
+             os.unlink(name)
+ 
+ 
++def digest(path):
++    try:
++        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
++    except FileNotFoundError:
++        return None
++
++
++def text(value):
++    return isinstance(value, str) and bool(value.strip())
++
++
++def observed_at(item):
++    value = item.get("observed_at")
++    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++        return None
++    return value
++
++
++def evidence_dir(signal):
++    return EVIDENCE / signal
++
++
++def case_path(signal):
++    return STORE / (signal + ".json")
++
++
+ def collect():
+     incident = read(ROOT / "branches/incident.json")
+     signals = set(incident.get("signals", []))
+@@ -82,45 +136,145 @@ def owner(signal):
+     return "legislature"
+ 
+ 
++def new_case(signal, now):
++    return {
++        "id": f"{signal}:{now}", "signal": signal,
++        "first_seen": now, "state": "open",
++        "clear_observations": 0,
++        "judiciary": "independent_fact_finding_required",
++        "legislature": "consider_evidence_and_legislation_if_needed",
++        "executive": "investigate_and_repair_within_existing_authority",
++        "owner": owner(signal),
++        "closure_rule": ("agent investigation with durable evidence plus independent "
++                         "Judiciary verification; a cleared health signal alone never closes"),
++    }
++
++
++def validate_investigation(case, now):
++    """Return (record, gap). A gap is a concrete missing/invalid observation."""
++    signal = case["signal"]
++    record = read(evidence_dir(signal) / "investigation.json")
++    if not record:
++        return None, "no agent investigation filed"
++    if record.get("signal") != signal:
++        return None, "investigation signal does not match the case"
++    if record.get("case_id") != case.get("id"):
++        return None, "investigation references a different case id"
++    if not text(record.get("investigator")):
++        return None, "investigation has no accountable investigator"
++    if not text(record.get("reason")):
++        return None, "investigation has no checkable reason"
++    if not text(record.get("evidence_ref")):
++        return None, "investigation cites no durable evidence"
++    when = observed_at(record)
++    if when is None:
++        return None, "investigation has no valid observed_at timestamp"
++    if when < case.get("last_seen", 0):
++        return None, "investigation predates the last observation of the failure"
++    if when > now + CLOCK_SKEW_SECONDS:
++        return None, "investigation timestamp is in the future"
++    return record, None
++
++
++def validate_verification(case, investigation, now):
++    signal = case["signal"]
++    record = read(evidence_dir(signal) / "verification.json")
++    if not record:
++        return None, "no independent Judiciary verification filed"
++    if record.get("signal") != signal:
++        return None, "verification signal does not match the case"
++    if record.get("case_id") != case.get("id"):
++        return None, "verification references a different case id"
++    if record.get("verified_by") != "judiciary":
++        return None, "verification is not attributed to the Judiciary"
++    if not text(record.get("verifier")):
++        return None, "verification names no accountable verifier"
++    if record.get("verifier") == investigation.get("investigator"):
++        return None, "verifier is the same identity as the investigator"
++    if not text(record.get("evidence_ref")):
++        return None, "verification cites no independent evidence"
++    when = observed_at(record)
++    if when is None:
++        return None, "verification has no valid observed_at timestamp"
++    if when < observed_at(investigation):
++        return None, "verification predates the investigation it reviews"
++    if when > now + CLOCK_SKEW_SECONDS:
++        return None, "verification timestamp is in the future"
++    disposition = record.get("disposition")
++    if disposition not in VERIFICATION_DISPOSITIONS:
++        return None, "verification has no recognized disposition"
++    if disposition not in CLOSING_DISPOSITIONS:
++        return None, f"Judiciary disposition {disposition!r} does not support closure"
++    return record, None
++
++
++def preserve_closed(case):
++    """Keep prior closure evidence when the same signal recurs later."""
++    when = case.get("verified_at")
++    if isinstance(when, bool) or not isinstance(when, int):
++        when = case.get("first_seen", 0)
++    atomic(HISTORY / f"{case['signal']}-{when}.json", case)
++
++
+ def reconcile():
+     now, signals = collect()
+     STORE.mkdir(parents=True, exist_ok=True)
+-    existing = sorted(STORE.glob("*.json"))
++    existing = sorted(p for p in STORE.glob("*.json") if p.name != "index.json")
+     names = set(signals) | {p.stem for p in existing}
+     for signal in sorted(names):
+         if not signal.replace("_", "").replace("-", "").isalnum():
+             continue
+-        path = STORE / (signal + ".json")
++        path = case_path(signal)
+         case = read(path)
+         if signal in signals:
+-            if not case or case.get("state") == "verified_closed":
+-                case = {
+-                    "id": f"{signal}:{now}", "signal": signal,
+-                    "first_seen": now, "state": "open",
+-                    "clear_observations": 0,
+-                    "judiciary": "independent_fact_finding_required",
+-                    "legislature": "consider_evidence_and_legislation_if_needed",
+-                    "executive": "investigate_and_repair_within_existing_authority",
+-                    "owner": owner(signal),
+-                    "closure_rule": "two independent healthy observations, not agent/process success",
+-                }
++            if not case:
++                case = new_case(signal, now)
++            elif case.get("state") == "verified_closed":
++                preserve_closed(case)
++                case = new_case(signal, now)
++            case["state"] = "open"
+             case["last_seen"] = now
+             case["observations"] = case.get("observations", 0) + 1
+             case["clear_observations"] = 0
+-        elif case.get("state") == "open":
+-            # Never resolve from agent success, a comment or a merge alone.
+-            # This confirmation observes the SAME underlying signal cleared
+-            # in two subsequent independent cycles.
+-            case["clear_observations"] = case.get("clear_observations", 0) + 1
+-            if case["clear_observations"] >= 2:
+-                case["state"] = "verified_closed"
+-                case["verified_at"] = now
+-                case["verification"] = "two successive deterministic health checks without signal"
++            case["next_action"] = "investigate_and_repair"
++            case.pop("verification_gap", None)
++            case.pop("closure_evidence", None)
+         elif not case:
+             continue
++        elif case.get("state") == "verified_closed":
++            continue
++        else:
++            # The signal is gone. Record the observation, but never close on it.
++            case["clear_observations"] = case.get("clear_observations", 0) + 1
++            investigation, gap = validate_investigation(case, now)
++            if investigation is None:
++                case["state"] = "awaiting_investigation"
++                case["next_action"] = "file_agent_investigation"
++                case["verification_gap"] = gap
++                case.pop("closure_evidence", None)
++            else:
++                verification, gap = validate_verification(case, investigation, now)
++                if verification is None:
++                    case["state"] = "awaiting_verification"
++                    case["next_action"] = "request_independent_judiciary_verification"
++                    case["verification_gap"] = gap
++                    case.pop("closure_evidence", None)
++                else:
++                    case["state"] = "verified_closed"
++                    case["verified_at"] = now
++                    case["verification"] = ("agent investigation plus independent "
++                                            "Judiciary verification")
++                    case["closure_evidence"] = {
++                        "investigation": str(evidence_dir(signal) / "investigation.json"),
++                        "investigation_digest": digest(evidence_dir(signal) / "investigation.json"),
++                        "verification": str(evidence_dir(signal) / "verification.json"),
++                        "verification_digest": digest(evidence_dir(signal) / "verification.json"),
++                    }
++                    case.pop("next_action", None)
++                    case.pop("verification_gap", None)
+         atomic(path, case)
+-    open_cases = [read(p) for p in sorted(STORE.glob("*.json"))]
+-    active = [x for x in open_cases if x.get("state") == "open"]
++    open_cases = [read(p) for p in sorted(STORE.glob("*.json")) if p.name != "index.json"]
++    active = [x for x in open_cases if x.get("state") in ACTIVE_STATES]
+     atomic(STORE / "index.json", {
+         "observed_at": now, "active": [x["id"] for x in active],
+         "count": len(active), "caveat": "operational health, not proof of delivery",
+@@ -130,7 +284,7 @@ def reconcile():
+ 
+ def report():
+     return [read(p) for p in sorted(STORE.glob("*.json"))
+-            if p.name != "index.json" and read(p).get("state") == "open"]
++            if p.name != "index.json" and read(p).get("state") in ACTIVE_STATES]
+ 
+ 
+ if __name__ == "__main__":
+@@ -142,5 +296,5 @@ if __name__ == "__main__":
+         "open_cases": cases,
+         "rule": "Judiciary independently investigates; Parliament decides legal changes; "
+                 "Executive repairs within existing authority and implements ratified changes. "
+-                "Never close for agent activity, a comment, or a PR.",
++                "Never close for agent activity, a comment, a PR or a disappeared health signal.",
+     }, separators=(",", ":")))
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 879d5858..d28f3773 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -206,8 +206,11 @@ $cases
+ === END CORRECTIVE OBLIGATIONS ===
+ Preserve identity across sittings. Judiciary independently measures;
+ Parliament authorizes changes to ordinary law when needed; Executive
+-implements authorized repairs. Case closure requires disappearance of the
+-failure confirmed by repeated deterministic observation, not an agent exit.
++implements authorized repairs. A vanished health signal is never proof of a
++repair: case closure requires an accountable agent investigation with durable
++evidence plus an independent Judiciary verification. Agent exit, a comment, a
++merge or a JSON status alone never closes a case. See
++government/institutional-cases.py for the exact evidence fields.
+ EOF
+ fi
+ 
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index eadf8d69..cdf90be9 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -32,6 +32,7 @@ esac
+ MOCK
+ chmod +x "$d/bin/antonina" "$d/town/government/appointments.sh"
+ cp "$repo/government/EXECUTIVE-INNOVATION.md" "$d/town/government/EXECUTIVE-INNOVATION.md"
++cp "$repo/government/AGENT-REPORTING-POLICY.md" "$d/town/government/AGENT-REPORTING-POLICY.md"
+ printf '# Historic Act 14 — Legislative Centre\n' > "$d/town/government/LAWS.md"
+ printf 'Founder-controlled fixture Constitution\n' > "$d/charter"
+ export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock"
+@@ -64,16 +65,70 @@ jq -e '.state=="open" and .owner=="executive"' "$d/state/institutional-cases/con
+ jq -e '.state=="open" and .owner=="executive" and .first_seen==1000' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ rm "$d/state/branches/incident.json"
+ VICHE_CASE_NOW=1100 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++# A missing signal is only an observation. It must not close the case.
++jq -e '.state=="awaiting_investigation" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ VICHE_CASE_NOW=1200 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="verified_closed" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.state=="awaiting_investigation" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.state!="verified_closed"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ jq -e '.state=="open"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+-# Only a matching independent Judiciary verification can discharge the
+-# uncertain-effects reconciliation case.
+-printf '{"previous_agent":"old-agent","successor_agent":"new-agent","verified_by":"judiciary","verification_scope":"external_effect_reconciled","evidence_ref":"fixture:independent-reviewed-effects"}\n' > "$d/state/continuity/verified-innovation-centre.json"
++
++# Closure needs an accountable agent investigation with durable evidence.
++stale="$d/state/institutional-cases/innovation_stale.json"
++stale_id=$(jq -r .id "$stale")
++mkdir -p "$d/state/institutional-cases/evidence/innovation_stale"
++printf '{"signal":"innovation_stale","case_id":"%s","investigator":"executive-agent","observed_at":1250,"reason":"no evidence cited"}\n' "$stale_id" > "$d/state/institutional-cases/evidence/innovation_stale/investigation.json"
+ VICHE_CASE_NOW=1300 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-VICHE_CASE_NOW=1400 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="verified_closed"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++jq -e '.state=="awaiting_investigation" and (.verification_gap|test("durable evidence"))' "$stale" >/dev/null
++cat > "$d/state/institutional-cases/evidence/innovation_stale/investigation.json" <<EOF
++{"signal":"innovation_stale","case_id":"$stale_id","investigator":"executive-agent","observed_at":1250,"reason":"Restored the health writer; two independent watchdog cycles observed fresh records.","evidence_ref":"fixture:before-after-health","conclusion":"resolved"}
++EOF
++VICHE_CASE_NOW=1350 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="awaiting_verification"' "$stale" >/dev/null
++
++# The investigator cannot verify its own work, and a non-closing
++# Judiciary disposition must not close the case.
++cat > "$d/state/institutional-cases/evidence/innovation_stale/verification.json" <<EOF
++{"signal":"innovation_stale","case_id":"$stale_id","verified_by":"judiciary","verifier":"executive-agent","observed_at":1400,"disposition":"confirmed_resolved","evidence_ref":"fixture:self-review"}
++EOF
++VICHE_CASE_NOW=1450 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="awaiting_verification" and (.verification_gap|test("same identity"))' "$stale" >/dev/null
++cat > "$d/state/institutional-cases/evidence/innovation_stale/verification.json" <<EOF
++{"signal":"innovation_stale","case_id":"$stale_id","verified_by":"judiciary","verifier":"judiciary-agent","observed_at":1450,"disposition":"inconclusive","evidence_ref":"fixture:independent-watchdog-log"}
++EOF
++VICHE_CASE_NOW=1500 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="awaiting_verification"' "$stale" >/dev/null
++cat > "$d/state/institutional-cases/evidence/innovation_stale/verification.json" <<EOF
++{"signal":"innovation_stale","case_id":"$stale_id","verified_by":"judiciary","verifier":"judiciary-agent","observed_at":1500,"disposition":"confirmed_resolved","evidence_ref":"fixture:independent-watchdog-log"}
++EOF
++VICHE_CASE_NOW=1550 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="verified_closed" and (.closure_evidence.investigation_digest|startswith("sha256:")) and (.closure_evidence.verification_digest|startswith("sha256:"))' "$stale" >/dev/null
++
++# Only a matching independent Judiciary verification can clear the
++# uncertain-effects reconciliation signal; even then, closure still needs the
++# agent investigation and a separate independent assessment.
++printf '{"previous_agent":"old-agent","successor_agent":"new-agent","verified_by":"judiciary","verification_scope":"external_effect_reconciled","evidence_ref":"fixture:independent-reviewed-effects"}\n' > "$d/state/continuity/verified-innovation-centre.json"
++VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++VICHE_CASE_NOW=1700 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++cont="$d/state/institutional-cases/continuity_unverified_innovation-centre.json"
++jq -e '.state=="awaiting_investigation"' "$cont" >/dev/null
++cont_id=$(jq -r .id "$cont")
++mkdir -p "$d/state/institutional-cases/evidence/continuity_unverified_innovation-centre"
++cat > "$d/state/institutional-cases/evidence/continuity_unverified_innovation-centre/investigation.json" <<EOF
++{"signal":"continuity_unverified_innovation-centre","case_id":"$cont_id","investigator":"executive-agent","observed_at":1750,"reason":"Reconciled the old agent's durable effects against the successor's work.","evidence_ref":"fixture:reconciled-effects","conclusion":"resolved"}
++EOF
++VICHE_CASE_NOW=1800 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="awaiting_verification"' "$cont" >/dev/null
++cat > "$d/state/institutional-cases/evidence/continuity_unverified_innovation-centre/verification.json" <<EOF
++{"signal":"continuity_unverified_innovation-centre","case_id":"$cont_id","verified_by":"judiciary","verifier":"judiciary-agent","observed_at":1800,"disposition":"confirmed_resolved","evidence_ref":"fixture:independent-continuity-review"}
++EOF
++VICHE_CASE_NOW=1850 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="verified_closed"' "$cont" >/dev/null
++
++# A recurring failure must preserve the earlier closure record, not overwrite it.
++printf '{"signals":["innovation_stale"],"observed_at":1900}\n' > "$d/state/branches/incident.json"
++VICHE_CASE_NOW=1900 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open"' "$stale" >/dev/null
++test -s "$d/state/institutional-cases/history/innovation_stale-1550.json"
+ 
+ # After a real enactment, Executive unit runs on preserved worktree, not a
+ # parliamentary summons. Mock only the branch-bootstrap and deployment.

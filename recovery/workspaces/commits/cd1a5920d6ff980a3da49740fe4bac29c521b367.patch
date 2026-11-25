@@ -1,0 +1,208 @@
+commit cd1a5920d6ff980a3da49740fe4bac29c521b367
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Sun Nov 22 09:16:12 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Sun Nov 22 09:16:12 2026 +0000
+
+    Integrate delivery/act22-due-routing-worktree-20261122 (operator): Merge remote-tracking branch 'refs/remotes/origin/main' into fix/act22-due-routing-20261122
+    
+    Landed by the integration queue (Act 31) as one candidate on main 9413ab1b8496.
+    
+    Delivery-Branch: delivery/act22-due-routing-worktree-20261122
+    Delivery-Head: 5083f3145d8613199ddf657beb44a57cd3fe29c4
+    Proposed-By: operator
+    Reviewed-By: reviewer-shjynfofyieb5g25jt7uii-lets
+    Review-Reason: Correctly implements Act 22 due routing with resolver filtering, pagination, and worktree isolation; no records/ changes; does not modify LAWS.md/seats.tsv without bill trailer.
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/predict-due.py b/government/predict-due.py
+index 915707f4..2cf06823 100644
+--- a/government/predict-due.py
++++ b/government/predict-due.py
+@@ -19,14 +19,23 @@ def iso(epoch):
+     return datetime.datetime.fromtimestamp(epoch,datetime.timezone.utc).isoformat()
+ 
+ 
++def town_root():
++    return Path(os.environ.get("VICHE_TOWN_ROOT", str(Path(__file__).resolve().parent.parent)))
++
++
+ def main():
+     ap=argparse.ArgumentParser(description=__doc__)
+     ap.add_argument("--now",type=int,default=int(time.time()))
+-    ap.add_argument("--limit",type=int,default=12)
++    ap.add_argument("--limit",type=int,default=50)
++    ap.add_argument("--offset",type=int,default=0)
++    ap.add_argument("--resolver",choices=("all","c1a00001","c1a0000b"),
++                    default="all")
+     args=ap.parse_args()
++    if args.offset < 0:
++        raise SystemExit("predict-due: offset cannot be negative")
+     if not 1 <= args.limit <= 50:
+         raise SystemExit("predict-due: limit must be between 1 and 50")
+-    town=Path(os.environ.get("VICHE_TOWN_ROOT","/var/lib/lubko/wd/viche"))
++    town=town_root()
+     ledger=Path(os.environ.get("VICHE_PREDICT_LEDGER",
+                              str(town/"records/predictions/ledger.json")))
+     check=subprocess.run([sys.executable,str(town/"government/predict-ledger.py"),
+@@ -53,19 +62,26 @@ def main():
+             if r["id"] not in resolutions:
+                 pending.append(r)
+         pending.sort(key=lambda r:(r["resolution_date"],r["id"]))
++        def resolver(r):
++            return "c1a0000b" if r["author"]=="c1a00001" else "c1a00001"
++        assigned=[r for r in pending if args.resolver=="all" or
++                  resolver(r)==args.resolver]
++        page=assigned[args.offset:args.offset+args.limit]
+         items=[]
+-        for r in pending[:args.limit]:
++        for r in page:
+             bill=town/"records/bills"/(r["bill_id"]+".md")
+             withdrawn=False
+             if bill.is_file() and not bill.is_symlink():
+                 withdrawn="WITHDRAWN" in bill.read_text(errors="replace")[:200]
+             items.append({
+                 "id":r["id"],"author":r["author"],
+-                "required_resolver":"c1a0000b" if r["author"]=="c1a00001" else "c1a00001",
++                "required_resolver":resolver(r),
+                 "due_utc":r["resolution_date"],
+                 "days_past_due":(day-datetime.date.fromisoformat(r["resolution_date"])).days,
+-                "proposition":r["proposition"],
+-                "evidence_source":r["evidence_source"],
++                "proposition":r["proposition"][:240],
++                "evidence_source":r["evidence_source"][:180],
++                "full_evidence_must_be_read_from_ledger":(
++                    len(r["proposition"])>240 or len(r["evidence_source"])>180),
+                 "conditional_withdrawn_bill":withdrawn,
+                 "caution":"Examine exact primary evidence. If unavailable or counterfactual, resolve UNRESOLVED with reason, not an invented Brier score."
+             })
+@@ -77,9 +93,13 @@ def main():
+             "as_of_utc":iso(args.now),"integrity":"clean",
+             "due":len(due),"scored":scored,"unresolved":unable,
+             "awaiting_independent_resolution":len(pending),
++            "awaiting_assigned_resolution":len(assigned),
++            "resolver_filter":args.resolver,"offset":args.offset,
+             "future_registered":len(future),
+             "next_due_utc":min(future).isoformat() if future else None,
+-            "items":items,"truncated":len(pending)>len(items),
++            "items":items,"truncated":args.offset+len(items)<len(assigned),
++            "next_offset":args.offset+len(items)
++                if args.offset+len(items)<len(assigned) else None,
+             "no_auto_resolution":True,
+             "review_note":"Clerk is Act 22 resolver except its own predictions; those require independent Audit c1a0000b. Report calibration coverage even when all cases are unresolved."
+         },ensure_ascii=False,sort_keys=True))
+diff --git a/government/predict-ledger.py b/government/predict-ledger.py
+index 748cc8e2..282c121f 100644
+--- a/government/predict-ledger.py
++++ b/government/predict-ledger.py
+@@ -51,7 +51,7 @@ FALLBACK_RESOLVER = "c1a0000b"
+ 
+ 
+ def town_root() -> Path:
+-    return Path(os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche"))
++    return Path(os.environ.get("VICHE_TOWN_ROOT", str(Path(__file__).resolve().parent.parent)))
+ 
+ 
+ def ledger_path() -> Path:
+diff --git a/government/predict-scorer.py b/government/predict-scorer.py
+index efdb1b3b..cddcf13a 100644
+--- a/government/predict-scorer.py
++++ b/government/predict-scorer.py
+@@ -35,7 +35,7 @@ ACT20_CHECKPOINTS = [
+ 
+ 
+ def town_root() -> Path:
+-    return Path(os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche"))
++    return Path(os.environ.get("VICHE_TOWN_ROOT", str(Path(__file__).resolve().parent.parent)))
+ 
+ 
+ def content_hash(entry: dict) -> str:
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 2605760b..fb1733e2 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -357,7 +357,7 @@ fi
+ # evidence, not wishful calibration, controls the independent disposition.
+ if [ "$seat" = "$clerk" ] || [ "$seat" = c1a0000b ]; then
+     if [ -f "$town/government/predict-due.py" ]; then
+-        if due=$(timeout 15 python3 "$town/government/predict-due.py" 2>/dev/null); then
++        if due=$(timeout 15 python3 "$town/government/predict-due.py" --resolver "$seat" --limit 50 2>/dev/null); then
+             printf '%s\n%s\n%s\n' \
+                 '=== ACT 22 PREDICTIONS REQUIRING INDEPENDENT RESOLUTION ===' \
+                 "$due" \
+diff --git a/tests/predict-due-smoke.sh b/tests/predict-due-smoke.sh
+index 1d7e90ae..c9bec32f 100644
+--- a/tests/predict-due-smoke.sh
++++ b/tests/predict-due-smoke.sh
+@@ -39,4 +39,34 @@ if python3 "$tmp/government/predict-due.py" --now 90002 > "$tmp/agenda" 2>/dev/n
+ fi
+ jq -e '.integrity=="failed"' "$tmp/agenda" >/dev/null
+ grep -q 'government/predict-due.py' "$repo/government/sitting.sh"
+-echo 'Act22 due agenda: independent resolver, withdrawn plan, honest unresolved and integrity fail-closed passed'
++grep -q -- '--resolver "$seat"' "$repo/government/sitting.sh"
++# Tomorrow 17 come due: 15 authored by c1a00004 are Clerk-owned,
++# two authored by Clerk require Audit. No silently dropped twelfth+ items.
++export VICHE_PREDICT_LEDGER="$tmp/cohort.json"
++for n in $(seq 1 17); do
++  if [ "$n" -le 15 ]; then author=c1a00004; else author=c1a00001; fi
++  VICHE_PREDICT_NOW=90 python3 "$tmp/government/predict-ledger.py" register \
++    --bill "cohort-$n" --proposition "Check future cohort event $n" \
++    --resolution-date 1970-01-02 --probability 0.6 \
++    --evidence "independent:cohort-event-$n" --author "$author" >/dev/null
++done
++python3 "$tmp/government/predict-due.py" --now 90000 \
++  --resolver c1a00001 > "$tmp/clerk"
++python3 "$tmp/government/predict-due.py" --now 90000 \
++  --resolver c1a0000b > "$tmp/audit"
++jq -e '.awaiting_independent_resolution==17 and
++       .awaiting_assigned_resolution==15 and
++       (.items|length)==15 and .truncated==false and
++       (.items|all(.required_resolver=="c1a00001"))' "$tmp/clerk" >/dev/null
++jq -e '.awaiting_independent_resolution==17 and
++       .awaiting_assigned_resolution==2 and
++       (.items|length)==2 and .truncated==false and
++       (.items|all(.required_resolver=="c1a0000b"))' "$tmp/audit" >/dev/null
++python3 "$tmp/government/predict-due.py" --now 90000 \
++  --resolver c1a00001 --limit 8 --offset 0 > "$tmp/page1"
++python3 "$tmp/government/predict-due.py" --now 90000 \
++  --resolver c1a00001 --limit 8 --offset 8 > "$tmp/page2"
++jq -e '(.items|length)==8 and .truncated==true and .next_offset==8' "$tmp/page1" >/dev/null
++jq -e '(.items|length)==7 and .truncated==false and .next_offset==null' "$tmp/page2" >/dev/null
++test "$(wc -c < "$tmp/clerk")" -lt 32768
++echo 'Act22 due queue: independent resolver routing, all 17 due, pagination, withdrawn evidence and integrity pass'
+diff --git a/tests/predict-worktree-isolation-smoke.sh b/tests/predict-worktree-isolation-smoke.sh
+new file mode 100644
+index 00000000..5e4ebfd9
+--- /dev/null
++++ b/tests/predict-worktree-isolation-smoke.sh
+@@ -0,0 +1,30 @@
++#!/bin/sh
++# Act22 mutation and scoring defaults resolve relative to the invoked source,
++# not the shared canonical worktree. No fixture command writes to production.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++mkdir -p "$tmp/government" "$tmp/records/predictions"
++cp "$repo"/government/predict-ledger.py "$repo"/government/predict-scorer.py "$repo"/government/predict-due.py "$tmp/government/"
++python3 - "$tmp" <<'PY'
++import importlib.util, os, sys
++from pathlib import Path
++root=Path(sys.argv[1]).resolve()
++for key in ("VICHE_TOWN_ROOT","VICHE_PREDICT_LEDGER","VICHE_PREDICT_CALIBRATION"):
++ os.environ.pop(key,None)
++for name in ("predict-ledger","predict-scorer","predict-due"):
++ path=root/"government"/(name+".py")
++ spec=importlib.util.spec_from_file_location(name.replace("-","_"),path)
++ module=importlib.util.module_from_spec(spec)
++ spec.loader.exec_module(module)
++ assert module.town_root()==root,(name,module.town_root())
++ if name=="predict-ledger":
++  assert module.ledger_path()==root/"records/predictions/ledger.json"
++os.environ["VICHE_TOWN_ROOT"]="/tmp/explicit-override"
++spec=importlib.util.spec_from_file_location("due_override",root/"government/predict-due.py")
++module=importlib.util.module_from_spec(spec)
++spec.loader.exec_module(module)
++assert module.town_root()==Path("/tmp/explicit-override")
++print("Act22 worktree-local paths: default isolation and explicit override passed")
++PY

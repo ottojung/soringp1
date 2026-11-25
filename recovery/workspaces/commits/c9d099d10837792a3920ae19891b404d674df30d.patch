@@ -1,0 +1,967 @@
+commit c9d099d10837792a3920ae19891b404d674df30d
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 06:56:21 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 06:56:21 2026 +0000
+
+    Publish complete PnP proofs immediately; verify exact revisions concurrently
+
+diff --git a/missions/pnp/PROTOCOL.md b/missions/pnp/PROTOCOL.md
+index c073a892..5149c397 100644
+--- a/missions/pnp/PROTOCOL.md
++++ b/missions/pnp/PROTOCOL.md
+@@ -75,10 +75,14 @@ native_decide, unsafe commands), and exactly one Lean proof file.
+ Use a fresh isolated Git checkout/worktree based on a pinned upstream main SHA and
+ a new branch unique to the leased gap. Never use untrusted candidate worktree Git hooks,
+ configs, pre-existing branch, or commit history as submission input.
+-Run the required pinned local Lean/Mathlib build once, in the publisher. Do not
+-run a redundant full local authoritative checker; the PR receives that verdict
+-from the upstream fleet. Record hash and outcome; distinguish the successful
+-local build from authoritative upstream acceptance. A worker hands a complete
++Submit complete, high-confidence proofs immediately after static validation and lease
++confirmation. Do not delay signing, pushing or PR creation for local compilation.
++After the PR opens, independently verify that exact committed revision with the
++managed compiler unless matching successful managed build evidence already exists.
++A local failure is a correction signal, not an authoritative rejection. Correct
++the same open PR with a new signed commit; never open a second PR for the gap.
++Reconcile only authoritative verdicts for the current PR head, and require merge
++for ACCEPTED. Do not run a redundant full local authoritative checker. A worker hands a complete
+ candidate directly to the publisher via submit; no additional Executive approval
+ or researcher-side full checker is needed. Snapshot the candidate and start a
+ detached, per-gap locked deterministic publisher immediately. Recover interrupted
+@@ -108,7 +112,7 @@ contains exactly the expected signed SHA, GitHub verification == true.
+ If post-create validation fails, report and stop automated mutations; do not
+ hide the discrepancy. Never merge, close, comment on unrelated PRs, change settings,
+ delete branches as incidental cleanup, or operate on other repositories.
+-For an allowed correction, rebuild new signed commit(s) and prove every PR
++For an allowed correction, sign new commit(s) and prove every PR
+ commit beyond the upstream base is signed and attributed to ottojung before updating.
+ 
+ ## Research program (standing)
+diff --git a/missions/pnp/build_control.py b/missions/pnp/build_control.py
+index 4e8e17ed..a9b34f32 100644
+--- a/missions/pnp/build_control.py
++++ b/missions/pnp/build_control.py
+@@ -45,6 +45,10 @@ def obsolete(gap=None, lease=None):
+         return False
+     if lease and rec.get("lease") and lease != rec["lease"]:
+         return True
++    if os.environ.get("PNP_POSTCHECK_SHA"):
++        return not (rec.get("state") == "PR_OPEN"
++                    and rec.get("commit_sha") == os.environ["PNP_POSTCHECK_SHA"]
++                    and rec.get("local_check_status") == "pending")
+     return rec.get("state") in ("STALE", "RELEASED", "ACCEPTED", "PR_OPEN")
+ 
+ 
+diff --git a/missions/pnp/compile.py b/missions/pnp/compile.py
+index 6e571645..908f2126 100644
+--- a/missions/pnp/compile.py
++++ b/missions/pnp/compile.py
+@@ -7,7 +7,7 @@ import subprocess
+ import sys
+ import time
+ 
+-from . import build_control as control, watchdog, state, assignment
++from . import build_control as control, watchdog, state, assignment, evidence
+ 
+ 
+ def command(args):
+@@ -28,7 +28,7 @@ def run(args, cwd=None, heavy=True, publication=False, timeout=600,
+     argv = command(args)
+     # Avoid inheriting a researcher's custom path/options in publication.
+     env = {k: v for k, v in os.environ.items()
+-           if not (publication and (k.startswith("LEAN_") or k.startswith("LAKE_")
++           if not ((publication or os.environ.get("PNP_EVIDENCE_BUILD") == "1") and (k.startswith("LEAN_") or k.startswith("LAKE_")
+                                     or k in ("PEQUALNP_IN_QUEUE", "PEQUALNP_REAL_LAKE")))}
+     env.update(PNP_MANAGED_COMPILER="1", LEAN_NUM_THREADS="1", LAKE_ARTIFACT_CACHE="true",
+                LAKE_RESTORE_ARTIFACTS="true",
+@@ -97,7 +97,18 @@ def main(argv=None):
+         raise KeyboardInterrupt
+     signal.signal(signal.SIGTERM, interrupted)
+     try:
+-        return run(args, heavy=not ns.light, timeout=max(1, min(ns.timeout, 1800)))
++        bound = assignment.binding(Path.cwd())
++        rec = state.load(bound[0]) if bound else None
++        before = evidence.snapshot(rec, Path.cwd(), args) if rec and not ns.light else None
++        if before:
++            os.environ["PNP_EVIDENCE_BUILD"] = "1"
++        code = run(args, heavy=not ns.light, timeout=max(1, min(ns.timeout, 1800)))
++        if code == 0 and before:
++            try:
++                evidence.record(rec, before, evidence.snapshot(rec, Path.cwd(), args))
++            except (OSError, ValueError) as exc:
++                print("build evidence unavailable:", exc, file=sys.stderr)
++        return code
+     except (control.BuildDeferred, KeyboardInterrupt, OSError) as exc:
+         print("RESOURCE DEFERRED:", exc, file=sys.stderr, flush=True)
+         return 75
+diff --git a/missions/pnp/config.py b/missions/pnp/config.py
+index 26c8b2de..3b23949d 100644
+--- a/missions/pnp/config.py
++++ b/missions/pnp/config.py
+@@ -56,13 +56,13 @@ ALLOWED = {
+     "DISCOVERED": {"LEASED", "RELEASED", "FAULT"},
+     "LEASED": {"RESEARCHING", "RELEASED", "STALE", "FAULT"},
+     "RESEARCHING": {"CANDIDATE_READY", "RELEASED", "STALE", "FAULT"},
+-    "CANDIDATE_READY": {"LOCAL_CHECKED", "RESEARCHING", "RELEASED",
++    "CANDIDATE_READY": {"LOCAL_CHECKED", "SIGNED", "RESEARCHING", "RELEASED",
+                         "STALE", "FAULT"},
+     "LOCAL_CHECKED": {"SIGNED", "RESEARCHING", "RELEASED", "STALE", "FAULT"},
+     "SIGNED": {"PUSHED", "FAULT"},
+     "PUSHED": {"PR_OPEN", "FAULT"},
+-    "PR_OPEN": {"ACCEPTED", "REJECTED", "FAULT"},
+-    "REJECTED": {"RESEARCHING", "FAULT"},
++    "PR_OPEN": {"ACCEPTED", "REJECTED", "STALE", "FAULT"},
++    "REJECTED": {"RESEARCHING", "SIGNED", "FAULT", "STALE"},
+     "FAULT": {"RESEARCHING", "RELEASED"},
+ }
+ 
+diff --git a/missions/pnp/evidence.py b/missions/pnp/evidence.py
+new file mode 100644
+index 00000000..38326f4c
+--- /dev/null
++++ b/missions/pnp/evidence.py
+@@ -0,0 +1,65 @@
++"""Reuse only a successful managed build of the exact proof on a clean base."""
++import hashlib
++from pathlib import Path
++import subprocess
++
++from . import assignment, state
++
++
++def snapshot(rec, cwd, args):
++    """Ignore scratch builds, dirty inputs or custom caches."""
++    if args not in (["lake", "build", rec["module"]],
++                    ["lake", "build", "+" + rec["module"]]):
++        return None
++    found = assignment.workspace(Path(cwd))
++    if not found or assignment.binding(Path(cwd)) != (rec["gap_id"], rec["lease"]):
++        return None
++    root = found[1]
++    if Path(cwd).resolve() != (root / "lean").resolve():
++        return None
++    from . import gitctl
++    try:
++        def git(*args):
++            return subprocess.check_output(["git", "-C", str(root), *args],
++                                           timeout=10, text=True).strip()
++        # Only the exact proof may differ under lean/. Notes elsewhere are fine.
++        if git("status", "--porcelain", "--untracked-files=all", "--", "lean") not in (
++                "?? " + rec["path"], "A  " + rec["path"]):
++            return None
++        if git("diff", "HEAD", "--name-only", "--", "lean") not in ("", rec["path"]):
++            return None
++        path = root / rec["path"]
++        if path.is_symlink() or not path.is_file():
++            return None
++        gitctl.prepare_build_cache(str(root))
++        packages = root / "lean/.lake/packages"
++        seed = Path("/home/lubko/pequalnp-research-20261123/lean/.lake/packages")
++        if packages.resolve() != seed.resolve():
++            return None
++        return {"lease": rec["lease"], "base": git("rev-parse", "HEAD"),
++                "digest": hashlib.sha256(path.read_bytes()).hexdigest(),
++                "module": rec["module"], "path": rec["path"],
++                "statement": rec["statement"], "imports": rec["imports"]}
++    except (OSError, ValueError, subprocess.SubprocessError, gitctl.GitError):
++        return None
++
++
++def record(rec, before, after):
++    if not before or before != after:
++        return
++    with state.lock(rec["gap_id"]):
++        current = state.load(rec["gap_id"])
++        if current and current["lease"] == rec["lease"] and current["state"] in (
++                "LEASED", "RESEARCHING", "CANDIDATE_READY"):
++            current["build_evidence"] = before
++            state.save(current)
++            state.event(rec["gap_id"], "managed_build_evidence", {"digest": before["digest"],
++                                                                "base": before["base"]})
++
++
++def matching(rec, digest, base):
++    e = rec.get("build_evidence")
++    return isinstance(e, dict) and e == {
++        "lease": rec["lease"], "base": base, "digest": digest,
++        "module": rec["module"], "path": rec["path"],
++        "statement": rec["statement"], "imports": rec["imports"]}
+diff --git a/missions/pnp/frontier.py b/missions/pnp/frontier.py
+index cb458db1..4ad6a8fc 100644
+--- a/missions/pnp/frontier.py
++++ b/missions/pnp/frontier.py
+@@ -88,6 +88,8 @@ def checkpoint(gap, lease=None, now=None):
+         return {"decision": "wait", "reason": "assignment identity unavailable"}
+     if lease and rec.get("lease") != lease:
+         return {"decision": "stop", "reason": "assignment superseded"}
++    if status == "PR_OPEN" and rec.get("local_check_status") == "failed" and rec.get("external_verdict") != "ACCEPTED":
++        return {"decision": "continue", "reason": "correct existing PR after local compile failure"}
+     if status in STOPPED:
+         return {"decision": "stop", "reason": status}
+     if status == "REJECTED" and rec.get("pr_number"):
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index 50c78d0d..16dc30b9 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -241,3 +241,22 @@ def all_new_commits_signed(worktree, base_sha):
+         except GitError:
+             return False
+     return bool(shas)
++
++
++def prepare_unpublished(worktree, branch, base, previous=None):
++    """Recover a crash before recording SIGNED, never rewrite a remote head."""
++    remote = remote_branch_sha(branch)
++    if remote != previous:
++        raise GitError("unexpected remote branch before staging")
++    target = previous or base
++    run(["git", "-C", worktree, "reset", "--hard", target])
++    run(["git", "-C", worktree, "clean", "-fd", "--", "lean"])
++
++
++def is_upstream_ancestor(sha, latest):
++    """Use a prior checked upstream base only if its ancestry is confirmed."""
++    import re
++    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
++        return False
++    return run(["git", "--git-dir=" + MIRROR, "merge-base", "--is-ancestor",
++                sha, latest], check=False).returncode == 0
+diff --git a/missions/pnp/github.py b/missions/pnp/github.py
+index 00249ba7..a22e5756 100644
+--- a/missions/pnp/github.py
++++ b/missions/pnp/github.py
+@@ -77,7 +77,7 @@ def create_pr(branch, gap_id):
+ 
+ def get_pr(number):
+     expr = ("{number: .number, state: .state, title: .title, "
+-            "author: .user.login, "
++            "author: .user.login, head_sha: .head.sha, merged: .merged, "
+             "head_ref: .head.ref, head_repo: .head.repo.full_name, "
+             "base_ref: .base.ref, base_repo: .base.repo.full_name, "
+             "url: .html_url}")
+@@ -99,7 +99,7 @@ def pr_commits(number):
+ def pr_comments(number):
+     return json.loads(gh("api", "repos/" + config.UPSTREAM + "/issues/" +
+                          str(number) + "/comments", "--jq",
+-                         "[.[] | {body: .body, created_at: .created_at}]"))
++                         "[.[] | {body: .body, created_at: .created_at, author: .user.login}]"))
+ 
+ 
+ def validate_created(number, expected_sha, expected_path,
+diff --git a/missions/pnp/jobs.py b/missions/pnp/jobs.py
+index b398ee1a..74f8bd41 100644
+--- a/missions/pnp/jobs.py
++++ b/missions/pnp/jobs.py
+@@ -5,7 +5,7 @@ import subprocess
+ import sys
+ import time
+ 
+-from . import config, publish, state, validate, build_control
++from . import config, publish, state, validate
+ 
+ READY = ("CANDIDATE_READY", "LOCAL_CHECKED", "SIGNED", "PUSHED", "REJECTED")
+ 
+@@ -42,8 +42,6 @@ def submit(gap, source, expected_lease=None):
+         raise publish.StopPublish("assignment superseded")
+     if not rec:
+         raise publish.StopPublish("no acquired gap")
+-    if rec["state"] == "PR_OPEN":
+-        return {"gap": gap, "pr": rec["pr_number"], "url": rec["pr_url"]}
+     fd = claim(gap)
+     if fd is None:
+         return {"gap": gap, "status": "publishing"}
+@@ -54,18 +52,23 @@ def submit(gap, source, expected_lease=None):
+             rec = state.load(gap)
+             if not rec or (expected_lease and rec.get("lease") != expected_lease):
+                 raise publish.StopPublish("assignment superseded")
+-            if rec["state"] not in ("LEASED", "RESEARCHING") + READY:
++            if rec["state"] not in ("LEASED", "RESEARCHING", "PR_OPEN") + READY:
+                 raise publish.StopPublish("gap not publishable: " + rec["state"])
+             meta = {"id": gap, "file": rec["path"], "module": rec["module"],
+                     "statement": rec["statement"], "imports": rec["imports"]}
+             digest = validate.validate(meta, data)
+             if rec["state"] in ("SIGNED", "PUSHED") and digest != rec["candidate_digest"]:
+                 raise publish.StopPublish("signed proof is immutable")
+-            if digest == rec.get("candidate_digest") and not build_control.resource_ready(rec):
+-                return {"gap": gap, "status": "resource-deferred",
+-                        "required_headroom": rec["publisher_memory_required"]}
+-            state.atomic_write(candidate_path(gap), data.decode("utf-8"))
+             before = rec["state"]
++            if rec["state"] == "PR_OPEN":
++                if (digest == rec.get("candidate_digest") or rec.get("local_check_status") != "failed"
++                        or rec.get("external_verdict") == "ACCEPTED"):
++                    return {"gap": gap, "pr": rec["pr_number"], "url": rec["pr_url"]}
++                rec["state"] = "REJECTED"
++            if (rec["state"] == "REJECTED" and digest == rec.get("candidate_digest")
++                    and not rec.get("queued_lease")):
++                raise publish.StopPublish("correction must change the proof")
++            state.atomic_write(candidate_path(gap), data.decode("utf-8"))
+             if before in ("LEASED", "RESEARCHING", "CANDIDATE_READY"):
+                 rec.update(state="CANDIDATE_READY", candidate_digest=digest,
+                            failure_reason=None)
+@@ -88,8 +91,6 @@ def resume(gap):
+             not rec.get("queued_lease") or rec["queued_lease"] != rec["lease"] or
+             not os.path.isfile(candidate_path(gap))):
+         return False
+-    if not build_control.resource_ready(rec):
+-        return True
+     if (rec.get("publisher_retry_at") or 0) > time.time():
+         return True
+     fd = claim(gap)
+@@ -119,6 +120,10 @@ def run(gap, fd):
+     try:
+         os.environ["PNP_PUBLISH_LOCK_FD"] = str(fd)
+         rec = state.load(gap)
++        if rec["state"] == "PR_OPEN":
++            from . import postcheck
++            postcheck.run(gap)
++            return
+         if rec["state"] not in READY or rec.get("queued_lease") != rec["lease"]:
+             return
+         os.environ["PNP_PUBLISH_GAP"] = gap
+@@ -126,6 +131,8 @@ def run(gap, fd):
+         os.environ["PNP_PUBLISH_LEASE"] = lease or ""
+         result = publish.publish(gap, candidate_path(gap))
+         print(result, flush=True)
++        from . import postcheck
++        postcheck.run(gap)
+     except publish.StopPublish as exc:
+         print("publication stopped:", exc, flush=True)
+         if lease:
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index e23aa9d3..a1c7a721 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -212,3 +212,12 @@ unmanaged Lean: use the shared compiler and respect its resource admission.
+ A complete candidate must be submitted promptly rather than waiting on an
+ irrelevant experimental branch. Executive delivers actionable mathematical
+ handoffs to the existing researcher promptly, preserving search progress.
++
++## Immediate publication
++Submit complete high-confidence proofs immediately with the normal submit command.
++Never wait for a redundant compile before opening the PR. The publisher validates,
++signs and publishes, then checks the exact published revision locally in parallel
++with upstream CI. Do not submit unfinished proofs, placeholders or guesses.
++Executive must promptly delegate corrections shown in correction_needed, reusing
++the same open PR and the existing research artifacts. Do not treat a local check
++failure as a final external verdict; do not repeat rejected identical proof bytes.
+diff --git a/missions/pnp/postcheck.py b/missions/pnp/postcheck.py
+new file mode 100644
+index 00000000..f36ae92c
+--- /dev/null
++++ b/missions/pnp/postcheck.py
+@@ -0,0 +1,68 @@
++"""Independent local verification of a published, immutable candidate revision."""
++import hashlib
++import os
++from pathlib import Path
++import time
++
++from . import build_control, gitctl, state
++
++
++def pending(rec):
++    return (rec and rec.get("state") == "PR_OPEN" and
++            rec.get("local_check_status") == "pending" and
++            rec.get("commit_sha") and rec.get("worktree"))
++
++
++def run(gap, git=gitctl):
++    rec = state.load(gap)
++    if not pending(rec):
++        return
++    sha = rec["commit_sha"]
++    if not build_control.resource_ready(rec):
++        return
++    def update(**fields):
++        with state.lock(gap):
++            current = state.load(gap)
++            if pending(current) and current["commit_sha"] == sha:
++                current.update(fields)
++                state.save(current)
++                state.event(gap, "postcheck", {"sha": sha, **fields})
++    os.environ.update(PNP_PUBLISH_GAP=gap, PNP_PUBLISH_LEASE=rec["lease"],
++                      PNP_POSTCHECK_SHA=sha)
++    try:
++        wt = rec["worktree"]
++        def exact():
++            return (git.run(["git", "-C", wt, "rev-parse", "HEAD"]).stdout.strip() == sha
++                    and not git.run(["git", "-C", wt, "status", "--porcelain",
++                                     "--untracked-files=all", "--", "lean"]).stdout.strip()
++                    and hashlib.sha256(Path(wt, rec["path"]).read_bytes()).hexdigest()
++                    == rec["candidate_digest"])
++        if not exact():
++            raise gitctl.GitError("published checkout differs from exact proof")
++        ok, log = git.build(wt, rec["module"], rec["statement"])
++        if not exact():
++            raise gitctl.GitError("published checkout changed during check")
++        update(local_check_status="passed" if ok else "failed",
++               local_check_log=log[-2000:], local_check_retry_at=None,
++               publisher_memory_required=None)
++    except Exception as exc:
++        fields = {"local_check_retry_at": time.time() + 60,
++                  "local_check_log": str(exc)[-2000:]}
++        if isinstance(exc, build_control.MemoryDeferred):
++            fields["publisher_memory_required"] = exc.required
++        update(**fields)
++    finally:
++        os.environ.pop("PNP_POSTCHECK_SHA", None)
++
++
++def resume(gap, rec):
++    from . import jobs
++    if (not pending(rec) or (rec.get("local_check_retry_at") or 0) > time.time()
++            or not build_control.resource_ready(rec)):
++        return
++    fd = jobs.claim(gap)
++    if fd is not None:
++        try:
++            jobs.launch(gap, fd)
++        finally:
++            os.close(fd)
+diff --git a/missions/pnp/publish.py b/missions/pnp/publish.py
+index c572b918..05eba33a 100644
+--- a/missions/pnp/publish.py
++++ b/missions/pnp/publish.py
+@@ -8,7 +8,7 @@ restart after SIGNED, PUSHED or PR_OPEN never duplicates a branch or PR.
+ import os
+ import time
+ 
+-from . import config, desk as desk_mod, gitctl, github, state, validate, build_control
++from . import config, desk as desk_mod, gitctl, github, state, validate, evidence
+ 
+ 
+ class StopPublish(Exception):
+@@ -57,7 +57,7 @@ def _read_candidate(path):
+ 
+ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+             build_runner=None, signer=None, pusher=None, known_prs=None):
+-    """Publish one validated, signed, checked candidate.  Idempotent."""
++    """Publish a complete statically validated candidate immediately. Idempotent."""
+     desk = desk or desk_mod.Desk()
+     git = git or gitctl
+     gh = gh or github
+@@ -69,7 +69,7 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     if rec["state"] not in ("CANDIDATE_READY", "LOCAL_CHECKED", "SIGNED",
+                             "PUSHED", "REJECTED"):
+         raise StopPublish("state %s is not publishable" % rec["state"])
+-    correction = rec["state"] == "REJECTED"
++    correction = rec["state"] == "REJECTED" or bool(rec.get("correction_from_sha"))
+     resume = rec["state"] in ("SIGNED", "PUSHED")
+ 
+     # Re-read live instructions at startup; a stale pnp.sh comment is not law.
+@@ -113,44 +113,43 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     if not resume:
+         base_sha = rec.get("base_sha")
+         worktree = rec.get("worktree")
+-        reuse = (rec["state"] == "LOCAL_CHECKED" and not correction
+-                 and hasattr(git, "reusable_checked_tree")
+-                 and git.reusable_checked_tree(worktree, base_sha, rec["path"], data))
+-        if not reuse:
+-            try:
+-                latest_base = git.ensure_mirror()
+-            except Exception as e:
+-                _retry_later(gap_id, "upstream checkout unavailable: %s" % e)
++        try:
++            latest_base = git.ensure_mirror()
+             base_sha = rec.get("base_sha") or latest_base
++            old = (rec.get("build_evidence") or {}).get("base")
++            if (not correction and not rec.get("base_sha")
++                    and hasattr(git, "is_upstream_ancestor")
++                    and old and evidence.matching(rec, digest, old)
++                    and git.is_upstream_ancestor(old, latest_base)):
++                base_sha = old
+             if not base_sha:
+-                _stop(gap_id, "correction has no pinned original base")
++                _stop(gap_id, "missing pinned base")
++            if correction:
++                previous = rec.get("correction_from_sha") or rec.get("commit_sha")
++                pr = gh.get_pr(rec["pr_number"])
++                if pr.get("state") != "open" or pr.get("head_sha") != previous:
++                    _stop(gap_id, "correction requires the original open PR head")
++                state.update(gap_id, correction_from_sha=previous)
+             state.update(gap_id, base_sha=base_sha, branch=branch)
+-            try:
+-                worktree = git.fresh_worktree(gap_id, base_sha, branch)
+-            except Exception as e:
+-                _retry_later(gap_id, "publication checkout unavailable: %s" % e)
++            worktree = git.fresh_worktree(gap_id, base_sha, branch)
+             state.update(gap_id, worktree=worktree)
+-            try:
+-                if correction:
+-                    git.pin_candidate(worktree, rec["path"], data, correction=True)
+-                else:
+-                    git.pin_candidate(worktree, rec["path"], data)
+-            except Exception as e:
+-                _stop(gap_id, "staging failed: %s" % e)
+-            try:
+-                ok, log = git.build(worktree, rec["module"], rec["statement"],
+-                                    runner=build_runner)
+-            except build_control.MemoryDeferred as e:
+-                state.update(gap_id, publisher_memory_required=e.required)
+-                _retry_later(gap_id, "resource deferred: %s" % e)
+-            except Exception as e:
+-                _retry_later(gap_id, "local build unavailable: %s" % e)
+-            if not ok:
+-                _candidate_failed(gap_id, "pinned Lean build failed: %s" % log[-300:])
+-            if rec["state"] == "CANDIDATE_READY":
+-                state.transition(gap_id, "LOCAL_CHECKED", candidate_digest=digest)
+-        # A rival may settle the gap during a lengthy build. Renew immediately
+-        # before signing/pushing, rather than publishing a known stale proof.
++            if hasattr(git, "prepare_unpublished"):
++                git.prepare_unpublished(worktree, branch, base_sha,
++                                        previous if correction else None)
++            if correction:
++                git.pin_candidate(worktree, rec["path"], data, correction=True)
++            else:
++                git.pin_candidate(worktree, rec["path"], data)
++        except StopPublish:
++            raise
++        except Exception as e:
++            _retry_later(gap_id, "publication checkout unavailable: %s" % e)
++        # No local build gate. Reuse exact managed evidence if available;
++        # otherwise the signed revision is checked after PR creation.
++        checked = evidence.matching(state.load(gap_id), digest, base_sha)
++        state.update(gap_id, local_check_status="passed" if checked else "pending",
++                     local_check_retry_at=None, local_check_log=None)
++        # Recheck lease immediately before external publication.
+         if not correction:
+             current = state.load(gap_id)
+             if current["state"] in ("STALE", "RELEASED") or current.get("lease") != rec.get("lease"):
+@@ -177,19 +176,16 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+         state.clear_intent(gap_id)
+         if correction and not git.all_new_commits_signed(worktree, base_sha):
+             _stop(gap_id, "a PR-range commit is unsigned or misattributed")
+-        if correction:
+-            state.transition(gap_id, "RESEARCHING")
+-            state.transition(gap_id, "CANDIDATE_READY")
+-            state.transition(gap_id, "LOCAL_CHECKED")
+-        state.transition(gap_id, "SIGNED", commit_sha=sha)
+         expected_commits = (git.new_commits(worktree, base_sha) if correction
+                             and hasattr(git, "new_commits") else [sha])
++        state.transition(gap_id, "SIGNED", commit_sha=sha,
++                         expected_commits=expected_commits)
+     else:
+         sha = rec.get("commit_sha")
+         base_sha = rec.get("base_sha")
+         if not sha or not base_sha:
+             _stop(gap_id, "resume lacks a signed commit or pinned base")
+-        expected_commits = [sha]
++        expected_commits = rec.get("expected_commits") or [sha]
+ 
+     # Before any mutation: authenticated identity and remote ground truth.
+     try:
+@@ -197,9 +193,13 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     except Exception as e:
+         _retry_later(gap_id, "GitHub identity preflight failed: %s" % e)
+     remote = git.remote_branch_sha(branch)
++    if correction:
++        existing = gh.get_pr(rec["pr_number"])
++        if existing.get("state") != "open" or existing.get("head_sha") not in (remote, sha):
++            _stop(gap_id, "correction PR no longer open at expected head")
+     if remote == sha:
+         pass                                   # already pushed: recover
+-    elif correction and remote == rec.get("commit_sha"):
++    elif correction and remote == (rec.get("correction_from_sha") or rec.get("commit_sha")):
+         # The fork still carries the rejected, signed commit.  The new
+         # signed commit must descend from it; Git rejects non-FF pushes.
+         state.intent(gap_id, "push_correction",
+@@ -270,10 +270,10 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     if state.load(gap_id)["state"] in ("PUSHED", "SIGNED", "LOCAL_CHECKED"):
+         state.transition(gap_id, "PR_OPEN", pr_number=number,
+                          pr_url=pr.get("url"), external_verdict="pending",
+-                         queued_lease=None, failure_reason=None)
++                         queued_lease=None, failure_reason=None, correction_from_sha=None)
+     else:
+         state.update(gap_id, pr_number=number, pr_url=pr.get("url"),
+-                     external_verdict="pending", queued_lease=None)
++                     external_verdict="pending", queued_lease=None, correction_from_sha=None)
+     state.event(gap_id, "published", {"sha": sha, "pr": number,
+                                       "digest": digest})
+     return {"gap": gap_id, "sha": sha, "pr": number, "url": pr.get("url"),
+diff --git a/missions/pnp/reconcile.py b/missions/pnp/reconcile.py
+index 852889ca..128b0c18 100644
+--- a/missions/pnp/reconcile.py
++++ b/missions/pnp/reconcile.py
+@@ -9,7 +9,24 @@ import time
+ 
+ from . import config, desk as desk_mod, gitctl, github, state, frontier
+ 
+-VERDICT = re.compile(r"\b(ACCEPTED|REJECTED|FAULT)\b")
++VERDICT = re.compile(
++    r"^Checked on the base repository at commit `([0-9a-f]{9,40})`\.\s+"
++    r"\*\*(ACCEPTED|REJECTED|FAULT|REFUSED) \([^\n]*\)\*\*", re.M)
++
++
++def current_verdict(comments, sha):
++    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
++        return None
++    verdicts = []
++    for comment in comments:
++        if comment.get("author") != "LiorDagan":
++            continue
++        body = comment.get("body") or ""
++        match = VERDICT.search(body)
++        if (match and sha.startswith(match[1]) and
++                re.search(r"^Run: https://github\.com/brilliant-hq/pequalnp-proofs/actions/runs/[0-9]+$", body, re.M)):
++            verdicts.append((comment.get("created_at", ""), match[2]))
++    return max(verdicts)[1] if verdicts else None
+ 
+ 
+ def _heartbeat(gap_id, rec, desk, force=False):
+@@ -38,21 +55,19 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None, observed=None):
+     rec = state.load(gap_id)
+     if rec is None:
+         return {"gap": gap_id, "result": "no-state"}
+-    if rec["state"] in ("ACCEPTED", "RELEASED", "STALE") or (
+-            rec["state"] == "REJECTED" and not rec.get("queued_lease")):
++    if rec["state"] in ("ACCEPTED", "RELEASED", "STALE"):
+         return {"gap": gap_id, "result": "terminal", "state": rec["state"]}
+ 
+     # Missing from a complete fresh frontier is a reason to confirm, not a verdict.
+     _heartbeat(gap_id, rec, desk, force=frontier.missing(observed or {}, gap_id))
+     rec = state.load(gap_id)
+-    if rec["state"] in ("ACCEPTED", "RELEASED", "STALE") or (
+-            rec["state"] == "REJECTED" and not rec.get("queued_lease")):
++    if rec["state"] in ("ACCEPTED", "RELEASED", "STALE"):
+         return {"gap": gap_id, "result": "terminal", "state": rec["state"]}
+ 
+     # A detached deterministic publisher owns a durable candidate. Recovery
+     # never starts a competing build or holds the short reconciliation pass.
+     from . import jobs
+-    if jobs.resume(gap_id):
++    if rec["state"] != "PR_OPEN" and jobs.resume(gap_id):
+         return {"gap": gap_id, "result": "publishing", "state": rec["state"]}
+ 
+     branch = rec.get("branch") or config.branch_for(gap_id)
+@@ -96,24 +111,35 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None, observed=None):
+     if number:
+         number = int(number)
+         pr = gh.get_pr(number)
+-        if rec["state"] in ("PUSHED", "SIGNED", "LOCAL_CHECKED"):
++        if rec["state"] in ("PUSHED", "SIGNED", "LOCAL_CHECKED") and pr.get("head_sha") == rec.get("commit_sha"):
+             state.transition(gap_id, "PR_OPEN", pr_number=number,
+                              pr_url=pr.get("url"),
+                              external_verdict="pending")
+         state.update(gap_id, pr_number=number, pr_url=pr.get("url"))
+-        comments = gh.pr_comments(number)
+-        verdicts = [(m.get("created_at", ""),
+-                     VERDICT.search(m.get("body", "")).group(1))
+-                    for m in comments
+-                    if VERDICT.search(m.get("body", ""))]
+-        if verdicts:
+-            verdict = sorted(verdicts)[-1][1]
+-            if verdict != "FAULT":
+-                state.transition(gap_id, verdict,
+-                                 external_verdict=verdict, queued_lease=None)
+-            else:
+-                state.update(gap_id, external_verdict="FAULT",
+-                             failure_reason="upstream checker FAULT; will recheck")
++        current = state.load(gap_id)
++        if current["state"] in ("PR_OPEN", "REJECTED") and not current.get("queued_lease") and pr.get("head_sha") == current.get("commit_sha"):
++            verdict = current_verdict(gh.pr_comments(number), current.get("commit_sha"))
++            # A checker success is not a merged contribution; a competitor
++            # can win before the merge. Never apply an old revision's verdict.
++            with state.lock(gap_id):
++                latest = state.load(gap_id)
++                if latest["state"] in ("PR_OPEN", "REJECTED") and not latest.get("queued_lease") and latest.get("commit_sha") == current.get("commit_sha"):
++                    before = latest["state"]
++                    if pr.get("merged") is True and verdict == "ACCEPTED":
++                        latest.update(state="ACCEPTED", external_verdict="ACCEPTED", queued_lease=None)
++                    elif pr.get("state") == "closed" and not pr.get("merged"):
++                        latest.update(state="STALE", failure_reason="PR closed without merge", queued_lease=None)
++                    elif verdict in ("REJECTED", "REFUSED"):
++                        latest.update(state="REJECTED", external_verdict=verdict, queued_lease=None)
++                    elif verdict == "FAULT":
++                        latest.update(external_verdict="FAULT")
++                    elif verdict == "ACCEPTED":
++                        latest.update(external_verdict="ACCEPTED")
++                    state.save(latest)
++                    if latest["state"] != before:
++                        state.event(gap_id, "state", {"to": latest["state"], "sha": latest.get("commit_sha")})
++            from . import postcheck
++            postcheck.resume(gap_id, state.load(gap_id))
+     rec = state.load(gap_id)
+     state.update(gap_id, last_reconcile=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                       time.gmtime()))
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index 49392ccb..c0e71544 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -174,6 +174,11 @@ def reacquire(gap_id, **fields):
+             rec[key] = None
+         rec["failure_reason"] = None
+         rec["queued_lease"] = None
++        rec["build_evidence"] = None
++        rec["local_check_status"] = None
++        rec["correction_from_sha"] = None
++        rec["expected_commits"] = None
++        rec["local_check_retry_at"] = None
+         rec["publisher_retry_at"] = None
+         rec["publisher_failures"] = 0
+         rec["publisher_memory_required"] = None
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index 6df4ad05..ae96241d 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -55,6 +55,9 @@ def snapshot():
+                      "lease_expires_at": item.get("lease_expires_at"),
+                      "lease_obtained_at": item.get("lease_obtained_at"),
+                      "resource_deferred": bool(item.get("publisher_memory_required") and not frontier.build_control.resource_ready(item)) if item.get("state") in ("CANDIDATE_READY", "LOCAL_CHECKED") else False,
++                     "local_check_status": item.get("local_check_status"),
++                     "correction_queued": bool(item.get("queued_lease")),
++                     "external_verdict": item.get("external_verdict"),
+                      "failure_reason": item.get("failure_reason")})
+     lb = leaderboard.load()
+     stale = True
+@@ -85,8 +88,9 @@ def snapshot():
+                 pass
+         worker["gap_state"] = by_gap.get(gid, {}).get("state")
+         worker["competition"] = observed.get("gaps", {}).get(gid)
++    corrections = sorted(r["gap"] for r in rows if (r["state"] == "REJECTED" and not r["correction_queued"]) or (r["state"] == "PR_OPEN" and r["local_check_status"] == "failed" and r["external_verdict"] != "ACCEPTED"))
+     stale_workers = [a["id"] for a in w["agents"]
+-                     if a["gap_state"] in frontier.STOPPED or a["lease_current"] is False]
++                     if (a["gap_state"] in frontier.STOPPED and a["gap"] not in corrections) or a["lease_current"] is False]
+     active = [r["gap"] for r in rows if r["state"] in frontier.ACTIVE
+               and type(r["lease_expires_at"]) in (int, float)
+               and r["lease_expires_at"] > time.time() and isinstance(r["gap"], str)]
+@@ -102,7 +106,7 @@ def snapshot():
+             related.append({"gap": gid, "title": item.get("title"), "held": held, "parallel": parallel})
+     related.sort(key=lambda x: (x["held"], x["gap"]))
+     coordination_due = bool(w["coverage"] == "complete" and (
+-        stale_workers or unstaffed or (ordinary is not None and ordinary > 0)))
++        stale_workers or unstaffed or corrections or (ordinary is not None and ordinary > 0)))
+     age = {r["gap"]: max(0, round((time.time()-r["lease_obtained_at"])/60))
+            for r in rows if r["gap"] in active and type(r["lease_obtained_at"]) in (int,float)}
+     score = {k: lb.get(k) for k in ("rank", "our_steps", "leader",
+@@ -121,7 +125,7 @@ def snapshot():
+         "frontier_fresh": bool(observed), "active_lease_gaps": active,
+         "unstaffed_active_gaps": unstaffed, "active_lease_age_minutes": age,
+         "potential_fronts": related[:12],
+-        "coordination_due": coordination_due,
++        "coordination_due": coordination_due, "correction_needed": corrections,
+         "publisher_build_busy": frontier.build_control.busy(),
+         "legacy_lean_compiler_pids": frontier.build_control.legacy_compilers(),
+         "lean_headroom_bytes": frontier.build_control.headroom(),
+@@ -155,7 +159,7 @@ def snapshot():
+             "assignments": sorted((str(a["id"]), a["gap"] or "", a["gap_state"] or "") for a in w["agents"]),
+             "ordinary_available": (observed.get("ordinary") or 0) > 0 if observed else None,
+             "hard_available": (observed.get("offerable") or 0) > (observed.get("ordinary") or 0) if observed else None,
+-            "unstaffed": unstaffed, "obsolete_workers": sorted(stale_workers),
++            "corrections": corrections, "unstaffed": unstaffed, "obsolete_workers": sorted(stale_workers),
+             "unbound": sorted(str(a["id"]) for a in w["agents"] if not a["bound"])},
+         "caveat": "Only public checked steps count; local activity is not proof."}
+ 
+diff --git a/missions/pnp/watchdog.py b/missions/pnp/watchdog.py
+index a80f34e6..57c9e67a 100644
+--- a/missions/pnp/watchdog.py
++++ b/missions/pnp/watchdog.py
+@@ -126,6 +126,18 @@ def stop_if_terminal(entry, expected, pending, now):
+                 except OSError:
+                     pass
+             superseded = previous is not None and previous != current
++            if rec.get("state") == "PR_OPEN" and not superseded:
++                try:
++                    env = (entry / "environ").read_bytes().split(b"\0")
++                    if (b"PNP_MANAGED_COMPILER=1" in env
++                            and rec.get("local_check_status") == "pending"
++                            and rec.get("commit_sha")
++                            and ("PNP_POSTCHECK_SHA=" + rec["commit_sha"]).encode() in env
++                            and (entry / "cwd").resolve().is_relative_to(
++                                Path(config.WORKTREES_DIR, gap).resolve())):
++                        return None
++                except (OSError, ValueError):
++                    pass
+             if rec.get("state") not in TERMINAL and not superseded:
+                 return None
+             # Recheck after acquiring the gap lock. A replaced PID or cwd
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index bf73a838..e99e6d90 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -258,12 +258,26 @@ class TestPublish(unittest.TestCase):
+         self.assertEqual(r["pr"], 77)
+         self.assertEqual(h.created, 0)
+ 
+-    def test_failed_build_stops(self):
++    def test_compilation_not_a_publication_gate(self):
+         new_state()
+-        with self.assertRaises(publish.StopPublish):
+-            publish.publish(GAP, self.file, desk=FakeDesk(),
+-                            git=FakeGit(build_ok=False), gh=FakeGH())
+-        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
++        g, h = FakeGit(build_ok=False), FakeGH()
++        with mock.patch.object(g, "build", side_effect=AssertionError("pre-PR build")):
++            r = publish.publish(GAP, self.file, desk=FakeDesk(), git=g, gh=h)
++        self.assertEqual(r["pr"], 123)
++        self.assertEqual(state.load(GAP)["local_check_status"], "pending")
++        self.assertEqual(state.load(GAP)["state"], "PR_OPEN")
++
++    def test_exact_evidence_skips_postcheck(self):
++        from missions.pnp import evidence
++        rec = new_state()
++        state.update(GAP, build_evidence={
++            "lease": rec["lease"], "base": "base1", "digest": rec["candidate_digest"],
++            "module": MODULE, "path": PATH, "statement": STATEMENT, "imports": []})
++        self.assertTrue(evidence.matching(state.load(GAP), rec["candidate_digest"], "base1"))
++        self.assertFalse(evidence.matching(state.load(GAP), "changed", "base1"))
++        self.assertFalse(evidence.matching(state.load(GAP), rec["candidate_digest"], "base2"))
++        publish.publish(GAP, self.file, desk=FakeDesk(), git=FakeGit(), gh=FakeGH())
++        self.assertEqual(state.load(GAP)["local_check_status"], "passed")
+ 
+     def test_bad_candidate_stops_before_git(self):
+         new_state()
+@@ -281,18 +295,49 @@ class TestPublish(unittest.TestCase):
+                             git=FakeGit(), gh=FakeGH())
+         self.assertEqual(state.load(GAP)["state"], "STALE")
+ 
+-    def test_failed_proof_can_be_corrected_without_losing_lease(self):
+-        new_state()
+-        d, g, h = FakeDesk(), FakeGit(build_ok=False), FakeGH()
+-        with self.assertRaises(publish.StopPublish):
+-            publish.publish(GAP, self.file, desk=d, git=g, gh=h)
+-        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
+-        self.assertIsNone(state.load(GAP)["candidate_digest"])
+-        state.transition(GAP, "CANDIDATE_READY")
+-        g.build_ok = True
+-        result = publish.publish(GAP, self.file, desk=d, git=g, gh=h)
+-        self.assertEqual(result["pr"], 123)
+-        self.assertEqual(h.created, 1)
++    def test_failed_local_check_can_queue_same_pr_correction(self):
++        from missions.pnp import jobs
++        new_state("PR_OPEN", local_check_status="failed", pr_number=123,
++                  pr_url="u", commit_sha=SHA)
++        corrected = candidate_file(GOOD.replace("norm_num", "decide"))
++        with mock.patch.object(jobs, "launch") as launch:
++            jobs.submit(GAP, corrected)
++            launch.assert_called_once()
++        rec = state.load(GAP)
++        self.assertEqual(rec["state"], "REJECTED")
++        self.assertEqual(rec["pr_number"], 123)
++        self.assertEqual(rec["queued_lease"], "lease-1")
++
++    def test_correction_uses_same_pr_and_can_resume(self):
++        new_state("REJECTED", pr_number=123, pr_url="u", commit_sha=SHA,
++                  base_sha="base1", branch=config.branch_for(GAP))
++        new_sha = "b" * 40
++        class CorrectionGit(FakeGit):
++            def pin_candidate(self, wt, path, data, correction=False):
++                self.calls.append(("pin", correction))
++            def signed_commit(self, wt, base, message, signer=None, correction=False):
++                self.calls.append(("commit", correction))
++                return new_sha
++            def new_commits(self, wt, base):
++                return [SHA, new_sha]
++            def push_branch(self, branch, pusher=None):
++                self.remote = new_sha
++                return new_sha
++        g = CorrectionGit(remote=SHA)
++        h = FakeGH()
++        h.get_pr = lambda n: {"state": "open", "head_sha": g.remote}
++        h.commit_verification = lambda sha: {"sha": sha, "verified": True,
++            "name": config.AUTHOR_NAME, "email": config.AUTHOR_EMAIL}
++        h.validate_created = lambda n, sha, path, expected_commits=None: (
++            {"url": "u"}, [] if expected_commits == [SHA, new_sha] else ["wrong range"])
++        d = FakeDesk()
++        r = publish.publish(GAP, candidate_file(GOOD.replace("norm_num", "decide")),
++                            desk=d, git=g, gh=h)
++        self.assertEqual(r["pr"], 123)
++        self.assertEqual(h.created, 0)
++        self.assertEqual(d.releases, [])
++        self.assertEqual(state.load(GAP)["commit_sha"], new_sha)
++        self.assertEqual(state.load(GAP)["local_check_status"], "pending")
+ 
+     def test_gap_settled_during_build_never_pushes(self):
+         new_state()
+@@ -490,6 +535,11 @@ class TestCli(unittest.TestCase):
+         self.assertEqual(state.load(GAP)["lease"], "active-lease")
+ 
+ 
++def verdict_comment(sha, verdict, author="LiorDagan", date="2026"):
++    return {"author": author, "created_at": date,
++            "body": "Checked on the base repository at commit `%s`.\n\n**%s (checker exit 0)**\n\nRun: https://github.com/brilliant-hq/pequalnp-proofs/actions/runs/123" % (sha[:10], verdict)}
++
++
+ class TestReconcile(unittest.TestCase):
+     def setUp(self):
+         fresh()
+@@ -498,13 +548,34 @@ class TestReconcile(unittest.TestCase):
+         new_state("PUSHED", commit_sha=SHA, base_sha="base1",
+                   branch=config.branch_for(GAP))
+         gh = FakeGH(existing="123")
+-        gh.get_pr = lambda n: {"url": "u", "number": n}
+-        gh.pr_comments = lambda n: [{"body": "ACCEPTED", "created_at": "2026"}]
++        gh.get_pr = lambda n: {"url": "u", "number": n, "head_sha": SHA, "merged": True}
++        gh.pr_comments = lambda n: [verdict_comment(SHA, "ACCEPTED")]
+         g = FakeGit(remote=SHA)
+         r = reconcile.reconcile_gap(GAP, desk=FakeDesk(), gh=gh, git=g)
+         self.assertEqual(state.load(GAP)["state"], "ACCEPTED")
+         self.assertEqual(r["state"], "ACCEPTED")
+ 
++    def test_old_or_untrusted_verdict_ignored(self):
++        new_state("PR_OPEN", commit_sha=SHA, pr_number=123)
++        gh = FakeGH()
++        gh.get_pr = lambda n: {"url": "u", "head_sha": SHA, "state": "open"}
++        gh.pr_comments = lambda n: [verdict_comment("b"*40, "REJECTED", date="2027"),
++                                    verdict_comment(SHA, "ACCEPTED", author="other")]
++        reconcile.reconcile_gap(GAP, desk=FakeDesk(), gh=gh, git=FakeGit(remote=SHA))
++        self.assertEqual(state.load(GAP)["state"], "PR_OPEN")
++        gh.pr_comments = lambda n: [verdict_comment(SHA, "REJECTED")]
++        reconcile.reconcile_gap(GAP, desk=FakeDesk(), gh=gh, git=FakeGit(remote=SHA))
++        self.assertEqual(state.load(GAP)["state"], "REJECTED")
++
++    def test_checker_acceptance_without_merge_is_not_terminal(self):
++        new_state("PR_OPEN", commit_sha=SHA, pr_number=123)
++        gh = FakeGH()
++        gh.get_pr = lambda n: {"url": "u", "head_sha": SHA, "state": "open", "merged": False}
++        gh.pr_comments = lambda n: [verdict_comment(SHA, "ACCEPTED")]
++        reconcile.reconcile_gap(GAP, desk=FakeDesk(), gh=gh, git=FakeGit(remote=SHA))
++        self.assertEqual(state.load(GAP)["state"], "PR_OPEN")
++        self.assertEqual(state.load(GAP)["external_verdict"], "ACCEPTED")
++
+     def test_signed_push_without_pr_is_recovered_to_one_pr(self):
+         from pathlib import Path
+         candidate = candidate_file()
+@@ -535,6 +606,41 @@ class TestReconcile(unittest.TestCase):
+         self.assertEqual(state.load(GAP)["state"], "STALE")
+ 
+ 
++class TestPostcheck(unittest.TestCase):
++    def setUp(self):
++        fresh()
++
++    def test_exact_published_revision_checked_and_failure_recorded(self):
++        from missions.pnp import postcheck, build_control
++        from pathlib import Path as P
++        with tempfile.TemporaryDirectory() as wt:
++            proof = P(wt, PATH)
++            proof.parent.mkdir(parents=True)
++            proof.write_text(GOOD)
++            new_state("PR_OPEN", commit_sha=SHA, pr_number=123, worktree=wt,
++                      local_check_status="pending")
++            g = FakeGit(build_ok=False)
++            g.run = lambda args: type("Result", (), {"stdout": SHA if "rev-parse" in args else ""})()
++            with mock.patch.dict(os.environ, {}, clear=False):
++                with mock.patch.object(g, "build", wraps=g.build) as build:
++                    postcheck.run(GAP, git=g)
++                    build.assert_called_once()
++            rec = state.load(GAP)
++            self.assertEqual(rec["state"], "PR_OPEN")
++            self.assertEqual(rec["local_check_status"], "failed")
++            self.assertIsNone(rec["external_verdict"])
++            with mock.patch.dict(os.environ, {"PNP_POSTCHECK_SHA": SHA}):
++                self.assertTrue(build_control.obsolete(GAP, "lease-1"))
++
++    def test_pending_postcheck_admitted_only_for_matching_revision(self):
++        from missions.pnp import build_control
++        new_state("PR_OPEN", commit_sha=SHA, local_check_status="pending")
++        with mock.patch.dict(os.environ, {"PNP_POSTCHECK_SHA": SHA}):
++            self.assertFalse(build_control.obsolete(GAP, "lease-1"))
++            self.assertTrue(build_control.obsolete(GAP, "wrong-lease"))
++            state.update(GAP, commit_sha="b"*40)
++            self.assertTrue(build_control.obsolete(GAP, "lease-1"))
++
+ class TestDeskNextGap(unittest.TestCase):
+     """join.txt documents an explicit null gap as 'no gaps right now'."""
+ 

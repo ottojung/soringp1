@@ -1,0 +1,733 @@
+commit cb90686d612653da1a836e936a0a40d7862ccf05
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 05:17:13 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 05:17:13 2026 +0000
+
+    PnP: coordinate shared Lean compilation with dynamic memory reserve and publication priority
+
+diff --git a/missions/pnp/build_control.py b/missions/pnp/build_control.py
+index ed2b2de5..70737953 100644
+--- a/missions/pnp/build_control.py
++++ b/missions/pnp/build_control.py
+@@ -1,4 +1,4 @@
+-"""Bound publication memory and cancel only an obsolete publisher's own build."""
++"""Priority reader/writer queue for PnP Lean builds, not agent sessions."""
+ import contextlib
+ import fcntl
+ import os
+@@ -7,15 +7,31 @@ import time
+ 
+ from . import config, state
+ 
++GIB = 1024 ** 3
++RESERVE = 2 * GIB
++LIGHT_RSS = 2 * GIB
++HEAVY_MIN = 4 * GIB
++LIGHT_SLOTS = 2
++
+ 
+ class BuildDeferred(Exception):
+     pass
+ 
+ 
++class MemoryDeferred(BuildDeferred):
++    def __init__(self, reason, required):
++        super().__init__(reason)
++        self.required = required
++
++
+ def lock_path():
+     return os.path.join(config.CACHE_DIR, "publication-build.lock")
+ 
+ 
++def priority_path():
++    return os.path.join(config.CACHE_DIR, "publication-priority.lock")
++
++
+ def obsolete(gap=None, lease=None):
+     gap = gap or os.environ.get("PNP_PUBLISH_GAP")
+     lease = lease or os.environ.get("PNP_PUBLISH_LEASE")
+@@ -29,68 +45,134 @@ def obsolete(gap=None, lease=None):
+         return False
+     if lease and rec.get("lease") and lease != rec["lease"]:
+         return True
+-    return rec.get("state") in ("STALE", "RELEASED", "ACCEPTED")
++    return rec.get("state") in ("STALE", "RELEASED", "ACCEPTED", "PR_OPEN")
++
++
++def try_lock(fd, mode):
++    try:
++        fcntl.flock(fd, mode | fcntl.LOCK_NB)
++        return True
++    except BlockingIOError:
++        return False
++
++
++def legacy_compilers(proc=Path("/proc")):
++    """Detect existing unmanaged PnP compilers; never terminate them here."""
++    try:
++        entries = list(proc.iterdir())
++    except OSError:
++        return []
++    found = []
++    for entry in entries:
++        if not entry.name.isdigit():
++            continue
++        try:
++            if (entry / "comm").read_text().strip() not in ("lean", "lake", "checklemma"):
++                continue
++            cwd = (entry / "cwd").resolve(strict=True)
++            if not any(part in ("pnp", "pnp-work") or part.startswith("pequalnp")
++                       or part.startswith("pnp-") for part in cwd.parts):
++                continue
++            if b"PNP_MANAGED_COMPILER=1" in (entry / "environ").read_bytes().split(b"\0"):
++                continue
++            found.append(int(entry.name))
++        except (OSError, ValueError):
++            continue
++    return found
++
++
++def light_slot():
++    """At most two light reservations, admitted against measured headroom."""
++    for index in range(LIGHT_SLOTS):
++        path = os.path.join(config.CACHE_DIR, "lean-light-%d.lock" % index)
++        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
++        if try_lock(fd, fcntl.LOCK_EX):
++            return fd, index + 1
++        os.close(fd)
++    return None, LIGHT_SLOTS
+ 
+ 
+ @contextlib.contextmanager
+-def slot(timeout=600):
+-    # Full Mathlib loads have consumed 6-9 GiB each on the 15 GiB host.
+-    # Serialize only heavyweight publisher builds, not reasoning workers.
+-    # The descriptor survives in the compiler child; kernel release on death.
++def slot(timeout=600, heavy=True, publication=True):
++    """Heavy=exclusive; light=shared; a waiting publisher bars new research."""
+     os.makedirs(config.CACHE_DIR, exist_ok=True)
+     fd = os.open(lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
++    priority = os.open(priority_path(), os.O_CREAT | os.O_RDWR, 0o600)
+     deadline = time.monotonic() + timeout
++    preferred = False
++    light = None
+     try:
+         while True:
+             if obsolete():
+-                raise BuildDeferred("publication assignment ended")
+-            try:
+-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+-                free = headroom()
+-                if free is not None and free < MAX_BUILD_RSS + RESERVE:
++                raise BuildDeferred("compilation assignment ended")
++            # A publisher retains the gate while waiting for existing builds.
++            # Research holds it only during the short admission decision.
++            if not preferred:
++                preferred = try_lock(priority, fcntl.LOCK_EX)
++            if preferred:
++                if try_lock(fd, fcntl.LOCK_EX if heavy else fcntl.LOCK_SH):
++                    free = headroom()
++                    # During migration, defer rather than fighting a legacy
++                    # raw Lean/checklemma process for RAM.
++                    legacy = legacy_compilers()
++                    if heavy:
++                        enough = free is not None and free >= RESERVE + HEAVY_MIN
++                    else:
++                        light, _ = light_slot()
++                        # Reserve both potential light jobs conservatively.
++                        enough = light is not None and free is not None and free >= RESERVE + LIGHT_SLOTS * LIGHT_RSS
++                    if enough and not legacy:
++                        fcntl.flock(priority, fcntl.LOCK_UN)
++                        preferred = False
++                        break
++                    if light is not None:
++                        os.close(light)
++                        light = None
+                     fcntl.flock(fd, fcntl.LOCK_UN)
+-                    if time.monotonic() >= deadline:
+-                        raise BuildDeferred("insufficient memory for full publication build")
+-                    time.sleep(2)
+-                    continue
+-                break
+-            except BlockingIOError:
+-                if time.monotonic() >= deadline:
+-                    raise BuildDeferred("publication compiler busy; retry")
+-                time.sleep(2)
+-        yield fd
++                    # If admission fails for memory/legacy reasons, allow
++                    # other requests to re-evaluate; do not monopolize gate.
++                    fcntl.flock(priority, fcntl.LOCK_UN)
++                    preferred = False
++                elif not publication:
++                    fcntl.flock(priority, fcntl.LOCK_UN)
++                    preferred = False
++            if time.monotonic() >= deadline:
++                raise BuildDeferred("Lean queue, legacy compiler or host memory busy; retry later")
++            time.sleep(0.25)
++        yield (fd,) if light is None else (fd, light)
+     finally:
++        if light is not None:
++            os.close(light)
++        os.close(priority)
+         os.close(fd)
+ 
+ 
+ def busy():
+-    try:
+-        fd = os.open(lock_path(), os.O_RDONLY)
+-    except FileNotFoundError:
+-        return False
+-    except OSError:
+-        return None
+-    try:
++    """True while a heavy build holds the lock or publication is waiting."""
++    for path in (priority_path(), lock_path()):
+         try:
+-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+-        except BlockingIOError:
+-            return True
+-        return False
+-    except OSError:
+-        return None
+-    finally:
+-        os.close(fd)
+-
+-
+-GIB = 1024 ** 3
+-RESERVE = 2 * GIB
+-MAX_BUILD_RSS = 6 * GIB
++            fd = os.open(path, os.O_RDONLY)
++        except FileNotFoundError:
++            continue
++        except OSError:
++            return None
++        try:
++            if not try_lock(fd, fcntl.LOCK_EX):
++                return True
++        except OSError:
++            return None
++        finally:
++            os.close(fd)
++    return False
+ 
+ 
+ def headroom(root=Path("/sys/fs/cgroup")):
+-    """Conservative cgroup headroom, excluding reclaimable inactive file cache."""
++    """Conservative cgroup headroom, including reclaimable inactive cache."""
+     try:
+-        limit = int((root / "memory.max").read_text())
++        maximum = (root / "memory.max").read_text().strip()
++        if maximum == "max":
++            return None
++        limit = int(maximum)
+         current = int((root / "memory.current").read_text())
+         stats = dict(line.split() for line in
+                      (root / "memory.stat").read_text().splitlines())
+@@ -100,7 +182,6 @@ def headroom(root=Path("/sys/fs/cgroup")):
+ 
+ 
+ def group_rss(group, proc=Path("/proc")):
+-    """Sum RSS in our own process group; no arbitrary process selection."""
+     rss = 0
+     page = os.sysconf("SC_PAGE_SIZE")
+     for entry in proc.iterdir():
+@@ -115,13 +196,32 @@ def group_rss(group, proc=Path("/proc")):
+     return rss
+ 
+ 
+-def memory_reason(group):
++def memory_reason(group, heavy=True):
+     free = headroom()
+     if free is not None and free < RESERVE:
+         return "host memory reserve threatened"
+-    try:
+-        if group_rss(group) > MAX_BUILD_RSS:
+-            return "publication build exceeded 6 GiB RSS budget"
+-    except OSError:
+-        pass
++    # The light class is deliberately bounded; a larger job belongs in heavy.
++    # No fixed RSS ceiling applies to heavy builds.
++    if not heavy:
++        try:
++            if group_rss(group) > LIGHT_RSS:
++                return "light compilation exceeded 2 GiB; retry as heavy"
++        except OSError:
++            pass
+     return None
++
++
++def resource_ready(rec):
++    required = rec.get("publisher_memory_required")
++    if not required:
++        return True
++    free = headroom()
++    return free is not None and free >= required
++
++
++def oom_count(root=Path("/sys/fs/cgroup")):
++    try:
++        return int(dict(line.split() for line in
++                        (root / "memory.events").read_text().splitlines())["oom_kill"])
++    except (OSError, KeyError, ValueError):
++        return None
+diff --git a/missions/pnp/compile.py b/missions/pnp/compile.py
+new file mode 100644
+index 00000000..dd7e7d14
+--- /dev/null
++++ b/missions/pnp/compile.py
+@@ -0,0 +1,100 @@
++"""One supervised entry point for research and publisher Lean compilation."""
++import argparse
++import os
++import signal
++import subprocess
++import sys
++import time
++
++from . import build_control as control
++
++
++def command(args):
++    # No use of the upstream mkdir queue from managed builds. Both research
++    # and publisher share the kernel locks above; retain the Lake artifact cache.
++    tool = args[0] if args else ""
++    if tool not in ("lake", "lean"):
++        raise ValueError("expected lake or lean")
++    if tool == "lake" and (len(args) < 2 or args[1] not in ("build", "env", "lean")):
++        raise ValueError("expected lake build, lake env lean or lake lean")
++    if args[:2] == ["lake", "env"] and (len(args) < 3 or args[2] != "lean"):
++        raise ValueError("lake env must run lean")
++    return [os.path.join(os.path.expanduser("~/.elan/bin"), tool)] + args[1:]
++
++
++def run(args, cwd=None, heavy=True, publication=False, timeout=600,
++        output=None, inherited=()):
++    argv = command(args)
++    # Avoid inheriting a researcher's custom path/options in publication.
++    env = {k: v for k, v in os.environ.items()
++           if not (publication and (k.startswith("LEAN_") or k.startswith("LAKE_")
++                                    or k in ("PEQUALNP_IN_QUEUE", "PEQUALNP_REAL_LAKE")))}
++    env.update(PNP_MANAGED_COMPILER="1", LEAN_NUM_THREADS="1", LAKE_ARTIFACT_CACHE="true",
++               LAKE_RESTORE_ARTIFACTS="true",
++               LAKE_CACHE_DIR=os.path.expanduser("~/.pequalnp/lake-cache"))
++    wait = timeout if publication else min(15, timeout)
++    with control.slot(timeout=wait, heavy=heavy, publication=publication) as fds:
++        initial = control.headroom()
++        oom = control.oom_count()
++        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=output,
++                                stderr=output, start_new_session=True,
++                                pass_fds=inherited + fds)
++        deadline = time.monotonic() + timeout
++        try:
++            while True:
++                if control.obsolete():
++                    raise control.BuildDeferred("compilation assignment ended")
++                reason = control.memory_reason(proc.pid, heavy=heavy)
++                if reason:
++                    required = (initial or control.HEAVY_MIN + control.RESERVE) + control.GIB // 2
++                    raise control.MemoryDeferred(reason, required)
++                remaining = deadline - time.monotonic()
++                if remaining <= 0:
++                    raise control.BuildDeferred("Lean compilation timed out")
++                try:
++                    code = proc.wait(timeout=min(0.25, remaining))
++                except subprocess.TimeoutExpired:
++                    continue
++                after = control.oom_count()
++                if code and (code in (-signal.SIGKILL, 137) or
++                             (oom is not None and after is not None and after > oom)):
++                    required = (initial or control.HEAVY_MIN + control.RESERVE) + control.GIB // 2
++                    raise control.MemoryDeferred("compiler killed or host OOM during build", required)
++                return code
++        except BaseException:
++            # Only the child group created by this invocation.
++            try:
++                os.killpg(proc.pid, signal.SIGKILL)
++            except ProcessLookupError:
++                pass
++            proc.wait()
++            raise
++
++
++def main(argv=None):
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--light", action="store_true")
++    p.add_argument("--gap")
++    p.add_argument("--lease")
++    p.add_argument("--timeout", type=int, default=600)
++    p.add_argument("args", nargs=argparse.REMAINDER)
++    ns = p.parse_args(argv)
++    if ns.gap:
++        os.environ["PNP_PUBLISH_GAP"] = ns.gap
++    if ns.lease:
++        os.environ["PNP_PUBLISH_LEASE"] = ns.lease
++    args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
++    def interrupted(signum, frame):
++        raise KeyboardInterrupt
++    signal.signal(signal.SIGTERM, interrupted)
++    try:
++        return run(args, heavy=not ns.light, timeout=max(1, min(ns.timeout, 1800)))
++    except (control.BuildDeferred, KeyboardInterrupt, OSError) as exc:
++        print("RESOURCE DEFERRED:", exc, file=sys.stderr, flush=True)
++        return 75
++    except ValueError as exc:
++        p.error(str(exc))
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/missions/pnp/frontier.py b/missions/pnp/frontier.py
+index cd711bd0..8e6fab9e 100644
+--- a/missions/pnp/frontier.py
++++ b/missions/pnp/frontier.py
+@@ -97,7 +97,9 @@ def checkpoint(gap, lease=None, now=None):
+     if type(expiry) not in (float, int) or expiry <= now:
+         return {"decision": "wait", "reason": "lease needs confirmation"}
+     if status in ("CANDIDATE_READY", "LOCAL_CHECKED") and rec.get("queued_lease"):
+-        return {"decision": "wait", "reason": "publisher owns candidate"}
++        return {"decision": "wait", "reason": (
++            "publisher needs more memory; preserve or simplify proof"
++            if not build_control.resource_ready(rec) else "publisher owns candidate")}
+     return {"decision": "continue", "reason": "live local assignment",
+             "publisher_build_busy": build_control.busy()}
+ 
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index cf18be7d..3ddab1e7 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -5,13 +5,11 @@ committer and signing key are fixed in config.py; no candidate or worker
+ prompt can supply them.
+ """
+ import os
+-import signal
+ import shutil
+ import subprocess
+ import tempfile
+-import time
+ 
+-from . import config, build_control
++from . import config, build_control, compile as compiler
+ 
+ UPSTREAM_URL = "https://github.com/" + config.UPSTREAM + ".git"
+ FORK_URL = "git@github.com:" + config.FORK + ".git"
+@@ -151,47 +149,13 @@ def build(worktree, module, statement, runner=None):
+     if not isinstance(statement, str) or not statement.strip():
+         return False, "missing authoritative gap statement"
+     prepare_build_cache(worktree)
+-    shim = os.path.join(worktree, "tools", "bin", "lake")
+-    env = {k: v for k, v in os.environ.items()
+-           if not (k.startswith("LEAN_") or k.startswith("LAKE_")
+-                   or k in ("PEQUALNP_IN_QUEUE", "PEQUALNP_REAL_LAKE"))}
+-    # Use the upstream build queue and content-addressed artifact cache.
+-    # Its shell sets LEAN_NUM_THREADS from build-jobs.conf; constrain that
+-    # independently of the number of model-bound researchers.
+-    # Never inherit an untrusted worker's Lake search path/options.
+-    # Retain the publisher lock across an orphaned build subprocess, too.
+     lock_fd = os.environ.get("PNP_PUBLISH_LOCK_FD")
+     inherited = (int(lock_fd),) if lock_fd else ()
+-    with build_control.slot() as slot_fd, tempfile.TemporaryFile() as output:
+-        proc = subprocess.Popen([shim, "build", "+" + module],
+-                                cwd=os.path.join(worktree, "lean"),
+-                                env=env, stdout=output, stderr=output,
+-                                start_new_session=True,
+-                                pass_fds=inherited + (slot_fd,))
+-        deadline = time.monotonic() + 600
+-        try:
+-            while True:
+-                if build_control.obsolete():
+-                    raise build_control.BuildDeferred("publication assignment ended")
+-                reason = build_control.memory_reason(proc.pid)
+-                if reason:
+-                    raise build_control.BuildDeferred(reason)
+-                remaining = deadline - time.monotonic()
+-                if remaining <= 0:
+-                    raise GitError("local Lean build timed out; retry")
+-                try:
+-                    code = proc.wait(timeout=min(0.5, remaining))
+-                    break
+-                except subprocess.TimeoutExpired:
+-                    continue
+-        except BaseException:
+-            # Only this publisher's new process group, never an agent.
+-            try:
+-                os.killpg(proc.pid, signal.SIGKILL)
+-            except ProcessLookupError:
+-                pass
+-            proc.wait()
+-            raise
++    with tempfile.TemporaryFile() as output:
++        code = compiler.run(["lake", "build", "+" + module],
++                            cwd=os.path.join(worktree, "lean"),
++                            heavy=True, publication=True,
++                            output=output, inherited=inherited)
+         output.seek(max(0, output.tell() - 8000))
+         log = output.read().decode("utf-8", "replace")
+     if code and ("error: PEqualNP/" not in log and "error: ./PEqualNP/" not in log):
+diff --git a/missions/pnp/jobs.py b/missions/pnp/jobs.py
+index fe993c27..c50b7f0e 100644
+--- a/missions/pnp/jobs.py
++++ b/missions/pnp/jobs.py
+@@ -5,7 +5,7 @@ import subprocess
+ import sys
+ import time
+ 
+-from . import config, publish, state, validate
++from . import config, publish, state, validate, build_control
+ 
+ READY = ("CANDIDATE_READY", "LOCAL_CHECKED", "SIGNED", "PUSHED", "REJECTED")
+ 
+@@ -56,6 +56,9 @@ def submit(gap, source):
+         digest = validate.validate(meta, data)
+         if rec["state"] in ("SIGNED", "PUSHED") and digest != rec["candidate_digest"]:
+             raise publish.StopPublish("signed proof is immutable")
++        if digest == rec.get("candidate_digest") and not build_control.resource_ready(rec):
++            return {"gap": gap, "status": "resource-deferred",
++                    "required_headroom": rec["publisher_memory_required"]}
+         # Snapshot before acknowledging; never depend on a researcher file
+         # that may change or vanish on agent exit.
+         state.atomic_write(candidate_path(gap), data.decode("utf-8"))
+@@ -68,7 +71,8 @@ def submit(gap, source):
+         elif rec["state"] == "CANDIDATE_READY":
+             state.update(gap, candidate_digest=digest, failure_reason=None)
+         state.update(gap, queued_lease=rec["lease"],
+-                     publisher_retry_at=None, publisher_failures=0)
++                     publisher_retry_at=None, publisher_failures=0,
++                     publisher_memory_required=None)
+         launch(gap, fd)
+         return {"gap": gap, "status": "publishing", "digest": digest}
+     finally:
+@@ -82,6 +86,8 @@ def resume(gap):
+             not rec.get("queued_lease") or rec["queued_lease"] != rec["lease"] or
+             not os.path.isfile(candidate_path(gap))):
+         return False
++    if not build_control.resource_ready(rec):
++        return True
+     if (rec.get("publisher_retry_at") or 0) > time.time():
+         return True
+     fd = claim(gap)
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 8735d993..e2cddad5 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -129,3 +129,26 @@ Use the publisher for the required full build, not multiple simultaneous
+ full-import Lean scratch processes. Use minimal scratch imports, bounded
+ search subprocesses and small test inputs. A memory-deferred publisher
+ preserves the proof and retries; do not start a competing full build.
++
++## Shared Lean compilation queue
++
++All P vs NP local Lean computation uses the shared queue, including research.
++From the Lean directory run:
++  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile --gap GAP --lease LEASE -- lake build +MODULE
++For small scratch files with narrow imports:
++  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile --light --gap GAP --lease LEASE -- lake env lean Scratch.lean
++Use heavy (the default) for any full Mathlib import or unknown memory demand.
++Do not invoke raw lean/lake/checklemma for research or start competing full
++builds. Up to two light compilations may overlap when memory permits; heavy builds
++are exclusive, and publication has admission priority. Exit 75 means a
++resource/lease deferral, not a rejected theorem. Do not busy-retry; pursue
++independent reasoning or simplify the proof. A heavy build may use available
++RAM above the host reserve without a fixed per-proof cap. A resource-blocked
++publisher preserves its candidate and waits for increased headroom or new
++proof bytes. Executive owns reassignment; no process kills of researchers.
++
++Research admission waits only briefly (at most 15 seconds) before returning
++75, so a queued compilation does not occupy an agent tool call indefinitely.
++Legacy raw PnP compiler processes are recognized as an admission constraint.
++The Executive must retire or cooperatively reassign obsolete workers rather
++than allow them to restart unnecessary full checkers.
+diff --git a/missions/pnp/publish.py b/missions/pnp/publish.py
+index 4d0f4385..c572b918 100644
+--- a/missions/pnp/publish.py
++++ b/missions/pnp/publish.py
+@@ -8,7 +8,7 @@ restart after SIGNED, PUSHED or PR_OPEN never duplicates a branch or PR.
+ import os
+ import time
+ 
+-from . import config, desk as desk_mod, gitctl, github, state, validate
++from . import config, desk as desk_mod, gitctl, github, state, validate, build_control
+ 
+ 
+ class StopPublish(Exception):
+@@ -140,6 +140,9 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+             try:
+                 ok, log = git.build(worktree, rec["module"], rec["statement"],
+                                     runner=build_runner)
++            except build_control.MemoryDeferred as e:
++                state.update(gap_id, publisher_memory_required=e.required)
++                _retry_later(gap_id, "resource deferred: %s" % e)
+             except Exception as e:
+                 _retry_later(gap_id, "local build unavailable: %s" % e)
+             if not ok:
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index 0f2a02c2..49392ccb 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -176,6 +176,7 @@ def reacquire(gap_id, **fields):
+         rec["queued_lease"] = None
+         rec["publisher_retry_at"] = None
+         rec["publisher_failures"] = 0
++        rec["publisher_memory_required"] = None
+         rec["intent"] = None
+         rec["researchers"] = []
+         rec["state"] = "LEASED"
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index 0e1a6b96..1bbc6ddb 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -53,6 +53,7 @@ def snapshot():
+                      "state": item.get("state"),
+                      "pr_url": item.get("pr_url"),
+                      "lease_expires_at": item.get("lease_expires_at"),
++                     "resource_deferred": bool(item.get("publisher_memory_required") and not frontier.build_control.resource_ready(item)) if item.get("state") in ("CANDIDATE_READY", "LOCAL_CHECKED") else False,
+                      "failure_reason": item.get("failure_reason")})
+     lb = leaderboard.load()
+     stale = True
+@@ -93,6 +94,9 @@ def snapshot():
+         "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
+         "frontier_fresh": bool(observed), "active_lease_gaps": active,
+         "publisher_build_busy": frontier.build_control.busy(),
++        "legacy_lean_compiler_pids": frontier.build_control.legacy_compilers(),
++        "lean_headroom_bytes": frontier.build_control.headroom(),
++        "resource_deferred_gaps": [r["gap"] for r in rows if r.get("resource_deferred")],
+         "workers_on_terminal_gaps": stale_workers,
+         "owned_by": "Viche Executive; other operators do not launch agents",
+         "action": (
+diff --git a/tests/pnp-real-smoke.py b/tests/pnp-real-smoke.py
+index 662b012a..bbca2ff4 100644
+--- a/tests/pnp-real-smoke.py
++++ b/tests/pnp-real-smoke.py
+@@ -8,6 +8,8 @@ import pathlib
+ import subprocess
+ import sys
+ import tempfile
++import threading
++import time
+ import unittest
+ from types import SimpleNamespace
+ from unittest.mock import patch
+@@ -102,7 +104,7 @@ class FullPathSmoke(unittest.TestCase):
+ 
+     def test_publication_slot_and_confirmed_obsolescence(self):
+         with tempfile.TemporaryDirectory() as tmp:
+-            with patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=16 * build_control.GIB):
++            with patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=16 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]):
+                 self.assertFalse(build_control.busy())
+                 with build_control.slot(timeout=0):
+                     self.assertTrue(build_control.busy())
+@@ -130,11 +132,112 @@ class FullPathSmoke(unittest.TestCase):
+             self.assertIn("reserve", build_control.memory_reason(1))
+         with patch.object(build_control, "headroom", return_value=None), patch.object(
+                 build_control, "group_rss", return_value=7 * build_control.GIB):
+-            self.assertIn("budget", build_control.memory_reason(1))
++            self.assertIsNone(build_control.memory_reason(1))
++            self.assertIn("light", build_control.memory_reason(1, heavy=False))
+         with patch.object(build_control, "headroom", return_value=None), patch.object(
+                 build_control, "group_rss", return_value=0):
+             self.assertIsNone(build_control.memory_reason(1))
+ 
++    def test_light_shared_heavy_exclusive(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=12 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]):
++            with build_control.slot(timeout=0, heavy=False, publication=False):
++                with build_control.slot(timeout=0, heavy=False, publication=False):
++                    with self.assertRaises(build_control.BuildDeferred):
++                        with build_control.slot(timeout=0, heavy=False, publication=False):
++                            self.fail("third light build exceeds reserved capacity")
++                    with self.assertRaises(build_control.BuildDeferred):
++                        with build_control.slot(timeout=0, heavy=True):
++                            self.fail("heavy overlaps light")
++            with build_control.slot(timeout=0, heavy=True):
++                with self.assertRaises(build_control.BuildDeferred):
++                    with build_control.slot(timeout=0, heavy=False, publication=False):
++                        self.fail("light overlaps heavy")
++
++    def test_waiting_publisher_has_admission_priority(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=12 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]):
++            entered = threading.Event()
++            release = threading.Event()
++            errors = []
++            def publisher():
++                try:
++                    with build_control.slot(timeout=5):
++                        entered.set()
++                        release.wait(5)
++                except Exception as exc:
++                    errors.append(exc)
++                    entered.set()
++            with build_control.slot(timeout=0, heavy=True, publication=False):
++                thread = threading.Thread(target=publisher)
++                thread.start()
++                try:
++                    deadline = time.monotonic() + 3
++                    while time.monotonic() < deadline:
++                        fd = os.open(build_control.priority_path(), os.O_CREAT | os.O_RDWR, 0o600)
++                        try:
++                            import fcntl
++                            if not build_control.try_lock(fd, fcntl.LOCK_EX):
++                                break
++                        finally:
++                            os.close(fd)
++                        time.sleep(0.025)
++                    else:
++                        self.fail("publisher never took priority gate")
++                    self.assertFalse(entered.is_set())
++                    with self.assertRaises(build_control.BuildDeferred):
++                        with build_control.slot(timeout=0, heavy=False, publication=False):
++                            self.fail("new light build overtook publisher")
++                except BaseException:
++                    release.set()
++                    raise
++            try:
++                self.assertTrue(entered.wait(3))
++                self.assertFalse(errors)
++            finally:
++                release.set()
++                thread.join(5)
++
++    def test_legacy_compiler_and_unknown_memory_defer_admission(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp):
++            with patch.object(build_control, "headroom", return_value=12 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[123]):
++                with self.assertRaises(build_control.BuildDeferred):
++                    with build_control.slot(timeout=0):
++                        self.fail("legacy compiler overlaps managed build")
++            with patch.object(build_control, "headroom", return_value=None), patch.object(build_control, "legacy_compilers", return_value=[]):
++                with self.assertRaises(build_control.BuildDeferred):
++                    with build_control.slot(timeout=0):
++                        self.fail("unknown headroom allowed a heavy build")
++
++    def test_supervisor_reaps_its_own_memory_deferred_child(self):
++        from missions.pnp import compile as compiler
++        children = []
++        popen = subprocess.Popen
++        def spawn(*args, **kwargs):
++            proc = popen(*args, **kwargs)
++            children.append(proc)
++            return proc
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=10 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]), patch.object(build_control, "memory_reason", return_value="simulated pressure"), patch.object(compiler, "command", return_value=[sys.executable, "-c", "import time; time.sleep(30)"]), patch.object(compiler.subprocess, "Popen", side_effect=spawn):
++            with self.assertRaises(build_control.MemoryDeferred):
++                compiler.run(["lean", "scratch.lean"], timeout=3)
++            self.assertEqual(len(children), 1)
++            self.assertIsNotNone(children[0].poll())
++            self.assertFalse(build_control.busy())
++
++    def test_compiler_supervisor_success(self):
++        from missions.pnp import compile as compiler
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=10 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]), patch.object(compiler, "command", return_value=[sys.executable, "-c", "pass"]):
++            self.assertEqual(compiler.run(["lean", "scratch.lean"], timeout=3), 0)
++            self.assertFalse(build_control.busy())
++
++    def test_resource_blocked_waits_for_more_headroom(self):
++        rec = {"publisher_memory_required": 10 * build_control.GIB}
++        with patch.object(build_control, "headroom", return_value=9 * build_control.GIB):
++            self.assertFalse(build_control.resource_ready(rec))
++        with patch.object(build_control, "headroom", return_value=11 * build_control.GIB):
++            self.assertTrue(build_control.resource_ready(rec))
++        with patch.object(build_control, "headroom", return_value=None):
++            self.assertFalse(build_control.resource_ready(rec))
++        self.assertTrue(build_control.resource_ready({}))
++
+     def test_reuse_requires_exact_publisher_tree(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             def git(*args):

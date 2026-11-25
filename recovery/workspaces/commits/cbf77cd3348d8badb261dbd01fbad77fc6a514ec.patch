@@ -1,0 +1,304 @@
+commit cbf77cd3348d8badb261dbd01fbad77fc6a514ec
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 16 00:18:28 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 16 00:18:28 2026 +0000
+
+    Research: CA-M delivery-age measurement amendment (oversight 1792107382)
+    
+    The watchdog's no_recent_main_commit signal measured only
+    refs/remotes/origin/main, ignoring Kawun's active delivery line
+    origin/release/along-long-namespace (128 commits ahead of main). This
+    false-positived whenever work landed on the release line.
+    
+    oversight-watch.sh now takes the newest commit across origin/main and every
+    origin/release/* ref for the threshold, with an optional bounded read-only
+    fetch (VICHE_OVERSIGHT_FETCH=1, default off). Signal name and all
+    incident/hearing/escalation semantics are unchanged. Adds
+    local_delivery_commit_age_seconds alongside local_main_commit_age_seconds.
+    
+    Adds tests/oversight-release-signal-smoke.sh (POSIX /bin/sh): fresh release
+    commit suppresses the false positive; idle repo (main+release stale) still
+    triggers; main-only stale/fresh still behaves as before.
+    
+    Record: records/OVERSIGHT-CA-M-1792107382-research.md
+
+diff --git a/government/oversight-watch.sh b/government/oversight-watch.sh
+index 83a808cd..d33fb244 100644
+--- a/government/oversight-watch.sh
++++ b/government/oversight-watch.sh
+@@ -33,8 +33,37 @@ fi
+ 
+ # Git is a *leading signal*, not proof of correct completion.
+ # A stale local tracking branch is explicitly only a local observation.
++#
++# Delivery age (CA-M): the delivery signal must reflect the newest commit across
++# the delivery lines, not origin/main alone. Kawun's active delivery line is
++# origin/release/* (e.g. origin/release/along-long-namespace); measuring only
++# main false-positives whenever work lands on the release line. We therefore take
++# the NEWEST commit across origin/main and every origin/release/* ref. A fresh
++# commit on ANY delivery line suppresses the signal. This stays a weak leading
++# indicator — not a quota and not proof of deployment. The signal NAME
++# `no_recent_main_commit` is retained for continuity with existing incident
++# records; its measurement basis is delivery-wide.
+ main_age=-1
++delivery_age=-1
+ if [ -d "$kawun/.git" ]; then
++    if [ "${VICHE_OVERSIGHT_FETCH:-0}" = 1 ]; then
++        # Optional, bounded, read-only fetch so delivery refs reflect the remote.
++        # Off by default to keep the watchdog deterministic and testable.
++        if command -v timeout >/dev/null 2>&1; then
++            timeout 30 git -C "$kawun" fetch --quiet --prune 2>/dev/null || :
++        else
++            git -C "$kawun" fetch --quiet --prune 2>/dev/null || :
++        fi
++    fi
++    newest=
++    release_refs=$(git -C "$kawun" for-each-ref --format='%(refname)' refs/remotes/origin/release 2>/dev/null) || release_refs=
++    for ref in refs/remotes/origin/main $release_refs; do
++        ts=$(git -C "$kawun" log -1 --format=%ct "$ref" 2>/dev/null) || ts=
++        case "$ts" in ''|*[!0-9]*) :;; *)
++            if [ -z "$newest" ] || [ "$ts" -gt "$newest" ]; then newest=$ts; fi
++        ;; esac
++    done
++    if [ -n "$newest" ] && [ "$newest" -le "$now" ]; then delivery_age=$((now-newest)); fi
+     last_commit=$(git -C "$kawun" log -1 --format=%ct refs/remotes/origin/main 2>/dev/null) || last_commit=
+     case "$last_commit" in ''|*[!0-9]*) :;; *)
+         if [ "$last_commit" -le "$now" ]; then main_age=$((now-last_commit)); fi
+@@ -52,12 +81,12 @@ elif [ "$open" -gt 0 ]; then
+     if [ "$mode" = running ] && [ "$age" -ge 7200 ]; then
+         signals=${signals:+$signals,}running_without_recent_activity
+     fi
+-    if [ "$main_age" -ge 86400 ]; then
++    if [ "$delivery_age" -ge 86400 ]; then
+         signals=${signals:+$signals,}no_recent_main_commit
+     fi
+ fi
+ 
+-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$open" "$mode" "$age" "$main_age" "$reason" "${signals:-clear}" >> "$root/observations.tsv"
++printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$open" "$mode" "$age" "$main_age" "$delivery_age" "$reason" "${signals:-clear}" >> "$root/observations.tsv"
+ old=$root/incident.json
+ if [ -z "$signals" ]; then
+     if [ -s "$old" ]; then
+@@ -84,10 +113,11 @@ if [ "$answered" = false ] && [ $((now-first)) -ge 7200 ]; then overdue=true; fi
+ temp=$(mktemp "$root/incident.XXXXXXXX")
+ jq -n --argjson first "$first" --argjson now "$now" --arg signals "$signals" \
+    --argjson count "$open" --arg mode "$mode" --arg error "$reason" \
+-   --argjson agent_age "$age" --argjson git_age "$main_age" \
+-   --argjson board_ok "$board_ok" --argjson agent_ok "$agent_ok" \
+-   --argjson answered "$answered" --argjson overdue "$overdue" \
+-   '{first_seen:$first,observed_at:$now,signals:($signals|split(",")),open_kawun_issues_first_page:$count,executive_state:$mode,executive_error:$error,executive_last_activity_age_seconds:$agent_age,local_main_commit_age_seconds:$git_age,board_access_ok:$board_ok,agent_status_ok:$agent_ok,parliamentary_hearing_recorded:$answered,parliamentary_response_overdue:$overdue,assessment:"investigation_required_not_proof_of_misconduct"}' > "$temp"
++    --argjson agent_age "$age" --argjson git_age "$main_age" \
++    --argjson delivery_age "$delivery_age" \
++    --argjson board_ok "$board_ok" --argjson agent_ok "$agent_ok" \
++    --argjson answered "$answered" --argjson overdue "$overdue" \
++    '{first_seen:$first,observed_at:$now,signals:($signals|split(",")),open_kawun_issues_first_page:$count,executive_state:$mode,executive_error:$error,executive_last_activity_age_seconds:$agent_age,local_main_commit_age_seconds:$git_age,local_delivery_commit_age_seconds:$delivery_age,board_access_ok:$board_ok,agent_status_ok:$agent_ok,parliamentary_hearing_recorded:$answered,parliamentary_response_overdue:$overdue,assessment:"investigation_required_not_proof_of_misconduct"}' > "$temp"
+ mv -f "$temp" "$old"
+ if [ "$overdue" = true ]; then
+     printf '%s\t%s\tunanswered oversight incident\n' "$now" "$first" >> "$root/escalations.tsv"
+diff --git a/records/OVERSIGHT-CA-M-1792107382-research.md b/records/OVERSIGHT-CA-M-1792107382-research.md
+new file mode 100644
+index 00000000..902d3bdd
+--- /dev/null
++++ b/records/OVERSIGHT-CA-M-1792107382-research.md
+@@ -0,0 +1,84 @@
++# CA-M delivery-age measurement amendment — incident 1792107382
++
++**Seat:** c1a00004 (Research advocate — evidence, scientific reasoning, experiments)
++**Date:** 2026-10-16
++**Branch:** `research/oversight-release-signal-1792107382` (based on `origin/main` 324d56f)
++**Summons:** Clerk c1a00001, oversight incident `1792107382`, corrective action **CA-M**
++
++## Defect (measurement artifact)
++
++`government/oversight-watch.sh` computed the delivery signal from a single ref:
++
++```
++last_commit=$(git -C "$kawun" log -1 --format=%ct refs/remotes/origin/main)
++if [ "$main_age" -ge 86400 ]; then signals=…no_recent_main_commit; fi
++```
++
++Kawun's active delivery line is `origin/release/along-long-namespace` (a14856a3,
++2026-10-15T12:20:52Z, 128 commits ahead of `origin/main`). Measuring only
++`origin/main` false-positives whenever work lands on the release line — exactly
++the incident's trigger. `OVERSIGHT.md` §"Measured signs" already required an
++auditor to consider release branches; the code did not.
++
++## Change
++
++`government/oversight-watch.sh` now computes a delivery-wide age: the **newest**
++commit across `refs/remotes/origin/main` **and** every `refs/remotes/origin/release/*`
++ref, using that value for the `no_recent_main_commit` threshold. An optional,
++bounded, read-only `git fetch --quiet --prune` (30s `timeout`) runs only when
++`VICHE_OVERSIGHT_FETCH=1`; it is off by default to keep the watchdog deterministic
++during provider outages. The signal name and all incident/hearing/escalation
++semantics are unchanged; `executive_failed`, `executive_inactive`,
++`running_without_recent_activity` and `telemetry_unavailable` are untouched. The
++new `local_delivery_commit_age_seconds` field is added to `incident.json` and to
++`observations.tsv` alongside the retained `local_main_commit_age_seconds`, so the
++measurement remains auditable and never proof of deployment.
++
++## Measured before/after (real repo, hermetic harness, read-only)
++
++Repo `/workspace/skrynia-apps`; scratch state root; mock `antonina`; `now=1792109882`.
++
++| Version | `origin/main` age | `origin/release/along-long-namespace` age | Signal |
++|---|---|---|---|
++| Before (`origin/main:oversight-watch.sh`) | 114213s (1.32 d) | not measured | `no_recent_main_commit` (false positive) |
++| After (this branch) | 114213s | 43030s (0.50 d) | **suppressed** (no incident) |
++
++The delivery line is 0.5 day old, so the genuine "no delivery for 24h" condition
++is not met; the false positive is removed. A genuinely idle repo (main **and**
++release both >24h) still triggers — proven by the smoke test below.
++
++## Hermetic smoke test
++
++`tests/oversight-release-signal-smoke.sh` (POSIX `/bin/sh`, no bashisms, same
++mock-`antonina` pattern as `tests/oversight-smoke.sh`):
++
++```
++PASS (A): fresh origin/release/* commit suppresses the false positive
++PASS (B): idle repo (main+release stale) still triggers; delivery_age>=86400
++PASS (C1): stale origin/main with no release refs still triggers
++PASS (C2): fresh origin/main with no release refs does not trigger
++Oversight release-signal smoke checks passed
++```
++
++The pre-existing `tests/oversight-smoke.sh` still passes unchanged, so incident
++semantics, auditor dispatch, dedup and clear-on-signals-cleared are preserved.
++
++## Reproduce
++
++```
++sh -n government/oversight-watch.sh && sh -n tests/oversight-release-signal-smoke.sh
++/bin/sh tests/oversight-smoke.sh
++/bin/sh tests/oversight-release-signal-smoke.sh
++```
++
++## Scope / limitations
++
++- Local-only measurement unless `VICHE_OVERSIGHT_FETCH=1`; the production mirror
++  already carries the release ref, so the fix takes effect without a fetch. A
++  stale mirror would still need the fetch opt-in. This is a **weak leading
++  indicator**, not a quota and not proof of deployment.
++- No constitutional or ordinary-law change; implementation of existing
++  `OVERSIGHT.md` §"Measured signs" only.
++- Scope observation (whether `/workspace/skrynia-apps` is Kawun) is recorded in
++  `OVERSIGHT-EVIDENCE-1792107382-skeptic.md` §4 as Founder-reserved and is not
++  decided here.
+diff --git a/tests/oversight-release-signal-smoke.sh b/tests/oversight-release-signal-smoke.sh
+new file mode 100644
+index 00000000..5e50de66
+--- /dev/null
++++ b/tests/oversight-release-signal-smoke.sh
+@@ -0,0 +1,110 @@
++#!/bin/sh
++# Hermetic test for the CA-M delivery-age signal (oversight incident 1792107382).
++#
++# The watchdog's delivery signal must reflect the NEWEST commit across
++# origin/main AND every origin/release/* ref, not origin/main alone. This proves:
++#   (A) a fresh commit on origin/release/* suppresses the false positive even
++#       when origin/main is stale (the 1792107382 measurement artifact);
++#   (B) a genuinely idle repo (main AND release both stale) still triggers;
++#   (C) origin/main alone is still measured (stale main, no release refs -> signal;
++#       fresh main, no release refs -> no signal).
++#
++# POSIX /bin/sh only; no bashisms. Uses the same mock-antonina pattern as
++# tests/oversight-smoke.sh.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++
++mkdir -p "$scratch/bin" "$scratch/town/records" "$scratch/state"
++
++# --- mock antonina (board list + agent status) ---
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++"board list") printf '%s\n' "$MOCK_BOARD" ;;
++"agent status") printf '{"state":"running","last_activity_at":%s,"backend_error":{"classification":"none"}}\n' "$LAST" ;;
++*) exit 90 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++
++MOCK_BOARD='[{"number":1,"title":"Kawun: delivery"}]'
++LAST=2000000000
++PATH=$scratch/bin:$PATH
++export PATH MOCK_BOARD LAST
++
++NOW=2000000000
++VICHE_OVERSIGHT_NOW=$NOW
++VICHE_TOWN_ROOT=$scratch/town
++VICHE_STATE_ROOT=$scratch/state
++VICHE_KAWUN_REPO=$scratch/kawun
++VICHE_TOWNHALL_ID=297
++VICHE_OVERSIGHT_FETCH=0
++export VICHE_OVERSIGHT_NOW VICHE_TOWN_ROOT VICHE_STATE_ROOT VICHE_KAWUN_REPO
++export VICHE_TOWNHALL_ID VICHE_OVERSIGHT_FETCH
++
++kawun=$scratch/kawun
++incident=$scratch/state/oversight/incident.json
++
++# build_case <main_epoch> <release_epoch|empty>
++# Creates a Kawun-like repo. The release commit is a child of the main commit,
++# mirroring the real repo where the release line is ahead of main.
++build_case() {
++    rm -rf "$kawun"
++    git init -q "$kawun"
++    GIT_AUTHOR_DATE="@$1 +0000" GIT_COMMITTER_DATE="@$1 +0000" \
++        git -C "$kawun" -c user.email=t@t -c user.name=t commit -q --allow-empty -m m
++    main_sha=$(git -C "$kawun" rev-parse HEAD)
++    git -C "$kawun" update-ref refs/remotes/origin/main "$main_sha"
++    if [ -n "${2:-}" ]; then
++        GIT_AUTHOR_DATE="@$2 +0000" GIT_COMMITTER_DATE="@$2 +0000" \
++            git -C "$kawun" -c user.email=t@t -c user.name=t commit -q --allow-empty -m r
++        rel_sha=$(git -C "$kawun" rev-parse HEAD)
++        git -C "$kawun" update-ref refs/remotes/origin/release/along-long-namespace "$rel_sha"
++    fi
++}
++
++run_watch() {
++    rm -rf "$scratch/state/oversight"
++    /bin/sh "$repo/government/oversight-watch.sh" >/dev/null 2>&1
++}
++
++DAY=86400
++
++# (A) fresh release line, stale main -> false positive SUPPRESSED.
++#     main ~2.3 days old, release 60s old. delivery_age=60 (<DAY), main_age>DAY.
++build_case $((NOW - 200000)) $((NOW - 60))
++run_watch
++if [ -e "$incident" ]; then
++    echo "FAIL (A): fresh release line must suppress no_recent_main_commit" >&2
++    exit 1
++fi
++echo "PASS (A): fresh origin/release/* commit suppresses the false positive"
++
++# (B) genuinely idle: main AND release both stale -> still triggers.
++#     main ~4.6 days, release ~2.3 days (newer than main, still >DAY).
++build_case $((NOW - 400000)) $((NOW - 200000))
++run_watch
++jq -e --argjson now "$NOW" '.signals | index("no_recent_main_commit")' "$incident" >/dev/null
++jq -e --argjson now "$NOW" '.local_delivery_commit_age_seconds >= 86400' "$incident" >/dev/null
++echo "PASS (B): idle repo (main+release stale) still triggers; delivery_age>=86400"
++
++# (C1) origin/main alone, stale, no release refs -> still triggers (no weakening).
++build_case $((NOW - 400000)) ""
++run_watch
++jq -e '.signals | index("no_recent_main_commit")' "$incident" >/dev/null
++jq -e '.local_main_commit_age_seconds >= 86400' "$incident" >/dev/null
++echo "PASS (C1): stale origin/main with no release refs still triggers"
++
++# (C2) origin/main alone, fresh, no release refs -> no signal.
++build_case $((NOW - 60)) ""
++run_watch
++if [ -e "$incident" ]; then
++    echo "FAIL (C2): fresh origin/main must not trigger" >&2
++    exit 1
++fi
++echo "PASS (C2): fresh origin/main with no release refs does not trigger"
++
++echo 'Oversight release-signal smoke checks passed'

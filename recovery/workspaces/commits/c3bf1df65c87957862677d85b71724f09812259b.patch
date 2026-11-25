@@ -1,0 +1,90 @@
+commit c3bf1df65c87957862677d85b71724f09812259b
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Thu Oct 22 17:54:39 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Thu Oct 22 17:54:39 2026 +0000
+
+    Relaunch existing researchers without redefining owned cwd
+
+diff --git a/scripts/agent_pool_keeper.py b/scripts/agent_pool_keeper.py
+index c884701..871b516 100644
+--- a/scripts/agent_pool_keeper.py
++++ b/scripts/agent_pool_keeper.py
+@@ -85,6 +85,19 @@ def select_packet(agent_id, fallback, cursors, plan):
+             "before ending.\n\n" + current + "\n\n" + plan["common"])
+ 
+ 
++def agent_declares_cwd(agent_id, expected_cwd):
++    """Reuse a managed agent only in the directory it was created for.
++
++    Antonina deliberately rejects --cwd when an existing front owns work.
++    Read the durable declaration instead, and omit --cwd on resume/relaunch.
++    """
++    try:
++        data = json.loads((AGENTS_DIR / agent_id / "meta.json").read_text())
++        return data.get("id") == agent_id and data.get("cwd") == expected_cwd
++    except (OSError, ValueError, TypeError):
++        return False
++
++
+ def last_observed_output(agent_id, expected_cwd):
+     """Return recent output/start timestamp, not a mere running flag.
+ 
+@@ -205,9 +218,14 @@ def tick(history, cursors, plan):
+         if not os.path.isdir(path):
+             print("missing worktree", path, flush=True)
+             continue
++        if not agent_declares_cwd(agent_id, path):
++            print("refusing agent with missing or unexpected declared worktree", agent_id, flush=True)
++            continue
+         try:
+             next_prompt = select_packet(agent_id, prompt, cursors, plan)
+-            p = execute([A, "agent", "run", "--id", agent_id, "--cwd", path,
++            # Existing agents retain an owned front even in state "failed".
++            # --cwd is rejected in that case; their declared path was checked.
++            p = execute([A, "agent", "run", "--id", agent_id,
+                          "--prompt", next_prompt, "--detach", "--json"], timeout=35)
+             if p.returncode == 0 and json.loads(p.stdout).get("state") == "running":
+                 live.add(agent_id)
+diff --git a/tests/test_agent_pool_keeper.py b/tests/test_agent_pool_keeper.py
+index 4f8ea9b..9b122e5 100644
+--- a/tests/test_agent_pool_keeper.py
++++ b/tests/test_agent_pool_keeper.py
+@@ -41,6 +41,7 @@ class KeeperTests(unittest.TestCase):
+         launched = []
+         def fake_execute(args, timeout=20):
+             self.assertEqual(args[:3], [KEEPER.A, "agent", "run"])
++            self.assertNotIn("--cwd", args)
+             launched.append(args[args.index("--id") + 1])
+             return mock.Mock(returncode=0, stdout=json.dumps({"state": "running"}), stderr="")
+         with tempfile.TemporaryDirectory() as tmp:
+@@ -49,6 +50,7 @@ class KeeperTests(unittest.TestCase):
+                   mock.patch.object(KEEPER, "AGENTS_DIR", Path(tmp) / "agents"),
+                   mock.patch.object(KEEPER, "running", return_value=set(live)),
+                   mock.patch.object(KEEPER.os.path, "isdir", return_value=True),
++                  mock.patch.object(KEEPER, "agent_declares_cwd", return_value=True),
+                   mock.patch.object(KEEPER, "execute", side_effect=fake_execute)):
+                 cursors = {}
+                 KEEPER.tick(history, cursors, plan)
+@@ -56,6 +58,21 @@ class KeeperTests(unittest.TestCase):
+                 self.assertEqual(cursors[launched[0]], 1)
+                 self.assertEqual(json.loads((Path(tmp) / "cursors.json").read_text()), cursors)
+ 
++    def test_relaunch_respects_persisted_worktree_authority(self):
++        agent_id, wd, _ = KEEPER.ROSTER[0]
++        with tempfile.TemporaryDirectory() as tmp:
++            base = Path(tmp) / agent_id
++            base.mkdir()
++            meta = base / "meta.json"
++            with mock.patch.object(KEEPER, "AGENTS_DIR", Path(tmp)):
++                self.assertFalse(KEEPER.agent_declares_cwd(agent_id, "/home/lubko/" + wd))
++                meta.write_text(json.dumps({
++                    "id": agent_id, "cwd": "/home/lubko/DIFFERENT"}))
++                self.assertFalse(KEEPER.agent_declares_cwd(agent_id, "/home/lubko/" + wd))
++                meta.write_text(json.dumps({
++                    "id": agent_id, "cwd": "/home/lubko/" + wd}))
++                self.assertTrue(KEEPER.agent_declares_cwd(agent_id, "/home/lubko/" + wd))
++
+     def test_above_five_respects_quality_cooldown(self):
+         plan = KEEPER.load_packet_plan()
+         now = time.time()
