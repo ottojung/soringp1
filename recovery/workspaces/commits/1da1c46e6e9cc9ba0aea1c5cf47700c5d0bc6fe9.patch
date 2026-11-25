@@ -1,0 +1,105 @@
+commit 1da1c46e6e9cc9ba0aea1c5cf47700c5d0bc6fe9
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 12:21:44 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 12:21:44 2026 +0000
+
+    Fix economy disk forecast inflation from one-off reclaims
+    
+    forecast_hours used the oldest sample in the 2-24h lookback as one endpoint,
+    so a single reclamation inside the window made net loss look tiny and produced
+    a wildly inflated time-to-full (1296h where the sustained rate implies ~38h).
+    Use the median of positive net-loss rates over the most recent six hours,
+    excluding reclaim intervals, with whole-lookback and single-sample fallbacks.
+    Add a smoke-test regression. Economy proceed request P-1795522620-c40b.
+
+diff --git a/government/economy-resources.py b/government/economy-resources.py
+index 145109c9..751250e7 100644
+--- a/government/economy-resources.py
++++ b/government/economy-resources.py
+@@ -38,6 +38,7 @@ import json
+ import os
+ import pathlib
+ import shutil
++import statistics
+ import subprocess
+ import sys
+ import tempfile
+@@ -363,20 +364,49 @@ def record_sample(rows, fs, mem, current):
+     return rows
+ 
+ 
++def _net_loss_rates(rows, label):
++    """Positive net-loss rates between consecutive samples; reclaim jumps excluded."""
++    rates = []
++    ordered = sorted(rows, key=lambda r: int(r.get("at", 0)))
++    for a, b in zip(ordered, ordered[1:]):
++        dt = (int(b["at"]) - int(a["at"])) / 3600.0
++        if dt <= 0:
++            continue
++        lost = a["fs"][label]["avail"] - b["fs"][label]["avail"]
++        if lost > 0:
++            rates.append(lost / dt)
++    return rates
++
++
+ def forecast_hours(rows, label, avail_now, current):
+-    """Hours until the filesystem is full at the rate observed over the last day (None: not shrinking)."""
++    """Hours until the filesystem is full at a robust recent net-loss rate.
++
++    A one-off reclamation inside the lookback leaves the oldest sample's free
++    space close to today's, so the naive endpoint rate looks tiny and inflates
++    the forecast.  Use the median of positive sub-window rates over the most
++    recent six hours (reclaims, where free space rises, are excluded).  Fall
++    back to the whole lookback and then to the single-sample two-point rate so
++    sparse histories and the smoke fixtures keep working.
++    """
+     window = [r for r in rows if 7200 <= current - int(r.get("at", 0)) <= 86400 and label in r.get("fs", {})]
+     if not window:
+         window = [r for r in rows if 3600 <= current - int(r.get("at", 0)) <= 7200 and label in r.get("fs", {})]
+     if not window:
+         return None
++    for cutoff in (6 * 3600, None):
++        subset = ([r for r in window if current - int(r.get("at", 0)) <= cutoff]
++                  if cutoff is not None else window)
++        rates = _net_loss_rates(subset, label)
++        if len(rates) >= 2:
++            rate = statistics.median(rates)
++            if rate > 0:
++                return round(avail_now / rate, 1)
+     then = min(window, key=lambda r: r["at"])
+     hours = (current - then["at"]) / 3600.0
+     lost = then["fs"][label]["avail"] - avail_now
+     if hours <= 0 or lost <= 0:
+         return None
+-    rate = lost / hours
+-    return round(avail_now / rate, 1)
++    return round(avail_now / (lost / hours), 1)
+ 
+ 
+ # ---- evaluation -------------------------------------------------------------
+diff --git a/tests/economy-resources-smoke.sh b/tests/economy-resources-smoke.sh
+index bd2fbc15..9444f157 100644
+--- a/tests/economy-resources-smoke.sh
++++ b/tests/economy-resources-smoke.sh
+@@ -72,6 +72,20 @@ printf '{"at":%s,"fs":{"state":{"avail":%s}}}\n' "$((NOW - 86400))" "$(( 300 * G
+ run $NOW | jq -e '.overall == "ok"' >/dev/null
+ jq -e '.resources["disk:state"].hours_to_full == null' "$report" >/dev/null
+ 
++# A one-off reclaim inside the lookback must not inflate the forecast: the 24 h
++# endpoint is close to today's free space, but the recent sustained loss is 40 GiB/h.
++reset; fs 1000 400
++printf '{"at":%s,"fs":{"state":{"avail":%s}}}\n' \
++  "$((NOW - 86400))" "$(( 405 * GIB ))" \
++  "$((NOW - 25200))" "$(( 600 * GIB ))" \
++  "$((NOW - 18000))" "$(( 560 * GIB ))" \
++  "$((NOW - 14400))" "$(( 520 * GIB ))" \
++  "$((NOW - 10800))" "$(( 480 * GIB ))" \
++  "$((NOW - 7200))"  "$(( 440 * GIB ))" \
++  > "$d/state/economy/resource-history.jsonl"
++run $NOW >/dev/null
++jq -e '.resources["disk:state"].hours_to_full > 9 and .resources["disk:state"].hours_to_full < 11' "$report" >/dev/null
++
+ # Inodes: exhausted inodes make a roomy disk short.
+ reset; printf '{"state":{"total":%s,"avail":%s,"files":1000,"ffree":50}}\n' "$(( 1000 * GIB ))" "$(( 900 * GIB ))" > "$d/fs.json"
+ run $NOW | jq -e '.overall == "critical"' >/dev/null

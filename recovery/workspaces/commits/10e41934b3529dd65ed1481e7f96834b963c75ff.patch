@@ -1,0 +1,746 @@
+commit 10e41934b3529dd65ed1481e7f96834b963c75ff
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Tue Oct 13 23:08:32 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Tue Oct 13 23:08:32 2026 -0700
+
+    Remove Bash requirement from Viche boot and parliamentary scripts
+    
+    * Port protected S6 constitutional bootstrap to POSIX /bin/sh
+    
+    * Use POSIX sh in government/boot.sh
+    
+    * Use POSIX sh in government/sitting.sh
+    
+    * Make deterministic parliamentary tally POSIX sh plus awk
+    
+    * Port mocked bootstrap and mock Antonina CLI to POSIX sh
+    
+    * Launch protected constitution with /bin/sh from S6
+    
+    * Run bootstrap CI under POSIX sh and dash, never Bash
+    
+    * Remove non-POSIX sed escape and argument separator in protected boot
+    
+    * Add POSIX-sh legislative tally and bill digest regression test
+    
+    * Test POSIX shell ballot counting in CI
+    
+    * Document exclusive POSIX /bin/sh runtime requirement
+    
+    * Document exclusive POSIX /bin/sh runtime requirement
+    
+    * Document exclusive POSIX /bin/sh runtime requirement
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index 99987b94..14be1e08 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -6,12 +6,17 @@ on:
+ jobs:
+   bootstrap:
+     runs-on: ubuntu-latest
++    defaults:
++      run:
++        shell: sh
+     permissions:
+       contents: read
+     steps:
+       - uses: actions/checkout@v4
+       - name: Check shell syntax
+-        run: bash -n constitution/*.sh government/*.sh tests/*.sh deploy/s6/viche/run
++        run: |
++          /bin/sh -n constitution/*.sh government/*.sh tests/*.sh deploy/s6/viche/run
++          dash -n constitution/*.sh government/*.sh tests/*.sh deploy/s6/viche/run
+       - name: Check seat roster and constitutional model
+         run: |
+           grep -Fq 'opencode-go/longcat-2.5-preview-free' constitution/CONSTITUTION.md
+@@ -19,4 +24,6 @@ jobs:
+           awk -F '\t' 'NF != 3 || $1 !~ /^[0-9a-f]+$/ { exit 1 }' government/seats.tsv
+           test "$(cut -f1 government/seats.tsv | sort -u | wc -l)" -eq "$(wc -l < government/seats.tsv)"
+       - name: Exercise constitutional launch and recovery
+-        run: bash tests/boot-smoke.sh
++        run: dash tests/boot-smoke.sh
++      - name: Exercise legislative tally
++        run: dash tests/tally-smoke.sh
+diff --git a/AGENTS.md b/AGENTS.md
+index 7224e067..0fdda909 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -6,6 +6,8 @@ The Founder's **initial ranked preferences** are: **(1) high-quality resolution
+ 
+ The authoritative constitutional mount is `/var/lib/lubko/from-host/viche-constitution` (or the installed `VICHE_CONSTITUTION_DIR`); it contains `CONSTITUTION.md` and `boot.sh`. Do not use a writable worktree's `constitution/` as the source of authority. These files are the Founder's, not parliament's. A parliamentarian may submit a constitutional amendment request, but may not apply it.
+ 
++Every Viche shell script, including parliament-authored amendments to boot, sitting or voting scripts, must run under POSIX-compliant `/bin/sh`; do not introduce Bash-specific syntax, builtins or dependencies.
++
+ Parliament controls the ordinary `government/` directory, including laws, seat roster, boot reconciliation, agenda hook, voting rules and tallying code; changes need the legally valid recorded legislative process. Seat worktrees are independent; submit implementation changes on branches and merge to main after review. The founder boot fast-forwards the canonical town checkout; never edit its worktree irresponsibly or mistake a PR for enacted law.
+ 
+ Every agent, including agents delegated to do research or executive work, may use **only** `opencode-go/longcat-2.5-preview-free` variant `low` via managed Antonina. Never use a fallback provider, modify the model pin, call OpenCode directly to circumvent the pin, or consume paid model credits.
+diff --git a/README.md b/README.md
+index 7e5f633a..ad61c142 100644
+--- a/README.md
++++ b/README.md
+@@ -11,6 +11,8 @@
+ 
+ The **initial Founder happiness priorities** are ordered: **high-quality resolution of Antonina board tasks first, timely resolution second, economy of the Founder's attention third**. Agents should not interrupt the Founder for routine decisions they can resolve themselves. These are starting preferences that the Founder may later revise through Antonina board comments or issues authored `Vitalik`—not an efficiency metric that supplants happiness.
+ 
++All Viche launch, governance and test shell scripts use **POSIX `/bin/sh` only**; the S6 service does not need Bash.
++
+ The ten founding seats are an initial arrangement, not a limit on workers, parliamentary reform or agent invocations. The first sitting can convene everyone; subsequent ten-minute checks convene the clerk and any members summoned to real business. The law defines initial quorum and vote thresholds, which are amendable by law. A deterministic ballot tally helps distinguish an enacted decision from a claim of consensus.
+ 
+ Once the executive merges approved government code into GitHub `main`, the constitutional boot **fast-forwards the canonical town checkout** and invokes the updated parliamentary setup on its next cycle. It never auto-updates its own read-only constitutional source.
+@@ -23,6 +25,6 @@ Founder instructions are recognized by the exact Antonina issue/comment author `
+ 
+ The rules require `opencode-go/longcat-2.5-preview-free` variant `low` via Antonina, with no alternative model or fallback. Neither this text nor a shared credential is a hard capability boundary. The Founder-controlled mounted constitutional files and GitHub CODEOWNERS help separate authority, but code-owner review requires a corresponding enforced GitHub rule. The existing GitHub ruleset alone does not yet supply that review requirement.
+ 
+-Run `bash tests/boot-smoke.sh` to exercise a mocked constitutional launch and restart. The CI workflow intentionally does **not** require exactly ten seats, because parliament is authorized to change that number.
++Run `/bin/sh tests/boot-smoke.sh` and `/bin/sh tests/tally-smoke.sh` to exercise a mocked constitutional launch and restart. The CI workflow intentionally does **not** require exactly ten seats, because parliament is authorized to change that number.
+ 
+ Licensed under [AGPL-3.0-only](LICENSE).
+diff --git a/constitution/boot.sh b/constitution/boot.sh
+index d48c71e4..5b7c8f0b 100644
+--- a/constitution/boot.sh
++++ b/constitution/boot.sh
+@@ -1,60 +1,76 @@
+-#!/usr/bin/env bash
+-# Founder-controlled constitutional bootstrap. Invoked by s6, NOT by parliament.
+-# This file and CONSTITUTION.md must come from the same founder-approved readonly mount.
+-set -euo pipefail
++#!/bin/sh
++# Founder-controlled constitutional bootstrap. Invoked by S6, not parliament.
++# Charter and this file are from the same founder-approved read-only mount.
++set -eu
+ 
+-constitutional_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+-town="${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}"
+-seats="${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}"
+-state="${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}"
+-charter="$constitutional_dir/CONSTITUTION.md"
+-interval="${VICHE_SITTING_INTERVAL_SECONDS:-600}"
++constitutional_dir=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++charter=$constitutional_dir/CONSTITUTION.md
++interval=${VICHE_SITTING_INTERVAL_SECONDS:-600}
+ : "${VICHE_TOWNHALL_ID:?VICHE_TOWNHALL_ID must identify the Antonina Town Hall issue}"
+-[[ -s "$charter" ]] || { echo "Viche: incomplete constitutional mount" >&2; exit 1; }
+-[[ "$interval" =~ ^[1-9][0-9]*$ ]] || { echo "Viche: invalid sitting interval" >&2; exit 1; }
+-for cmd in antonina git jq; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
++
++[ -s "$charter" ] || { echo "Viche: missing authoritative constitution" >&2; exit 1; }
++case "$interval" in
++    ''|*[!0-9]*|0) echo "Viche: invalid sitting interval" >&2; exit 1 ;;
++esac
++for command_name in antonina git jq; do
++    command -v "$command_name" >/dev/null 2>&1 || {
++        echo "Viche: missing $command_name" >&2; exit 1;
++    }
++done
+ mkdir -p "$state" "$seats"
+-charter_text="$(cat "$charter")"
+-# Only the operator mounting this directory chooses its bytes. Never load a
+-# constitutional substitute from the parliament's Git tree.
+-export VICHE_CONSTITUTION="$charter"
+-export VICHE_CONSTITUTION_DIR="$constitutional_dir"
++charter_text=$(cat "$charter")
++# Never accept a substitute charter from parliament's writable Git tree.
++VICHE_CONSTITUTION=$charter
++VICHE_CONSTITUTION_DIR=$constitutional_dir
++export VICHE_CONSTITUTION VICHE_CONSTITUTION_DIR
+ 
+ reconcile() {
+-  # Parliament publishes approved changes via a normal PR/merge to origin/main.
+-  # A non-fast-forward or dirty checkout fails visibly instead of running stale laws.
+-  if [[ "${VICHE_TEST_NO_SYNC:-0}" != 1 ]]; then
+-    git -C "$town" pull --ff-only
+-  fi
+-  test -s "$town/government/LAWS.md"
+-  test -s "$town/government/seats.tsv"
+-  bash "$town/government/boot.sh" # only manages parliamentary seat worktrees and identities
++    # A failed fast-forward is a visible integration error, never silent staleness.
++    if [ "${VICHE_TEST_NO_SYNC:-0}" != 1 ]; then
++        git -C "$town" pull --ff-only || return 1
++    fi
++    [ -s "$town/government/LAWS.md" ] || return 1
++    [ -s "$town/government/seats.tsv" ] || return 1
++    /bin/sh "$town/government/boot.sh"
+ }
+ 
+ sitting() {
+-  local failed=0 agent_id title focus status current prompt suffix clerk all pid
+-  local -a pids=()
+-  clerk="$(head -n 1 "$town/government/seats.tsv" | cut -f1)"
+-  [[ -n "$clerk" ]] || { echo "Viche: no parliamentary clerk" >&2; return 1; }
+-  # First sitting convenes every seat. Later the clerk wakes every ten minutes;
+-  # other members are summoned explicitly by ordinary-law records.
+-  all=0
+-  [[ -f "$state/inaugurated" ]] || all=1
+-  while IFS=$'\t' read -r agent_id title focus; do
+-    [[ -n "$agent_id" ]] || continue
+-    if (( all == 0 )) && [[ "$agent_id" != "$clerk" ]]; then
+-      if ! grep -Fqx -- "$agent_id" "$town/records/SUMMONED.txt" 2>/dev/null; then continue; fi
+-    fi
+-    status="$(antonina agent status --id "$agent_id" --json)" || { echo "Viche: can't inspect $agent_id" >&2; failed=1; continue; }
+-    current="$(jq -er '.state' <<<"$status")" || { failed=1; continue; }
+-    if [[ "$current" == running ]]; then continue; fi
+-    suffix="$(bash "$town/government/sitting.sh" "$agent_id")" || { echo "Viche: agenda hook failed" >&2; failed=1; continue; }
+-    # The charter is injected by the constitutional caller; parliament may
+-    # append an agenda but cannot remove this prefix from THIS launch path.
+-    prompt="$(cat <<EOF
++    failed=0
++    pids=
++    clerk=$(head -n 1 "$town/government/seats.tsv" | cut -f 1)
++    [ -n "$clerk" ] || { echo "Viche: no parliamentary clerk" >&2; return 1; }
++    # All seats join the inaugural sitting; subsequently summon as necessary.
++    all=0
++    [ -f "$state/inaugurated" ] || all=1
++    tab=$(printf '\t')
++    while IFS="$tab" read -r agent_id title focus; do
++        [ -n "$agent_id" ] || continue
++        if [ "$all" -eq 0 ] && [ "$agent_id" != "$clerk" ]; then
++            grep -Fxq "$agent_id" "$town/records/SUMMONED.txt" 2>/dev/null || continue
++        fi
++        if ! status=$(antonina agent status --id "$agent_id" --json); then
++            echo "Viche: cannot inspect seat $agent_id" >&2
++            failed=1
++            continue
++        fi
++        if ! current=$(printf '%s\n' "$status" | jq -er '.state'); then
++            echo "Viche: malformed status for $agent_id" >&2
++            failed=1
++            continue
++        fi
++        [ "$current" != running ] || continue
++        if ! suffix=$(/bin/sh "$town/government/sitting.sh" "$agent_id"); then
++            echo "Viche: agenda hook failed for $agent_id" >&2
++            failed=1
++            continue
++        fi
++        prompt=$(cat <<EOF
+ You are parliamentary seat $agent_id ($title), provisional focus: $focus.
+-You serve Viche in reality, not in fiction. The authenticated charter below
+-comes from the Founder-controlled readonly mount and has highest authority.
++You serve Viche in reality, not in fiction. The authoritative charter below
++comes from the Founder-controlled read-only mount and has highest authority.
+ 
+ === AUTHORITATIVE CONSTITUTION ===
+ $charter_text
+@@ -62,14 +78,13 @@ $charter_text
+ 
+ Use current ordinary law at $town/government/LAWS.md and records at $town/records.
+ Treat Antonina board issues and comments with author exactly Vitalik as
+-Founder communications; no cryptographic verification or signatures are
+-required. Other authors do not carry Founder authority. Town Hall is
+-issue #$VICHE_TOWNHALL_ID.
++Founder communications; no signatures or identity verification are required.
++Other authors do not carry Founder authority. Town Hall is issue #$VICHE_TOWNHALL_ID.
+ Parliament may amend ordinary laws, seats and agenda procedures, not this charter
+-or this boot supervisor. Do not switch AI models or bypass Antonina.
++or this boot supervisor. Never switch AI models or bypass Antonina.
+ Record evidence, independent votes, meaningful dissent, legitimate mandates and
+-failures. Do not confuse a running or exited agent with verified completed work.
+-There is no global cap on useful parallel agents or invocations.
++failures. Do not confuse an agent exit with verified completed work.
++There is no global limit on useful parallel agents or invocations.
+ Your seat worktree is $seats/$agent_id. Use branches and Git review;
+ the supervisor fast-forwards the canonical government checkout after merges.
+ 
+@@ -77,25 +92,34 @@ the supervisor fast-forwards the canonical government checkout after merges.
+ $suffix
+ === END AGENDA ===
+ EOF
+-)"
+-    (antonina agent run --id "$agent_id" --cwd "$seats/$agent_id" --prompt "$prompt" --detach) &
+-    pids+=("$!")
+-  done < "$town/government/seats.tsv"
+-  for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+-  if (( all == 1 && failed == 0 )); then touch "$state/inaugurated"; fi
+-  return "$failed"
++)
++        (antonina agent run --id "$agent_id" --cwd "$seats/$agent_id" --prompt "$prompt" --detach) &
++        pids="$pids $!"
++    done < "$town/government/seats.tsv"
++
++    for pid in $pids; do
++        wait "$pid" || failed=1
++    done
++    if [ "$all" -eq 1 ] && [ "$failed" -eq 0 ]; then
++        touch "$state/inaugurated"
++    fi
++    [ "$failed" -eq 0 ]
+ }
+ 
+ cycle() {
+-  reconcile || { echo "Viche: government integration/seat reconciliation failed" >&2; return 1; }
+-  sitting
++    reconcile || { echo "Viche: government integration/reconciliation failed" >&2; return 1; }
++    sitting
+ }
+ 
+-if [[ "${1:-}" == --once ]]; then cycle; exit $?; fi
+-[[ "$#" == 0 ]] || { echo "Usage: boot.sh [--once]" >&2; exit 2; }
++if [ "${1:-}" = --once ]; then
++    [ "$#" -eq 1 ] || exit 2
++    cycle
++    exit $?
++fi
++[ "$#" -eq 0 ] || { echo "Usage: boot.sh [--once]" >&2; exit 2; }
+ trap 'exit 0' TERM INT
+-cycle || echo "Viche: sitting failed; will retry, no unauthorized fallback" >&2
++cycle || echo "Viche: cycle failed; will retry without changing model" >&2
+ while :; do
+-  sleep "$interval" & wait "$!" || exit 0
+-  cycle || echo "Viche: cycle failed, requires investigation" >&2
++    sleep "$interval" & wait "$!" || exit 0
++    cycle || echo "Viche: cycle failed; requires investigation" >&2
+ done
+diff --git a/deploy/DEPLOYMENT.md b/deploy/DEPLOYMENT.md
+index 9a03bee2..a66c7b81 100644
+--- a/deploy/DEPLOYMENT.md
++++ b/deploy/DEPLOYMENT.md
+@@ -4,7 +4,7 @@ This **replaces** the old Viche-specific Docker Compose plan. The host already o
+ 
+ ## Three separately controlled directories
+ 
+-1. **Founder-owned readonly constitution** (confirmed existing mount path `/var/lib/lubko/from-host/viche-constitution`): `CONSTITUTION.md` and `boot.sh`. All three must come from the **same Founder-approved Git revision**. The town must not be able to write this directory or the source of its bind mount.
++1. **Founder-owned readonly constitution** (confirmed existing mount path `/var/lib/lubko/from-host/viche-constitution`): `CONSTITUTION.md` and `boot.sh`. Both files must come from the **same Founder-approved Git revision**. The town must not be able to write this directory or the source of its bind mount.
+ 2. **Parliament's writable Git clone**, at `/var/lib/lubko/wd/viche`, with `government/LAWS.md`, `government/boot.sh`, `government/sitting.sh`, laws, ballot rules, and records. Give it GitHub SSH access for PRs/pushes.
+ 3. **Persistent runtime data**, e.g. `/var/lib/lubko/wd/viche-seats` and `/var/lib/lubko/wd/viche-state`, alongside the existing Antonina managed agent state. Preserve these across container restarts; delete only deliberately during Founder reset.
+ 
+@@ -28,7 +28,7 @@ config-private/other/lubko-fs/s6-service-defaults/
+ 
+ Use `deploy/s6/viche/run` as the initial template in `config-private`. It sets `VICHE_TOWN_ROOT`, `VICHE_SEATS_ROOT`, and `VICHE_STATE_ROOT`, then **executes `/var/lib/lubko/from-host/viche-constitution/boot.sh`**. No parliament-writable entrypoint is allowed between S6 and the constitutional bootstrap. Provision `VICHE_TOWNHALL_ID` through host-controlled S6 environment configuration, not from the town's writable Git checkout. If a shell wrapper sets it, keep that wrapper with the private S6 service definition. Include the S6 service directory in the existing container service-tree deployment, and reuse the existing read-only `/var/lib/lubko/from-host` bind mount, and verify it remains `ro` after rebuilding. Check the container's actual S6 service registration/install mechanism before enabling the service; copying a file to Git alone does not activate a service.
+ 
+-The Viche S6 service should have `bash`, `git`, `jq`, and the existing `antonina` CLI, OpenCode runtime and Git/SSH credentials accessible. **Do not run another OpenCode provider, model or wrapper**: the sole authorized model is `opencode-go/longcat-2.5-preview-free`, variant `low`, through Antonina. Verify the installed Antonina build matches its pinned runtime before launch. The S6 and Lubko arrangement provides internet and Git access; verify connectivity and permissions. There are no Viche-specific concurrency, invocation or model fallback caps.
++The Viche S6 service should have a POSIX-compliant `/bin/sh`, `git`, `jq`, and the existing `antonina` CLI, OpenCode runtime and Git/SSH credentials accessible. **Do not run another OpenCode provider, model or wrapper**: the sole authorized model is `opencode-go/longcat-2.5-preview-free`, variant `low`, through Antonina. Verify the installed Antonina build matches its pinned runtime before launch. The S6 and Lubko arrangement provides internet and Git access; verify connectivity and permissions. There are no Viche-specific concurrency, invocation or model fallback caps.
+ 
+ ## Founder communication via Antonina author labels
+ 
+@@ -60,7 +60,7 @@ The external host shall restart the **entire box after 24 hours of uptime measur
+ 
+ The Founder may stop the S6 service, revert the government clone to an approved Git revision, preserve/archive board records and state, and restart. A constitutional amendment is a separate Founder-approved update of the read-only mounted source. Do not automatically overwrite that source from a routine Git pull.
+ 
+-Repository smoke tests: `bash -n constitution/*.sh government/*.sh tests/*.sh` and `bash tests/boot-smoke.sh`. The tests mock Antonina and use a test-only `VICHE_TEST_NO_SYNC=1` to avoid fetching Git history. **Never set that variable in production S6.** The tests do not prove real model invocation, correct displayed author fields in board issues/comments, or correct S6 volume mappings. These must be checked during deployment.
++Repository checks: `/bin/sh -n constitution/*.sh government/*.sh tests/*.sh deploy/s6/viche/run`, `/bin/sh tests/boot-smoke.sh`, and `/bin/sh tests/tally-smoke.sh`. The scripts are also checked with `dash` in CI. The tests mock Antonina and use a test-only `VICHE_TEST_NO_SYNC=1` to avoid fetching Git history. **Never set that variable in production S6.** The tests do not prove real model invocation, correct displayed author fields in board issues/comments, or correct S6 volume mappings. These must be checked during deployment.
+ 
+ ## Supply chain and hardening notes
+ 
+diff --git a/deploy/s6/viche/run b/deploy/s6/viche/run
+index b043f71d..d6167af3 100644
+--- a/deploy/s6/viche/run
++++ b/deploy/s6/viche/run
+@@ -6,4 +6,4 @@ export VICHE_SEATS_ROOT=/var/lib/lubko/wd/viche-seats
+ export VICHE_STATE_ROOT=/var/lib/lubko/wd/viche-state
+ # The operator sets the Town Hall issue number in S6 service environment.
+ : "${VICHE_TOWNHALL_ID:?Set Town Hall issue number in S6 environment}"
+-exec /bin/bash /var/lib/lubko/from-host/viche-constitution/boot.sh
++exec /bin/sh /var/lib/lubko/from-host/viche-constitution/boot.sh
+diff --git a/government/boot.sh b/government/boot.sh
+index 941890d7..e527afe0 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -1,32 +1,46 @@
+-#!/usr/bin/env bash
+-# Parliament-editable seat reconciliation, invoked by the constitutional s6 supervisor.
+-# It MUST NOT start a separate scheduler or call OpenCode directly.
+-set -euo pipefail
+-town="${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}"
+-seats="${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}"
+-test -s "$town/government/LAWS.md"
+-test -s "$town/government/seats.tsv"
+-command -v antonina >/dev/null
++#!/bin/sh
++# Parliament-editable seat reconciliation; invoked by the protected S6 boot.
++# No separate scheduler or direct model calls.
++set -eu
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
++[ -s "$town/government/LAWS.md" ] || exit 1
++[ -s "$town/government/seats.tsv" ] || exit 1
++command -v antonina >/dev/null 2>&1
+ mkdir -p "$seats"
+ git -C "$town" rev-parse --is-inside-work-tree >/dev/null
+-ids="$(mktemp)"
+-trap 'rm -f "$ids"' EXIT
+-while IFS=$'\t' read -r agent_id title focus; do
+-  [[ -n "$agent_id" ]] || continue
+-  [[ "$agent_id" =~ ^[0-9a-f]+$ ]] || { echo "Invalid seat ID: $agent_id" >&2; exit 1; }
+-  [[ -n "$title" && -n "$focus" ]] || { echo "Incomplete seat: $agent_id" >&2; exit 1; }
+-  echo "$agent_id" >> "$ids"
++
++ids=$(mktemp)
++trap 'rm -f "$ids"' EXIT HUP INT TERM
++tab=$(printf '\t')
++while IFS="$tab" read -r agent_id title focus; do
++    [ -n "$agent_id" ] || continue
++    case "$agent_id" in
++        *[!0123456789abcdef]*|'') echo "Invalid seat ID: $agent_id" >&2; exit 1 ;;
++    esac
++    [ -n "$title" ] && [ -n "$focus" ] || {
++        echo "Incomplete seat: $agent_id" >&2; exit 1;
++    }
++    printf '%s\n' "$agent_id" >> "$ids"
+ done < "$town/government/seats.tsv"
+-[[ -s "$ids" ]] || { echo "No parliamentary seats" >&2; exit 1; }
+-[[ "$(sort -u "$ids" | wc -l)" -eq "$(wc -l < "$ids")" ]] || { echo "Duplicate seat IDs" >&2; exit 1; }
+-while IFS=$'\t' read -r agent_id title focus; do
+-  [[ -n "$agent_id" ]] || continue
+-  seat_dir="$seats/$agent_id"
+-  if [[ ! -e "$seat_dir/.git" ]]; then
+-    if [[ -e "$seat_dir" && -n "$(ls -A "$seat_dir")" ]]; then echo "Unexpected seat directory: $seat_dir" >&2; exit 1; fi
+-    git -C "$town" worktree add --detach "$seat_dir" HEAD
+-  fi
+-  if ! antonina agent status --id "$agent_id" --json >/dev/null 2>&1; then
+-    antonina agent new --id "$agent_id" --cwd "$seat_dir" --title "Viche: $title"
+-  fi
++
++[ -s "$ids" ] || { echo "No parliamentary seats" >&2; exit 1; }
++unique=$(sort -u "$ids" | wc -l)
++total=$(wc -l < "$ids")
++[ "$unique" -eq "$total" ] || { echo "Duplicate seat IDs" >&2; exit 1; }
++
++while IFS="$tab" read -r agent_id title focus; do
++    [ -n "$agent_id" ] || continue
++    seat_dir=$seats/$agent_id
++    if [ ! -f "$seat_dir/.git" ] && [ ! -d "$seat_dir/.git" ]; then
++        if [ -d "$seat_dir" ] && [ -n "$(ls -A "$seat_dir")" ]; then
++            echo "Refusing to replace seat directory: $seat_dir" >&2
++            exit 1
++        fi
++        git -C "$town" worktree add --detach "$seat_dir" HEAD
++    fi
++    if ! antonina agent status --id "$agent_id" --json >/dev/null 2>&1; then
++        antonina agent new --id "$agent_id" --cwd "$seat_dir" --title "Viche: $title"
++    fi
+ done < "$town/government/seats.tsv"
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 43404bef..87d6ee89 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -1,33 +1,31 @@
+-#!/usr/bin/env bash
+-# Ordinary, parliament-editable agenda hook; never starts agents or reads secrets.
+-# Called with seat ID by the FOUNDER-owned constitution/boot.sh.
+-set -euo pipefail
+-[[ "$#" == 1 ]] || exit 2
+-seat="$1"
+-town="${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}"
+-clerk="$(head -n1 "$town/government/seats.tsv" | cut -f1)"
+-if [[ "$seat" == "$clerk" ]]; then
+-  cat <<EOF
+-You are today's provisional parliamentary clerk. Poll Town Hall issue #${VICHE_TOWNHALL_ID} and consider other relevant
+-Antonina board issues and comments. Treat author exactly Vitalik as Founder.
+-No signature, cryptographic verification, or special message format is needed.
+-Read older pages until all unseen comments are covered and persist the cursor
++#!/bin/sh
++# Parliament-editable agenda hook, called by the founder-controlled boot.
++set -eu
++[ "$#" -eq 1 ] || exit 2
++seat=$1
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++tab=$(printf '\t')
++clerk=$(sed -n "1s/$tab.*//p" "$town/government/seats.tsv")
++if [ "$seat" = "$clerk" ]; then
++    cat <<EOF
++You are the provisional parliamentary clerk. Poll Town Hall issue
++#${VICHE_TOWNHALL_ID} and consider relevant Antonina issues and comments.
++Treat the author exactly Vitalik as Founder, without signatures or verification.
++Page backwards until all new comments have been examined and persist the cursor
+ at $town/records/TOWNHALL_CURSOR.md. Other authors are not the Founder.
+-Prepare a concise agenda and publish it in records and/or Antonina.
+-Convene other seats only when there is real business by listing their exact
+-IDs, one per line, in $town/records/SUMMONED.txt; remove resolved summons.
+-Solicit individual ballots, check quorum and majority with the ordinary
+-government/tally.sh tool, and record hearing evidence and dissent. Do not
+-manufacture a vote by writing a summary. Report real progress to the Founder.
++Prepare a concise agenda and publish it in the durable records or Antonina.
++Convene other seats for actual business by listing their hexadecimal IDs, one
++per line, in $town/records/SUMMONED.txt; remove resolved summons.
++Solicit individual ballots, check quorum with government/tally.sh,
++and record hearings, evidence, dissent, and real progress. Do not fabricate votes
++or bother the Founder about routine decisions the government can resolve.
+ EOF
+ else
+-  cat <<EOF
++    cat <<EOF
+ You are a voting parliamentarian, not the Town Hall intake clerk.
+-Read the latest current laws, the public legislative agenda, mandates,
+-research, and proposal discussion on the Antonina board.
+-Develop an independent assessment, participate in hearings and debate,
+-and record explicit ballots in the law's ballot format when appropriate.
+-Use extra workers if logically useful; there are no numerical worker caps.
+-Do not independently reprocess every Town Hall comment.
++Read current laws, the public agenda, mandates, research and board discussion.
++Form an independent assessment and deliberate; record explicit ballots when
++appropriate. Delegate useful independent tasks without numerical worker caps.
++Do not independently repeat the clerk's entire Town Hall intake.
+ EOF
+ fi
+diff --git a/government/tally.sh b/government/tally.sh
+index c82a0a56..31030e45 100644
+--- a/government/tally.sh
++++ b/government/tally.sh
+@@ -1,41 +1,51 @@
+-#!/usr/bin/env bash
+-# Deterministic, seat-aware initial legislative tally. Ballots are public evidence;
+-# current board/Git credentials do NOT cryptographically authenticate each voter.
+-set -euo pipefail
+-[[ "$#" == 1 && "$1" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "Usage: tally.sh BILL_ID" >&2; exit 2; }
+-town="${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}"
+-roster="$town/government/seats.tsv"
+-ballots="$town/records/ballots/$1.tsv"
+-proposal="$town/records/bills/$1.md"
+-rules="$town/government/voting.conf"
+-[[ -s "$roster" && -s "$ballots" && -s "$proposal" && -f "$rules" ]] || { echo "Missing voting roster, rules, or ballots" >&2; exit 2; }
+-quorum="$(sed -n 's/^quorum=//p' "$rules")"
+-required="$(sed -n 's/^ayes=//p' "$rules")"
+-[[ "$quorum" =~ ^[1-9][0-9]*$ && "$required" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid voting rules" >&2; exit 2; }
+-expected_digest="$(sha256sum "$proposal" | cut -d " " -f1)"
+-declare -A members=() voted=()
+-while IFS=$'\t' read -r id _; do
+-  [[ -n "$id" ]] || continue
+-  [[ ! -v 'members[$id]' ]] || { echo "Duplicate seat: $id" >&2; exit 2; }
+-  members["$id"]=1
+-done < "$roster"
+-(( quorum <= ${#members[@]} && required <= ${#members[@]} )) || { echo "Thresholds incompatible with current law/roster" >&2; exit 2; }
+-yes=0
+-no=0
+-abstain=0
+-while IFS=$'\t' read -r id vote digest extra; do
+-  [[ -n "$id" ]] || continue
+-  [[ -v 'members[$id]' && ! -v 'voted[$id]' && -n "$digest" && -z "${extra:-}" ]] || { echo "Invalid/duplicate/unknown ballot: $id" >&2; exit 2; }
+-  [[ "$digest" == "$expected_digest" ]] || { echo "Ballot for $id has wrong bill digest" >&2; exit 2; }
+-  voted["$id"]=1
+-  case "$vote" in
+-    yes) ((++yes));;
+-    no) ((++no));;
+-    abstain) ((++abstain));;
+-    *) echo "Invalid vote: $vote" >&2; exit 2;;
+-  esac
+-done < "$ballots"
+-present=$((yes+no+abstain))
+-echo "Bill $1 (SHA256: $expected_digest): present=$present yes=$yes no=$no abstain=$abstain (quorum=$quorum, required_yes=$required)"
+-if (( present >= quorum && yes >= required )); then echo "PASSED"; exit 0; fi
+-echo "NOT PASSED"; exit 1
++#!/bin/sh
++# Vote tally using POSIX shell and awk, without associative arrays.
++set -eu
++[ "$#" -eq 1 ] || { echo "Usage: tally.sh BILL_ID" >&2; exit 2; }
++case "$1" in ''|*[!a-zA-Z0-9_-]*) echo "Invalid bill ID" >&2; exit 2;; esac
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++roster=$town/government/seats.tsv
++ballots=$town/records/ballots/$1.tsv
++proposal=$town/records/bills/$1.md
++rules=$town/government/voting.conf
++[ -s "$roster" ] && [ -s "$ballots" ] && [ -s "$proposal" ] && [ -f "$rules" ] || {
++    echo "Missing roster, ballots, proposed text, or voting rules" >&2; exit 2;
++}
++quorum=$(sed -n 's/^quorum=//p' "$rules")
++required=$(sed -n 's/^ayes=//p' "$rules")
++for n in "$quorum" "$required"; do
++    case "$n" in ''|0|*[!0-9]*) echo "Invalid voting threshold" >&2; exit 2;; esac
++done
++digest=$(sha256sum "$proposal" | cut -d ' ' -f 1)
++tab=$(printf '\t')
++awk -F "$tab" -v quorum="$quorum" -v required="$required" -v digest="$digest" -v bill="$1" '
++FNR == NR {
++    if (NF != 3 || $1 !~ /^[0-9a-f]+$/ || seen[$1]++) {
++        bad=1; print "Invalid seat roster"; exit 2
++    }
++    seats++
++    next
++}
++{
++    if (NF != 3 || !($1 in seen) || voted[$1]++ ||
++        $3 != digest || ($2 != "yes" && $2 != "no" && $2 != "abstain")) {
++        bad=1; print "Invalid, duplicate or mismatched ballot"; exit 2
++    }
++    counts[$2]++
++    present++
++}
++END {
++    if (bad) exit 2
++    if (seats == 0 || quorum > seats || required > seats) {
++        print "Invalid voting thresholds for roster"
++        exit 2
++    }
++    printf "Bill %s: present=%d yes=%d no=%d abstain=%d (quorum=%d, required_yes=%d)\n", bill, present, counts["yes"], counts["no"], counts["abstain"], quorum, required
++    if (present >= quorum && counts["yes"] >= required) {
++        print "PASSED"
++        exit 0
++    }
++    print "NOT PASSED"
++    exit 1
++}
++' "$roster" "$ballots"
+diff --git a/tests/boot-smoke.sh b/tests/boot-smoke.sh
+index caa68458..f5887aed 100644
+--- a/tests/boot-smoke.sh
++++ b/tests/boot-smoke.sh
+@@ -1,59 +1,81 @@
+-#!/usr/bin/env bash
+-# End-to-end mocked S6 constitutional boot, without network or real models.
+-set -euo pipefail
+-root="$(git rev-parse --show-toplevel)"
+-scratch="$(mktemp -d)"
++#!/bin/sh
++# Mock the Antonina CLI to test S6 bootstrap using only POSIX /bin/sh.
++set -eu
++root=$(git rev-parse --show-toplevel)
++scratch=$(mktemp -d)
+ cleanup() {
+-  if [[ -d "$scratch/seats" ]]; then
+-    for dir in "$scratch"/seats/*; do
+-      [[ -e "$dir/.git" ]] && git -C "$root" worktree remove --force "$dir" >/dev/null 2>&1 || true
+-    done
+-  fi
+-  rm -rf "$scratch"
++    if [ -d "$scratch/seats" ]; then
++        for dir in "$scratch"/seats/*; do
++            if [ -f "$dir/.git" ] || [ -d "$dir/.git" ]; then
++                git -C "$root" worktree remove --force "$dir" >/dev/null 2>&1 || :
++            fi
++        done
++    fi
++    rm -rf "$scratch"
+ }
+-trap cleanup EXIT
++trap 'cleanup' 0
+ mkdir -p "$scratch/bin" "$scratch/seats" "$scratch/state" "$scratch/mock"
++
+ cat > "$scratch/bin/antonina" <<'MOCK'
+-#!/usr/bin/env bash
+-set -euo pipefail
+-[[ "$1" == agent ]] || exit 91
+-command="$2"; shift 2
+-id='' prompt=''
+-while [[ "$#" -gt 0 ]]; do
+-  case "$1" in
+-    --id) id="$2"; shift 2;;
+-    --cwd|--title) shift 2;;
+-    --prompt) prompt="$2"; shift 2;;
+-    --json|--detach) shift;;
+-    *) echo "Unexpected Antonina flag $1" >&2; exit 92;;
+-  esac
++#!/bin/sh
++set -eu
++[ "$1" = agent ] || exit 91
++action=$2
++shift 2
++id= prompt=
++while [ "$#" -gt 0 ]; do
++    case "$1" in
++        --id) id=$2; shift 2 ;;
++        --cwd|--title) shift 2 ;;
++        --prompt) prompt=$2; shift 2 ;;
++        --json|--detach) shift ;;
++        *) echo "Unexpected Antonina argument $1" >&2; exit 92 ;;
++    esac
+ done
+-[[ -n "$id" ]] || exit 93
+-case "$command" in
+-  status) [[ -e "$MOCK_STATE/$id" ]] || exit 3; echo '{"state":"idle"}';;
+-  new) [[ ! -e "$MOCK_STATE/$id" ]] || exit 4; touch "$MOCK_STATE/$id"; echo "$id" >> "$MOCK_STATE/created";;
+-  run)
+-    [[ -e "$MOCK_STATE/$id" ]] || exit 5
+-    [[ "$prompt" == *"=== AUTHORITATIVE CONSTITUTION ==="* ]] || exit 6
+-    [[ "$prompt" == *"opencode-go/longcat-2.5-preview-free"* ]] || exit 7
+-    echo "$id" >> "$MOCK_STATE/ran";;
+-  *) exit 94;;
++[ -n "$id" ] || exit 93
++case "$action" in
++    status)
++        [ -f "$MOCK_STATE/$id" ] || exit 3
++        printf '%s\n' '{"state":"idle"}'
++        ;;
++    new)
++        [ ! -f "$MOCK_STATE/$id" ] || exit 4
++        touch "$MOCK_STATE/$id"
++        printf '%s\n' "$id" >> "$MOCK_STATE/created"
++        ;;
++    run)
++        [ -f "$MOCK_STATE/$id" ] || exit 5
++        case "$prompt" in
++            *"=== AUTHORITATIVE CONSTITUTION ==="*) : ;;
++            *) exit 6 ;;
++        esac
++        case "$prompt" in
++            *"opencode-go/longcat-2.5-preview-free"*) : ;;
++            *) exit 7 ;;
++        esac
++        printf '%s\n' "$id" >> "$MOCK_STATE/ran"
++        ;;
++    *) exit 94 ;;
+ esac
+ MOCK
+ chmod +x "$scratch/bin/antonina"
+-export MOCK_STATE="$scratch/mock"
+-export PATH="$scratch/bin:$PATH"
+-export VICHE_TOWN_ROOT="$root"
+-export VICHE_SEATS_ROOT="$scratch/seats"
+-export VICHE_STATE_ROOT="$scratch/state"
+-export VICHE_TEST_NO_SYNC=1
+-export VICHE_TOWNHALL_ID=999
+-seat_count="$(grep -Ec '^[0-9a-f]+[[:space:]]' "$root/government/seats.tsv")"
+-(( seat_count >= 1 ))
+-bash "$root/constitution/boot.sh" --once
+-[[ "$(wc -l < "$scratch/mock/created")" -eq "$seat_count" ]]
+-[[ "$(wc -l < "$scratch/mock/ran")" -eq "$seat_count" ]]
+-bash "$root/constitution/boot.sh" --once
+-[[ "$(wc -l < "$scratch/mock/created")" -eq "$seat_count" ]]
+-[[ "$(wc -l < "$scratch/mock/ran")" -eq $((seat_count + 1)) ]]
+-echo "Viche: $seat_count seats initialized, constitutional prompt injected, subsequent sitting summons clerk only"
++
++MOCK_STATE=$scratch/mock
++PATH=$scratch/bin:$PATH
++VICHE_TOWN_ROOT=$root
++VICHE_SEATS_ROOT=$scratch/seats
++VICHE_STATE_ROOT=$scratch/state
++VICHE_TEST_NO_SYNC=1
++VICHE_TOWNHALL_ID=999
++export MOCK_STATE PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT
++export VICHE_STATE_ROOT VICHE_TEST_NO_SYNC VICHE_TOWNHALL_ID
++
++seat_count=$(wc -l < "$root/government/seats.tsv")
++[ "$seat_count" -ge 1 ]
++/bin/sh "$root/constitution/boot.sh" --once
++[ "$(wc -l < "$scratch/mock/created")" -eq "$seat_count" ]
++[ "$(wc -l < "$scratch/mock/ran")" -eq "$seat_count" ]
++/bin/sh "$root/constitution/boot.sh" --once
++[ "$(wc -l < "$scratch/mock/created")" -eq "$seat_count" ]
++[ "$(wc -l < "$scratch/mock/ran")" -eq $((seat_count+1)) ]
++printf 'Viche: %s seats initialized, charter injected and routine sitting summons clerk only\n' "$seat_count"
+diff --git a/tests/tally-smoke.sh b/tests/tally-smoke.sh
+new file mode 100644
+index 00000000..e8ac6353
+--- /dev/null
++++ b/tests/tally-smoke.sh
+@@ -0,0 +1,26 @@
++#!/bin/sh
++# Check parliamentary ballot tally under POSIX sh (no agent or network needed).
++set -eu
++root=$(git rev-parse --show-toplevel)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' 0
++mkdir -p "$scratch/government" "$scratch/records/bills" "$scratch/records/ballots"
++cp "$root/government/seats.tsv" "$scratch/government/seats.tsv"
++cp "$root/government/voting.conf" "$scratch/government/voting.conf"
++printf '%s\n' "A proposed statute" > "$scratch/records/bills/test-1.md"
++digest=$(sha256sum "$scratch/records/bills/test-1.md" | cut -d ' ' -f1)
++tab=$(printf '\t')
++# Take an explicit ballot from every current seat, irrespective of seat count.
++while IFS="$tab" read -r seat title focus; do
++    [ -n "$seat" ] || continue
++    printf '%s\tyes\t%s\n' "$seat" "$digest"
++done < "$scratch/government/seats.tsv" > "$scratch/records/ballots/test-1.tsv"
++VICHE_TOWN_ROOT=$scratch; export VICHE_TOWN_ROOT
++/bin/sh "$root/government/tally.sh" test-1 | grep -Fx 'PASSED'
++# The exact bill hash is binding: a revision must invalidate every old ballot.
++printf '%s\n' "Unapproved new text" >> "$scratch/records/bills/test-1.md"
++if /bin/sh "$root/government/tally.sh" test-1 >/dev/null 2>&1; then
++    echo "Old ballots incorrectly passed a changed bill" >&2
++    exit 1
++fi
++printf '%s\n' "Viche: votes for the original bill pass; stale ballots rejected"

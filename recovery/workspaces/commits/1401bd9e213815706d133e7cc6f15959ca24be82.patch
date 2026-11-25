@@ -1,0 +1,92 @@
+commit 1401bd9e213815706d133e7cc6f15959ca24be82
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 21:30:01 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 21:30:01 2026 +0000
+
+    Surface id-less case documents instead of dropping them silently
+    
+    Review of 7bae81c noted that a dict case lacking an id was now silently omitted
+    from the index and report, where it previously failed loudly. Extract one
+    _case_documents() helper used by both paths: non-case JSON (an evidence list,
+    an empty placeholder) is skipped, but a non-empty dict without an id is named
+    on stderr so a malformed real obligation stays visible while the pass
+    continues. Regression asserts the warning and that it is not indexed.
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 15183b89..029fe114 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -13,6 +13,7 @@ import math
+ import os
+ import pathlib
+ import stat
++import sys
+ import tempfile
+ import time
+ 
+@@ -394,8 +395,7 @@ def reconcile():
+         elif not case:
+             continue
+         atomic(path, case)
+-    open_cases = [x for x in (read(p) for p in sorted(STORE.glob("*.json")))
+-                  if isinstance(x, dict) and x.get("id")]
++    open_cases = _case_documents()
+     active = [x for x in open_cases if x.get("state") == "open"]
+     atomic(STORE / "index.json", {
+         "observed_at": now, "active": [x["id"] for x in active],
+@@ -404,10 +404,31 @@ def reconcile():
+     return active
+ 
+ 
++def _case_documents():
++    """Return usable case documents, never failing the pass on foreign JSON.
++
++    The store also holds non-case documents (an evidence list, an empty
++    placeholder). Those are skipped. A dict that looks like a case but has no
++    id is malformed: skipping it silently could hide a real obligation, so it
++    is reported on stderr while the pass continues.
++    """
++    cases = []
++    for path in sorted(STORE.glob("*.json")):
++        if path.name == "index.json":
++            continue
++        document = read(path)
++        if not isinstance(document, dict) or not document:
++            continue
++        if document.get("id"):
++            cases.append(document)
++            continue
++        print("institutional-cases: case document without id: {}".format(path.name),
++              file=sys.stderr)
++    return cases
++
++
+ def report():
+-    cases = [read(p) for p in sorted(STORE.glob("*.json")) if p.name != "index.json"]
+-    return [case for case in cases
+-            if isinstance(case, dict) and case.get("id") and case.get("state") == "open"]
++    return [case for case in _case_documents() if case.get("state") == "open"]
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 2af43690..57717f4e 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -249,6 +249,15 @@ assert index["count"] == len(index["active"]), index
+ report = json.load(open(sys.argv[1] + "/reconcile-noncase.json"))["open_cases"]
+ assert all(isinstance(c, dict) and c.get("id") for c in report), report
+ PY
++# A dict that looks like a case but has no id must be surfaced, not silently
++# dropped from the index.
++printf '{"signal":"mystery","state":"open","first_seen":10}\n' \
++  > "$d/state/institutional-cases/mystery_no_id.json"
++VICHE_CASE_NOW=1800 python3 "$repo/government/institutional-cases.py" reconcile \
++  > "$d/reconcile-noid.json" 2> "$d/reconcile-noid.err"
++grep -Fq 'mystery_no_id.json' "$d/reconcile-noid.err"
++! jq -e '.active | index("mystery_no_id")' "$d/state/institutional-cases/index.json" >/dev/null 2>&1
++rm "$d/state/institutional-cases/mystery_no_id.json"
+ VICHE_CASE_NOW=1800 python3 "$repo/government/institutional-cases.py" report > "$d/report-noncase.json"
+ python3 -c 'import json,sys; cases=json.load(open(sys.argv[1]))["open_cases"]; assert all(isinstance(c,dict) and c.get("id") for c in cases), cases' "$d/report-noncase.json"
+ 

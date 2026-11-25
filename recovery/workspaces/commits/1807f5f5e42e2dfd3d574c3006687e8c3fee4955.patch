@@ -1,0 +1,139 @@
+commit 1807f5f5e42e2dfd3d574c3006687e8c3fee4955
+Author:     Founder (via Claude) <founder@viche.local>
+AuthorDate: Wed Nov 25 07:43:01 2026 +0000
+Commit:     Founder (via Claude) <founder@viche.local>
+CommitDate: Wed Nov 25 07:43:01 2026 +0000
+
+    pnp lbcert: bounded marceline load, retry-only monotone builds, sibling docs in playbook and tools
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01BbLKVJCr1wULmJfnFKd1Ju
+
+diff --git a/missions/pnp/lbcert/README.md b/missions/pnp/lbcert/README.md
+index c13813ef..cbc7eadc 100644
+--- a/missions/pnp/lbcert/README.md
++++ b/missions/pnp/lbcert/README.md
+@@ -57,6 +57,25 @@ with `ENGINE.lean = PNP_STATE_ROOT/lbcert/engine7281.lean`.
+ * `twin_publish.py HELD TWIN FILE` — PR for the negated twin of a held step through the
+   publisher's own gitctl/github/validate helpers.
+ 
++## Sibling transfer (any step)
++
++`sibremote.py STATEMENT.txt MODULE OUT.lean --imports PEqualNP.Defs` asks marceline-dev (relay op
++`sibling`, handler `~/.local/share/viche/relay/sib-handler.py`, corpus = upstream main in
++`/home/lubko/pnp-verify-2171/up2`, refreshed every 2 min) to find merged theorems with the same statement
++skeleton (numerals and binder names abstracted), swap in this statement (v1) or also remap the differing
++numerals consistently (v2), and compile each with `lake env lean`; the first that compiles is returned.
++Corpus measurement: 37% of merged theorems have a same-skeleton sibling; 7 of 14 tried pairs compiled.
++autosolve runs it for every held step without a candidate every 5 minutes; a success is written as
++`cands/GAP.lean` with status `ok sibling SOURCE` and the fast lane submits it.
++
++## Monotone-equals-general family
++
++Statements `∀ s, HasCircuitSize n f s → ∃ C, Monotone2 C ∧ C.size ≤ s ∧ ∀ x, C.eval … = f x` ("Table 2:
++for the monotone five-input f with table 0x…"). marceline-dev `monofam.py` computes the exact general
++complexity L (lb_cert at L, a circuit at L), searches an AND/OR circuit with exactly L gates, and emits
++the lb_cert lemma plus the explicit circuit; the lb-cert handler compiles it before returning it.
++No monotone circuit of size L = the statement is false (status `false`).
++
+ ## Track record and limits
+ 
+ ACCEPTED by `tools/check-lean.mjs`: L_meta_7309 (merged holdout), 5459, 8493, 8487, 8483 (pruned
+diff --git a/missions/pnp/lbcert/autosolve.py b/missions/pnp/lbcert/autosolve.py
+index 82d6ae91..c0ea7d3a 100644
+--- a/missions/pnp/lbcert/autosolve.py
++++ b/missions/pnp/lbcert/autosolve.py
+@@ -31,8 +31,8 @@ DESK = 'https://data.pequalnp.com/data/desk/gaps.json'
+ SOURCE = 'https://raw.githubusercontent.com/open-goat/pequalnp-proofs/main/lean/PEqualNP/Outside/L_meta_7281.lean'
+ SOURCE_SHA = '98c3a7192bc0d62775011eb073a212c7a2d0d9bf4da12e0e11980fd2fe002c74'
+ POLL = 45
+-REMOTE_WORKERS = 8
+-MAXSTATES = 60000      # the 512 KiB file limit is the real bound (~4.6k states for n = 8)
++REMOTE_WORKERS = 4   # marceline-dev runs at most 4 lb-cert jobs and 3 compiles at once
++MAXSTATES = 6000       # the 512 KiB file limit caps certificates at ~5k states; larger searches only burn marceline
+ os.makedirs(CANDS, exist_ok=True)
+ 
+ 
+@@ -70,6 +70,9 @@ def write_status(gid, text):
+     os.replace(tmp, os.path.join(CANDS, gid + '.status'))
+ 
+ 
++QUEUED = set()
++
++
+ def generate(g, engines):
+     gid, mod = g['id'], g['module']
+     if status(gid) is not None:
+@@ -85,6 +88,10 @@ def generate(g, engines):
+     except Exception:
+         r = {'status': 'relay_error'}
+     where = 'marceline'
++    if p.returncode == 1 and lbparse.family(g['statement']) == 'mono':
++        QUEUED.discard(gid)   # only marceline-dev builds this family: retry on a later poll
++        log('generate deferred', gid, r.get('status'), '%.0fs' % (time.time() - t0))
++        return
+     if p.returncode == 1:   # relay or handler trouble: build here, slower but independent
+         where = 'local'
+         r = {'status': 'error'}
+@@ -163,7 +170,7 @@ def main():
+     import threading
+     threading.Thread(target=sibling_loop, daemon=True).start()
+     pool = ThreadPoolExecutor(REMOTE_WORKERS)
+-    queued = set()
++    queued = QUEUED
+     while not os.path.exists(os.path.join(WORK, 'STOP')):
+         try:
+             gaps = json.loads(get(DESK))['gaps']
+diff --git a/missions/pnp/research/playbook.py b/missions/pnp/research/playbook.py
+index f5f31785..d47e8787 100644
+--- a/missions/pnp/research/playbook.py
++++ b/missions/pnp/research/playbook.py
+@@ -56,7 +56,13 @@ def guide(role):
+              "do not hand-prove them. The lb_cert generator pre-builds candidates on marceline-dev for every open step into "
+              "PNP_STATE_ROOT/lbcert/cands/GAP.lean (status in GAP.status) and the allocator fast lane submits them within one tick. "
+              "Build one yourself on marceline-dev (32 cores, ~20 s): python3 /var/lib/lubko/wd/viche/missions/pnp/lbcert/lbremote.py "
+-             "STATEMENT.txt PEqualNP.Outside.L_meta_N OUT.lean  (exit 0 written, 3 bound false, 4 too big). See missions/pnp/lbcert/README.md."]
++             "STATEMENT.txt PEqualNP.Outside.L_meta_N OUT.lean  (exit 0 written, 3 bound false, 4 too big). See missions/pnp/lbcert/README.md.",
++             "SIBLING PROOFS: 37% of merged theorems share their statement shape (numerals aside) with another merged one, and "
++             "a sibling's proof with the statement swapped compiles about half the time. The town retries this automatically "
++             "every 5 minutes while a step is held (PNP_STATE_ROOT/lbcert/cands/GAP.status says `ok sibling SOURCE`). "
++             "Run it yourself (compiled on marceline-dev): python3 /var/lib/lubko/wd/viche/missions/pnp/lbcert/sibremote.py "
++             "STATEMENT.txt PEqualNP.Outside.L_meta_N OUT.lean --imports PEqualNP.Defs  (exit 0 written, 5 no compiling sibling). "
++             "Before writing a long proof, read the newest merged sibling of the same family: it usually shows the method."]
+     if role in BOUND:
+         lines += [
+           "In your workspace, pnp-research obligations ready --current shows open dependencies; obligations show ID gives the exact type. Request with obligations request --statement TYPE --requires ID; solve with obligations solve ID BODY --async, collect with obligations collect ID. BODY is a Lean term beginning with by.",
+diff --git a/missions/pnp/tools.py b/missions/pnp/tools.py
+index 3f0c699d..9d282403 100644
+--- a/missions/pnp/tools.py
++++ b/missions/pnp/tools.py
+@@ -25,6 +25,9 @@ def inventory():
+         "lb_cert lower-bound certificate built on marceline-dev (~20 s); exit 0 written, 3 bound false, 4 too big",
+         "Statement `∀ t, HasCircuitSize n f t → K ≤ t`, `¬HasCircuitSize n f S` or its `¬ (...)` twin. "
+         "Usually already done: see PNP_STATE_ROOT/lbcert/cands/GAP.status; the allocator fast lane submits it.")
++    add("lbcert/sibremote.py", "lbcert.sibremote STATEMENT.txt PEqualNP.Outside.L_meta_N OUT.lean --imports PEqualNP.Defs",
++        "Prove the step with a merged same-shape sibling's proof, compiled on marceline-dev; exit 0 written, 5 none",
++        "Any step. Retried automatically every 5 min while held; run it after a new sibling merges.")
+     add("brief.py", "brief", "Exact leased statement, original sketch, parent cuts and siblings",
+         "At entry; before independent mathematics.")
+     add("proofs/__main__.py", "proofs find [QUERY]", "Retrieve checked analogous proofs and structural hints",
+diff --git a/records/handoffs/H-1795588200-lbgen.txt b/records/handoffs/H-1795588200-lbgen.txt
+index 3f6bc26e..fa5d1ad3 100644
+--- a/records/handoffs/H-1795588200-lbgen.txt
++++ b/records/handoffs/H-1795588200-lbgen.txt
+@@ -52,3 +52,15 @@ UPDATE 07:00Z (founder via Claude) — now part of the town, commits 853aeefc an
+ * Where credits actually come from (public contributors file): leaders' steps are mostly
+   "A step toward ..." cut steps, solved with 5–28 KB custom Lean in minutes. Sibling steps of one
+   family land in bursts with shared helper lemmas: reuse merged sibling proofs immediately.
++
++UPDATE 07:50Z (founder via Claude):
++* SIBLING TRANSFER (relay op `sibling`, missions/pnp/lbcert/sibremote.py): any held step without a
++  candidate is retried every 5 min against merged same-skeleton theorems, compiled on marceline-dev.
++  37% of merged theorems have such a sibling; 7/14 tried pairs compiled with a statement swap.
++* MONOTONE FAMILY ("Table 2: for the monotone five-input f with table 0x...", 83 open): generated and
++  compile-gated on marceline-dev (monofam.py). 30 of 35 batch-checked compile; 5 contention failures
++  are being rebuilt through the gate. L-meta-8680 went acquisition -> PR #12919 fully automatically.
++* marceline-dev load rules: at most 4 lb-cert jobs and 3 handler compiles at once (each Lean process
++  needs 3-12 GB; contention produced false compile failures). autosolve asks for <= 6000 states.
++* Agents: playbook (injected into every worker prompt) and missions.pnp.tools list lbremote and
++  sibremote. Read the newest merged sibling of a family before writing a long proof.

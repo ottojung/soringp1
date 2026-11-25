@@ -1,0 +1,71 @@
+commit 1817ef6a428402bfede4ca03ebaa712818a6ff1e
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Fri Nov 20 07:28:20 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Fri Nov 20 07:28:20 2026 +0000
+
+    Clerk: make economy-resources smoke hermetic under host load
+    
+    The full run-all suite itself raises host load above the Act 29 watch threshold
+    (per_cpu uses load5), so the "healthy" fixture intermittently reports overall=watch
+    and aborts the suite under set -e, blocking Act 31 landing of the Act 32
+    codification. This is environmental, not a resource-policy defect.
+    
+    Add VICHE_ECONOMY_LOAD_OVERRIDE JSON to economy-resources.py, matching the existing
+    NOW/FS/CGROUP test overrides, and set a low static load in the smoke test. Real
+    operation is unchanged: the override is only read when the env var is present.
+    Verified economy-resources-smoke and full tests/run-all.sh green.
+
+diff --git a/government/economy-resources.py b/government/economy-resources.py
+index 41dbecca..84e4c8fe 100644
+--- a/government/economy-resources.py
++++ b/government/economy-resources.py
+@@ -27,6 +27,8 @@ Environment
+   VICHE_TOWN_ROOT, VICHE_SEATS_ROOT, VICHE_STATE_ROOT   as elsewhere
+   VICHE_ECONOMY_NOW           epoch override (tests)
+   VICHE_ECONOMY_FS_OVERRIDE   JSON {label:{total,avail,files,ffree}} (tests)
++  VICHE_ECONOMY_LOAD_OVERRIDE JSON {load1,load5,load15,cpus?} load override (tests; keeps
++                              the smoke suite hermetic under host load spikes)
+   VICHE_ECONOMY_CGROUP        cgroup directory (default /sys/fs/cgroup)
+   VICHE_ECONOMY_JANITOR       janitor script path (default $TOWN/government/janitor.sh)
+ """
+@@ -168,11 +170,20 @@ def memory():
+ 
+ 
+ def load_average():
+-    try:
+-        one, five, fifteen = os.getloadavg()
+-    except OSError:
+-        return {"status": "unknown"}
+-    cpus = os.cpu_count() or 1
++    override = os.environ.get("VICHE_ECONOMY_LOAD_OVERRIDE")
++    if override:
++        try:
++            data = json.loads(override)
++            one, five, fifteen = (float(data[k]) for k in ("load1", "load5", "load15"))
++        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
++            return {"status": "unknown"}
++        cpus = int(data.get("cpus", os.cpu_count() or 1))
++    else:
++        try:
++            one, five, fifteen = os.getloadavg()
++        except OSError:
++            return {"status": "unknown"}
++        cpus = os.cpu_count() or 1
+     return {"load1": round(one, 2), "load5": round(five, 2), "load15": round(fifteen, 2), "cpus": cpus,
+             "per_cpu": round(five / cpus, 2)}
+ 
+diff --git a/tests/economy-resources-smoke.sh b/tests/economy-resources-smoke.sh
+index 51f096d7..bd2fbc15 100644
+--- a/tests/economy-resources-smoke.sh
++++ b/tests/economy-resources-smoke.sh
+@@ -13,7 +13,8 @@ echo "janitor: $1 complete"
+ STUB
+ export VICHE_TOWN_ROOT="$d/town" VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state" \
+   VICHE_ECONOMY_JANITOR="$d/janitor.sh" VICHE_ECONOMY_FS_OVERRIDE="$d/fs.json" VICHE_ECONOMY_CGROUP="$d/cg" \
+-  VICHE_ECONOMY_NO_DU=1 MOCK_JANITOR_LOG="$d/janitor.log" HOME="$d/home"
++  VICHE_ECONOMY_NO_DU=1 MOCK_JANITOR_LOG="$d/janitor.log" HOME="$d/home" \
++  VICHE_ECONOMY_LOAD_OVERRIDE='{"load1":0.10,"load5":0.10,"load15":0.10}'
+ NOW=1794830400
+ : > "$d/janitor.log"
+ res="python3 $repo/government/economy-resources.py"

@@ -1,0 +1,119 @@
+commit 1bb29ad84b74b5816731744ee7e5112f6214d98e
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 18:26:19 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 18:26:19 2026 +0000
+
+    Handle malformed advisory records and current read-only authorization verifier
+
+diff --git a/government/economy-models.py b/government/economy-models.py
+index 59ea33bb..9b37fe2a 100644
+--- a/government/economy-models.py
++++ b/government/economy-models.py
+@@ -133,7 +133,7 @@ def read_config():
+ 
+ 
+ def entry_model(entry):
+-    return entry if isinstance(entry, str) else entry.get("model", "")
++    return entry if isinstance(entry, str) else entry.get("model", "") if isinstance(entry, dict) else ""
+ 
+ 
+ def config_problems(entries):
+@@ -276,6 +276,9 @@ def policy():
+ 
+ 
+ def plan_order(cfg, catalogue_ids, probes, pol, current):
++    problems = config_problems(repair_entries(cfg["models"]))
++    if problems:
++        raise SystemExit("Invalid authorized model config: " + "; ".join(problems))
+     configured = [entry_model(e) for e in cfg["models"] if entry_model(e)]
+     in_catalogue = set(catalogue_ids)
+     wanted = {0: [], 1: [], 2: [], 3: []}
+@@ -408,7 +411,7 @@ def cooldown_state(models, current):
+             why = None
+             if not MODEL_ID_RE.match(model) or path.name != model.replace("/", "@") + ".json":
+                 why = "filename or model id mismatch"
+-            elif reason not in HARD_COOLDOWN_REASONS:
++            elif not isinstance(reason, str) or reason not in HARD_COOLDOWN_REASONS:
+                 why = "not a hard provider cooldown"
+             elif isinstance(until, bool) or not isinstance(until, (int, float)):
+                 why = "until is not a number"
+@@ -444,6 +447,8 @@ def soft_unhealthy(models, current):
+             except OSError:
+                 continue
+             data = load(path, {})
++            if not isinstance(data, dict):
++                continue
+             model = data.get("model")
+             agent = data.get("agent_id")
+             at = data.get("at")
+@@ -561,6 +566,11 @@ def main(argv):
+         return refresh(args)
+     if args.command == "check":
+         entries = read_config()["models"]
++        problems = config_problems(entries)
++        if problems:
++            for problem in problems:
++                print("invalid Antonina config: " + problem)
++            return 1
+         bad = violations([entry_model(e) for e in entries])
+         for first, second in bad:
+             print("tier violation: %s (%s) is ahead of %s (%s)" % (
+@@ -568,10 +578,7 @@ def main(argv):
+         missing_low = [entry_model(e) for e in entries if not isinstance(e, dict) or e.get("variant") != "low"]
+         for model in missing_low:
+             print("low reasoning variant required: " + model)
+-        problems = config_problems(entries)
+-        for problem in problems:
+-            print("invalid Antonina config: " + problem)
+-        return 1 if bad or missing_low or problems else 0
++        return 1 if bad or missing_low else 0
+     if args.command == "plan":
+         cfg = read_config()
+         ids = fetch_catalogue()
+diff --git a/tests/economy-models-smoke.sh b/tests/economy-models-smoke.sh
+index 54fda427..070cb08c 100644
+--- a/tests/economy-models-smoke.sh
++++ b/tests/economy-models-smoke.sh
+@@ -140,12 +140,14 @@ jq -e '[.cooldown_ignored[] | select(.why == "unreadable or oversized")] | lengt
+ rm -f "$d/cool"/*.json
+ 
+ # Fleet-wide soft health is a last-resort warning, never a reason to revoke authorization.
++printf '[]\n' > "$d/health/1794837500000-cccccccccccccccc.json"
++printf '{"model":"opencode/beta-free","reason":[],"until":1794880000}\n' > "$d/cool/opencode@beta-free.json"
+ printf '{"agent_id":"agent-one","model":"opencode/alpha-free","at":1794837500}\n' > "$d/health/1794837500000-aaaaaaaaaaaaaaaa.json"
+ printf '{"agent_id":"agent-two","model":"opencode/alpha-free","at":1794837550}\n' > "$d/health/1794837550000-bbbbbbbbbbbbbbbb.json"
+ VICHE_ECONOMY_NOW=1794837600 $eco refresh --probe-limit 0 | jq -e '.funding_risk == "none" and .free_available_now == 2' >/dev/null
+ jq -e '.soft_unhealthy["opencode/alpha-free"].agents == ["agent-one","agent-two"]' "$r" >/dev/null
+ jq -e '[.order[].model | select(. == "opencode/alpha-free")] | length == 1' "$r" >/dev/null
+-rm -f "$d/health"/*.json
++rm -f "$d/health"/*.json "$d/cool"/*.json
+ 
+ # The catalogue disappearing never damages the list.
+ snapshot=$(cat "$VICHE_ANTONINA_CONFIG")
+@@ -226,7 +228,7 @@ for f in "$repo"/government/*; do
+   [ -f "$f" ] || continue
+   grep -q 'antonina/config.json' "$f" || continue
+   case "$(basename "$f")" in
+-    economy-models.py|knowledge-free-dispatch.sh|MINISTRY-OF-ECONOMY.md|daily-digest.py) : ;;
++    economy-models.py|knowledge-free-dispatch.sh|knowledge-zero-billed.py|MINISTRY-OF-ECONOMY.md|daily-digest.py) : ;;
+     *) echo "unexpected global-config reference in $(basename "$f")" >&2; exit 1 ;;
+   esac
+ done
+@@ -249,6 +251,16 @@ rc=0; $eco refresh --probe-limit 0 2>/dev/null || rc=$?
+ test "$rc" -ne 0
+ test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$snapshot"
+ 
++# Invalid non-object entries must produce a controlled refusal without a rewrite.
++printf '{"models":[42]}\n' > "$VICHE_ANTONINA_CONFIG"
++snapshot=$(cat "$VICHE_ANTONINA_CONFIG")
++rc=0; $eco check > "$d/bad.out" 2>/dev/null || rc=$?
++test "$rc" -eq 1
++grep -q "invalid Antonina config" "$d/bad.out"
++rc=0; $eco refresh --probe-limit 0 2>/dev/null || rc=$?
++test "$rc" -ne 0
++test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$snapshot"
++
+ # A missing comment is repaired rather than treated as a reason to revoke.
+ printf '{"models":[{"model":"opencode/alpha-free"}]}\n' > "$VICHE_ANTONINA_CONFIG"
+ $eco refresh --probe-limit 0 >/dev/null

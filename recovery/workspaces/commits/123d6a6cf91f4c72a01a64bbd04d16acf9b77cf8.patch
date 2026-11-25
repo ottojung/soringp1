@@ -1,0 +1,256 @@
+commit 123d6a6cf91f4c72a01a64bbd04d16acf9b77cf8
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Wed Oct 21 04:59:42 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Wed Oct 21 05:01:01 2026 +0000
+
+    Executive: board-trail coverage of opaque-string originating issue ids (Act 18 §5/§7)
+    
+    parse_originating() dropped non-numeric issue ids, so an originating issue with
+    an opaque Antonina id (e.g. ErkrX8EKQJXF6fCQv5fzYl-cannon, Act 22) was invisible
+    to the §5/§7 universe. parse_issue() now keeps numeric ids as ints and opaque ids
+    as strings, with a deterministic order (numeric ascending, then opaque lexically).
+    Adds the Act 22 row to originating.tsv. Hermetic test
+    tests/board-trail-opaque-id-smoke.sh. Full suite green.
+
+diff --git a/government/board-trail-index.py b/government/board-trail-index.py
+index ce260909..66dbe332 100644
+--- a/government/board-trail-index.py
++++ b/government/board-trail-index.py
+@@ -7,7 +7,9 @@ Act 18 §5 lens input), NOT from parsing bill/LAWS prose (which mis-maps: bills
+ cite other issues as examples). For each originating issue the generator emits
+ one entry — issue, title, work, owning_office, stage, terminal_status,
+ git_only_gap — using that mapping plus the Antonina board's terminal-update
+-check.
++check. Issue ids may be opaque strings (not only numeric); they are parsed as
++strings and ordered deterministically (numeric ascending, then opaque
++lexically), so an opaque-id originating issue is not silently dropped.
+ 
+ git_only_gap is true when the underlying work is enacted/completed in Git while
+ the originating issue lacks a terminal board update — the defect class Act 18 §2
+@@ -145,9 +147,33 @@ def issue_terminal_state(issue):
+     return None
+ 
+ 
++def parse_issue(raw):
++    """Return an originating issue id as an int when it is all digits (keeping
++    the existing numeric JSON form), else the opaque string id unchanged.
++
++    Antonina issue ids may be opaque strings (e.g.
++    `ErkrX8EKQJXF6fCQv5fzYl-cannon`); a numeric-only parser silently dropped
++    them from the Act 18 §5/§7 universe."""
++    raw = raw.strip()
++    if raw.isdigit():
++        return int(raw)
++    return raw
++
++
++def issue_sort_key(issue):
++    """Deterministic order: numeric issues ascending by value, then opaque
++    string ids lexically, so the generated index is stable across runs."""
++    if isinstance(issue, int):
++        return (0, issue, "")
++    if str(issue).isdigit():
++        return (0, int(issue), "")
++    return (1, 0, str(issue))
++
++
+ def parse_originating():
+     """Return list of {issue, work_id, act, enacted_epoch, type} from the
+-    curated mapping file. Skips comments/blank/header rows."""
++    curated mapping file. Accepts opaque-string issue ids, not only numeric.
++    Skips comments/blank/header rows and rows with an empty issue id."""
+     rows = []
+     for line in read(ORIGINATING).splitlines():
+         line = line.rstrip("\n")
+@@ -156,9 +182,8 @@ def parse_originating():
+         cols = line.split("\t")
+         if len(cols) < 5 or cols[0].strip() == "issue":
+             continue
+-        try:
+-            issue = int(cols[0])
+-        except ValueError:
++        issue = parse_issue(cols[0])
++        if issue == "":
+             continue
+         rows.append({
+             "issue": issue,
+@@ -200,7 +225,7 @@ def build_index():
+         by_issue.setdefault(row["issue"], []).append(row)
+ 
+     entries = []
+-    for num in sorted(by_issue):
++    for num in sorted(by_issue, key=issue_sort_key):
+         work_list = by_issue[num]
+         enacted = any(w["type"] == "law" and w["enacted_epoch"] > 0 for w in work_list)
+         try:
+diff --git a/records/BOARD-TRAIL-OPAQUE-IDS-2026-10-21.md b/records/BOARD-TRAIL-OPAQUE-IDS-2026-10-21.md
+new file mode 100644
+index 00000000..d58a8afc
+--- /dev/null
++++ b/records/BOARD-TRAIL-OPAQUE-IDS-2026-10-21.md
+@@ -0,0 +1,70 @@
++# Board-trail coverage of opaque-string originating issue ids
++
++*Executive liaison c1a00002, 2026-10-21, per `records/summons/c1a00002.md`.
++Act 18 §5/§7 maintenance; ordinary law (Acts 2/6/18), not a constitutional
++change.*
++
++## Defect
++
++`records/board-trail/originating.tsv` is the curated §5/§7 cross-check input.
++`government/board-trail-index.py:parse_originating()` parsed the issue column
++with `int(cols[0])` and silently `continue`d on `ValueError`, so an originating
++issue whose Antonina id is an **opaque string** could not be represented and was
++omitted from the Founder-visible index. The Pre-Registered Prediction and
++Calibration Act (Act 22) originates from the opaque id
++`ErkrX8EKQJXF6fCQv5fzYl-cannon`, so it was invisible to the §5/§7 universe.
++
++## Fix
++
++- `government/board-trail-index.py`: new `parse_issue()` keeps a numeric id as an
++  `int` (preserving the existing JSON form and consumers) and returns an opaque id
++  unchanged; `parse_originating()` no longer drops non-numeric rows. A new
++  `issue_sort_key()` orders numeric ids ascending by value, then opaque ids
++  lexically, so the generated index is deterministic.
++- `government/board-trail-check.sh` (§5 lens): already parsed the issue column as
++  a string (`IFS= read -r issue`, `--id "$issue"`, `issue: $issue`), so it needed
++  no change — verified, not assumed.
++- `records/board-trail/originating.tsv`: added
++  `ErkrX8EKQJXF6fCQv5fzYl-cannon  prediction-calibration-act  22  1792554900  law`
++  and documented that the issue column accepts opaque ids. No other Viche
++  institutional originating issue has an opaque id (the remaining opaque board
++  ids belong to external QAI Proviral / Journal 3 / Along projects).
++
++## Test evidence
++
++`tests/board-trail-opaque-id-smoke.sh` (new, hermetic — mock board, scratch town)
++runs both instruments on a fixture with a numeric row (400) and an opaque row
++(`ErkrX8EKQJXF6fCQv5fzYl-cannon`):
++
++- §7 index: 2 entries; the opaque id is present, `board_readable:true`,
++  `terminal_status:"verification:confirmed"`, `git_only_gap:false`; the numeric
++  row is unchanged (number, genuine gap); order is numeric-then-opaque.
++- §5 lens: the opaque id is classified (`terminal:1`); the numeric row is `0`.
++- §5 measurement: `completed_total 2`, `terminal_reached 1`, `fraction_terminal 0.5`.
++
++Existing `board-trail-index-smoke.sh`, `board-trail-smoke.sh`,
++`board-trail-terminal-agreement-smoke.sh`, `board-trail-board-error-smoke.sh` and
++`board-trail-refresh-smoke.sh` still pass. Full suite `sh tests/run-all.sh` green.
++
++## Live result and Act 18 §8
++
++Regenerated against the live board: the index now lists **8 originating issues,
++all terminal, 0 Git-only gaps**; the §5 lens agrees (`terminal:1` for the opaque
++id, `fraction_terminal 1.0`).
++
++The Clerk's enactment transition on the opaque issue
++("Stage: enactment (terminal)") does **not** satisfy the Act 18 §3.4 classifier
++(no stage marker phrase, no declared terminal token), so the issue initially
++appeared as a Git-only gap. A compliant terminal update was posted
++(`deferred`: enactment verified; ledger/scorer/gatekeeper implementation pending;
++review at the next measurement window), bringing the issue to a terminal state
++under Act 18 §8.
++
++## Honest limits
++
++- Numeric ids remain JSON numbers and opaque ids JSON strings; the index's
++  `issue` field is therefore mixed-type by design, matching the §5 lens's
++  string form for numeric ids and preserving existing numeric consumers.
++- The classifier's requirement of an explicit terminal token means a natural
++  "enacted (terminal)" transition is not recognised; the compliant-token
++  vocabulary is a matter for the Legislature (Act 18 §3.4), not this fix.
+diff --git a/records/board-trail/originating.tsv b/records/board-trail/originating.tsv
+index dfea52f1..98ab9264 100644
+--- a/records/board-trail/originating.tsv
++++ b/records/board-trail/originating.tsv
+@@ -9,7 +9,8 @@
+ # is the preferred input; this mapping is the fallback.
+ #
+ # Columns (TAB-separated):
+-#   issue        originating board issue number
++#   issue        originating board issue id (numeric, or an opaque string id
++#                such as ErkrX8EKQJXF6fCQv5fzYl-cannon)
+ #   work_id      bill / task identifier
+ #   act          Act number for an enacted law ("-" for a draft/task)
+ #   enacted_epoch epoch seconds when the underlying work was enacted/completed
+@@ -24,3 +25,4 @@
+ 310	detector-calibration-act	20	1792454400	law
+ 313	office-continuity-act	19	1792417200	law
+ 314	change-quality-gate-act	21	1792553100	law
++ErkrX8EKQJXF6fCQv5fzYl-cannon	prediction-calibration-act	22	1792554900	law
+diff --git a/tests/board-trail-opaque-id-smoke.sh b/tests/board-trail-opaque-id-smoke.sh
+new file mode 100755
+index 00000000..93191400
+--- /dev/null
++++ b/tests/board-trail-opaque-id-smoke.sh
+@@ -0,0 +1,69 @@
++#!/bin/sh
++# Act 18 §5/§7 — an originating issue with an OPAQUE-STRING Antonina id must be
++# included and classified by the board-trail index/lens, not silently skipped
++# (the numeric-only parser dropped e.g. ErkrX8EKQJXF6fCQv5fzYl-cannon). Also
++# pins the deterministic order: numeric ids ascending, then opaque ids lexically.
++# Hermetic: mock board, scratch town.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++town=$scratch/town
++mkdir -p "$town/government" "$town/records/board-trail" "$scratch/bin" "$scratch/state"
++cp "$repo/government/board-trail-index.py" "$town/government/"
++cp "$repo/government/board-trail-check.sh" "$town/government/"
++cp "$repo/government/judiciary-measurements.py" "$town/government/"
++
++cat > "$town/records/board-trail/originating.tsv" <<'MAP'
++# fixture mapping (numeric then opaque)
++400	numeric-law	-	1000	law
++ErkrX8EKQJXF6fCQv5fzYl-cannon	opaque-law	-	1000	law
++MAP
++
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++id=; prev=
++for a in "$@"; do [ "$prev" = "--id" ] && id=$a; prev=$a; done
++case "$id" in
++400) printf '%s\n' '{"title":"numeric","messages":[]}' ;;
++ErkrX8EKQJXF6fCQv5fzYl-cannon) printf '%s\n' '{"title":"opaque","messages":[{"author":"c","createdAt":"1970-01-01T00:20:00.000Z","body":"Stage marker: verification. verification:confirmed."}]}' ;;
++*) printf '%s\n' '{"title":"unknown","messages":[]}' ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++
++PATH="$scratch/bin:$PATH"
++VICHE_TOWN_ROOT=$town
++VICHE_STATE_ROOT=$scratch/state
++VICHE_BOARD_TRAIL_RETRIES=3
++VICHE_BOARD_TRAIL_BACKOFF=0
++VICHE_BRANCH_NOW=2000000000
++export PATH VICHE_TOWN_ROOT VICHE_STATE_ROOT VICHE_BOARD_TRAIL_RETRIES
++export VICHE_BOARD_TRAIL_BACKOFF VICHE_BRANCH_NOW
++
++python3 "$town/government/board-trail-index.py" >/dev/null
++idx="$town/records/board-trail/index.json"
++
++# The opaque id is present (not skipped), classified, and terminal.
++jq -e '.issues | length == 2' "$idx" >/dev/null
++jq -e '.issues[] | select(.issue=="ErkrX8EKQJXF6fCQv5fzYl-cannon")
++       | .board_readable==true and .terminal_status=="verification:confirmed" and .git_only_gap==false' "$idx" >/dev/null
++jq -e '.issues[] | select(.issue=="ErkrX8EKQJXF6fCQv5fzYl-cannon") | .work | test("opaque-law")' "$idx" >/dev/null
++# Numeric row is unchanged: still a number, and a genuine gap.
++jq -e '.issues[] | select(.issue==400) | .board_readable==true and .git_only_gap==true' "$idx" >/dev/null
++# Deterministic order: numeric ascending first, then opaque lexically.
++jq -e '.issues[0].issue==400 and .issues[1].issue=="ErkrX8EKQJXF6fCQv5fzYl-cannon"' "$idx" >/dev/null
++
++# §5 lens includes the opaque id too.
++sh "$town/government/board-trail-check.sh" > "$scratch/s5"
++jq -e 'select(.issue=="ErkrX8EKQJXF6fCQv5fzYl-cannon") | .terminal==1 and .board_readable==true' "$scratch/s5" >/dev/null
++jq -e 'select(.issue=="400") | .terminal==0' "$scratch/s5" >/dev/null
++
++# The §5 measurement counts the opaque issue in its universe.
++python3 "$town/government/judiciary-measurements.py" >/dev/null
++report=$scratch/state/branches/judiciary-measurements.json
++jq -e '.board_trail.completed_total==2 and .board_trail.readable_total==2 and .board_trail.terminal_reached==1 and .board_trail.fraction_terminal==0.5' "$report" >/dev/null
++jq -e '(.board_trail.git_only_gaps|length)==1 and .board_trail.git_only_gaps[0].issue=="400"' "$report" >/dev/null
++
++echo 'Act 18 opaque-id board-trail smoke passed'

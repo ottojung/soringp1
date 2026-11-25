@@ -1,0 +1,56 @@
+commit 1f3ae07a5086961f0d0caea86d306ded1e30eb80
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 17 05:17:16 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 17 05:17:16 2026 +0000
+
+    Janitor: per-path growth attribution (diff successive inventories)
+    
+    inventory now compares against the previous inventory and writes growth.tsv
+    (top 20 paths by size delta) plus a growth_top log line; report shows the
+    top growers. Implements the prevention recommendation in
+    records/JANITOR-OPERATIONAL-REPORT-2026-10-17.md (Act 12.12). Read-only.
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index 8a32f211..388de828 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -322,6 +322,8 @@ incident() {
+ inventory() {
+     inv=$jstate/inventory.tsv
+     tmp_inv=$jstate/tmp/inventory.tsv
++    prev=$jstate/tmp/inventory.prev.tsv
++    if [ -f "$inv" ]; then cp "$inv" "$prev" 2>/dev/null || : > "$prev"; else : > "$prev"; fi
+     printf 'ts\thost\tpath\tsize_kb\tmtime\tage_days\tis_git\tuncommitted\tunpushed\tclass\n' > "$tmp_inv"
+     log_append "$jstate/actions.log" "$ts inventory begin min_kb=$inventory_min_kb"
+     for root in /workspace /home/lubko /var/lib/lubko/wd /tmp/opencode; do
+@@ -350,6 +352,18 @@ inventory() {
+     done
+     mv "$tmp_inv" "$inv"
+     rotate "$inv"
++    if [ -s "$prev" ]; then
++        grow=$jstate/growth.tsv
++        printf 'ts\tpath\tprev_kb\tnow_kb\tdelta_kb\n' > "$grow"
++        awk -F'\t' 'NR==FNR { if (FNR>1) old[$3]=$4; next } FNR>1 && ($3 in old) { d=$4-old[$3]; if (d!=0) printf "%s\t%s\t%s\t%s\t%d\n", $1, $3, old[$3], $4, d }' "$prev" "$inv" \
++            | sort -t"$(printf '\t')" -k5,5nr | head -n 20 >> "$grow"
++        top=$(tail -n +2 "$grow" | head -n 1)
++        if [ -n "$top" ]; then
++            tpath=$(printf '%s' "$top" | cut -f2)
++            tdelta=$(printf '%s' "$top" | cut -f5)
++            log_append "$jstate/actions.log" "$ts inventory growth_top=$tpath delta_kb=$tdelta"
++        fi
++    fi
+     n=$(wc -l < "$inv" 2>/dev/null || printf '0')
+     log_append "$jstate/actions.log" "$ts inventory end entries=$n"
+     printf 'janitor: inventory complete, %s entries (min %s KB)\n' "$n" "$inventory_min_kb"
+@@ -500,6 +514,10 @@ case "$mode" in
+             printf 'recent alerts:\n'
+             tail -n 8 "$jstate/alerts.log"
+         fi
++        if [ -f "$jstate/growth.tsv" ]; then
++            printf 'top growers (KB):\n'
++            head -n 11 "$jstate/growth.tsv"
++        fi
+         ;;
+     status)
+         if [ -f "$jstate/status" ]; then

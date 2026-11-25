@@ -1,0 +1,424 @@
+commit 1f010f394e99925faecb8880170a202955a0c846
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Thu Oct 15 16:35:54 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Thu Oct 15 16:35:54 2026 -0700
+
+    Make institutional failure observable and require independent oversight (#19)
+    
+    * Detect stalled Kawun delivery independently of AI and durable incident evidence
+    
+    * Dispatch independent substantive auditor on incidents and periodic blind-spot review
+    
+    * Invoke deterministic watchdog and independent audit each governance cycle
+    
+    * Make adverse audit findings mandatory Clerk and parliamentary business
+    
+    * Document independent evidence-based institutional oversight and response protocol
+    
+    * Test autonomous watchdog, auditor isolation, overdue hearing and recovery
+    
+    * Exercise institution watchdog and auditor in CI
+    
+    * Mock board telemetry and isolate periodic audit from bootstrap scheduling test
+    
+    * Escalate unanswered oversight incidents visibly to Town Hall once per incident
+    
+    * Verify overdue parliamentary notice is published once, even across cycles
+    
+    * Document automatic one-time Founder-visible escalation during parliamentary silence
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index d765156e..071a55c2 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -31,6 +31,8 @@ jobs:
+         run: dash tests/seat-liveness-smoke.sh
+       - name: Exercise independent executive delivery
+         run: dash tests/executive-cycle-smoke.sh
++      - name: Exercise independent institutional oversight
++        run: dash tests/oversight-smoke.sh
+       - name: Exercise targeted parliamentary summons
+         run: dash tests/summons-smoke.sh
+       - name: Check sampler TSV with zero agents
+diff --git a/government/OVERSIGHT.md b/government/OVERSIGHT.md
+new file mode 100644
+index 00000000..4357107d
+--- /dev/null
++++ b/government/OVERSIGHT.md
+@@ -0,0 +1,24 @@
++# Institutional oversight: detection, inquiry, and correction
++
++## Authority and separation
++
++This implementation executes **existing** Founding Acts 4 (independent audit), 5 (durability), 8 (quality, timeliness, Founder attention) and 9 (Viche/Kawun only). It does not amend the Constitution or enact new legislation. Parliament can revise it by ordinary law.
++
++- **Watchdog** (`government/oversight-watch.sh`): deterministic, invoked each ten-minute government reconciliation, independent of the Clerk, executive, Auditor, and model provider. Writes readable, durable observations and a current incident into the host's persistent Viche state. Does not edit Git working trees, close board issues, or judge wrongdoing.
++- **Independent Auditor** (`government/audit-cycle.sh`): autonomously dispatched for an open incident or a periodic six-hour sample when the provider permits; retains its own seat and constitutional model restriction. Must verify actual outcomes and investigate measurement blind spots, not rely on executive self-reports.
++- **Clerk/Parliament** (`government/sitting.sh`): receive active oversight incidents **as mandatory agenda items**, independently of Founder communications. The Clerk coordinates evidence and parliamentary remedies, not executive task selection.
++- **Executive**: remains independent, accountable to outcomes, and can correct operational shortcomings under existing law without parliamentary ceremony.
++
++## Measured signs (not performance quotas)
++
++First-page open Kawun issue count is a **lower bound** based on titles (`Kawun`, `kawunapp`, `skrynia-apps`). If unreadable, create a telemetry incident rather than guessing there is no work. Agent state and last activity come from Antonina. The age of the **local tracked** Kawun main Git commit is a weak leading indicator, not proof of deployment or completion.
++
++An open backlog plus a failed executive, half an hour of non-running inactivity, two hours of apparent running without recent activity, or 24 hours without a local main commit triggers an **inquiry**, not punishment. Missing source telemetry also triggers investigation. The auditor must consider progress on difficult work, release branches, genuine external blockers and false positives. These are review thresholds, **not ceilings on agent work or arbitrary task deadlines**.
++
++## Durable feedback and anti-capture
++
++Persistent evidence is under `${VICHE_STATE_ROOT}/oversight/`: `observations.tsv`, current `incident.json`, `history.jsonl`, auditor dispatch events, and `hearings/INCIDENT_ID.json`. The clock-based incident ID is its `first_seen` Unix timestamp. The Clerk must link a published Git/board hearing with a JSON acknowledgement containing `{"incident_id": ID, "evidence_ref": "URL-or-commit"}`. Acknowledgment cannot mark failure resolved. If no hearing is recorded within two hours, `parliamentary_response_overdue` becomes true and escalation is logged. A single deduplicated notice is also posted to Town Hall #\`VICHE_TOWNHALL_ID\` if the board is accessible, including during AI-provider outages; this also appears in the Clerk's next mandatory agenda.
++
++Watchdog automatically clears an incident only when **its measured signals** disappear, with closure explicitly marked as requiring independent outcome verification. It may reopen when poor delivery recurs. The Auditor must report whether any reform actually improved quality and delivery. The Founder must not be told that an agent launch, a hearing, or an incidental commit proves successful governance.
++
++The watchdog's on-box state survives S6 and container restarts. Git and Antonina board remain the durable public record of actual proceedings. Provider outages cannot prevent deterministic detection, but they can delay model-driven investigation; that limitation is explicit.
+diff --git a/government/audit-cycle.sh b/government/audit-cycle.sh
+new file mode 100644
+index 00000000..df14a2ea
+--- /dev/null
++++ b/government/audit-cycle.sh
+@@ -0,0 +1,64 @@
++#!/bin/sh
++# The independent Audit Member investigates outcomes without Clerk or executive summons.
++set -eu
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
++root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/oversight
++charter=${VICHE_CONSTITUTION:?authoritative Founder charter required}
++now=${VICHE_OVERSIGHT_NOW:-$(date +%s)}
++id=c1a00008
++[ -s "$charter" ] && [ -d "$seats/$id" ] || exit 1
++[ -f "$root/observations.tsv" ] || exit 0
++# Never dispatch a second run over a parliamentary sitting.
++if grep -Fxq "$id" "$town/records/SUMMONED.txt" 2>/dev/null; then exit 0; fi
++meta=$(antonina agent status --id "$id" --json)
++kind=$(printf '%s\n' "$meta" | jq -r '.state')
++case "$kind" in running|failed) exit 0;; idle|succeeded) :;; *) exit 1;; esac
++model=$(printf '%s\n' "$meta" | jq -r '.model // empty')
++variant=$(printf '%s\n' "$meta" | jq -r '.variant // empty')
++[ "$model" = opencode-go/longcat-2.5-preview-free ] && [ "$variant" = low ] ||
++    { echo 'Auditor: unauthorized model, refusing dispatch' >&2; exit 1; }
++
++# Investigate an incident at least every half hour; also run independent
++# broad audits at least once every six hours when there is no incident.
++incident=no
++cadence=21600
++if [ -s "$root/incident.json" ]; then incident=yes; cadence=1800; fi
++last=0
++if [ -s "$root/last-audit-dispatch" ]; then last=$(cat "$root/last-audit-dispatch"); fi
++case "$last" in ''|*[!0-9]*) last=0;; esac
++[ $((now-last)) -ge "$cadence" ] || exit 0
++
++evidence='No active incident; review sampled observations and seek blind spots.'
++if [ "$incident" = yes ]; then evidence=$(cat "$root/incident.json"); fi
++prompt=$(cat <<EOF
++You are the independent Viche Audit Member under Act 4, accountable to
++Parliament and the Founder, not to the executive or Clerk. Independently audit
++whether Viche is making the Founder happier: quality of finished Kawun work,
++timeliness, and conservation of Founder attention (Acts 8 and 9). Examine
++actual Git changes, tests, merges, deployment, live owners and board issues.
++An agent being alive or writing a report is NOT evidence of useful delivery.
++Do not equate number of commits or a stale local main checkout with success.
++Separate verified evidence, uncertainty, and mere leading indicators.
++
++=== AUTHORITATIVE CONSTITUTION ===
++$(cat "$charter")
++=== END AUTHORITATIVE CONSTITUTION ===
++
++Current deterministic watchdog evidence:
++$evidence
++
++Inspect the complete, current ordinary laws at $town/government/LAWS.md and
++oversight guidance at $town/government/OVERSIGHT.md.
++Independently investigate adverse signals and limitations, publish reproducible
++findings and a practical correction with an owner. If necessary, call for a
++parliamentary inquiry; the Clerk MUST consider active incidents at each sitting.
++Check previous corrections after subsequent evidence and hold Parliament
++accountable if it ignores the issue. Do not merely ask the executive whether
++it thinks it is effective. Use Antonina and only its constitutionally allowed
++free model. Never perform unrelated projects. This is an audit, not a vote.
++EOF
++)
++antonina agent run --id "$id" --cwd "$seats/$id" --prompt "$prompt" --detach
++printf '%s\n' "$now" > "$root/last-audit-dispatch"
++printf '%s\t%s\taccepted_not_verified\n' "$now" "$incident" >> "$root/audit-dispatches.tsv"
+diff --git a/government/boot.sh b/government/boot.sh
+index 25e6f792..0ceea40e 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -68,3 +68,14 @@ fi
+ if [ -f "$town/government/executive-cycle.sh" ]; then
+     /bin/sh "$town/government/executive-cycle.sh" || echo "Viche: executive cycle failed" >&2
+ fi
++
++# Deterministic oversight continues even when every AI session is unavailable.
++# Failure of telemetry/auditing must not prevent unrelated reconciliation.
++if [ -f "$town/government/oversight-watch.sh" ]; then
++    /bin/sh "$town/government/oversight-watch.sh" ||
++        echo "Viche: watchdog cycle failed; investigate monitoring coverage" >&2
++fi
++if [ -f "$town/government/audit-cycle.sh" ]; then
++    /bin/sh "$town/government/audit-cycle.sh" ||
++        echo "Viche: independent audit scheduling failed" >&2
++fi
+diff --git a/government/oversight-watch.sh b/government/oversight-watch.sh
+new file mode 100644
+index 00000000..83a808cd
+--- /dev/null
++++ b/government/oversight-watch.sh
+@@ -0,0 +1,105 @@
++#!/bin/sh
++# Deterministic institutional watchdog: runs without AI, Clerk, or executive consent.
++# An alert is a mandatory investigation, NOT a judgment of misconduct.
++set -eu
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/oversight
++kawun=${VICHE_KAWUN_REPO:-/workspace/skrynia-apps}
++now=${VICHE_OVERSIGHT_NOW:-$(date +%s)}
++mkdir -p "$root/hearings"
++umask 077
++case "$now" in ''|*[!0-9]*) echo 'Invalid watchdog clock' >&2; exit 2;; esac
++
++# Read the actual Antonina board, rather than inferring work from agent activity.
++board_ok=true
++board=$(antonina board list --state open --page 1 --json 2>"$root/board-error.log") || board_ok=false
++open=0
++if [ "$board_ok" = true ]; then
++    open=$(printf '%s\n' "$board" | jq -er '[.[] | select((.title // "") | test("Kawun|kawunapp|skrynia-apps"; "i"))] | length') || board_ok=false
++fi
++
++agent_ok=true
++meta=$(antonina agent status --id c1a00002 --json 2>"$root/agent-error.log") || agent_ok=false
++mode=unknown
++reason=unknown
++age=-1
++if [ "$agent_ok" = true ]; then
++    mode=$(printf '%s\n' "$meta" | jq -er '.state') || agent_ok=false
++    reason=$(printf '%s\n' "$meta" | jq -r '.backend_error.classification // "none"')
++    last=$(printf '%s\n' "$meta" | jq -r '(.last_activity_at // 0) | floor')
++    case "$last" in ''|*[!0-9]*) last=0;; esac
++    if [ "$last" -gt 0 ] && [ "$last" -le "$now" ]; then age=$((now-last)); fi
++fi
++
++# Git is a *leading signal*, not proof of correct completion.
++# A stale local tracking branch is explicitly only a local observation.
++main_age=-1
++if [ -d "$kawun/.git" ]; then
++    last_commit=$(git -C "$kawun" log -1 --format=%ct refs/remotes/origin/main 2>/dev/null) || last_commit=
++    case "$last_commit" in ''|*[!0-9]*) :;; *)
++        if [ "$last_commit" -le "$now" ]; then main_age=$((now-last_commit)); fi
++    ;; esac
++fi
++
++signals=
++if [ "$board_ok" != true ] || [ "$agent_ok" != true ]; then
++    signals=telemetry_unavailable
++elif [ "$open" -gt 0 ]; then
++    if [ "$mode" = failed ]; then signals=executive_failed; fi
++    if [ "$mode" != running ] && [ "$mode" != failed ] && [ "$age" -ge 1800 ]; then
++        signals=${signals:+$signals,}executive_inactive
++    fi
++    if [ "$mode" = running ] && [ "$age" -ge 7200 ]; then
++        signals=${signals:+$signals,}running_without_recent_activity
++    fi
++    if [ "$main_age" -ge 86400 ]; then
++        signals=${signals:+$signals,}no_recent_main_commit
++    fi
++fi
++
++printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$open" "$mode" "$age" "$main_age" "$reason" "${signals:-clear}" >> "$root/observations.tsv"
++old=$root/incident.json
++if [ -z "$signals" ]; then
++    if [ -s "$old" ]; then
++        jq -c --argjson now "$now" '. + {closed_at:$now,closure:"signals_cleared_requires_auditor_verification"}' "$old" >> "$root/history.jsonl"
++        rm -f "$old"
++    fi
++    exit 0
++fi
++
++first=$now
++if [ -s "$old" ]; then
++    prior=$(jq -r '.first_seen // 0' "$old") || prior=0
++    case "$prior" in ''|*[!0-9]*) :;; *) if [ "$prior" -gt 0 ]; then first=$prior; fi;; esac
++fi
++hearing=$root/hearings/$first.json
++answered=false
++if [ -s "$hearing" ]; then
++    if jq -e --argjson id "$first" '.incident_id == $id and (.evidence_ref | type == "string" and length > 0)' "$hearing" >/dev/null 2>&1; then
++        answered=true
++    fi
++fi
++overdue=false
++if [ "$answered" = false ] && [ $((now-first)) -ge 7200 ]; then overdue=true; fi
++temp=$(mktemp "$root/incident.XXXXXXXX")
++jq -n --argjson first "$first" --argjson now "$now" --arg signals "$signals" \
++   --argjson count "$open" --arg mode "$mode" --arg error "$reason" \
++   --argjson agent_age "$age" --argjson git_age "$main_age" \
++   --argjson board_ok "$board_ok" --argjson agent_ok "$agent_ok" \
++   --argjson answered "$answered" --argjson overdue "$overdue" \
++   '{first_seen:$first,observed_at:$now,signals:($signals|split(",")),open_kawun_issues_first_page:$count,executive_state:$mode,executive_error:$error,executive_last_activity_age_seconds:$agent_age,local_main_commit_age_seconds:$git_age,board_access_ok:$board_ok,agent_status_ok:$agent_ok,parliamentary_hearing_recorded:$answered,parliamentary_response_overdue:$overdue,assessment:"investigation_required_not_proof_of_misconduct"}' > "$temp"
++mv -f "$temp" "$old"
++if [ "$overdue" = true ]; then
++    printf '%s\t%s\tunanswered oversight incident\n' "$now" "$first" >> "$root/escalations.tsv"
++    # Keep the Founder informed even if the model provider cannot run Parliament.
++    marker=$root/escalated-$first
++    if [ ! -e "$marker" ] && [ -n "${VICHE_TOWNHALL_ID:-}" ]; then
++        notice="Viche oversight incident $first has received no parliamentary hearing for two hours. Measured signs: $signals; visible open Kawun issues: $open; executive state: $mode ($reason). Investigation required, not a misconduct verdict. Parliament has this on its mandatory agenda. No routine Founder action requested."
++        if antonina board comment --id "$VICHE_TOWNHALL_ID" --author "Viche watchdog" --body "$notice" >/dev/null 2>&1; then
++            printf '%s\n' "$now" > "$marker"
++        else
++            echo 'Viche watchdog: Town Hall notice failed; will retry later' >&2
++        fi
++    fi
++fi
++printf 'Viche oversight: %s (incident %s, unanswered=%s)\n' "$signals" "$first" "$overdue" >&2
+diff --git a/government/sitting.sh b/government/sitting.sh
+index cb91d464..3801d673 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -67,3 +67,27 @@ as a blocker rather than inventing or repeating old work.
+ EOF
+     fi
+ fi
++
++# A watchdog incident is mandatory parliamentary business, even when Town Hall
++# has no new Founder messages. This hook is ordinary law, not constitutional code.
++if [ "$seat" = "$clerk" ]; then
++    oversight=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/oversight
++    if [ -s "$oversight/incident.json" ]; then
++        cat <<EOF
++=== MANDATORY OPEN OVERSIGHT INQUIRY ===
++$(cat "$oversight/incident.json")
++=== END OVERSIGHT INCIDENT ===
++Do not adjourn for "no business": independently investigate this open incident.
++Examine the auditor's findings and actual Kawun outcomes, convene an inquiry
++and summon needed members for evidence or corrective legislation. Require
++a concrete corrective action, its owner and a follow-up evaluation date.
++For incident first_seen ID from JSON, publish a real hearing record on the
++Antonina board or in a merged Git record, then write
++$oversight/hearings/ID.json containing {"incident_id":ID,"evidence_ref":"URL-or-commit"}.
++A hearing record is an acknowledgment, NEVER proof the failure is resolved.
++The independent watchdog will flag non-response after two hours and must not
++silently close unresolved audit findings. Do not fabricate proceedings or
++require Founder attention for routine technical corrections.
++EOF
++    fi
++fi
+diff --git a/tests/boot-smoke.sh b/tests/boot-smoke.sh
+index ff3305c4..fecbf3a3 100644
+--- a/tests/boot-smoke.sh
++++ b/tests/boot-smoke.sh
+@@ -25,6 +25,7 @@ git clone --quiet --no-hardlinks "$root" "$town"
+ cat > "$scratch/bin/antonina" <<'MOCK'
+ #!/bin/sh
+ set -eu
++if [ "$1" = board ] && [ "$2" = list ]; then echo "[]"; exit 0; fi
+ [ "$1" = agent ] || exit 91
+ action=$2
+ shift 2
+@@ -77,6 +78,9 @@ VICHE_TOWNHALL_ID=999
+ export MOCK_STATE PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT
+ export VICHE_STATE_ROOT VICHE_TEST_NO_SYNC VICHE_TOWNHALL_ID
+ 
++# Periodic broad audit is separately tested. Suppress its timer in bootstrap smoke.
++mkdir -p "$scratch/state/oversight"
++date +%s > "$scratch/state/oversight/last-audit-dispatch"
+ seat_count=$(wc -l < "$town/government/seats.tsv")
+ [ "$seat_count" -ge 1 ]
+ /bin/sh "$town/constitution/boot.sh" --once
+diff --git a/tests/oversight-smoke.sh b/tests/oversight-smoke.sh
+new file mode 100644
+index 00000000..03a17653
+--- /dev/null
++++ b/tests/oversight-smoke.sh
+@@ -0,0 +1,91 @@
++#!/bin/sh
++# Hermetic test of independent, clocked failure detection and auditor dispatch.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/town/government" "$scratch/town/records" "$scratch/state" "$scratch/seats/c1a00008"
++printf 'authoritative fixture\n' > "$scratch/charter"
++: > "$scratch/town/records/SUMMONED.txt"
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++"board comment")
++    printf "posted\\n" >> "$NOTICES"
++    ;;
++"board list")
++    printf '%s\n' "$MOCK_BOARD"
++    ;;
++"agent status")
++    case "$*" in
++        *c1a00008*) printf '{"state":"%s","model":"%s","variant":"%s"}\n' "$AUDIT_STATE" "$MODEL" "$VARIANT";;
++        *) printf '{"state":"%s","last_activity_at":%s,"backend_error":{"classification":"%s"}}\n' "$EXEC_STATE" "$LAST" "$ERROR";;
++    esac
++    ;;
++"agent run")
++    case "$*" in
++        *"authoritative fixture"*) printf 'audit-dispatch\n' >> "$DISPATCHES";;
++        *) exit 70;;
++    esac
++    ;;
++*) exit 90 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++PATH=$scratch/bin:$PATH
++VICHE_TOWN_ROOT=$scratch/town
++VICHE_SEATS_ROOT=$scratch/seats
++VICHE_STATE_ROOT=$scratch/state
++VICHE_CONSTITUTION=$scratch/charter
++VICHE_KAWUN_REPO=$scratch/unavailable-kawun
++VICHE_OVERSIGHT_NOW=20000
++MOCK_BOARD='[{"number":152,"title":"Kawun: audit secrets"},{"number":43,"title":"Unrelated project"}]'
++EXEC_STATE=failed
++ERROR=upstream_endpoint_unavailable
++LAST=19500
++AUDIT_STATE=idle
++MODEL=opencode-go/longcat-2.5-preview-free
++VARIANT=low
++DISPATCHES=$scratch/dispatches
++NOTICES=$scratch/notices
++VICHE_TOWNHALL_ID=297
++export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION
++export VICHE_KAWUN_REPO VICHE_OVERSIGHT_NOW MOCK_BOARD EXEC_STATE ERROR LAST
++export AUDIT_STATE MODEL VARIANT DISPATCHES NOTICES VICHE_TOWNHALL_ID
++/bin/sh "$repo/government/oversight-watch.sh"
++incident=$scratch/state/oversight/incident.json
++jq -e '.first_seen == 20000 and (.signals | index("executive_failed")) and .open_kawun_issues_first_page == 1' "$incident" >/dev/null
++/bin/sh "$repo/government/audit-cycle.sh"
++[ "$(wc -l < "$DISPATCHES")" -eq 1 ]
++/bin/sh "$repo/government/audit-cycle.sh"
++[ "$(wc -l < "$DISPATCHES")" -eq 1 ]
++
++VICHE_OVERSIGHT_NOW=28001
++export VICHE_OVERSIGHT_NOW
++/bin/sh "$repo/government/oversight-watch.sh"
++jq -e '.parliamentary_response_overdue == true and .parliamentary_hearing_recorded == false and .first_seen == 20000' "$incident" >/dev/null
++[ "$(wc -l < "$NOTICES")" -eq 1 ]
++/bin/sh "$repo/government/oversight-watch.sh"
++[ "$(wc -l < "$NOTICES")" -eq 1 ]
++
++printf '%s\n' '{"incident_id":20000,"evidence_ref":"https://example.com/hearing"}' > "$scratch/state/oversight/hearings/20000.json"
++/bin/sh "$repo/government/oversight-watch.sh"
++jq -e '.parliamentary_response_overdue == false and .parliamentary_hearing_recorded == true' "$incident" >/dev/null
++printf '%s\n' c1a00008 > "$scratch/town/records/SUMMONED.txt"
++/bin/sh "$repo/government/audit-cycle.sh"
++[ "$(wc -l < "$DISPATCHES")" -eq 1 ]
++
++: > "$scratch/town/records/SUMMONED.txt"
++MODEL=forbidden
++export MODEL
++/bin/sh "$repo/government/audit-cycle.sh" >/dev/null 2>&1 && exit 1
++[ "$(wc -l < "$DISPATCHES")" -eq 1 ]
++MODEL=opencode-go/longcat-2.5-preview-free
++EXEC_STATE=idle
++MOCK_BOARD='[]'
++export MODEL EXEC_STATE MOCK_BOARD
++/bin/sh "$repo/government/oversight-watch.sh"
++[ ! -e "$incident" ]
++[ -s "$scratch/state/oversight/history.jsonl" ]
++echo 'Independent oversight smoke checks passed'

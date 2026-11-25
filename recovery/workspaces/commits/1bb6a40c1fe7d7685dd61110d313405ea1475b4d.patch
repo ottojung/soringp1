@@ -1,0 +1,599 @@
+commit 1bb6a40c1fe7d7685dd61110d313405ea1475b4d
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 16:36:42 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 16:36:42 2026 +0000
+
+    Verify exact revisions and expose auditable Viche delivery pipeline
+
+diff --git a/.github/workflows/delivery-pr.yml b/.github/workflows/delivery-pr.yml
+new file mode 100644
+index 00000000..a7c9359e
+--- /dev/null
++++ b/.github/workflows/delivery-pr.yml
+@@ -0,0 +1,32 @@
++name: Viche delivery PR bridge
++on:
++  push:
++    branches:
++      - 'delivery/**'
++permissions:
++  contents: read
++  pull-requests: write
++concurrency:
++  group: delivery-pr-${{ github.ref }}
++  cancel-in-progress: false
++jobs:
++  propose:
++    runs-on: ubuntu-latest
++    steps:
++      - name: Open a reviewable PR for the proposed delivery
++        env:
++          GH_TOKEN: ${{ github.token }}
++          HEAD_BRANCH: ${{ github.ref_name }}
++        run: |
++          set -euo pipefail
++          [[ "$HEAD_BRANCH" == delivery/* ]] || exit 2
++          # A PR is a review request, not evidence of a passed law or merge.
++          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
++            --head "$HEAD_BRANCH" --base main --json number --jq 'length')
++          if [[ "$existing" != 0 ]]; then
++            echo "Existing open PR for $HEAD_BRANCH"; exit 0
++          fi
++          gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
++            -f "title=Viche delivery: ${HEAD_BRANCH#delivery/}" \
++            -f "head=$HEAD_BRANCH" -f "base=main" \
++            -f "body=Unreviewed Viche delivery candidate. A PR never constitutes parliamentary enactment or an Act 21 quality gate pass. The Clerk (or authorized substitute) must verify the exact proposed merge commit and tree with the applicable local suite. For bills or ballots, verify the recorded vote and legal mandate independently. Do not merge from a green CI badge alone."
+diff --git a/government/DELIVERY.md b/government/DELIVERY.md
+new file mode 100644
+index 00000000..578aa867
+--- /dev/null
++++ b/government/DELIVERY.md
+@@ -0,0 +1,56 @@
++# Delivery bridge: from independent branch to verified outcome
++
++This is operational guidance implementing EXISTING Viche law, not authority to
++enact legislation. A PR, a green CI run and a delivered outcome differ.
++
++## Inventory
++
++Run: python3 /var/lib/lubko/wd/viche/government/delivery-candidates.py --brief
++
++Full JSON lists unmerged worktree commits, changed paths, dirtiness and remote
++publication. Categories records-review, code-review and legislative-review
++are routing hints, NOT quality or legal approval. Avoid duplicate work and
++never assume a dirty branch is approved for integration.
++
++## Propose a clean, substantive branch
++
++From its Viche Git worktree after signing its commits:
++
++    /bin/sh /var/lib/lubko/wd/viche/government/propose-delivery.sh short-description
++
++This refuses dirty, unmanaged, main, policy-only and failing-test branches.
++It tests the local exact HEAD and pushes that commit as a new
++origin/delivery/short-description branch without force or mutation of main.
++It records a durable operational receipt. Preserve authorship and dissent.
++
++The narrowly permissioned GitHub Actions delivery-pr.yml workflow attempts
++to open a reviewable PR, but does not merge. A regular branch push triggers
++CI independently. If GitHub disallows Actions PR creation, record the exact
++error and use an authorized GitHub integration to open a PR. Do not claim
++that a successful Git push is a finished integration.
++
++## Act 21 exact-commit quality gate
++
++1. Secure an independent substantive review and identify the enabling
++   assignment or duly enacted legislative authority.
++2. Resolve any merge conflicts AGAINST THE CURRENT origin/main. Do not erase
++   another office's conflicting findings. The Clerk's own records require a
++   separate verifying office.
++3. The Clerk or a recorded delegated substitute must run the applicable
++   suite on the EXACT proposed merge commit and record the SHA, tree,
++   output digest and timestamp:
++
++       VICHE_TOWN_ROOT=/var/lib/lubko/wd/viche /bin/sh /var/lib/lubko/wd/viche/government/suite-status.sh --commit SHA --suite tests/records-smoke.sh
++
++   Source-code changes require tests/run-all.sh. The gate creates an isolated
++   detached Git worktree of the named SHA, so the current checkout cannot
++   masquerade as the verified commit. Reconcile durable status with CI.
++4. Only an authorized office may push a verified merge. PR creation,
++   signing and green CI do not enact a law. Check the separate vote and
++   quorum requirements before changing law. Never auto-merge bills.
++5. Update the originating board issue with the actual integrated SHA and
++   remaining obligations. No theorem is proved by agent completion alone.
++
++Independent useful work can proceed while one reviewed merge awaits approval.
++The Legislature, Executive, Judiciary and Innovation Centre retain their
++separate legal authority.
+diff --git a/government/delivery-candidates.py b/government/delivery-candidates.py
+new file mode 100644
+index 00000000..8abcffbf
+--- /dev/null
++++ b/government/delivery-candidates.py
+@@ -0,0 +1,122 @@
++#!/usr/bin/env python3
++"""Non-mutating inventory of Viche work that exists off main.
++
++This is a decision aid, not permission to merge or enact legislation.
++Records signed by another office still need Act 21 verification and review.
++"""
++import argparse
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++from datetime import datetime, timezone
++
++
++def git(path, *args, required=True):
++    proc = subprocess.run(
++        ["git", "-C", str(path), *args],
++        text=True, capture_output=True, check=False,
++    )
++    if proc.returncode and required:
++        raise RuntimeError(f"git {' '.join(args)} in {path}: {proc.stderr.strip()}")
++    return proc.stdout.strip() if proc.returncode == 0 else None
++
++
++def classify(paths):
++    files = [p for p in paths if p != "AGENTS.md"]
++    if not files:
++        return "policy-only"
++    if any(p == "government/LAWS.md" or p.startswith("records/ballots/")
++           or p.startswith("records/bills/") for p in files):
++        return "legislative-review"
++    if any(p.startswith(("government/", "tests/", "constitution/", "deploy/", ".github/"))
++           for p in files):
++        return "code-review"
++    if all(p.startswith("records/") for p in files):
++        return "records-review"
++    return "mixed-review"
++
++
++def collect(repo, seats):
++    repo = Path(repo).resolve()
++    seats = Path(seats).resolve()
++    head = git(repo, "rev-parse", "refs/remotes/origin/main")
++    entries = []
++    worktrees = git(repo, "worktree", "list", "--porcelain").splitlines()
++    for item in worktrees:
++        if not item.startswith("worktree "):
++            continue
++        path = Path(item[len("worktree "):]).resolve()
++        if path == seats or seats not in path.parents:
++            continue
++        branch = git(path, "symbolic-ref", "-q", "--short", "HEAD", required=False)
++        if branch is None:
++            continue
++        counts = git(path, "rev-list", "--left-right", "--count",
++                     "refs/remotes/origin/main...HEAD")
++        behind, ahead = [int(v) for v in counts.split()]
++        if ahead == 0:
++            continue
++        files = git(path, "diff", "--name-only", "refs/remotes/origin/main...HEAD").splitlines()
++        if not files:
++            continue
++        category = classify(files)
++        if category == "policy-only":
++            continue
++        dirty = git(path, "status", "--porcelain", "--untracked-files=normal").splitlines()
++        remote = f"refs/remotes/origin/{branch}"
++        published_sha = git(path, "rev-parse", "--verify", remote, required=False)
++        unpublished = int(git(path, "rev-list", "--count", f"{remote}..HEAD")) if published_sha else ahead
++        entries.append({
++            "branch": branch,
++            "worktree": str(path),
++            "head": git(path, "rev-parse", "HEAD"),
++            "ahead_main": ahead,
++            "behind_main": behind,
++            "files": files,
++            "category": category,
++            "dirty": dirty,
++            "unpublished_commits": unpublished,
++            "needs": (
++                "parliamentary authority and ballot audit before enactment"
++                if category == "legislative-review" else
++                "independent review and exact-commit full suite"
++                if category in ("code-review", "mixed-review") else
++                "independent records review and exact-commit records smoke"
++            ),
++        })
++    return {
++        "generated_at": datetime.now(timezone.utc).isoformat(),
++        "canonical": head,
++        "candidate_count": len(entries),
++        "candidates": sorted(entries, key=lambda x: (bool(x["dirty"]), x["category"], -x["ahead_main"], x["branch"])),
++        "caveat": "Inventory is not proof of deliverability or legislative authority; no automatic merge permission.",
++    }
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--repo", default=os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche"))
++    parser.add_argument("--seats", default=os.environ.get("VICHE_SEATS_ROOT", "/var/lib/lubko/wd/viche-seats"))
++    parser.add_argument("--brief", action="store_true")
++    args = parser.parse_args()
++    try:
++        result = collect(args.repo, args.seats)
++    except (OSError, RuntimeError, ValueError) as e:
++        print(f"delivery-inventory: {e}", file=sys.stderr)
++        return 1
++    if not args.brief:
++        print(json.dumps(result, indent=2))
++    else:
++        for item in result["candidates"]:
++            status = ("dirty" if item["dirty"] else "clean")
++            if item["unpublished_commits"]:
++                status += f", unpublished={item['unpublished_commits']}"
++            print(f"{item['category']} | {status} | ahead={item['ahead_main']} | {item['branch']}")
++        print("Review, exact-commit verification and legal authority remain prerequisites.")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 2cb84d34..7cbf54c3 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -52,6 +52,11 @@ EOF
+ )
+ else
+   eligible=$(python3 "$town/government/eligible-work.py") || exit 1
++  # Local Git inventory is read-only and never blocks research dispatch.
++  delivery=$(python3 "$town/government/delivery-candidates.py" --brief) || {
++    echo "Viche: delivery candidate inventory unavailable" >&2
++    delivery="inventory unavailable; inspect Git worktrees before inferring no work"
++  }
+   prompt=$(cat <<EOF
+ You are Viche executive liaison. This is independent executive delivery,
+ NOT a parliamentary sitting. Do not do the parliamentary Clerk work.
+@@ -64,6 +69,11 @@ Standing Founder priority: Continue SoringP1 until the final theorems for S(n)/S
+ Follow the current operational agenda at $town/government/executive-agenda.md.
+ Verified issue assignments, independent of the target registry:
+ $eligible
++
++REVIEWABLE WORKTREE INVENTORY (facts, not authority to merge):
++$delivery
++
++Before repeating a stale integration blocker, inspect $town/government/DELIVERY.md. Clean, substantive signed branches can be published with propose-delivery.sh to origin/delivery/NAME for an automatically requested GitHub PR. This bridge opens a PR but NEVER merges or enacts a law. Require Clerk or duly delegated exact-commit local verification under Act 21, an independent second reviewer for Clerk-authored records, and enacted parliamentary authority for bills and ballots. Follow CI and explicitly verify final integration on main. Avoid flooding PRs with policy-only or unreviewed draft work.
+ Act on every eligible issue by constructive work. SoringP1 #301 is explicitly assigned. Read descriptions/comments; do not treat empty target registry as no work.
+ A billy-dev assignment governs WHERE agents execute and keep worktrees, NOT ordinary GitHub infrastructure: GitHub Actions CI/tests/builds/Lean verification on GitHub-hosted runners is expressly authorized and must stay enabled for any repo (incl. SoringP1). Never delete or disable working workflows merely because an issue is assigned to billy-dev. Require verified passing CI when applicable (a green run, not a claim).
+ Maintain durable issue ownership, dependencies, completed work and blockers.
+diff --git a/government/propose-delivery.sh b/government/propose-delivery.sh
+new file mode 100644
+index 00000000..962b8899
+--- /dev/null
++++ b/government/propose-delivery.sh
+@@ -0,0 +1,57 @@
++#!/bin/sh
++# Agents may propose signed, locally-tested work for independent PR review
++# without API credentials. The GitHub workflow opens a PR only.
++# This script NEVER merges, enacts laws, edits ballots or changes the charter.
++set -eu
++[ "$#" -eq 1 ] || { echo 'Usage: propose-delivery.sh SHORT-SLUG' >&2; exit 2; }
++slug=$1
++case "$slug" in
++    ''|*[!a-z0-9-]*) echo 'Expected a lowercase alphanumeric/hyphen slug' >&2; exit 2 ;;
++esac
++repo=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++cwd=$(pwd -P)
++[ "$cwd" != "$repo" ] || { echo 'Do not propose main itself' >&2; exit 2; }
++git -C "$repo" worktree list --porcelain | grep -Fxq "worktree $cwd" ||
++    { echo 'Only a registered Viche worktree can publish a delivery' >&2; exit 2; }
++[ -z "$(git -C "$cwd" status --porcelain)" ] ||
++    { echo 'Commit or intentionally discard local changes before proposing' >&2; exit 1; }
++branch=$(git -C "$cwd" symbolic-ref --short HEAD) ||
++    { echo 'Detached HEAD cannot propose delivery' >&2; exit 1; }
++[ "$branch" != main ] || exit 1
++head=$(git -C "$cwd" rev-parse HEAD)
++tree=$(git -C "$cwd" rev-parse HEAD^{tree})
++# Reconcile remote main without changing any worktree or merging changes.
++git -C "$repo" fetch -q origin main ||
++    { echo 'Cannot verify current upstream main' >&2; exit 1; }
++if git -C "$cwd" merge-base --is-ancestor "$head" refs/remotes/origin/main; then
++    echo 'Nothing unpublished: this commit is already on main' >&2
++    exit 1
++fi
++files=$(git -C "$cwd" diff --name-only refs/remotes/origin/main...HEAD)
++substantive=$(printf '%s\n' "$files" | grep -v -x 'AGENTS.md' | grep -v '^$' || :)
++[ -n "$substantive" ] ||
++    { echo 'Refusing a proposal containing only synchronized instructions' >&2; exit 1; }
++suite=tests/records-smoke.sh
++if printf '%s\n' "$substantive" | grep -Eq '^(government/|tests/|constitution/|deploy/|\.github/)'; then
++    suite=tests/run-all.sh
++fi
++[ -s "$cwd/$suite" ] || { echo "Missing applicable suite: $suite" >&2; exit 1; }
++# Source is clean at the exact HEAD verified above. CI on the proposed
++# ref is a second check, not an Act 21 substitute.
++if ! (cd "$cwd" && /bin/sh "$suite" > /dev/null); then
++    echo "Verification failed on $head: $suite" >&2; exit 1
++fi
++[ "$(git -C "$cwd" rev-parse HEAD)" = "$head" ] &&
++[ -z "$(git -C "$cwd" status --porcelain)" ] ||
++    { echo 'Worktree changed during verification; refusing to publish' >&2; exit 1; }
++
++target=refs/heads/delivery/$slug
++git -C "$cwd" push origin "HEAD:$target" ||
++    { echo "Push to $target failed; no force push was attempted" >&2; exit 1; }
++mkdir -p "$state/delivery"
++printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
++    "$(date -u +%FT%TZ)" "$branch" "$target" "$head" "$tree" "$suite" \
++    >> "$state/delivery/proposals.tsv"
++printf 'Proposed %s at %s with green %s. Review and merge are separate legal steps.\n' \
++    "$target" "$head" "$suite"
+diff --git a/government/suite-status.sh b/government/suite-status.sh
+index 64eb99e1..1324dfa2 100644
+--- a/government/suite-status.sh
++++ b/government/suite-status.sh
+@@ -42,16 +42,45 @@ case "$ci" in
+     green|red|unavailable) : ;;
+     *) echo "suite-status: invalid --ci value: $ci" >&2; exit 2 ;;
+ esac
+-[ -f "$town/$suite" ] || { echo "suite-status: suite not found: $town/$suite" >&2; exit 2; }
++case "$suite" in
++    tests/*) : ;;
++    *) echo "suite-status: suite must be a relative tests/ script" >&2; exit 2 ;;
++esac
++case "$suite" in
++    *../*|*/../*|*//*) echo "suite-status: unsafe suite path" >&2; exit 2 ;;
++esac
+ 
+ sha=$(git -C "$town" rev-parse --verify "$commit^{commit}" 2>/dev/null) || {
+     echo "suite-status: cannot resolve commit: $commit" >&2; exit 2
+ }
+ tree=$(git -C "$town" rev-parse --verify "$commit^{tree}")
+ 
+-# Run the suite once; emit "<exit>\t<sha256 of combined output>".
++# Act 21 verifies the EXACT commit. A dirty or newer canonical checkout must
++# never masquerade as the selected revision. Isolate both source and Git index
++# in a temporary detached worktree. This checkout is never pushed or retained.
++scratch=$(mktemp -d "${TMPDIR:-/tmp}/viche-suite.XXXXXXXX") || exit 2
++checkout=$scratch/revision
++cleanup() {
++    if [ -d "$checkout" ]; then
++        git -C "$town" worktree remove --force "$checkout" >/dev/null 2>&1 || :
++    fi
++    rm -rf "$scratch"
++}
++trap 'cleanup' 0
++trap 'exit 130' 1 2 3 15
++git -C "$town" worktree add --quiet --detach "$checkout" "$sha" ||
++    { echo "suite-status: cannot create checkout for $sha" >&2; exit 2; }
++[ -f "$checkout/$suite" ] ||
++    { echo "suite-status: suite missing from verified commit: $sha" >&2; exit 2; }
++[ "$(git -C "$checkout" rev-parse HEAD)" = "$sha" ] ||
++    { echo "suite-status: checkout SHA mismatch" >&2; exit 2; }
++[ "$(git -C "$checkout" rev-parse HEAD^{tree})" = "$tree" ] ||
++    { echo "suite-status: checkout tree mismatch" >&2; exit 2; }
++
++# Run each replay in that immutable source checkout; emit an exit code and an
++# output digest. Flaky-red reruns use the SAME original source revision.
+ run_once() {
+-    out=$(cd "$town" && /bin/sh "$suite" 2>&1) && rc=0 || rc=$?
++    out=$(cd "$checkout" && VICHE_TOWN_ROOT="$checkout" /bin/sh "$suite" 2>&1) && rc=0 || rc=$?
+     hash=$(printf '%s' "$out" | sha256sum | cut -d ' ' -f1)
+     printf '%s\t%s\n' "$rc" "$hash"
+ }
+diff --git a/tests/delivery-bridge-smoke.sh b/tests/delivery-bridge-smoke.sh
+new file mode 100644
+index 00000000..7b0f61bd
+--- /dev/null
++++ b/tests/delivery-bridge-smoke.sh
+@@ -0,0 +1,75 @@
++#!/bin/sh
++# Hermetic delivery inventory/proposal tests; only a local bare Git remote.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++town=$scratch/town
++seats=$scratch/seats
++state=$scratch/state
++remote=$scratch/origin.git
++mkdir -p "$town" "$seats" "$state"
++git init --bare -q "$remote"
++git -C "$town" init -q -b main
++git -C "$town" config user.name Fixture
++git -C "$town" config user.email fixture@example.invalid
++git -C "$town" config commit.gpgsign false
++git -C "$town" remote add origin "$remote"
++mkdir -p "$town/tests" "$town/records"
++printf 'Canonical policy\n' > "$town/AGENTS.md"
++printf '#!/bin/sh\nexit 0\n' > "$town/tests/records-smoke.sh"
++printf '#!/bin/sh\nexit 0\n' > "$town/tests/run-all.sh"
++git -C "$town" add -A
++git -C "$town" commit -qm 'baseline'
++git -C "$town" push -q -u origin main
++git -C "$town" fetch -q origin main
++
++records=$seats/c1a00001
++git -C "$town" worktree add -qb records-review "$records" main
++mkdir -p "$records/records"
++printf 'Independently reviewed audit evidence\n' > "$records/records/report.md"
++git -C "$records" add -A
++git -C "$records" commit -qm 'audit record'
++python3 "$repo/government/delivery-candidates.py" --repo "$town" --seats "$seats" > "$scratch/candidates.json"
++jq -e '.candidate_count==1 and .candidates[0].category=="records-review" and
++  .candidates[0].ahead_main==1 and .candidates[0].unpublished_commits==1 and
++  (.candidates[0].dirty | length)==0' "$scratch/candidates.json" >/dev/null
++
++(cd "$records" && VICHE_TOWN_ROOT=$town VICHE_STATE_ROOT=$state \
++  /bin/sh "$repo/government/propose-delivery.sh" audited-record) >/dev/null
++test "$(git -C "$remote" rev-parse refs/heads/delivery/audited-record)" = "$(git -C "$records" rev-parse HEAD)"
++test "$(wc -l < "$state/delivery/proposals.tsv")" -eq 1
++
++# Local dirty edits cannot be hidden by an existing signed HEAD.
++printf 'not-committed\n' > "$records/records/draft.md"
++if (cd "$records" && VICHE_TOWN_ROOT=$town VICHE_STATE_ROOT=$state \
++    /bin/sh "$repo/government/propose-delivery.sh" unsaved-record) >/dev/null 2>&1; then
++  echo 'Dirty branch was proposed' >&2; exit 1
++fi
++if git -C "$remote" show-ref --verify --quiet refs/heads/delivery/unsaved-record; then
++  echo 'Unexpected dirty delivery ref' >&2; exit 1
++fi
++
++legislative=$seats/c1a00002
++git -C "$town" worktree add -qb bill-draft "$legislative" main
++mkdir -p "$legislative/records/bills"
++printf 'Draft only; NOT LAW\n' > "$legislative/records/bills/draft.md"
++git -C "$legislative" add -A
++git -C "$legislative" commit -qm draft
++python3 "$repo/government/delivery-candidates.py" --repo "$town" --seats "$seats" > "$scratch/candidates.json"
++jq -e '.candidates | any(.category=="legislative-review" and
++  (.needs|contains("parliamentary authority")))' "$scratch/candidates.json" >/dev/null
++
++policy=$seats/c1a00003
++git -C "$town" worktree add -qb policy-only "$policy" main
++printf 'policy synchronization only\n' > "$policy/AGENTS.md"
++git -C "$policy" add -A
++git -C "$policy" commit -qm policy
++if (cd "$policy" && VICHE_TOWN_ROOT=$town VICHE_STATE_ROOT=$state \
++    /bin/sh "$repo/government/propose-delivery.sh" useless-policy) >/dev/null 2>&1; then
++  echo 'Policy-only changes were proposed' >&2; exit 1
++fi
++
++grep -q 'pull-requests: write' "$repo/.github/workflows/delivery-pr.yml"
++grep -q 'delivery/' "$repo/.github/workflows/delivery-pr.yml"
++echo 'Delivery candidate inventory and guarded PR publication smoke passed'
+diff --git a/tests/suite-status-smoke.sh b/tests/suite-status-smoke.sh
+index 30347201..f29474bd 100644
+--- a/tests/suite-status-smoke.sh
++++ b/tests/suite-status-smoke.sh
+@@ -1,60 +1,97 @@
+ #!/bin/sh
+-# Act 21 §3 — suite-status generator smoke test (hermetic; POSIX /bin/sh).
+-# Proves: a green suite records green; two consecutive reds record red; a
+-# red-then-green (flaky) run records green (the §1 flaky-red policy); and the
+-# recorded commit/tree match. No board or network access.
++# Act 21 exact-revision verifier: hermetic POSIX smoke test.
+ set -eu
+-
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ scratch=$(mktemp -d)
+-trap 'rm -rf "$scratch"' EXIT
+-
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+ town=$scratch/town
+ mkdir -p "$town/government" "$town/records" "$town/tests"
+ cp "$repo/government/suite-status.sh" "$town/government/"
++git -C "$town" init -q -b main
++git -C "$town" config user.email fixture@example.invalid
++git -C "$town" config user.name Fixture
++git -C "$town" config commit.gpgsign false
+ 
+-git -C "$town" init -q
+-git -C "$town" -c user.email=t@t -c user.name=t add -A
+-git -C "$town" -c user.email=t@t -c user.name=t commit -qm init
+-
+-printf '#!/bin/sh\nexit 0\n' > "$town/tests/green.sh"
+-printf '#!/bin/sh\necho boom; exit 1\n' > "$town/tests/red.sh"
++cat > "$town/tests/green.sh" <<'EOF'
++#!/bin/sh
++exit 0
++EOF
++cat > "$town/tests/red.sh" <<'EOF'
++#!/bin/sh
++echo boom
++exit 1
++EOF
+ cat > "$town/tests/flaky.sh" <<'EOF'
+ #!/bin/sh
+-n=$(cat tests/flaky.count 2>/dev/null || echo 0)
++n=$(cat "$SUITE_STATUS_SMOKE_COUNTER" 2>/dev/null || echo 0)
+ n=$((n + 1))
+-echo "$n" > tests/flaky.count
+-[ "$n" -ge 2 ] && exit 0
+-exit 1
++printf '%s\n' "$n" > "$SUITE_STATUS_SMOKE_COUNTER"
++[ "$n" -ge 2 ]
+ EOF
++SUITE_STATUS_SMOKE_COUNTER=$scratch/flaky.count
++export SUITE_STATUS_SMOKE_COUNTER
++git -C "$town" add -A
++git -C "$town" commit -qm 'committed gate and fixtures'
+ 
+ run() {
+-    VICHE_TOWN_ROOT=$town /bin/sh "$town/government/suite-status.sh" "$@"
++  VICHE_TOWN_ROOT=$town /bin/sh "$town/government/suite-status.sh" "$@"
+ }
+-result() {
+-    sed -n 's/.*"result": "\([a-z]*\)".*/\1/p' "$town/records/suite-status.json"
++check_result() {
++  jq -e --arg expected "$1" '.result == $expected' "$town/records/suite-status.json" >/dev/null
+ }
+ 
+-# green -> green, commit/tree recorded
+ run --suite tests/green.sh >/dev/null
+-[ "$(result)" = green ] || { echo "FAIL: expected green"; exit 1; }
+-grep -q "\"commit\": \"$(git -C "$town" rev-parse HEAD)\"" "$town/records/suite-status.json" || { echo "FAIL: commit"; exit 1; }
+-grep -q "\"tree\": \"$(git -C "$town" rev-parse HEAD^{tree})\"" "$town/records/suite-status.json" || { echo "FAIL: tree"; exit 1; }
++check_result green
++jq -e --arg commit "$(git -C "$town" rev-parse HEAD)" \
++  --arg tree "$(git -C "$town" rev-parse HEAD^{tree})" \
++  '.commit==$commit and .tree==$tree' "$town/records/suite-status.json" >/dev/null
+ 
+-# two consecutive reds -> red (exit 1), incident true
+-if run --suite tests/red.sh >/dev/null 2>&1; then echo "FAIL: red must exit non-zero"; exit 1; fi
+-[ "$(result)" = red ] || { echo "FAIL: expected red"; exit 1; }
+-grep -q '"incident": true' "$town/records/suite-status.json" || { echo "FAIL: incident"; exit 1; }
++if run --suite tests/red.sh >/dev/null 2>&1; then
++  echo "FAIL: committed red suite must block" >&2; exit 1
++fi
++check_result red
++jq -e '.incident == true and (.runs|length)==2' "$town/records/suite-status.json" >/dev/null
+ 
+-# flaky (red then green) -> green (flaky-red policy: not a permanent block)
+-rm -f "$town/tests/flaky.count"
+ run --suite tests/flaky.sh >/dev/null
+-[ "$(result)" = green ] || { echo "FAIL: expected green (flaky)"; exit 1; }
+-grep -q '"run":1,"result":"red"' "$town/records/suite-status.json" || { echo "FAIL: run1 red"; exit 1; }
+-grep -q '"run":2,"result":"green"' "$town/records/suite-status.json" || { echo "FAIL: run2 green"; exit 1; }
++check_result green
++jq -e '.runs|map(.result)==["red","green"]' "$town/records/suite-status.json" >/dev/null
+ 
+-# CI reconciliation: disagree -> incident
+ run --suite tests/green.sh --ci red >/dev/null
+-grep -q '"ci_reconciliation": "disagree"' "$town/records/suite-status.json" || { echo "FAIL: ci disagree"; exit 1; }
++jq -e '.ci_reconciliation=="disagree" and .incident==true' "$town/records/suite-status.json" >/dev/null
++
++# Important regression: HEAD vs --commit vs dirty worktree must never mix.
++printf '#!/bin/sh\nexit 0\n' > "$town/tests/probe.sh"
++git -C "$town" add tests/probe.sh
++git -C "$town" commit -qm 'green revision'
++good=$(git -C "$town" rev-parse HEAD)
++printf '#!/bin/sh\necho intentional-failure; exit 1\n' > "$town/tests/probe.sh"
++git -C "$town" add tests/probe.sh
++git -C "$town" commit -qm 'red revision'
++bad=$(git -C "$town" rev-parse HEAD)
++
++# Deliberately fool the old implementation: current working file green,
++# specified revision red. The updated verifier must report the red commit.
++printf '#!/bin/sh\nexit 0\n' > "$town/tests/probe.sh"
++if run --suite tests/probe.sh --commit "$bad" >/dev/null 2>&1; then
++  echo "FAIL: dirty current checkout masqueraded as red commit" >&2; exit 1
++fi
++check_result red
++jq -e --arg sha "$bad" --arg tree "$(git -C "$town" rev-parse "$bad^{tree}")" \
++  '.commit==$sha and .tree==$tree' "$town/records/suite-status.json" >/dev/null
++
++# Conversely, verifying an older green commit remains green despite HEAD red.
++run --suite tests/probe.sh --commit "$good" >/dev/null
++check_result green
++jq -e --arg sha "$good" '.commit==$sha' "$town/records/suite-status.json" >/dev/null
++
++# Invalid suites and suites absent at the target revision must fail closed.
++if run --suite tests/../government/suite-status.sh >/dev/null 2>&1; then
++  echo "FAIL: accepted traversal" >&2; exit 1
++fi
++if run --suite tests/probe.sh --commit HEAD~2 >/dev/null 2>&1; then
++  echo "FAIL: accepted test absent from verified commit" >&2; exit 1
++fi
+ 
+-echo "suite-status smoke passed"
++test "$(git -C "$town" worktree list --porcelain | grep -c '^worktree ')" -eq 1
++test "$(git -C "$town" status --porcelain -- tests/probe.sh)" = ' M tests/probe.sh'
++echo 'Exact-commit quality-gate, flaky-red and isolation smoke passed'
