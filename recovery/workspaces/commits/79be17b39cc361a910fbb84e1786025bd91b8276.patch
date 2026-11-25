@@ -1,0 +1,178 @@
+commit 79be17b39cc361a910fbb84e1786025bd91b8276
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Oct 27 21:43:02 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Oct 27 21:43:02 2026 +0000
+
+    Bound Act 18 pagination and fail closed on incomplete board scans
+
+diff --git a/government/board-trail-check.sh b/government/board-trail-check.sh
+index c0e958e9..24148c1b 100755
+--- a/government/board-trail-check.sh
++++ b/government/board-trail-check.sh
+@@ -28,6 +28,7 @@ set -eu
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ map=$town/records/board-trail/originating.tsv
+ sep=$(printf '\t')
++max_pages=20
+ if [ ! -f "$map" ]; then
+     echo "board-trail-check: no cross-check mapping at $map" >&2
+     exit 1
+@@ -58,7 +59,7 @@ board_show() {
+ }
+ 
+ while IFS="$sep" read -r issue work act epoch type; do
+-    case "$issue" in ''|'#'*) continue ;; esac
++    case "$issue" in ''|'#'*|issue) continue ;; esac
+     case "$epoch" in ''|*[!0-9]*) epoch=0 ;; esac
+     page=1
+     all='[]'
+@@ -69,11 +70,18 @@ while IFS="$sep" read -r issue work act epoch type; do
+             break
+         fi
+         msgs=$(printf '%s' "$data" | jq -c '.messages // []')
+-        all=$(jq -n --argjson a "$all" --argjson b "$msgs" '$a + $b')
+         n=$(printf '%s' "$msgs" | jq 'length')
++        if [ "$n" -ge 50 ] && [ "$page" -ge "$max_pages" ]; then
++            # A full final allowed page means more history may exist. Treat the
++            # scan as incomplete rather than silently declaring a terminal gap.
++            readable=0
++            break
++        fi
++        # Keep page arrays on stdin: passing accumulated histories as jq argv
++        # eventually exceeds ARG_MAX on high-volume originating issues.
++        all=$(printf '%s\n%s\n' "$all" "$msgs" | jq -s -c '.[0] + .[1]')
+         [ "$n" -lt 50 ] && break
+         page=$((page + 1))
+-        [ "$page" -gt 20 ] && break
+     done
+     if [ "$readable" -eq 0 ]; then
+         echo "board-trail-check: board unreadable for #$issue; recorded as unreadable, not a gap" >&2
+diff --git a/government/board-trail-index.py b/government/board-trail-index.py
+index e9d1d3d1..067217d2 100644
+--- a/government/board-trail-index.py
++++ b/government/board-trail-index.py
+@@ -43,6 +43,8 @@ TERMINAL_STATES = (
+     "enactment:not_enacted",
+     "deferred",
+ )
++BOARD_PAGE_SIZE = 50
++MAX_BOARD_PAGES = 20
+ 
+ # Act 18 §3.4 content standard: a terminal update carries exactly one stage
+ # marker AND a DECLARED terminal state. Both the §5 lens
+@@ -113,24 +115,28 @@ def board_invoke(*args):
+ 
+ 
+ def fetch_issue(num):
+-    """Return the issue with all comment pages, or raise if any page is unreadable.
++    """Return the issue with all bounded comment pages, or raise if incomplete.
+ 
+     The board-trail lens scans every page. The generated Founder-facing index
+     must use the same complete history: a terminal update can fall beyond page
+     one on a high-traffic originating issue, and treating a partial read as
+-    complete creates a false Git-only gap.
++    complete creates a false Git-only gap. Histories beyond the shared 20-page
++    ceiling are unreadable rather than silently truncated.
+     """
+     first = board_invoke("show", "--id", str(num), "--page", "1", "--json")
+     issue = dict(first)
+     messages = list(first.get("messages") or [])
+     page = 1
+-    while len(first.get("messages") or []) >= 50:
++    while len(first.get("messages") or []) >= BOARD_PAGE_SIZE:
++        if page >= MAX_BOARD_PAGES:
++            raise RuntimeError(
++                f"issue {num} exceeds the {MAX_BOARD_PAGES}-page board history limit")
+         page += 1
+         next_page = board_invoke("show", "--id", str(num), "--page", str(page), "--json")
+         page_messages = list(next_page.get("messages") or [])
+         messages.extend(page_messages)
+         first = next_page
+-        if len(page_messages) < 50:
++        if len(page_messages) < BOARD_PAGE_SIZE:
+             break
+     issue["messages"] = messages
+     return issue
+diff --git a/tests/board-trail-index-smoke.sh b/tests/board-trail-index-smoke.sh
+index 3080a801..096e6723 100644
+--- a/tests/board-trail-index-smoke.sh
++++ b/tests/board-trail-index-smoke.sh
+@@ -18,6 +18,7 @@ printf 'issue\twork_id\tact\tenacted_epoch\ttype\n' > "$town/records/board-trail
+ printf '303\tjudiciary-independence\t15\t1792241160\tlaw\n' >> "$town/records/board-trail/originating.tsv"
+ printf '307\tinnovation-centre-act\t14\t1792241160\tlaw\n' >> "$town/records/board-trail/originating.tsv"
+ printf '308\tepistemic-adversarialism-act\t16\t1792241160\tlaw\n' >> "$town/records/board-trail/originating.tsv"
++printf '309\toversized-history\t18\t1792400760\tlaw\n' >> "$town/records/board-trail/originating.tsv"
+ printf '312\tboard-reporting-act\t18\t1792400760\tlaw\n' >> "$town/records/board-trail/originating.tsv"
+ printf '310\tdetector-calibration-act\t-\t0\tdraft\n' >> "$town/records/board-trail/originating.tsv"
+ cp "$repo/government/LAWS.md" "$town/government/"
+@@ -40,6 +41,7 @@ case "$1 $2" in
+     *"307"*) printf '{"title":"Innovation Centre","messages":[{"author":"Viche Clerk","body":"TERMINAL UPDATE — verification:confirmed. Stage marker: verification. Evidence: records/bills/innovation-centre-act.md"}]}' ;;
+     *"308"*"--page 1"*) python3 -c 'import json,sys; json.dump({"title":"Epistemic Adversarialism","messages":[{"author":"agent","body":"ordinary comment %d" % i} for i in range(50)]},sys.stdout)' ;;
+     *"308"*) echo 'mock page 2 unavailable' >&2; exit 90 ;;
++    *"309"*) page=1; prev=; for arg do [ "$prev" = "--page" ] && page=$arg; prev=$arg; done; printf '%s\n' "$page" >> "$SCRATCH/309-pages"; python3 -c 'import json,sys; json.dump({"title":"Long history","messages":[{"author":"agent","body":"x"*2048} for _ in range(50)]},sys.stdout)' ;;
+     *"310"*) printf '{"title":"Detector Calibration Act","messages":[]}' ;;
+     *"312"*) printf '{"title":"Board Reporting Act","messages":[{"author":"c1e00002","body":"Stage marker: verification. Terminal state verification:confirmed. Evidence records/ballots/board-reporting-act.tsv"}]}' ;;
+     *) printf '{"title":"unknown","messages":[]}' ;;
+@@ -48,6 +50,7 @@ case "$1 $2" in
+ esac
+ MOCK
+ chmod +x "$scratch/bin/antonina"
++export SCRATCH=$scratch
+ PATH="$scratch/bin:$PATH"
+ VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$scratch/state" VICHE_BOARD_TRAIL_RETRIES=1 python3 "$town/government/board-trail-index.py" >/dev/null
+ 
+@@ -67,6 +70,10 @@ jq -e '.issues[] | select(.issue==307) | .git_only_gap==false and .terminal_stat
+ # If any page is unreadable, do not infer a missing terminal update from the
+ # partial history; the issue is explicitly marked unreadable instead.
+ jq -e '.issues[] | select(.issue==308) | .board_readable==false and .git_only_gap==false' "$idx" >/dev/null
++# A full page 20 is an incomplete scan, not proof of a terminal gap; the index
++# generator must stop at the shared bounded history limit and fail closed.
++jq -e '.issues[] | select(.issue==309) | .board_readable==false and .git_only_gap==false' "$idx" >/dev/null
++[ "$(wc -l < "$scratch/309-pages")" -eq 20 ]
+ # #312 has a terminal verification update -> not a gap, terminal confirmed.
+ jq -e '.issues[] | select(.issue==312) | .git_only_gap==false and .terminal_status=="verification:confirmed"' "$idx" >/dev/null
+ # Owning office: legislative items are Clerk-owned.
+diff --git a/tests/board-trail-pagination-cap-smoke.sh b/tests/board-trail-pagination-cap-smoke.sh
+new file mode 100644
+index 00000000..add4a880
+--- /dev/null
++++ b/tests/board-trail-pagination-cap-smoke.sh
+@@ -0,0 +1,37 @@
++#!/bin/sh
++# Act 18 §5/§7 — bounded pagination fails closed at the shared page cap, and
++# long page histories are aggregated without passing large JSON arrays in argv.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++town=$scratch/town
++mkdir -p "$town/government" "$town/records/board-trail" "$scratch/bin" "$scratch/state"
++cp "$repo/government/board-trail-index.py" "$repo/government/board-trail-check.sh" "$town/government/"
++printf 'issue\twork_id\tact\tenacted_epoch\ttype\n999\tlong-history\t18\t1000\tlaw\n' > "$town/records/board-trail/originating.tsv"
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++id= page=1 prev=
++for arg do
++    [ "$prev" = "--id" ] && id=$arg
++    [ "$prev" = "--page" ] && page=$arg
++    prev=$arg
++done
++[ "$id" = 999 ] || exit 90
++printf '%s\n' "$page" >> "$SCRATCH/pages"
++python3 -c 'import json,sys; json.dump({"title":"Long history","messages":[{"author":"agent","createdAt":"2026-10-27T00:00:00Z","body":"x"*2048} for _ in range(50)]},sys.stdout)'
++MOCK
++chmod +x "$scratch/bin/antonina"
++export SCRATCH=$scratch PATH="$scratch/bin:$PATH" VICHE_TOWN_ROOT=$town VICHE_STATE_ROOT=$scratch/state VICHE_BOARD_TRAIL_RETRIES=1
++
++python3 "$town/government/board-trail-index.py" >/dev/null
++jq -e '.issues[] | select(.issue==999) | .board_readable==false and .git_only_gap==false' "$town/records/board-trail/index.json" >/dev/null
++[ "$(wc -l < "$scratch/pages")" -eq 20 ]
++
++: > "$scratch/pages"
++sh "$town/government/board-trail-check.sh" > "$scratch/check.jsonl"
++jq -e 'select(.issue=="999") | .board_readable==false and .terminal==null and .comments_total==null' "$scratch/check.jsonl" >/dev/null
++[ "$(wc -l < "$scratch/pages")" -eq 20 ]
++[ "$(wc -l < "$scratch/check.jsonl")" -eq 1 ] # mapping header is not an originating issue
++echo 'Act 18 board pagination cap and large-history smoke passed'

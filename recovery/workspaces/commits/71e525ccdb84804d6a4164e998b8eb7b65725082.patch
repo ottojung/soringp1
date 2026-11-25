@@ -1,0 +1,512 @@
+commit 71e525ccdb84804d6a4164e998b8eb7b65725082
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 07:16:05 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 07:16:06 2026 +0000
+
+    Add reusable proof retrieval and verified finite circuit synthesis tools
+
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index a1c7a721..0f0c676f 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -221,3 +221,25 @@ with upstream CI. Do not submit unfinished proofs, placeholders or guesses.
+ Executive must promptly delegate corrections shown in correction_needed, reusing
+ the same open PR and the existing research artifacts. Do not treat a local check
+ failure as a final external verdict; do not repeat rejected identical proof bytes.
++
++## Reusable proof infrastructure
++
++From the bound assignment directory run:
++`PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.proofs find`
++to find related checked upstream proof statements and tactics. Inspect a result
++using the same command with `source MODULE`. Direct import is legal only when
++the result explicitly marks it as allowed by the desk. Otherwise adapt the
++reasoning into local helper lemmas; never submit another proof unchanged.
++For an explicit small circuit truth-table row run `... proofs circuit --output
++candidate.lean` (the full command uses the same PYTHONPATH above). The generator
++independently checks every input, creates a statically validated candidate only
++for recognized shapes, and never submits or claims a lease. Review all clauses
++and use ordinary submit once confident. These are deterministic research tools,
++not institutional gates. Prefer using them before spending model turns on
++repeated Lean boilerplate.
++
++For small existential monotone edge-function circuits use the same command with
++`synthesize --output candidate.lean`. It searches shared star/biclique
++expressions, independently checks every Boolean input, enforces the gate
++budget, and emits a self-contained candidate. A failed search is not evidence
++of nonexistence. No generator claims a lease or publishes a proof.
+diff --git a/missions/pnp/proofs/__init__.py b/missions/pnp/proofs/__init__.py
+new file mode 100644
+index 00000000..3f0c94c9
+--- /dev/null
++++ b/missions/pnp/proofs/__init__.py
+@@ -0,0 +1 @@
++"""Read-only proof retrieval and deterministic certificate generation."""
+diff --git a/missions/pnp/proofs/__main__.py b/missions/pnp/proofs/__main__.py
+new file mode 100644
+index 00000000..267828a2
+--- /dev/null
++++ b/missions/pnp/proofs/__main__.py
+@@ -0,0 +1,71 @@
++"""Research tools: inspect the current assignment, find checked analogues, generate certificates."""
++import argparse
++import json
++from pathlib import Path
++
++from .. import assignment, state
++from . import corpus, circuit, synthesis
++
++
++def main():
++    p = argparse.ArgumentParser(description=__doc__)
++    sub = p.add_subparsers(dest="command", required=True)
++    find = sub.add_parser("find")
++    find.add_argument("query", nargs="?")
++    find.add_argument("--limit", type=int, default=8)
++    source = sub.add_parser("source")
++    source.add_argument("module")
++    gen = sub.add_parser("circuit")
++    gen.add_argument("--output", type=Path)
++    syn = sub.add_parser("synthesize")
++    syn.add_argument("--output", type=Path)
++    sub.add_parser("index")
++    args = p.parse_args()
++    if args.command in ("find", "source", "index"):
++        with corpus.open_index() as db:
++            revision = corpus.update(db)
++            if args.command == "index":
++                print(json.dumps({"revision":revision,"proofs":db.execute("select count(*) from proof").fetchone()[0]}))
++                return
++            if args.command == "source":
++                path = "lean/" + args.module.replace(".", "/") + ".lean"
++                row = db.execute("select source from proof where path=?", (path,)).fetchone()
++                if not row:
++                    p.error("unknown checked proof")
++                print(row[0])
++                return
++            binding = assignment.binding(Path.cwd())
++            rec = state.load(binding[0]) if binding else None
++            query = args.query or (rec["statement"] if rec else None)
++            if not query:
++                p.error("provide a query or run in a bound assignment")
++            print(json.dumps({"revision":revision,"matches":corpus.search(db,query,
++                rec["imports"] if rec else [],min(30,max(1,args.limit)))},ensure_ascii=False,indent=2))
++            return
++    gap, lease = assignment.resolve()
++    rec = state.load(gap)
++    if rec["lease"] != lease or rec["state"] not in ("LEASED","RESEARCHING"):
++        p.error("no live bound assignment")
++    meta = {"id":gap,"file":rec["path"],"module":rec["module"],"statement":rec["statement"],"imports":rec["imports"]}
++    if args.command == "synthesize":
++        report = synthesis.candidate(meta)
++        text = report.pop("candidate", None) if report else None
++    else:
++        report = circuit.explicit_circuit(meta)
++        text = circuit.render(meta,"decide") if report and report["verified"] else None
++    if not text:
++        print(json.dumps({"result":"not-generated","details":report}))
++        return
++    # A finite semantic check is evidence, not a Lean compilation verdict.
++    # The researcher must review the remaining clauses and choose to submit.
++    if args.output:
++        with args.output.open("x",encoding="utf-8") as f:
++            f.write(text)
++    print(json.dumps({"result":"candidate","details":report,"local_lean_checked":False,
++                      "output":str(args.output) if args.output else None}))
++    if not args.output:
++        print(text)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/missions/pnp/proofs/circuit.py b/missions/pnp/proofs/circuit.py
+new file mode 100644
+index 00000000..d0589429
+--- /dev/null
++++ b/missions/pnp/proofs/circuit.py
+@@ -0,0 +1,69 @@
++"""Exact finite witness validation and Lean proof rendering."""
++import re
++
++from .. import validate
++
++GATE = re.compile(r"⟨PEqualNP\.CircuitLowerBounds\.GateOp\.(and|or|not),\s*\[([0-9, ]*)\]⟩")
++EDGE = re.compile(r"\(x (\d+) && x (\d+)\)")
++INPUT = re.compile(r"∀ x : Fin (\d+) → Bool, C\.eval \(List\.ofFn x\) =")
++
++
++def explicit_circuit(meta):
++    """Recognize only explicit circuit equality rows; reject ambiguous shapes."""
++    s = meta["statement"]
++    head = re.match(r"let C : PEqualNP\.CircuitLowerBounds\.Circuit := \(⟨\[(.*?)\],\s*(\d+)⟩ : PEqualNP\.CircuitLowerBounds\.Circuit\);", s, re.S)
++    if not head:
++        return None
++    body = head.group(1)
++    gates = [(m[1], [int(x.strip()) for x in m[2].split(",") if x.strip()])
++             for m in GATE.finditer(body)]
++    if not gates or GATE.sub("", body).replace(",", "").strip():
++        return None
++    m = INPUT.search(s)
++    if not m:
++        return None
++    n, out = int(m[1]), int(head[2])
++    prefix = s[head.end():m.start()].strip()
++    basic = f"C.gates.length = {len(gates)} ∧ C.output = {out} ∧"
++    if not prefix.startswith(basic):
++        return None
++    extra = prefix[len(basic):].strip()
++    gate_shape = ("(∀ p ∈ C.gates.zipIdx, ((p.1.op.eval [] = true ∧ ∀ a b : Bool, "
++                  "p.1.op.eval [a, b] = (a && b)) ∨ (p.1.op.eval [] = false ∧ "
++                  "∀ a b : Bool, p.1.op.eval [a, b] = (a || b))) ∧ "
++                  "p.1.inputs.length = 2 ∧ ∀ i ∈ p.1.inputs, i < " + str(n) + " + p.2) ∧")
++    if extra not in ("", gate_shape):
++        return None
++    if extra and any(op not in ("and", "or") for op, _ in gates):
++        return None
++    if n > 12 or len(gates) > 64 or not 0 <= out < n+len(gates):
++        return None
++    rhs = s[m.end():].strip()
++    # Accept only a disjunction of parenthesized edge conjunctions.
++    if not re.fullmatch(r"[()\s]*" + EDGE.pattern + r"(?:[()\s]*\|\|[()\s]*" + EDGE.pattern + r")*[()\s]*", rhs):
++        return None
++    edges = [(int(a), int(b)) for a,b in EDGE.findall(rhs)]
++    if not edges or any(a >= n or b >= n for a,b in edges):
++        return None
++    if any(len(ins) != (1 if op == "not" else 2) or any(i >= n+j for i in ins)
++           for j,(op,ins) in enumerate(gates)):
++        return None
++    for mask in range(1 << n):
++        wires = [bool(mask & (1 << i)) for i in range(n)]
++        for op, ins in gates:
++            xs = [wires[i] for i in ins]
++            wires.append(all(xs) if op == "and" else any(xs) if op == "or" else not xs[0])
++        expected = any(wires[a] and wires[b] for a,b in edges)
++        if wires[out] != expected:
++            return {"verified": False, "counterexample": mask, "inputs": n}
++    return {"verified": True, "inputs": n, "cases": 1 << n,
++            "gates": len(gates), "output": out, "edges": edges}
++
++
++def render(meta, proof):
++    imports = ["Mathlib"] + [m for m in meta["imports"] if m != "Mathlib"]
++    text = "\n".join("import "+m for m in imports) + "\n\n"
++    text += "set_option maxRecDepth 100000 in\nset_option maxHeartbeats 0 in\n"
++    text += "theorem " + meta["module"] + " : " + meta["statement"] + " := by\n  " + proof + "\n"
++    validate.validate(meta, text.encode())
++    return text
+diff --git a/missions/pnp/proofs/corpus.py b/missions/pnp/proofs/corpus.py
+new file mode 100644
+index 00000000..2b0599cd
+--- /dev/null
++++ b/missions/pnp/proofs/corpus.py
+@@ -0,0 +1,97 @@
++"""Index checked upstream proof sources, without executing them."""
++import json
++import math
++from pathlib import Path
++import re
++import sqlite3
++import subprocess
++
++from .. import config, gitctl
++
++TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9'.]*")
++PROOF = re.compile(r"(?m)^theorem PEqualNP\.Outside\.[A-Za-z0-9_]+\s*:")
++TACTICS = re.compile(r"\b(?:decide|fin_cases|interval_cases|simp|omega|norm_num|ring|aesop|exact|linarith|nlinarith|grind|bv_decide)\b")
++
++
++def terms(s):
++    return {x.lower() for t in TOKEN.findall(s) for x in [t, t.split(".")[-1]]
++            if len(x) > 2 and not x.startswith("L_meta_")}
++
++
++def statement(source):
++    matches = list(PROOF.finditer(source))
++    if not matches:
++        return ""
++    tail = source[matches[-1].end():]
++    return re.split(r":=\s*by\b|:=\s*\n\s*[A-Za-z_]", tail, maxsplit=1)[0].strip()
++
++
++def open_index():
++    path = Path(config.CACHE_DIR, "proof-corpus.sqlite")
++    path.parent.mkdir(parents=True, exist_ok=True)
++    db = sqlite3.connect(path, timeout=15)
++    db.execute("create table if not exists proof(path text primary key, blob text, statement text, source text, tactics text, imports text)")
++    db.execute("create table if not exists metadata(key text primary key, value text)")
++    return db
++
++
++def update(db, mirror=gitctl.MIRROR, revision="refs/remotes/upstream/main"):
++    def git(*args):
++        return subprocess.check_output(["git", "--git-dir=" + mirror, *args], timeout=60)
++    sha = git("rev-parse", revision).decode().strip()
++    old = db.execute("select value from metadata where key='revision'").fetchone()
++    version = db.execute("select value from metadata where key='index_version'").fetchone()
++    if old and old[0] == sha and version == ("2",):
++        return sha
++    rows = {}
++    for line in git("ls-tree", "-r", sha, "lean/PEqualNP/Outside").decode().splitlines():
++        meta, path = line.split("\t", 1)
++        mode, kind, blob = meta.split()
++        if kind == "blob" and mode == "100644" and path.endswith(".lean"):
++            rows[path] = blob
++    known = dict(db.execute("select path,blob from proof")) if version == ("2",) else {}
++    with db:
++        if version != ("2",):
++            db.execute("delete from proof")
++        for path, blob in rows.items():
++            if known.get(path) == blob:
++                continue
++            src = git("cat-file", "blob", blob)
++            db.execute("delete from proof where path=?", (path,))
++            if len(src) > config.MAX_FILE_BYTES:
++                continue
++            text = src.decode("utf-8", "replace")
++            if re.search(r"[\u0400-\u04ff]", text):
++                continue
++            stmt = statement(text)
++            if not stmt:
++                continue
++            imports = re.findall(r"(?m)^import ([A-Za-z0-9_.]+)$", text)
++            db.execute("insert or replace into proof values(?,?,?,?,?,?)",
++                       (path, blob, stmt, text, json.dumps(sorted(set(TACTICS.findall(text)))), json.dumps(imports)))
++        for path in set(known) - set(rows):
++            db.execute("delete from proof where path=?", (path,))
++        db.execute("insert or replace into metadata values('revision',?)", (sha,))
++        db.execute("insert or replace into metadata values('index_version','2')")
++    return sha
++
++
++def search(db, query, allowed=(), limit=8):
++    q = terms(query)
++    rows = list(db.execute("select path,blob,statement,tactics,imports from proof"))
++    doc_terms = [terms(row[2]) for row in rows]
++    freq = {t: sum(t in d for d in doc_terms) for t in q}
++    def score(d):
++        return sum(math.log((len(rows)+1)/(freq[t]+1))+1 for t in q & d) / math.sqrt(max(1,len(d)))
++    found = []
++    for row, d in zip(rows, doc_terms):
++        rank = score(d)
++        if rank <= 0:
++            continue
++        path, blob, stmt, tactics, imports = row
++        module = path.removeprefix("lean/").removesuffix(".lean").replace("/", ".")
++        found.append({"path": path, "blob": blob, "module": module,
++                      "score": round(rank, 4), "statement": stmt,
++                      "tactics": json.loads(tactics), "imports": json.loads(imports),
++                      "direct_import_allowed": module in allowed})
++    return sorted(found, key=lambda r: (-r["score"], r["path"]))[:limit]
+diff --git a/missions/pnp/proofs/synthesis.py b/missions/pnp/proofs/synthesis.py
+new file mode 100644
+index 00000000..10fb7e30
+--- /dev/null
++++ b/missions/pnp/proofs/synthesis.py
+@@ -0,0 +1,112 @@
++"""Deterministic small graph edge-function circuit synthesis."""
++import itertools
++import re
++
++from .circuit import EDGE
++
++SHAPE = re.compile(
++    r"∃ C : PEqualNP\.CircuitLowerBounds\.Circuit, PEqualNP\.MetaComplexity\.Monotone2 C ∧ C\.size ≤ (\d+) ∧ ∀ x : Fin (\d+) → Bool, C\.eval \(List\.ofFn x\) = \(fun x : Fin \2 → Bool => (.*)\) x", re.S)
++
++
++def parse(statement):
++    m = SHAPE.fullmatch(statement.strip())
++    if not m:
++        return None
++    bound,n,rhs = int(m[1]),int(m[2]),m[3]
++    if not 2 <= n <= 12:
++        return None
++    if not re.fullmatch(r"[()\s]*" + EDGE.pattern + r"(?:[()\s]*\|\|[()\s]*" + EDGE.pattern + r")*[()\s]*", rhs):
++        return None
++    edges = {tuple(sorted((int(a),int(b)))) for a,b in EDGE.findall(rhs)}
++    if not edges or any(a == b or b >= n for a,b in edges):
++        return None
++    return n,bound,edges
++
++
++def synthesize(n, edges):
++    """Cover edges by stars or complete bipartite blocks; share OR subexpressions."""
++    neighbors = {i:{b if a == i else a for a,b in edges if i in (a,b)}
++                 for i in range(n)}
++    blocks = set()
++    for i in range(n):
++        if neighbors[i]:
++            blocks.add(((i,),tuple(sorted(neighbors[i]))))
++    for k in range(2,min(4,n)+1):
++        for left in itertools.combinations(range(n),k):
++            right = set.intersection(*(neighbors[i] for i in left))
++            if right:
++                blocks.add((left,tuple(sorted(right))))
++    blocks = sorted(blocks)
++    best = None
++    for strategy in range(3):
++        gates, memo, remaining, outputs = [], {}, set(edges), []
++        def gate(op,a,b):
++            key = op,*sorted((a,b))
++            if key not in memo:
++                memo[key] = n+len(gates)
++                gates.append(key)
++            return memo[key]
++        def disjoin(xs):
++            xs = list(xs)
++            result = xs[0]
++            for x in xs[1:]:
++                result = gate("or",result,x)
++            return result
++        while remaining:
++            choices = []
++            for a,b in blocks:
++                covered = {tuple(sorted((u,v))) for u in a for v in b} & remaining
++                if not covered:
++                    continue
++                cost = len(a)+len(b)
++                rank = (len(covered)/cost,len(covered)) if strategy == 0 else (
++                    (len(covered),-cost) if strategy == 1 else (len(covered)-cost,-cost))
++                choices.append((rank,a,b,covered))
++            _,a,b,covered = max(choices,key=lambda t:(t[0],t[1],t[2]))
++            outputs.append(gate("and",disjoin(a),disjoin(b)))
++            remaining -= covered
++        output = disjoin(outputs)
++        if best is None or len(gates)<len(best[0]):
++            best = gates,output
++    return best
++
++
++def verify(n,edges,gates,output):
++    for mask in range(1<<n):
++        w = [bool(mask & (1<<i)) for i in range(n)]
++        for op,a,b in gates:
++            if not (0 <= a < len(w) and 0 <= b < len(w)):
++                return False
++            w.append(w[a] and w[b] if op=="and" else w[a] or w[b])
++        if w[output] != any(w[a] and w[b] for a,b in edges):
++            return False
++    return True
++
++
++def candidate(meta):
++    from .. import validate
++    parsed = parse(meta["statement"])
++    if not parsed:
++        return None
++    n,bound,edges = parsed
++    gates,out = synthesize(n,edges)
++    report = {"gates":len(gates),"bound":bound,"cases":1<<n,"candidate":None}
++    if len(gates)>bound or not verify(n,edges,gates,out):
++        return report
++    mod = meta["module"]
++    imports = ["Mathlib"]+[m for m in meta["imports"] if m!="Mathlib"]
++    prefix = "\n".join("import "+m for m in imports)
++    gs = ", ".join("⟨PEqualNP.CircuitLowerBounds.GateOp."+op+", ["+str(a)+", "+str(b)+"]⟩" for op,a,b in gates)
++    text = prefix+"\n\nnamespace "+mod+"\ndef witness : PEqualNP.CircuitLowerBounds.Circuit := ⟨["+gs+"], "+str(out)+"⟩\n"
++    text += "lemma wf : PEqualNP.MetaComplexity.Monotone2 witness := by\n  intro g hg\n  simp only [witness, List.mem_cons, List.not_mem_nil, or_false] at hg\n  rcases hg with "+" | ".join("rfl" for _ in gates)+" <;> simp\n"
++    variables = ["b"+str(i) for i in range(n)]
++    rhs = re.sub(r"\bx (\d+)\b", lambda m: variables[int(m[1])], SHAPE.fullmatch(meta["statement"].strip())[3])
++    text += "set_option maxRecDepth 100000 in\nset_option maxHeartbeats 0 in\n"
++    text += "lemma truth : ∀ "+" ".join(variables)+" : Bool, witness.eval ["+", ".join(variables)+"] = ("+rhs+") := by\n  decide\n"
++    text += "end "+mod+"\n\ntheorem "+mod+" : "+meta["statement"]+" := by\n"
++    text += "  refine ⟨"+mod+".witness, "+mod+".wf, by decide, ?_⟩\n  intro x\n  simp only [List.ofFn_succ, List.ofFn_zero]\n"
++    text += "  exact "+mod+".truth "+" ".join("(x "+str(i)+")" for i in range(n))+"\n"
++    # Never describe the generated candidate as Lean-checked.
++    validate.validate(meta,text.encode())
++    report["candidate"]=text
++    return report
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index 7c2bee0b..8832a912 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -6,3 +6,4 @@ cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
+ python3 tests/pnp-pipeline.py
+ python3 tests/pnp-real-smoke.py
+ python3 tests/pnp-watchdog-smoke.py
++python3 tests/pnp-proof-tools.py
+diff --git a/tests/pnp-proof-tools.py b/tests/pnp-proof-tools.py
+new file mode 100644
+index 00000000..9fc89c58
+--- /dev/null
++++ b/tests/pnp-proof-tools.py
+@@ -0,0 +1,79 @@
++#!/usr/bin/env python3
++"""No network, no lease acquisition, no GitHub mutation."""
++import os
++from pathlib import Path
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from missions.pnp.proofs import corpus, circuit, synthesis
++from missions.pnp import validate
++
++META = {"id": "L-meta-12345",
++        "module": "PEqualNP.Outside.L_meta_12345",
++        "file": "lean/PEqualNP/Outside/L_meta_12345.lean",
++        "imports": ["PEqualNP.Defs"],
++        "statement": ("let C : PEqualNP.CircuitLowerBounds.Circuit := "
++                      "(⟨[⟨PEqualNP.CircuitLowerBounds.GateOp.and, [0, 1]⟩], 2⟩ : PEqualNP.CircuitLowerBounds.Circuit); "
++                      "C.gates.length = 1 ∧ C.output = 2 ∧ ∀ x : Fin 2 → Bool, C.eval (List.ofFn x) = ((x 0 && x 1))")}
++
++
++class ProofTools(unittest.TestCase):
++    def test_finite_circuit(self):
++        result = circuit.explicit_circuit(META)
++        self.assertTrue(result["verified"])
++        self.assertEqual(result["cases"], 4)
++        validate.validate(META, circuit.render(META, "decide").encode())
++
++    def test_false_and_malformed_circuit(self):
++        bad = dict(META, statement=META["statement"].replace("GateOp.and", "GateOp.or"))
++        self.assertFalse(circuit.explicit_circuit(bad)["verified"])
++        bad = dict(META, statement=META["statement"].replace("[0, 1]", "[0, 2]"))
++        self.assertIsNone(circuit.explicit_circuit(bad))
++        bad = dict(META, statement=META["statement"].replace("((x 0 && x 1))", "((x 0 && x 1) && (x 0 && x 1))"))
++        self.assertIsNone(circuit.explicit_circuit(bad))
++
++    def test_synthesis_bound_and_truth_table(self):
++        meta = dict(META, statement=("∃ C : PEqualNP.CircuitLowerBounds.Circuit, "
++          "PEqualNP.MetaComplexity.Monotone2 C ∧ C.size ≤ 3 ∧ ∀ x : Fin 4 → Bool, "
++          "C.eval (List.ofFn x) = (fun x : Fin 4 → Bool => "
++          "(x 1 && x 3) || (x 0 && x 2) || (x 0 && x 3) || (x 1 && x 2)) x"))
++        r = synthesis.candidate(meta)
++        self.assertEqual(r["gates"], 3)
++        self.assertEqual(r["cases"], 16)
++        self.assertIn("(b1 && b3) || (b0 && b2)",r["candidate"])
++        validate.validate(meta,r["candidate"].encode())
++        bad = dict(meta, statement=meta["statement"].replace("≤ 3","≤ 2"))
++        self.assertIsNone(synthesis.candidate(bad)["candidate"])
++
++    def test_corpus_incremental_and_allowed_import(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            db = sqlite3.connect(":memory:")
++            db.execute("create table proof(path text primary key, blob text, statement text, source text, tactics text, imports text)")
++            db.execute("create table metadata(key text primary key, value text)")
++            def git(*args):
++                return subprocess.check_output(["git","-C",tmp,*args],stderr=subprocess.STDOUT)
++            git("init","-q")
++            proof = Path(tmp, META["file"])
++            proof.parent.mkdir(parents=True)
++            proof.write_text(circuit.render(META,"decide"))
++            git("add",".")
++            git("-c","user.name=Test","-c","user.email=test@example.test","-c","commit.gpgsign=false","commit","-qm","fixture")
++            sha = corpus.update(db,mirror=str(Path(tmp,".git")),revision="HEAD")
++            hits = corpus.search(db,META["statement"],[META["module"]])
++            self.assertEqual(len(hits),1)
++            self.assertTrue(hits[0]["direct_import_allowed"])
++            self.assertIn("decide",hits[0]["tactics"])
++            self.assertEqual(corpus.update(db,mirror=str(Path(tmp,".git")),revision="HEAD"),sha)
++            proof.unlink()
++            git("add","-A")
++            git("-c","user.name=Test","-c","user.email=test@example.test","-c","commit.gpgsign=false","commit","-qm","remove")
++            corpus.update(db,mirror=str(Path(tmp,".git")),revision="HEAD")
++            self.assertEqual(corpus.search(db,META["statement"]),[])
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

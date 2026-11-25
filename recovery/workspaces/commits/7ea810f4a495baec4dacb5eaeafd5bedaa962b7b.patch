@@ -1,0 +1,67 @@
+commit 7ea810f4a495baec4dacb5eaeafd5bedaa962b7b
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Oct 20 18:29:04 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Oct 20 18:29:04 2026 +0000
+
+    Janitor: per-HEAD unpushed check so idle-cache valve actually fires (#298/#299)
+    
+    The idle-cache rule's unpushed-commit check used 'git log --branches --not
+    --remotes', but branch refs are shared across a repository's linked worktrees:
+    a single unrelated worktree's unpushed commit made every .lake in that repo look
+    unpushed and silently disabled the valve (observed 2026-10-20: the SoringP1
+    caches were skipped for reason=unpushed because a separate research worktree had
+    one unpushed commit, even though the main checkout's HEAD was clean and pushed).
+    
+    Fix: check only the worktree's own HEAD ('git log --not --remotes'), with a
+    conservative fallback to unpushed when the repo has no remote-tracking refs at
+    all (where '--not --remotes' is empty and cannot confirm the work is saved).
+    Smoke test 15 now adds an unrelated unpushed branch and still reclaims the
+    pushed worktree's cache.
+    
+    Live dry-run now identifies 20 verifiably idle, regenerable caches (~30 GB),
+    including the stale AssemblyP1 caches (weeks idle), matching the Founder's #299
+    direction to reclaim whole-box artifacts when verified safe.
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index c04f9228..6e8e9779 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -821,7 +821,17 @@ reclaim_idle_caches() {
+             log_append "$jstate/actions.log" "$ts idle-cache skip path=$path reason=not-git-worktree"
+             continue
+         fi
+-        up=$(timeout 15 git -C "$parent" log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr -d ' ')
++        # HEAD only (this worktree's own branch), NOT --branches: branch refs are
++        # shared across a repository's linked worktrees, so --branches would let
++        # an unrelated worktree's unpushed commit block reclaiming this cache and
++        # silently disable the valve. If the repo has no remote-tracking refs at
++        # all, `--not --remotes` is empty and cannot confirm the work is saved, so
++        # treat it as unpushed (conservative).
++        if git -C "$parent" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null | grep -q .; then
++            up=$(timeout 15 git -C "$parent" log --oneline --not --remotes 2>/dev/null | wc -l | tr -d ' ')
++        else
++            up=1
++        fi
+         is_num "$up" || up=0
+         if [ "$up" -gt 0 ]; then
+             log_append "$jstate/actions.log" "$ts idle-cache skip path=$path reason=unpushed commits=$up"
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+index c53afbbd..9d3ab0f6 100644
+--- a/tests/janitor-smoke.sh
++++ b/tests/janitor-smoke.sh
+@@ -259,6 +259,14 @@ git -C "$wt1" add .gitignore f
+ git -C "$wt1" commit -qm init
+ git -C "$wt1" remote add origin "$origin"
+ git -C "$wt1" push -q -u origin HEAD
++# An unrelated unpushed branch in the same repo (branches are shared across
++# linked worktrees) must NOT block reclaiming this worktree's pushed cache.
++wt1br=$(git -C "$wt1" symbolic-ref --short HEAD)
++git -C "$wt1" checkout -q -b sidebranch
++printf 'side\n' > "$wt1/side"
++git -C "$wt1" add side
++git -C "$wt1" commit -qm side
++git -C "$wt1" checkout -q "$wt1br"
+ mkdir -p "$wt1/.lake"
+ printf 'olean\n' > "$wt1/.lake/olean"
+ touch -d '2 days ago' "$wt1/.lake"

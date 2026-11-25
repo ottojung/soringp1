@@ -1,0 +1,296 @@
+commit 7c6c0ee1b8be5b7099c081e04492c06c708d0750
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Fri Oct 23 10:29:21 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Fri Oct 23 10:29:21 2026 -0700
+
+    Measure institutional outcomes independently of agent activity (#33)
+
+diff --git a/government/OUTCOME-METRICS.md b/government/OUTCOME-METRICS.md
+new file mode 100644
+index 00000000..ddc723ca
+--- /dev/null
++++ b/government/OUTCOME-METRICS.md
+@@ -0,0 +1,25 @@
++# Independent institutional outcome feedback
++
++`government/outcome-metrics.py` is a read-only evidence collector executed
++non-blockingly by `government/boot.sh`, separate from executive dispatch and
++legislative voting. It persists `institutional-outcomes/latest.json` and a
++timestamped JSONL history below `VICHE_STATE_ROOT`.
++
++The measurements distinguish (1) Antonina process exits by project/outcome,
++(2) main-branch Git commits and PR merges as delivery signals,
++(3) readiness ages of the Legislature, Executive, Judiciary and permanent
++non-voting Innovation Centre, (4) still-open work seen on the Antonina board,
++and (5) claimed, investigated, blocked and independently curated SoringP1
++research fronts.
++
++**No proxy proves completed work.** A green agent exit is not a merged
++artifact; a merged commit is not evidence of independent quality; an AI
++proposed research question is not a theorem; branch readiness is not
++institutional effectiveness. Each unavailable source is marked unavailable,
++not silently converted to zero.
++
++The independent Judiciary includes the snapshot in its measurements. The
++Clerk reads the evidence when preparing its agenda. Only the Legislative
++branch may debate, propose and ratify changes. Neither the measurements nor
++this document impose quotas, models, a project list, or substantive goals on
++the autonomous Innovation Centre.
+diff --git a/government/boot.sh b/government/boot.sh
+index 3beb66ca..21d7509a 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -83,6 +83,12 @@ if [ -f "$town/government/oversight-watch.sh" ]; then
+     /bin/sh "$town/government/oversight-watch.sh" ||
+         echo "Viche: watchdog cycle failed; investigate monitoring coverage" >&2
+ fi
++# Read-only institutional feedback: never gates autonomous branches.
++if [ -f "$town/government/outcome-metrics.py" ]; then
++    python3 "$town/government/outcome-metrics.py" ||
++        echo "Viche: outcome feedback unavailable; do not infer success" >&2
++fi
++
+ # Independent Judiciary: evidence and adjudication, not executive delivery,
+ # proposing bills, or modifying its own measurement rules.
+ if [ -f "$town/government/branch-liveness.sh" ]; then
+diff --git a/government/judiciary-measurements.py b/government/judiciary-measurements.py
+index f30ac6ce..6009c56e 100644
+--- a/government/judiciary-measurements.py
++++ b/government/judiciary-measurements.py
+@@ -91,7 +91,13 @@ def board_trail():
+     return out
+ 
+ 
+-payload={'observed_at':now,'destination':'Legislature', 'kind':'Judiciary measurement, not legislation', 'counts':counts, 'false_positive_rate':None,'false_negative_rate':None,'measurement_reliability':'not_established','judiciary_independence':'non-voting independent measurement office (Act 15, enacted 2026-10-17)', 'no_proposals':True, 'board_trail':board_trail()}
++try:
++    institutional_outcomes=json.loads(
++        (root/'institutional-outcomes/latest.json').read_text())
++except (OSError,ValueError,TypeError):
++    institutional_outcomes={'telemetry':'unavailable','not_a_clean_result':True}
++
++payload={'observed_at':now,'destination':'Legislature', 'kind':'Judiciary measurement, not legislation', 'counts':counts, 'false_positive_rate':None,'false_negative_rate':None,'measurement_reliability':'not_established','judiciary_independence':'non-voting independent measurement office (Act 15, enacted 2026-10-17)', 'no_proposals':True, 'institutional_outcomes':institutional_outcomes, 'board_trail':board_trail()}
+ p=root/'branches/judiciary-measurements.json'
+ p.parent.mkdir(parents=True,exist_ok=True)
+ tmp=p.with_suffix('.json.tmp')
+diff --git a/government/outcome-metrics.py b/government/outcome-metrics.py
+new file mode 100644
+index 00000000..9c4c65c5
+--- /dev/null
++++ b/government/outcome-metrics.py
+@@ -0,0 +1,148 @@
++#!/usr/bin/env python3
++"""Observational institutional feedback; no authority to govern or enact."""
++import collections
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import time
++
++TOWN=Path(os.getenv('VICHE_TOWN_ROOT','/var/lib/lubko/wd/viche'))
++STATE=Path(os.getenv('VICHE_STATE_ROOT','/var/lib/lubko/wd/viche-state'))
++CLI=os.getenv('VICHE_METRICS_ANTONINA','antonina')
++NOW=int(os.getenv('VICHE_METRICS_NOW',time.time()))
++WINDOW=86400
++
++def shell(args, timeout=35):
++    p=subprocess.run([str(x) for x in args],capture_output=True,text=True,timeout=timeout)
++    if p.returncode:raise RuntimeError(p.stderr[-180:] or 'nonzero exit')
++    return p.stdout
++
++def js(path):
++    try:return json.loads(Path(path).read_text())
++    except (ValueError,OSError):return None
++
++def agents():
++    rows=[]
++    for page in range(1,9):
++        d=json.loads(shell([CLI,'agent','list','--finished','--page',page,
++                            '--limit',500,'--json'],65))
++        if d.get('unreadable'):raise ValueError('incomplete agent inventory')
++        a=d['agents']
++        rows.extend(a)
++        if len(a)<500:break
++        if a and all(float(x.get('finished_at') or 0)<NOW-WINDOW for x in a):break
++    else:raise RuntimeError('inventory exceeds bounded observation window')
++    recent=[x for x in rows if isinstance(x.get('finished_at'),(float,int))
++            and NOW-WINDOW<=x['finished_at']<=NOW+5]
++    projects=collections.Counter()
++    outcomes=collections.Counter()
++    for x in recent:
++        title=x.get('title','')
++        projects['Viche' if title.startswith('Viche') else
++                 'SoringP1' if title.startswith('SoringP1') else 'other']+=1
++        outcomes[x.get('state','unknown')]+=1
++    return dict(window_seconds=WINDOW,total=len(recent),by_project=dict(projects),
++                by_process_outcome=dict(outcomes),
++                caveat='process success does NOT prove work delivery or verification')
++
++def git_delivery():
++    lines=shell(['git','-C',TOWN,'log','--first-parent',
++                 '--since='+str(NOW-WINDOW),'--format=%ct%x09%H%x09%s'])
++    recent=[]
++    for line in lines.splitlines():
++        fields=line.split('\t',2)
++        if len(fields)==3 and fields[0].isdigit() and int(fields[0])<=NOW:
++            recent.append(fields)
++    return dict(main_head=shell(['git','-C',TOWN,'rev-parse','HEAD']).strip(),
++                main_commits=len(recent),
++                main_merge_commits=sum('Merge pull request' in x[2] for x in recent),
++                most_recent=recent[0] if recent else None,
++                caveat='merged history is not proof of independently verified impact')
++
++def branches():
++    result={}
++    for b in ('legislature','executive','judiciary'):
++        x=js(STATE/'branches'/f'{b}.json')
++        result[b]=dict(telemetry='available' if isinstance(x,dict) else 'missing',
++                       readiness=x.get('readiness') if isinstance(x,dict) else None,
++                       age_seconds=max(0,NOW-int(x['observed_at']))
++                       if isinstance(x,dict) and isinstance(x.get('observed_at'),(float,int))
++                       else None)
++    ic=js(STATE/'legislature/innovation-centre/health.json')
++    result['innovation_centre']=dict(telemetry='available' if isinstance(ic,dict) else 'missing',
++                                    readiness=ic.get('readiness') if isinstance(ic,dict) else None,
++                                    age_seconds=max(0,NOW-int(ic['observed_at']))
++                                    if isinstance(ic,dict) and isinstance(ic.get('observed_at'),(float,int))
++                                    else None)
++    return result
++
++def research():
++    frontier=js(os.getenv('VICHE_SORING_FRONTIER',
++             '/home/lubko/.local/state/soringp1/frontier-ledger.json'))
++    if not isinstance(frontier,dict):return {'telemetry':'unavailable'}
++    return dict(telemetry='available',
++                states=dict(collections.Counter(x.get('status','unknown')
++                                  for x in frontier.get('fronts',[]))),
++                curator_running=bool(frontier.get('curator',{}).get('agent_id')),
++                caveat='curator proposals are not verified research results')
++
++def board():
++    entries=json.loads(shell([CLI,'board','list','--state','open',
++                              '--page','1','--json'],45))
++    if not isinstance(entries,list):raise ValueError('invalid board inventory')
++    return dict(open_first_page=len(entries),
++                open_by_project=dict(collections.Counter(
++                    'Viche' if x.get('title','').startswith('Viche')
++                    else 'SoringP1' if x.get('title','').startswith('SoringP1')
++                    else 'other' for x in entries)),
++                caveat='first page only; do not infer issues missing on this page were closed')
++
++def measure():
++    result={'observed_at':NOW,'role':'descriptive evidence for independent branch review',
++            'delivery_verified_by_this_probe':False,
++            'no_prescriptive_quota':True}
++    for key,fn in [('agents',agents),('git',git_delivery),
++                   ('branches',branches),('research',research),('board',board)]:
++        try:result[key]=fn()
++        except (ValueError,RuntimeError,KeyError,TypeError,subprocess.TimeoutExpired) as e:
++            result[key]={'telemetry':'unavailable','error':str(e)[-180:]}
++    alerts=[]
++    if any(v['telemetry']!='available' or v['readiness']=='unhealthy'
++           for v in result.get('branches',{}).values()):
++        alerts.append('branch_readiness_review')
++    r=result.get('research',{})
++    if r.get('telemetry')=='available' and not (r['states'].get('ready',0)
++         or r['states'].get('running',0) or r['states'].get('launching',0)
++         or r['curator_running']):
++        alerts.append('research_frontier_not_being_replenished')
++    if any(result[k].get('telemetry')=='unavailable' for k in ('agents','git','board')):
++        alerts.append('outcome_measurement_incomplete')
++    result['signals_for_inquiry_not_verdicts']=alerts
++    return result
++
++def atomic(path,data):
++    path.parent.mkdir(parents=True,exist_ok=True)
++    fd,tmp=tempfile.mkstemp(prefix='.outcomes-',dir=path.parent)
++    try:
++        with os.fdopen(fd,'w') as f:
++            f.write(data);f.flush();os.fsync(f.fileno())
++        os.replace(tmp,path)
++    finally:
++        if os.path.exists(tmp):os.unlink(tmp)
++
++def main():
++    obj=measure()
++    root=STATE/'institutional-outcomes'
++    atomic(root/'latest.json',json.dumps(obj,indent=2,sort_keys=True)+'\n')
++    marker=js(root/'last-history-minute.json')
++    if not isinstance(marker,dict) or marker.get('minute')!=NOW//60:
++        with (root/'history.jsonl').open('a') as f:
++            f.write(json.dumps(obj,sort_keys=True)+'\n')
++        atomic(root/'last-history-minute.json',json.dumps({'minute':NOW//60})+'\n')
++    print('Viche outcome evidence:',json.dumps({
++        'agent_exits':obj['agents'].get('total'),
++        'main_commits':obj['git'].get('main_commits'),
++        'signals':obj['signals_for_inquiry_not_verdicts']}))
++if __name__=='__main__':main()
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 1dc26220..e0fd6cdf 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -34,6 +34,10 @@ GitHub-hosted CI builds, tests and Lean verification; do not disable those
+ workflows to enforce an agent execution-host assignment.
+ Executive discovery, issue prioritization and delivery belong to the independent
+ executive office under Act 2. The Clerk is not its task scheduler.
++Read descriptive institutional outcomes at
++/var/lib/lubko/wd/viche-state/institutional-outcomes/latest.json.
++These distinguish agent exits, main merges and independent verification.
++Treat trends as questions for inquiry, never as mandatory output quotas.
+ Read the independent Judiciary's latest measurements at
+ ${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/branches/judiciary-measurements.json
+ and any pending case findings before setting the parliamentary agenda.
+diff --git a/tests/outcome-metrics-smoke.sh b/tests/outcome-metrics-smoke.sh
+new file mode 100755
+index 00000000..6fdfcd2a
+--- /dev/null
++++ b/tests/outcome-metrics-smoke.sh
+@@ -0,0 +1,46 @@
++#!/bin/sh
++set -eu
++root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++mkdir -p "$tmp/state/branches" "$tmp/bin"
++cat > "$tmp/bin/antonina" <<'EOF'
++#!/bin/sh
++case "$*" in
++  "agent list --finished --page 1 --limit 500 --json")
++    printf '%s\n' '{"agents":[{"title":"Viche: Clerk","state":"succeeded","finished_at":1792774800},{"title":"SoringP1 proof attempt","state":"failed","finished_at":1792774800}],"unreadable":[]}' ;;
++  "board list --state open --page 1 --json")
++    printf '%s\n' '[{"title":"Viche: unfinished mandate"},{"title":"SoringP1: theorem remains open"}]' ;;
++  *) echo "unexpected test call: $*" >&2; exit 2 ;;
++esac
++EOF
++chmod +x "$tmp/bin/antonina"
++printf '%s\n' '{"branch":"legislature","readiness":"running","observed_at":1792774800}' > "$tmp/state/branches/legislature.json"
++printf '%s\n' '{"branch":"executive","readiness":"ready","observed_at":1792774800}' > "$tmp/state/branches/executive.json"
++printf '%s\n' '{"branch":"judiciary","readiness":"running","observed_at":1792774800}' > "$tmp/state/branches/judiciary.json"
++VICHE_METRICS_NOW=1792774900 VICHE_TOWN_ROOT="$root" \
++VICHE_STATE_ROOT="$tmp/state" VICHE_METRICS_ANTONINA="$tmp/bin/antonina" \
++python3 "$root/government/outcome-metrics.py" > "$tmp/output"
++python3 - "$tmp/state/institutional-outcomes/latest.json" <<'PY'
++import json,sys
++x=json.load(open(sys.argv[1]))
++assert x['agents']['total']==2,x['agents']
++assert x['agents']['by_process_outcome']=={'failed':1,'succeeded':1}
++assert x['agents']['caveat'].find('NOT prove')>=0
++assert x['board']['open_by_project']=={'Viche':1,'SoringP1':1}
++assert x['branches']['legislature']['readiness']=='running'
++assert x['delivery_verified_by_this_probe'] is False
++assert x['no_prescriptive_quota'] is True
++PY
++# Unavailable agent inventory cannot silently become a green zero.
++printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/antonina"
++VICHE_METRICS_NOW=1792774961 VICHE_TOWN_ROOT="$root" \
++VICHE_STATE_ROOT="$tmp/state" VICHE_METRICS_ANTONINA="$tmp/bin/antonina" \
++python3 "$root/government/outcome-metrics.py" > "$tmp/output"
++python3 - "$tmp/state/institutional-outcomes/latest.json" <<'PY'
++import json,sys
++x=json.load(open(sys.argv[1]))
++assert x['agents']['telemetry']=='unavailable',x['agents']
++assert 'outcome_measurement_incomplete' in x['signals_for_inquiry_not_verdicts']
++PY
++echo 'Viche outcome feedback smoke passed'

@@ -1,0 +1,108 @@
+commit 7aed9ea80c20990d7189aeef0d522fba75a430ac
+Author:     Recovery Steward <recovery-steward@viche>
+AuthorDate: Sat Nov 7 23:39:56 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 23:52:08 2026 +0000
+
+    Board-trail lens: use shared XDG roots and a bounded timeout
+    
+    The mandatory board-trail cross-check inherited the OpenCode service's
+    private XDG_CONFIG_HOME/XDG_STATE_HOME, so the Antonina CLI could not see
+    the user's credentials and managed-agent registry, and a fixed 30s
+    ceiling made the lens routinely stale. Correct only the known service
+    roots (preserving valid caller-provided roots so hermetic tests still
+    work) and size the timeout to the mapping with a floor and cap.
+    
+    Measurement criteria are unchanged: unreadable records remain explicitly
+    unreadable and reliability semantics are untouched.
+
+diff --git a/government/judiciary-measurements.py b/government/judiciary-measurements.py
+index 0c570fd2..93d0f1f8 100644
+--- a/government/judiciary-measurements.py
++++ b/government/judiciary-measurements.py
+@@ -47,7 +47,38 @@ def board_trail():
+     if shutil.which('antonina') is None:
+         out['reason']='antonina CLI unavailable'; return out
+     try:
+-        done=subprocess.run(['/bin/sh',str(script)],capture_output=True,text=True,timeout=30)
++        # Viche's OpenCode service supplies private XDG roots for its own
++        # service data. The Antonina CLI needs the user's shared credential and
++        # managed-agent registry instead. Correct only those known service
++        # roots (or unset/empty values); preserve valid caller-provided XDG
++        # roots so isolated installations continue to work.
++        cli_env=os.environ.copy()
++        home=Path.home()
++        xdg_defaults={
++            'XDG_CONFIG_HOME':home/'.config',
++            'XDG_STATE_HOME':home/'.local/state',
++        }
++        xdg_service_roots={
++            'XDG_CONFIG_HOME':home/'.local/state/antonina/opencode-service/config',
++            'XDG_STATE_HOME':home/'.local/state/antonina/opencode-service/state',
++        }
++        for key,default in xdg_defaults.items():
++            if cli_env.get(key) in (None,'',str(xdg_service_roots[key])):
++                cli_env[key]=str(default)
++        # The cross-check performs bounded board pagination per originating
++        # issue. A fixed 30s ceiling made the mandatory lens routinely stale
++        # even with valid credentials. Keep this synchronous but allow a
++        # bounded window sized to the mapping; each individual read remains
++        # retry-bounded and unreadable records remain explicitly unreadable.
++        mapping_rows=sum(1 for line in mapping.open() if line.strip() and
++                         not line.lstrip().startswith('#'))
++        # The scanner makes one or more paged board calls per such row. The
++        # 15-second allowance is a conservative per-row budget based on
++        # observed latency/retries; floor and cap bound both small-map
++        # overhead and pathological synchronous stalls.
++        timeout=max(120,min(900,30+mapping_rows*15))
++        done=subprocess.run(['/bin/sh',str(script)],capture_output=True,text=True,
++                            timeout=timeout,env=cli_env)
+     except (subprocess.TimeoutExpired,OSError) as err:
+         out['reason']='cross-check unavailable: '+str(err)[:160]; return out
+     if done.returncode!=0:
+diff --git a/tests/board-trail-smoke.sh b/tests/board-trail-smoke.sh
+index 189931ac..45f49b4d 100755
+--- a/tests/board-trail-smoke.sh
++++ b/tests/board-trail-smoke.sh
+@@ -21,6 +21,14 @@ cat > "$scratch/bin/antonina" <<'MOCK'
+ set -eu
+ case "$1 $2" in
+ "board show")
++    if [ "${ASSERT_STANDARD_XDG:-0}" = 1 ]; then
++        [ "$XDG_CONFIG_HOME" = "$EXPECTED_XDG_CONFIG_HOME" ] || {
++            echo "unexpected Antonina config root: $XDG_CONFIG_HOME" >&2; exit 91;
++        }
++        [ "$XDG_STATE_HOME" = "$EXPECTED_XDG_STATE_HOME" ] || {
++            echo "unexpected Antonina state root: $XDG_STATE_HOME" >&2; exit 92;
++        }
++    fi
+     id=; prev=
+     for a in "$@"; do [ "$prev" = "--id" ] && id=$a; prev=$a; done
+     case "$id" in
+@@ -54,6 +62,13 @@ jq -e 'select(.issue=="103") | .stage_markers=="proposal" and .chatter==0' "$scr
+ jq -e 'select(.issue=="104") | .terminal==0 and .stage_markers=="" and .post_completion==1' "$scratch/rows" >/dev/null
+ jq -e 'select(.issue=="105") | .terminal==0 and .stage_markers=="verification" and .post_completion==1' "$scratch/rows" >/dev/null
+ jq -e 'select(.issue=="106") | .terminal==1 and .stage_markers=="verification" and .post_completion==1' "$scratch/rows" >/dev/null
++XDG_CONFIG_HOME=$HOME/.local/state/antonina/opencode-service/config
++XDG_STATE_HOME=$HOME/.local/state/antonina/opencode-service/state
++ASSERT_STANDARD_XDG=1
++EXPECTED_XDG_CONFIG_HOME=$HOME/.config
++EXPECTED_XDG_STATE_HOME=$HOME/.local/state
++export EXPECTED_XDG_CONFIG_HOME EXPECTED_XDG_STATE_HOME
++export XDG_CONFIG_HOME XDG_STATE_HOME ASSERT_STANDARD_XDG
+ python3 "$scratch/town/government/judiciary-measurements.py" >/dev/null
+ report=$scratch/state/branches/judiciary-measurements.json
+ jq -e '.board_trail.status=="measured"' "$report" >/dev/null
+@@ -61,4 +76,12 @@ jq -e '.board_trail.completed_total==6 and .board_trail.terminal_reached==2 and
+ jq -e '(.board_trail.git_only_gaps|length)==1 and .board_trail.git_only_gaps[0].issue=="102"' "$report" >/dev/null
+ jq -e '.board_trail.dangling_trails==4 and .board_trail.content_standard_failures==1' "$report" >/dev/null
+ jq -e '.no_proposals==true and .measurement_reliability=="not_established"' "$report" >/dev/null
++# Valid custom roots are preserved rather than overwritten.
++XDG_CONFIG_HOME=$scratch/custom-config
++XDG_STATE_HOME=$scratch/custom-state
++EXPECTED_XDG_CONFIG_HOME=$scratch/custom-config
++EXPECTED_XDG_STATE_HOME=$scratch/custom-state
++export XDG_CONFIG_HOME XDG_STATE_HOME EXPECTED_XDG_CONFIG_HOME EXPECTED_XDG_STATE_HOME
++python3 "$scratch/town/government/judiciary-measurements.py" >/dev/null
++jq -e '.board_trail.status=="measured"' "$report" >/dev/null
+ echo 'Board-trail completeness lens smoke passed'

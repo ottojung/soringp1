@@ -1,0 +1,648 @@
+commit 7ddce1da3cd385eab57891541380b6f7559e830e
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Sat Nov 21 16:54:15 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Sat Nov 21 16:54:15 2026 +0000
+
+    Act32: conservatively meter whole-host CPU and enforce budget lifecycle
+
+diff --git a/government/knowledge-budget-tool.py b/government/knowledge-budget-tool.py
+index c8c7d7db..d3a10180 100644
+--- a/government/knowledge-budget-tool.py
++++ b/government/knowledge-budget-tool.py
+@@ -7,9 +7,10 @@ if the authoritative source is unreadable it exits non-zero and the POSIX-sh
+ engine fails closed.
+ 
+ Token usage is read from the Antonina-managed OpenCode service SQLite database
+-(`session_v2`, keyed by the agent's native_session_id). CPU time is read from
+-/proc for the agent's runner process (including reaped children). Wall time is
+-computed by the shell from authoritative timestamps.
++(`session_v2`, keyed by the agent's native_session_id). Whole-host CPU busy
++ticks are read from /proc/stat BEFORE launch and thereafter; the difference
++is a deliberately pessimistic upper bound for every overlapping office, not
++attributable backend CPU. Wall time comes from monotonic session timers.
+ 
+ Subcommands:
+   validate CONFIG          validate source-controlled budget config; exit 0/1
+@@ -74,9 +75,10 @@ def validate_config(cfg):
+         if not isinstance(db, str) or not db:
+             errors.append("metering.opencode_db must be a non-empty string")
+     cpu_meter = cfg.get("cpu_meter")
+-    if not isinstance(cpu_meter, dict) or cpu_meter.get("available") is not False or \
+-            cpu_meter.get("source") != "unavailable":
+-        errors.append("cpu_meter must explicitly remain unavailable until verified per-office backend attribution is implemented")
++    if (not isinstance(cpu_meter, dict) or cpu_meter.get("available") is not True
++            or cpu_meter.get("source") != "proc-stat-host-busy-upper-bound-v1"
++            or cpu_meter.get("attribution") != "conservative-whole-host-upper-bound"):
++        errors.append("CPU meter must explicitly use a whole-host busy-time upper bound")
+     for key, low, high in (("accounting_window_seconds", 1, MAX_WINDOW),
+                            ("monitor_interval_seconds", 1, 300)):
+         val = cfg.get(key)
+@@ -153,12 +155,74 @@ def meter_columns(con):
+     return {row[1] for row in con.execute("PRAGMA table_info(session_v2)")}
+ 
+ 
+-def cpu_seconds(_pid):
+-    # OpenCode's runner PID is not the backend/service CPU attribution. Never
+-    # substitute it for the Act 32 machine-time cap. Until a verified service
+-    # cgroup/session attribution exists, CPU is explicitly unavailable and the
+-    # engine refuses all activations that require this cap.
+-    return None, False
++def host_cpu():
++    """Monotone WHOLE-HOST busy CPU seconds (not office CPU attribution).
++
++    Every CPU tick spent by a knowledge office's local backend is included,
++    regardless of the supervising runner PID or concurrent workload. Charging
++    all host busy ticks to EACH overlapping office is an intentionally
++    conservative upper bound. This costs more allowance, never less. A boot
++    change or unreadable proc file is fatal to the session meter.
++    """
++    import re
++    boot = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
++    if not re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", boot):
++        raise OSError("host boot identity missing or malformed")
++    with pathlib.Path("/proc/stat").open() as proc:
++        line = proc.readline().strip().split()
++    if len(line) < 9 or line[0] != "cpu":
++        raise OSError("host aggregate CPU accounting unavailable")
++    fields = [int(x) for x in line[1:9]]
++    if any(x < 0 for x in fields):
++        raise OSError("host CPU counter is invalid")
++    hz = os.sysconf("SC_CLK_TCK")
++    if not isinstance(hz, int) or hz <= 0:
++        raise OSError("invalid host CPU tick rate")
++    # user,nice,system,irq,softirq,steal; guest is already part of user
++    # and idle/iowait are not CPU execution.
++    total = sum(fields[i] for i in (0, 1, 2, 5, 6, 7)) / hz
++    return {"cpu_seconds": total, "cpu_boot_id": boot,
++            "cpu_available": True, "cpu_source": "proc-stat-host-busy-upper-bound-v1",
++            "cpu_attribution": "conservative-whole-host-upper-bound"}
++
++
++def cpu_delta(baseline, current, previous=None):
++    """Reject reboot/reset or regression; label whole-host delta as upper bound."""
++    if not all(isinstance(x, dict) for x in (baseline, current)):
++        raise ValueError("CPU baseline/current sample missing")
++    if baseline.get("cpu_boot_id") != current.get("cpu_boot_id"):
++        raise ValueError("CPU host rebooted during reservation")
++    if (baseline.get("cpu_source") != "proc-stat-host-busy-upper-bound-v1"
++            or current.get("cpu_source") != baseline.get("cpu_source")):
++        raise ValueError("CPU source changed")
++    before, after = baseline.get("cpu_seconds"), current.get("cpu_seconds")
++    if (any(isinstance(x, bool) or not isinstance(x, (int, float)) or
++            not math.isfinite(x) for x in (before, after)) or after < before):
++        raise ValueError("CPU counter reset or unavailable")
++    if previous is not None:
++        if not isinstance(previous, dict) or previous.get("cpu_boot_id") != current.get("cpu_boot_id"):
++            raise ValueError("previous CPU meter identity lost")
++        old = previous.get("cpu_host_seconds")
++        if isinstance(old, bool) or not isinstance(old, (int, float)) or after < old:
++            raise ValueError("CPU counter regressed from last committed sample")
++    updated = dict(current)
++    updated["cpu_host_seconds"] = after
++    updated["cpu_seconds"] = max(0.0, after - before)
++    updated["cpu_upper_bound"] = True
++    # The native session can be reused and cannot be identified prelaunch.
++    # Absolute session tokens safely UPPER-bound this invocation's tokens.
++    # The overrun checker historically requires .tokens.delta_total, so
++    # expose the conservative bound under that field with explicit semantics.
++    tokens = updated.get("tokens")
++    if (not isinstance(tokens, dict)
++            or isinstance(tokens.get("total"), bool)
++            or not isinstance(tokens.get("total"), int) or tokens["total"] < 0):
++        raise ValueError("token session total missing; cannot charge upper bound")
++    if updated.get("session_found") is not True:
++        raise ValueError("native session is not measured")
++    updated["tokens"] = dict(tokens, delta_total=tokens["total"])
++    updated["token_accounting"] = "absolute-session-total-upper-bound"
++    return updated
+ 
+ 
+ def snapshot(db, sid, pid):
+@@ -184,7 +248,7 @@ def snapshot(db, sid, pid):
+                                               "cache_read", "cache_write"))
+     reported = bool(row is not None and row[len(TOKEN_FIELDS)] is not None)
+     cost = float(row[len(TOKEN_FIELDS)] or 0) if reported else 0.0
+-    cpu, cpu_ok = cpu_seconds(pid)
++    cpu = host_cpu()
+     return {
+         "available": True,
+         "source": METER_SOURCE,
+@@ -194,8 +258,11 @@ def snapshot(db, sid, pid):
+         "tokens": tokens,
+         "cost": cost,
+         "cost_reported": reported,
+-        "cpu_seconds": cpu,
+-        "cpu_available": cpu_ok,
++        "cpu_seconds": cpu["cpu_seconds"],
++        "cpu_available": cpu["cpu_available"],
++        "cpu_boot_id": cpu["cpu_boot_id"],
++        "cpu_source": cpu["cpu_source"],
++        "cpu_attribution": cpu["cpu_attribution"],
+         "time_updated_ms": int(row[len(TOKEN_FIELDS) + 1]) if row[len(TOKEN_FIELDS) + 1] is not None else None,
+     }
+ 
+@@ -268,7 +335,7 @@ def overrun(caps, snap, wall):
+     tokens = snap.get("tokens", {}).get("delta_total")
+     cpu = snap.get("cpu_seconds")
+     if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+-        raise ValueError("per-run token delta unavailable")
++        raise ValueError("session token bound unavailable")
+     reasons = []
+     if tokens >= caps["tokens_total"]:
+         reasons.append("tokens_total")
+@@ -306,6 +373,11 @@ def main(argv):
+             finally:
+                 con.close()
+             return emit({"ok": True, "source": METER_SOURCE}, 0)
++        if cmd == "cpu-meter":
++            return emit(host_cpu(), 0)
++        if cmd == "cpu-delta":
++            return emit(cpu_delta(json.loads(args[0]), json.loads(args[1]),
++                                  json.loads(args[2]) if len(args) > 2 else None), 0)
+         if cmd == "snapshot":
+             return emit(snapshot(args[0], args[1] if len(args) > 1 else "",
+                                  args[2] if len(args) > 2 else ""), 0)
+diff --git a/government/knowledge-budget.conf b/government/knowledge-budget.conf
+index fb9204d6..b2805856 100644
+--- a/government/knowledge-budget.conf
++++ b/government/knowledge-budget.conf
+@@ -5,9 +5,10 @@
+     "opencode_db": "/home/lubko/.local/state/antonina/opencode-service/opencode.db"
+   },
+   "cpu_meter": {
+-    "available": false,
+-    "source": "unavailable",
+-    "reason": "No verified per-office backend CPU attribution; runner PID CPU is not a valid substitute"
++    "available": true,
++    "source": "proc-stat-host-busy-upper-bound-v1",
++    "attribution": "conservative-whole-host-upper-bound",
++    "reason": "Every host busy CPU second is pessimistically charged to every overlapping knowledge office; includes unrelated workloads. This is a bound, NOT measured per-office CPU usage."
+   },
+   "accounting_window_seconds": 3888000,
+   "monitor_interval_seconds": 20,
+diff --git a/government/knowledge-budget.sh b/government/knowledge-budget.sh
+index 393bac20..80998c1b 100644
+--- a/government/knowledge-budget.sh
++++ b/government/knowledge-budget.sh
+@@ -53,6 +53,20 @@ db_path() {
+ probe_or_die() {
+   python3 "$TOOL" probe "$(db_path)" >/dev/null 2>&1 ||
+     die 'authoritative token metering unavailable; activation blocked (no unmeasured budget claimed)'
++  python3 "$TOOL" cpu-meter >/dev/null 2>&1 ||
++    die 'whole-host busy CPU meter unavailable; activation blocked'
++}
++
++cpu_adjust() {
++  _ca_base=$1
++  _ca_current=$2
++  _ca_previous=
++  [ "$#" -lt 3 ] || _ca_previous=$3
++  if [ -n "$_ca_previous" ] && [ "$_ca_previous" != null ]; then
++    python3 "$TOOL" cpu-delta "$_ca_base" "$_ca_current" "$_ca_previous"
++  else
++    python3 "$TOOL" cpu-delta "$_ca_base" "$_ca_current"
++  fi
+ }
+ 
+ check_office() {
+@@ -61,7 +75,7 @@ check_office() {
+ 
+ atomic_write() {
+   _aw_path=$1
+-  python3 "$TOOL" durable-write "$_aw_path"
++  python3 "$TOOL" durable-write "$_aw_path" >/dev/null
+ }
+ 
+ atomic_cp() {
+@@ -163,10 +177,29 @@ finalize_locked() {
+       hold_locked "$_f_id" 'meter_unreadable_at_finalize'; return 0
+     fi
+   fi
++  if [ "$(printf '%s\n' "$_f_snap" | jq -r '.cpu_upper_bound // false')" != true ]; then
++    _f_base=$(printf '%s\n' "$_f_cur" | jq -c '.cpu_baseline')
++    _f_previous=$(printf '%s\n' "$_f_cur" | jq -c '.meter')
++    if ! _f_snap=$(cpu_adjust "$_f_base" "$_f_snap" "$_f_previous"); then
++      hold_locked "$_f_id" 'cpu_reboot_or_counter_invalid_at_finalize'; return 0
++    fi
++  fi
+   _f_started=$(printf '%s\n' "$_f_cur" | jq -r '.started_at')
+   [ -n "$_f_wall" ] || _f_wall=$(( $(date +%s) - _f_started ))
+   _f_agent=$(printf '%s\n' "$_f_cur" | jq -r '.agent_id // ""')
+-  [ -z "$_f_agent" ] || stop_or_kill "$_f_agent" "$(printf '%s\n' "$_f_cur" | jq -r '.overrun_action')"
++  if [ -n "$_f_agent" ]; then
++    stop_or_kill "$_f_agent" "$(printf '%s\n' "$_f_cur" | jq -r '.overrun_action')"
++    # A kill request is NOT proof that a detached backend session stopped.
++    # Never release the reserved cap while it might still be consuming work.
++    if ! _f_status=$(agent_status "$_f_agent"); then
++      hold_locked "$_f_id" 'cannot_verify_agent_stopped'; return 0
++    fi
++    _f_state=$(printf '%s\n' "$_f_status" | jq -r '.state // "unknown"')
++    case "$_f_state" in
++      running|starting|recovering|unknown)
++        hold_locked "$_f_id" 'agent_still_active_or_unknown_after_stop'; return 0 ;;
++    esac
++  fi
+   _f_usage=$(usage_from_snapshot "$_f_snap" "$_f_wall")
+   _f_now=$(date +%s)
+   _f_new=$(printf '%s\n' "$_f_cur" | jq -c --arg r "$_f_reason" --argjson u "$_f_usage" \
+@@ -183,11 +216,12 @@ do_reserve_locked() {
+   _dr_office=$1; _dr_agent=$2
+   cfg_load
+   probe_or_die
+-  # No trustworthy per-session backend CPU attribution exists on this host.
+-  # The runner PID is not the OpenCode service CPU. This Act 32 hard cap is
+-  # therefore unavailable and dispatch MUST remain disabled until a supported
+-  # source is configured and verified.
+-  die 'authoritative per-session backend CPU meter unavailable; activation blocked (runner CPU is not a substitute)'
++  # Read WHOLE-HOST busy CPU BEFORE launch. Each overlapping office pays
++  # for all host activity, giving a conservative upper bound, not attribution.
++  _dr_cpu=$(python3 "$TOOL" cpu-meter) ||
++    die 'cannot record host CPU baseline before launch'
++  [ "$(printf '%s\n' "$_dr_cpu" | jq -r '.cpu_available')" = true ] ||
++    die 'host CPU baseline not available'
+   [ "$(cfgs ".offices.\"$_dr_office\".enabled")" = true ] ||
+     die "office $_dr_office is disabled in the budget config; fail closed"
+   _dr_open=$(res_find_open "$_dr_office")
+@@ -207,10 +241,13 @@ do_reserve_locked() {
+   _dr_res=$(jq -cn --arg id "$_dr_id" --arg office "$_dr_office" --arg agent "$_dr_agent" --argjson now "$_dr_now" \
+     --argjson caps "$_dr_caps" --arg hash "$_dr_hash" --arg db "$_dr_db" \
+     --argjson window "$_dr_window" --argjson interval "$_dr_interval" --arg action "$_dr_action" \
++    --argjson cpu "$_dr_cpu" \
+     '{schema:"viche-knowledge-budget-reservation-v1",id:$id,office:$office,
+       state:"reserved",created_at:$now,caps:$caps,config_sha256:$hash,meter_db:$db,
+       accounting_window_seconds:$window,monitor_interval_seconds:$interval,overrun_action:$action,
+-      meter:null,baseline:null,usage:null,agent_id:$agent,native_session_id:null,runner_pid:null,
++      meter:null,baseline:null,cpu_baseline:$cpu,usage:null,
++      cpu_accounting:"whole-host-busy-upper-bound-not-per-office",
++      agent_id:$agent,native_session_id:null,runner_pid:null,
+       started_at:null,expires_at:null,charge:null,monitor_pid:null,
+       history:[{at:$now,event:"reserved",office:$office}]}')
+   res_write "$_dr_id" "$_dr_res"
+@@ -245,6 +282,12 @@ do_start_locked() {
+     refresh_aggregate "$(printf '%s\n' "$_ds_cur" | jq -r '.accounting_window_seconds')"
+     die 'meter/session binding unknown after launch; reservation held at full cap'
+   fi
++  _ds_cpu=$(printf '%s\n' "$_ds_cur" | jq -c '.cpu_baseline')
++  if ! _ds_snap=$(cpu_adjust "$_ds_cpu" "$_ds_snap"); then
++    stop_or_kill "$_ds_agent" kill
++    hold_locked "$_ds_id" 'cpu_reboot_or_baseline_invalid_after_launch'
++    die 'host CPU meter invalid after launch; full-cap hold'
++  fi
+   _ds_now=$(date +%s)
+   _ds_expiry=$((_ds_now + $(printf '%s\n' "$_ds_cur" | jq -r '.caps.wall_seconds')))
+   _ds_new=$(printf '%s\n' "$_ds_cur" | jq -c --arg a "$_ds_agent" --arg s "$_ds_sid" \
+@@ -345,9 +388,16 @@ monitor() {
+     if ! _mo_snap=$(python3 "$TOOL" snapshot "$_mo_db" "$_mo_sid" "$_mo_pid" 2>/dev/null); then
+       hold "$_mo_id" 'meter_unreadable'; exit 0
+     fi
++    _mo_base=$(printf '%s\n' "$_mo_cur" | jq -c '.cpu_baseline')
++    _mo_previous=$(printf '%s\n' "$_mo_cur" | jq -c '.meter')
++    if ! _mo_snap=$(cpu_adjust "$_mo_base" "$_mo_snap" "$_mo_previous"); then
++      hold "$_mo_id" 'cpu_reboot_or_counter_regression'; exit 0
++    fi
+     _mo_caps=$(printf '%s\n' "$_mo_cur" | jq -c '.caps')
+     _mo_wall=$((_mo_now - $(printf '%s\n' "$_mo_cur" | jq -r '.started_at')))
+-    _mo_ov=$(python3 "$TOOL" overrun "$_mo_caps" "$_mo_snap" "$_mo_wall")
++    if ! _mo_ov=$(python3 "$TOOL" overrun "$_mo_caps" "$_mo_snap" "$_mo_wall"); then
++      hold "$_mo_id" 'usage_overrun_check_failed'; exit 0
++    fi
+     if [ "$(printf '%s\n' "$_mo_ov" | jq -r '.over')" = true ]; then
+       _mo_action=$(printf '%s\n' "$_mo_cur" | jq -r '.overrun_action')
+       stop_or_kill "$_mo_agent" "$_mo_action"
+@@ -396,7 +446,8 @@ guard() {
+       .counted==$a.counted' "$ROOT/aggregate.json" >/dev/null 2>&1 ||
+       die 'aggregate record is corrupt or divergent; refusing activation'
+   fi
+-  die 'authoritative per-session backend CPU meter unavailable; activation blocked (runner CPU is not a substitute)'
++  python3 "$TOOL" cpu-meter >/dev/null 2>&1 ||
++    die 'whole-host busy CPU meter unavailable; activation blocked'
+   _g_adm=$(python3 "$TOOL" admit "$CONFIG" "$_g_agg" "$_g_office") || die 'admission check failed'
+   [ "$(printf '%s\n' "$_g_adm" | jq -r '.admit')" = true ] ||
+     die "budget exhausted: $(printf '%s\n' "$_g_adm" | jq -r '.reason')"
+diff --git a/records/knowledge/ACT32-HOST-CPU-METER-20261121.md b/records/knowledge/ACT32-HOST-CPU-METER-20261121.md
+new file mode 100644
+index 00000000..bd6be33d
+--- /dev/null
++++ b/records/knowledge/ACT32-HOST-CPU-METER-20261121.md
+@@ -0,0 +1,37 @@
++# Act 32 host CPU budget source: conservative upper bound
++
++## What is counted
++
++OpenCode token totals come from authoritative session_v2 SQLite rows. The
++absolute session totals are deliberately used where the exact prelaunch
++token baseline cannot be proven; do not claim an exact per-run delta.
++CPU accounting is NOT measured per office. The machine /proc/stat aggregate
++busy ticks (user, nice, system, irq, softirq, steal; avoid duplicated guest
++ticks) are sampled BEFORE detached launch and periodically thereafter.
++The full positive busy-CPU delta is charged to EACH overlapping knowledge
++office reservation, including unrelated activity. Thus the measured charge
++is an upper bound on the office's CPU consumption. This costs more allowance
++when the host is busy and can shorten sessions, never less.
++
++The machine boot ID is checked between every sample. Reboot, counter reset,
++missing native session row, missing token telemetry, unknown agent state and
++corrupt reservation fail closed at full reserved liability. A request to stop
++or kill a detached agent is not proof it stopped: the reservation cannot be
++closed until Antonina itself reports a terminal state. No office is enabled
++by this meter change alone.
++
++This is an ADMISSION and MONITORING budget, not a mathematical guarantee
++that CPU cannot overshoot a polled threshold before the next tick or when
++the backend cannot be killed. The operator must not label the whole-host
++upper bound as attributable per-office actual CPU, even though it suffices
++for conservative spending comparisons and protects against undercounting.
++
++All four offices remain disabled until independent Statistics baseline
++evidence, Economy review, Judiciary phase check, explicit Executive order
++and short unexpired office activation are established.
++
++## Verification
++
++Run tests/knowledge-budget-smoke.sh and tests/knowledge-host-cpu-smoke.sh.
++Run python3 government/knowledge-budget-tool.py cpu-meter to see the
++whole-host cumulative CPU counter and kernel boot identity.
+diff --git a/tests/knowledge-budget-smoke.sh b/tests/knowledge-budget-smoke.sh
+index 13164c74..010f30ca 100644
+--- a/tests/knowledge-budget-smoke.sh
++++ b/tests/knowledge-budget-smoke.sh
+@@ -1,6 +1,6 @@
+ #!/bin/sh
+-# Act 32 H adversarial black-box tests. Production CPU attribution is presently
+-# unsupported; the fail-closed gate must therefore prevent every live dispatch.
++# Act 32 H adversarial black-box tests: host busy CPU is a conservative
++# upper bound, NOT per-session attribution; reset/unreadable must fail closed.
+ set -eu
+ cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
+ TOOL=$(pwd -P)/government/knowledge-budget-tool.py
+@@ -34,24 +34,26 @@ PY
+ jq -e '[.offices[] | .enabled] | all(. == false)' government/knowledge-budget.conf >/dev/null ||
+   fail 'shipped config did not default all offices disabled'
+ 
+-# Production gate: real token meter exists, but no verified per-session backend
+-# CPU attribution exists, so neither guard nor reservation may admit dispatch.
+-no /bin/sh "$ENGINE" guard statistics
+-no /bin/sh "$ENGINE" reserve statistics test-agent
+-[ "$(find "$d/state/knowledge/budget/reservations" -type f | wc -l)" -eq 0 ] ||
+-  fail 'reservation was written despite unavailable authoritative CPU meter'
+-
+-# Regression: the real activation caller passes two arguments (office, agent id).
+-# The reserve dispatch must forward both so do_reserve_locked reaches the
+-# intended fail-closed CPU-meter guard, not an unset-parameter abort.
+-RESERVE_ERR=$(/bin/sh "$ENGINE" reserve statistics test-agent 2>&1 >/dev/null || true)
+-printf '%s\n' "$RESERVE_ERR" | grep -q 'authoritative per-session backend CPU meter unavailable' ||
+-  fail 'reserve did not reach the fail-closed CPU-meter guard (wrong/missing argument wiring)'
+-printf '%s\n' "$RESERVE_ERR" | grep -qi 'unbound variable' &&
+-  fail 'reserve aborted on an unset argument instead of the CPU-meter guard'
+-
+-# The production cycle gate must block before appointment creation or detached
+-# launch when the budget cannot meter CPU. Verify the real caller ordering using
++# Valid token telemetry plus host-wide busy CPU accounting admits a
++# PRELAUNCH reservation with durable CPU baseline before any agent exists.
++ok /bin/sh "$ENGINE" guard statistics
++rid=$(/bin/sh "$ENGINE" reserve statistics test-agent) || fail 'reservation denied'
++[ -n "$rid" ] && [ -s "$d/state/knowledge/budget/reservations/$rid.json" ] ||
++  fail 'prelaunch reservation missing'
++jq -e '.cpu_baseline.cpu_available==true and
++       .cpu_baseline.cpu_source=="proc-stat-host-busy-upper-bound-v1" and
++       (.cpu_baseline.cpu_boot_id|length)>20 and
++       .cpu_accounting=="whole-host-busy-upper-bound-not-per-office"' \
++    "$d/state/knowledge/budget/reservations/$rid.json" >/dev/null ||
++    fail 'prelaunch CPU upper-bound baseline missing'
++no /bin/sh "$ENGINE" reserve statistics second-agent
++# The test fixture has no launched agent, so its reservation may be removed.
++rm "$d/state/knowledge/budget/reservations/$rid.json" "$d/state/knowledge/budget/aggregate.json"
++ok /bin/sh "$ENGINE" guard statistics
++no /bin/sh "$ENGINE" reserve statistics
++
++# The production cycle still blocks before appointment or detached launch
++# whenever token telemetry is absent. Verify the real caller ordering using
+ # an isolated town fixture and a recording Antonina stub.
+ mkdir -p "$d/cycle-town/government" "$d/cycle-town/records/knowledge" "$d/cycle-state" "$d/cycle-bin"
+ cp government/knowledge-budget.conf government/knowledge-budget.sh government/knowledge-budget-tool.py \
+@@ -62,7 +64,7 @@ printf 'baseline\n' > "$d/cycle-town/records/knowledge/baseline-20261119.json"
+ cp "$DB" "$d/cycle-meter.db"
+ python3 - "$d/cycle-town/government/knowledge-budget.conf" "$d/cycle-meter.db" <<'PY'
+ import json,sys
+-p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]; c['offices']['statistics']['enabled']=True; json.dump(c,open(p,'w'))
++p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]+'.missing'; c['offices']['statistics']['enabled']=True; json.dump(c,open(p,'w'))
+ PY
+ cat > "$d/cycle-bin/antonina" <<'SH'
+ #!/bin/sh
+@@ -101,7 +103,10 @@ no python3 "$TOOL" delta "$CUR" "$RESET"
+ 
+ # Authoritative time_updated is explicitly milliseconds, never interpreted as
+ # seconds or as a fabricated CPU signal.
+-printf '%s\n' "$CUR" | jq -e '.time_updated_ms==1795197102261 and .cpu_available==false and .cpu_seconds==null' >/dev/null ||
++printf '%s\n' "$CUR" | jq -e '.time_updated_ms==1795197102261 and .cpu_available==true and
++    .cpu_source=="proc-stat-host-busy-upper-bound-v1" and
++    .cpu_attribution=="conservative-whole-host-upper-bound" and
++    .cpu_seconds>0 and (.cpu_boot_id|length)>20' >/dev/null ||
+   fail 'meter units/provenance are ambiguous'
+ 
+ # Any malformed/unknown reservation is a hard aggregate error, not skipped.
+@@ -176,4 +181,4 @@ ok /bin/sh "$ENGINE" config rollback
+ H2=$(sha256sum "$d/state/knowledge/budget/config.active.json" | awk '{print $1}')
+ [ "$H1" = "$H2" ] || fail 'rollback was not byte-exact'
+ 
+-echo 'knowledge budget: disabled defaults; missing SID, CPU, corruption, cumulative deltas, durable writes, and rollback fail closed/pass'
++echo 'knowledge budget: disabled defaults; host CPU reservations, missing SID, corruption, cumulative deltas, durability and rollback verified'
+diff --git a/tests/knowledge-host-cpu-lifecycle-smoke.sh b/tests/knowledge-host-cpu-lifecycle-smoke.sh
+new file mode 100644
+index 00000000..687c8924
+--- /dev/null
++++ b/tests/knowledge-host-cpu-lifecycle-smoke.sh
+@@ -0,0 +1,95 @@
++#!/bin/sh
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++town=$(pwd -P)
++engine=$town/government/knowledge-budget.sh
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++mkdir -p "$tmp/fixture/government" "$tmp/state" "$tmp/bin"
++cp government/knowledge-budget.conf "$tmp/fixture/government/"
++db=$tmp/meter.sqlite3
++python3 - "$db" "$tmp/fixture/government/knowledge-budget.conf" <<'PY'
++import json,sqlite3,sys
++db,conf=sys.argv[1:]
++con=sqlite3.connect(db)
++con.execute('create table session_v2 (id text primary key,tokens_input int,tokens_output int,tokens_reasoning int,tokens_cache_read int,tokens_cache_write int,cost real,time_updated int)')
++con.execute("insert into session_v2 values ('sid',100,0,0,0,0,0.0,1795279700000)")
++con.commit()
++x=json.load(open(conf))
++x['metering']['opencode_db']=db
++x['monitor_interval_seconds']=1
++x['offices']['statistics']['enabled']=True
++x['offices']['statistics']['caps']['tokens_total']=150
++json.dump(x,open(conf,'w'))
++PY
++cat > "$tmp/bin/antonina" <<'SH'
++#!/bin/sh
++case "$1 $2" in
++  'agent status') cat "$TEST_AGENT_STATE" ;;
++  'agent kill')
++    printf '%s\n' "$*" >> "$TEST_AGENT_KILLS"
++    if [ "$TEST_KILL_FAIL" = yes ]; then exit 1; fi
++    printf '{"state":"clearexit","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++    ;;
++  'agent stop') : ;;
++  *) exit 17 ;;
++esac
++SH
++chmod +x "$tmp/bin/antonina"
++export VICHE_TOWN_ROOT="$tmp/fixture" VICHE_STATE_ROOT="$tmp/state"
++export VICHE_BUDGET_TOOL="$town/government/knowledge-budget-tool.py"
++export TEST_AGENT_STATE="$tmp/agent.json" TEST_AGENT_KILLS="$tmp/kills.log"
++export TEST_KILL_FAIL=no
++export PATH="$tmp/bin:$PATH"
++printf '{"state":"running","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++r=$(/bin/sh "$engine" reserve statistics test-agent)
++case "$r" in *'
++'*|'{'*) echo "Reservation output contaminated: $r" >&2; exit 1 ;; esac
++/bin/sh "$engine" mark-dispatched "$r"
++result=$(/bin/sh "$engine" start "$r" test-agent)
++[ "$result" = "active $r" ] || { echo "start failed: $result" >&2; exit 1; }
++python3 - "$db" <<'PY'
++import sqlite3,sys
++con=sqlite3.connect(sys.argv[1])
++con.execute("update session_v2 set tokens_input=185,time_updated=1795279800000 where id='sid'")
++con.commit()
++PY
++reached=no
++for attempt in 1 2 3 4 5 6 7 8; do
++  state=$(jq -r '.state' "$tmp/state/knowledge/budget/reservations/$r.json")
++  if [ "$state" = closed ]; then reached=yes; break; fi
++  sleep 1
++done
++[ "$reached" = yes ] || { echo "Overrun monitor did not close after kill" >&2; exit 1; }
++grep -q 'agent kill' "$TEST_AGENT_KILLS"
++jq -e '.state=="closed" and .meter.cpu_upper_bound==true and
++       .meter.token_accounting=="absolute-session-total-upper-bound" and
++       .usage.tokens_total>=185 and .usage.cpu_seconds>=0 and
++       (.closed_reason|startswith("overrun_tokens_total"))' \
++  "$tmp/state/knowledge/budget/reservations/$r.json" >/dev/null || {
++  echo 'Measured token overrun was not durably accounted' >&2; exit 1;
++}
++# A kill command that exits nonzero or leaves the backend running must
++# NEVER release the cap. Stop verification is independent of kill invocation.
++export TEST_KILL_FAIL=yes
++printf '{"state":"running","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++r2=$(/bin/sh "$engine" reserve statistics test-agent-2)
++[ -n "$r2" ] || exit 1
++/bin/sh "$engine" mark-dispatched "$r2"
++/bin/sh "$engine" start "$r2" test-agent-2 >/dev/null
++held=no
++for attempt in 1 2 3 4 5 6 7 8; do
++  state=$(jq -r '.state' "$tmp/state/knowledge/budget/reservations/$r2.json")
++  if [ "$state" = held ]; then held=yes; break; fi
++  sleep 1
++done
++[ "$held" = yes ] || { echo 'Failed termination released or stranded reservation' >&2; exit 1; }
++jq -e '.state=="held" and .charge.tokens_total==150 and
++        .held_reason=="agent_still_active_or_unknown_after_stop"' \
++        "$tmp/state/knowledge/budget/reservations/$r2.json" >/dev/null || {
++  echo 'Failed stop did not retain full reservation' >&2; exit 1;
++}
++if /bin/sh "$engine" reserve statistics agent-3 >/dev/null 2>&1; then
++  echo 'Another agent was admitted over still-running held session' >&2; exit 1
++fi
++echo 'whole-host CPU and tokens: active overrun, verified stop, failed-kill hold and no replay passed'
+diff --git a/tests/knowledge-host-cpu-smoke.sh b/tests/knowledge-host-cpu-smoke.sh
+new file mode 100644
+index 00000000..da0d1439
+--- /dev/null
++++ b/tests/knowledge-host-cpu-smoke.sh
+@@ -0,0 +1,4 @@
++#!/bin/sh
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++python3 tests/test_knowledge_host_cpu.py
+diff --git a/tests/test_knowledge_host_cpu.py b/tests/test_knowledge_host_cpu.py
+new file mode 100644
+index 00000000..1deff4bf
+--- /dev/null
++++ b/tests/test_knowledge_host_cpu.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python3
++"""Act 32: whole-host CPU busy upper-bound, no fake office attribution."""
++import importlib.util
++import pathlib
++import subprocess
++import sys
++import unittest
++
++ROOT = pathlib.Path(__file__).resolve().parents[1]
++TOOL = ROOT / "government/knowledge-budget-tool.py"
++spec = importlib.util.spec_from_file_location("knowledge_budget_tool", TOOL)
++mod = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(mod)
++
++
++def sample(seconds, boot="12345678-1234-1234-1234-123456789abc",
++           source="proc-stat-host-busy-upper-bound-v1"):
++    return {"cpu_seconds": seconds, "cpu_boot_id": boot,
++            "cpu_available": True, "cpu_source": source,
++            "cpu_attribution": "conservative-whole-host-upper-bound",
++            "session_found": True, "tokens": {"total": 80}}
++
++
++class CpuUpperBound(unittest.TestCase):
++    def test_real_monotone_host_observations(self):
++        a = mod.host_cpu()
++        b = mod.host_cpu()
++        self.assertTrue(a["cpu_available"])
++        self.assertEqual(a["cpu_boot_id"], b["cpu_boot_id"])
++        self.assertGreaterEqual(b["cpu_seconds"], a["cpu_seconds"])
++        self.assertEqual(a["cpu_source"], "proc-stat-host-busy-upper-bound-v1")
++        actual = subprocess.check_output(
++            [sys.executable, str(TOOL), "cpu-meter"], text=True)
++        self.assertIn("conservative-whole-host-upper-bound", actual)
++
++    def test_delta_and_provenance(self):
++        baseline = sample(1_000_000)
++        current = sample(1_000_054)
++        delta = mod.cpu_delta(baseline, current)
++        self.assertEqual(delta["cpu_seconds"], 54)
++        self.assertEqual(delta["cpu_host_seconds"], 1_000_054)
++        self.assertTrue(delta["cpu_upper_bound"])
++        self.assertEqual(delta["tokens"]["total"], 80)
++        later = mod.cpu_delta(baseline, sample(1_000_080), delta)
++        self.assertEqual(later["cpu_seconds"], 80)
++
++    def test_fail_closed_on_reboot_and_counter_reset(self):
++        baseline = sample(1_000_000)
++        with self.assertRaisesRegex(ValueError, "reboot"):
++            mod.cpu_delta(baseline, sample(200, "87654321-1234-1234-1234-123456789abc"))
++        with self.assertRaisesRegex(ValueError, "reset"):
++            mod.cpu_delta(baseline, sample(999_999))
++        with self.assertRaisesRegex(ValueError, "source changed"):
++            mod.cpu_delta(baseline, sample(1_000_050, source="runner-pid"))
++        previous = mod.cpu_delta(baseline, sample(1_000_050))
++        with self.assertRaisesRegex(ValueError, "regressed"):
++            mod.cpu_delta(baseline, sample(1_000_049), previous)
++        with self.assertRaisesRegex(ValueError, "previous CPU meter"):
++            mod.cpu_delta(baseline, sample(1_000_060),
++                          {"cpu_boot_id": "other", "cpu_host_seconds": 1_000_051})
++
++    def test_absolute_cpu_not_used_for_caps(self):
++        caps = {"tokens_total": 400_000, "cpu_seconds": 90,
++                "wall_seconds": 3600}
++        baseline = sample(2_500_000)
++        adjusted = mod.cpu_delta(baseline, sample(2_500_055))
++        result = mod.overrun(caps, adjusted, 40)
++        self.assertFalse(result["over"])
++        more = mod.cpu_delta(baseline, sample(2_500_091), adjusted)
++        result = mod.overrun(caps, more, 65)
++        self.assertTrue(result["over"])
++        self.assertIn("cpu_seconds", result["reasons"])
++
++    def test_config_describes_bound_not_fake_peroffice_cpu(self):
++        config = mod.load_config(str(ROOT / "government/knowledge-budget.conf"))[0]
++        self.assertFalse(mod.validate_config(config))
++        config["cpu_meter"]["attribution"] = "measured-per-office"
++        self.assertTrue(mod.validate_config(config))
++
++if __name__ == "__main__":
++    unittest.main()

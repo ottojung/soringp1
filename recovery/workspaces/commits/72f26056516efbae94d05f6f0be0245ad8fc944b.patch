@@ -1,0 +1,68 @@
+commit 72f26056516efbae94d05f6f0be0245ad8fc944b
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 17:16:02 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 17:16:02 2026 +0000
+
+    Reject canonical evidence collisions before publishing a reviewed merge
+
+diff --git a/government/reviewed-merge.sh b/government/reviewed-merge.sh
+index 9b4c0fc9..066b7eb5 100644
+--- a/government/reviewed-merge.sh
++++ b/government/reviewed-merge.sh
+@@ -99,6 +99,32 @@ if [ "$publish" != true ]; then
+     echo 'Not pushed; verification alone is not review or enactment.'
+     exit 0
+ fi
++# Preflight the actual canonical checkout BEFORE pushing. Source-of-truth
++# state can contain locally generated reports and untracked audit records even
++# though the Git target branch is clean. A fast-forward would refuse these
++# overlapping files AFTER our push, leaving main published but undeployed.
++# Never delete, overwrite, or stash unreviewed canonical evidence to force it.
++canonical_head=$(git -C "$repo" rev-parse HEAD)
++[ "$canonical_head" = "$base" ] ||
++    { echo 'Canonical checkout is not at fetched main; reconcile before publish' >&2; exit 1; }
++changed=$(git -C "$repo" diff --name-only "$base" "$candidate")
++while IFS= read -r path; do
++    [ -n "$path" ] || continue
++    if { [ -e "$repo/$path" ] || [ -L "$repo/$path" ]; } &&
++       ! git -C "$repo" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
++        echo "Canonical untracked evidence overlaps the approved merge: $path" >&2
++        echo 'Preserve and reconcile this evidence independently before publishing.' >&2
++        exit 1
++    fi
++    if ! git -C "$repo" diff --quiet -- "$path" ||
++       ! git -C "$repo" diff --cached --quiet -- "$path"; then
++        echo "Canonical tracked local edits overlap the approved merge: $path" >&2
++        exit 1
++    fi
++done <<EOF
++$changed
++EOF
++
+ # Caller must separately establish reviewer identity and legal scope; capture
+ # the attestation in durable host state without altering the verified tree.
+ printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+diff --git a/tests/reviewed-merge-smoke.sh b/tests/reviewed-merge-smoke.sh
+index 64d2a325..9165942b 100644
+--- a/tests/reviewed-merge-smoke.sh
++++ b/tests/reviewed-merge-smoke.sh
+@@ -51,6 +51,18 @@ grep -q 'CHECKED exact merge' "$tmp/review.txt"
+ test "$(git -C "$town" rev-parse HEAD)" = "$base"
+ test ! -f "$town/records/judiciary.md"
+ 
++# A canonical untracked report colliding with the approved commit must be
++# protected BEFORE publishing main; preserving it is more important than speed.
++printf 'unreviewed canonical evidence\n' > "$town/records/judiciary.md"
++if run delivery/audit-fixture --publish --verified-by clerk --reviewed-by judiciary \
++    --evidence 'fixture:collision' > "$tmp/collision.log" 2>&1; then
++  echo 'Published over untracked canonical evidence' >&2; exit 1
++fi
++test "$(cat "$town/records/judiciary.md")" = 'unreviewed canonical evidence'
++test "$(git -C "$remote" rev-parse refs/heads/main)" = "$base"
++test ! -s "$state/delivery/review-authorizations.tsv"
++rm "$town/records/judiciary.md"
++
+ run delivery/audit-fixture --publish --verified-by clerk --reviewed-by judiciary \
+   --evidence 'fixture:independent-check' > "$tmp/review.txt"
+ grep -q 'PUBLISHED signed candidate' "$tmp/review.txt"

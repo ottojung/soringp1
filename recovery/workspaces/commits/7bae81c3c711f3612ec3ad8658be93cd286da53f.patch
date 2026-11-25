@@ -1,0 +1,83 @@
+commit 7bae81c3c711f3612ec3ad8658be93cd286da53f
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 21:25:44 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 21:25:44 2026 +0000
+
+    Tolerate non-case JSON in the institutional case store
+    
+    The live store contains an evidence-only JSON list and an empty placeholder
+    file alongside case objects. Reconciliation aborted with an AttributeError on
+    the list, so the whole pass - including index regeneration - would fail in
+    production. Restore the deployed guard that normalises a valid non-dict
+    document to an empty case, and exclude non-case documents from the index and
+    report paths. Regression seeds both live-observed shapes.
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index a284d348..15183b89 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -319,6 +319,11 @@ def reconcile():
+             continue
+         path = STORE / (signal + ".json")
+         case = read(path)
++        # The store also holds non-case JSON (for example an evidence list or an
++        # empty placeholder file). A valid non-dict document is not a case and
++        # must not abort the whole reconcile pass.
++        if not isinstance(case, dict):
++            case = {}
+         if signal in signals:
+             if not case:
+                 case = {
+@@ -389,7 +394,8 @@ def reconcile():
+         elif not case:
+             continue
+         atomic(path, case)
+-    open_cases = [read(p) for p in sorted(STORE.glob("*.json"))]
++    open_cases = [x for x in (read(p) for p in sorted(STORE.glob("*.json")))
++                  if isinstance(x, dict) and x.get("id")]
+     active = [x for x in open_cases if x.get("state") == "open"]
+     atomic(STORE / "index.json", {
+         "observed_at": now, "active": [x["id"] for x in active],
+@@ -399,8 +405,9 @@ def reconcile():
+ 
+ 
+ def report():
+-    return [read(p) for p in sorted(STORE.glob("*.json"))
+-            if p.name != "index.json" and read(p).get("state") == "open"]
++    cases = [read(p) for p in sorted(STORE.glob("*.json")) if p.name != "index.json"]
++    return [case for case in cases
++            if isinstance(case, dict) and case.get("id") and case.get("state") == "open"]
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 6fdf417b..2af43690 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -233,6 +233,25 @@ printf '1750\tclear\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1750 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ 
++# The durable store also contains non-case documents (observed live: a JSON
++# evidence list and an empty placeholder). Reconciliation must tolerate them
++# instead of aborting the whole pass, and must never index them as cases.
++printf '[{"case":"executive_unhealthy:1793746004","note":"addendum evidence only"}]\n' \
++  > "$d/state/institutional-cases/addendum-executive-2026-11-04.json"
++: > "$d/state/institutional-cases/addendum-executive-unhealthy-2026-11-04.json"
++VICHE_CASE_NOW=1800 python3 "$repo/government/institutional-cases.py" reconcile > "$d/reconcile-noncase.json"
++python3 - "$d" <<'PY'
++import json, sys
++state = sys.argv[1] + "/state/institutional-cases"
++index = json.load(open(state + "/index.json"))
++assert all("addendum" not in case_id for case_id in index["active"]), index["active"]
++assert index["count"] == len(index["active"]), index
++report = json.load(open(sys.argv[1] + "/reconcile-noncase.json"))["open_cases"]
++assert all(isinstance(c, dict) and c.get("id") for c in report), report
++PY
++VICHE_CASE_NOW=1800 python3 "$repo/government/institutional-cases.py" report > "$d/report-noncase.json"
++python3 -c 'import json,sys; cases=json.load(open(sys.argv[1]))["open_cases"]; assert all(isinstance(c,dict) and c.get("id") for c in cases), cases' "$d/report-noncase.json"
++
+ # After a real enactment, Executive unit runs on preserved worktree, not a
+ # parliamentary summons. Mock only the branch-bootstrap and deployment.
+ printf '## Act 23 — Executive Innovation Office Act (enacted 2026-10-25 by recorded vote)\n' > "$d/town/government/LAWS.md"

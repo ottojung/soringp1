@@ -1,0 +1,545 @@
+commit 753e6163825be73913e2384ee88207515649a137
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Tue Nov 24 23:55:36 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Tue Nov 24 23:55:36 2026 +0000
+
+    Make research rollout atomic and integrate certificate and onboarding workflows
+
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index 467ccd58..3936664e 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -108,3 +108,12 @@ imports matching. Run `python3 -m missions.pnp.brief` in a bound workspace.
+ Use the reduction source as a mathematical guide, not an automatically
+ permitted import. Catalog metadata never changes lease identity or authorizes
+ work on unheld steps.
++
++## Research tools
++
++Researchers receive role-specific instructions at dispatch. Start with
++\`pnp-research start\` in the workspace, or \`pnp-research guide ROLE\` for
++examples. The work packet includes reusable discoveries across lease changes,
++exact open Lean dependencies, and relevant proof generators. See
++[research/README.md](research/README.md) for async checks, independent method
++research, symbolic Lean certificates, and adoption measurements.
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 343572f5..a361f08d 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -27,6 +27,11 @@ nohup flock -n "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/proof
+     timeout 30 python3 -m missions.pnp.preflight --scan \
+     </dev/null >"${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/proof-preflight.log" 2>&1 &
+ # Renew leases and recover queued publications before the optional score poll.
++# Cumulative research maintenance is local/read-mostly and independently
++# locked. Finished async proofs survive agent exit and lease rotation.
++nohup flock -n "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/research-maintenance.lock" \
++    timeout 90 /bin/sh -c 'python3 -m missions.pnp.research.knowledge ingest && python3 -m missions.pnp.research.obligations reconcile' \
++    </dev/null >"${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/research-maintenance.log" 2>&1 &
+ python3 -m missions.pnp.frontier || :
+ python3 missions/pnp/cli.py reconcile
+ # A 20-minute desk lease TTL cannot be maintained by a 24-hour boot hook.
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index bbfcbcf0..cc9c12de 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -387,8 +387,13 @@ lemmas, obstructions or certificates; tool fronts produce independently
+ verified automation and held-out family benchmarks. Prefer results over reports.
+ 
+ At dispatch inject the role-specific executable workflow directly into the
+-initial prompt. For independent method/tool researchers, knowledge curators
+-and portfolio evaluators, after creating/reusing the idle agent run
++initial prompt. The standing staff/continuity helper does this automatically
++for bound and support roles. Workers first run pnp-research start for their
++actual work packet; pnp-research guide ROLE gives examples on demand.
++Do not require reading the entire mandate or a documentation quiz before
++research. Measure actual adoption with pnp-research adoption, and separately
++measure checked output. For explicit independent method/tool researchers,
++knowledge curators and portfolio evaluators, after creating/reusing the idle agent run
+ `pnp-research dispatch ROLE --agent ID --cwd WORKSPACE --task "specific task"`
+ (or include the role text from `pnp-research dispatch ROLE` with the existing
+ role instructions). This is an Executive lifecycle action, not a worker tool
+diff --git a/missions/pnp/preflight.py b/missions/pnp/preflight.py
+index c9305e67..91c2fd11 100644
+--- a/missions/pnp/preflight.py
++++ b/missions/pnp/preflight.py
+@@ -48,10 +48,25 @@ def run(rec, revision):
+             if r.get("verified"):
+                 source=circuit.render(meta,"decide")
+         else:
+-            r=synthesis.candidate(meta)
+-            if r is not None:
+-                source=r.pop("candidate",None)
+-                result.update(generator="synthesis",details=r,result="no_candidate")
++            from .research import certificate
++            # Symbolic star certificates are cheap and support larger graphs;
++            # the legacy generator can still win on overlapping bicliques.
++            parsed=certificate.parse(meta["statement"])
++            if parsed and parsed[0]<=64 and len(parsed[3])<=256:
++                # Bound the synchronous preflight search; agents can explicitly
++                # request a longer search without slowing guard/lease work.
++                try:
++                    r=certificate.render(meta,seconds=0.15)
++                    source=r.pop("candidate",None)
++                    r.pop("certificate",None)
++                    result.update(generator="symbolic_star",details=r,result="no_candidate")
++                except (ValueError,TypeError,KeyError,validate.InvalidCandidate):
++                    pass  # Try the older construction instead.
++            if not source:
++                r=synthesis.candidate(meta)
++                if r is not None:
++                    source=r.pop("candidate",None)
++                    result.update(generator="synthesis",details=r,result="no_candidate")
+         if source:
+             validate.validate(meta,source.encode())
+             result.update(result="candidate",sha256=hashlib.sha256(source.encode()).hexdigest(),
+diff --git a/missions/pnp/proofs/__main__.py b/missions/pnp/proofs/__main__.py
+index 1eae6db7..2f1652f3 100644
+--- a/missions/pnp/proofs/__main__.py
++++ b/missions/pnp/proofs/__main__.py
+@@ -100,8 +100,13 @@ def main():
+         p.error("no live bound assignment")
+     meta = {"id":gap,"file":rec["path"],"module":rec["module"],"statement":rec["statement"],"imports":rec["imports"]}
+     if args.command == "synthesize":
+-        report = synthesis.candidate(meta)
+-        text = report.pop("candidate", None) if report else None
++        from ..research import certificate
++        report=certificate.render(meta,seconds=2)
++        text=report.pop("candidate",None)
++        report.pop("certificate",None)
++        if not text:
++            report = synthesis.candidate(meta)
++            text = report.pop("candidate", None) if report else None
+     else:
+         report = circuit.explicit_circuit(meta)
+         text = circuit.render(meta,"decide") if report and report["verified"] else None
+diff --git a/missions/pnp/research/README.md b/missions/pnp/research/README.md
+index 08494f17..0f0c1e97 100644
+--- a/missions/pnp/research/README.md
++++ b/missions/pnp/research/README.md
+@@ -1,14 +1,22 @@
+ # Cumulative mathematical research
+ 
+-Agent CLI: `pnp-research`, installed with `missions/pnp/research/install.sh`.
+-Executive dispatches independent method/tool roles with `pnp-research dispatch
+-ROLE --agent ID --cwd WORKSPACE --task TASK`. Baseline worker prompts include
+-the same usable commands. No role is authorized to create leases or publish
+-outside the existing allocator and publisher.
++## First command, not a reading assignment
+ 
+-## Knowledge
++\`pnp-research start\` in a research workspace returns the current role, pinned
++revision, assigned subproblem, checked/open dependencies, and relevant earlier
++results (including released leases). The Executive dispatch helper injects a
++short role-specific prompt automatically. For an unfamiliar command, use
++\`pnp-research guide ROLE\` for executable examples or the command's \`--help\`.
++Do not read every manual before doing mathematics.
+ 
+-```sh
++Independent method/tool agents run \`pnp-research start --role method\` or
++\`pnp-research start --role tool\`. They work on reusable mathematical families
++and proof-producing automation without acquiring desk leases. The Executive
++maintains these independent roles alongside baseline and focused researchers.
++
++## Use the mathematical memory
++
++\`\`\`sh
+ pnp-research knowledge find 'peeling core bound'
+ pnp-research knowledge find --family projective-plane --kind technique
+ pnp-research knowledge show ID
+@@ -16,65 +24,99 @@ pnp-research knowledge add obstruction --family graph-circuit \
+   --statement 'precise failed claim' --detail 'why it fails' \
+   --provenance 'original investigation' --file evidence.txt
+ pnp-research knowledge link COUNTEREXAMPLE OBSTRUCTION counterexample_to
+-pnp-research knowledge ingest
+-```
++\`\`\`
+ 
+-The SQLite database and content-addressed artifacts live outside lease trees
+-under PNP_STATE_ROOT/research. Imported reports/fragment metadata are not
+-kernel receipts. Archive replay deduplicates immutable identities. Typed
+-knowledge and explicit links persist independently of workers. Use exact
+-statements/hypotheses and reproducible files rather than generic notes.
++Exact prior-gap records are prioritized in the work packet even across
++reacquisitions or family classification changes. Search results are compact;
++use show for details and artifacts. Imported worker findings and fragment
++metadata are not kernel receipts. Typed objects preserve actual mathematical
++statements, hypotheses, counterexamples and reproducible evidence.
+ 
+-## Proof dependency graph
++## Parallel Lean discovery
+ 
+ In a bound workspace:
+-```sh
++\`\`\`sh
++pnp-research obligations ready --current
++pnp-research obligations show NODE_ID
+ pnp-research obligations request --statement '∀ n : Nat, n + 0 = n' --import Mathlib
+-pnp-research obligations ready
+-pnp-research obligations show ID
+-pnp-research obligations assign ID WORKER_LABEL
+-pnp-research obligations solve ID proof.body
+-pnp-research obligations assemble ID --output Combined.lean
+-pnp-research obligations assemble ROOT --candidate --output Candidate.lean
+-```
+-
+-A body is a complete Lean term, normally `by ...`. Refer to other nodes by
+-their `viche_o_ID` symbols and give their IDs with repeated `--requires ID`
+-when requesting an obligation. A node is ready only once its dependencies
+-are checked on the same base. The solver builds the dependency closure,
+-uses the remote compiler (or `--local` managed compiler), checks the exact
+-source digest, and requires Lean's axiom report for the exact declaration
+-with no additional axioms. It records failures separately. `fork ID` copies
+-an obligation graph to the bound workspace's base, without carrying proof
+-verification; `body ID --output FILE` retrieves a checked proof body.
+-Assembly in candidate mode runs the existing static validator; the normal
+-publisher and authoritative checker still determine acceptance.
+-
+-Independent method research does not need a lease:
+-```sh
++# Write proof.body containing a complete Lean term: by intro n; exact Nat.add_zero n
++pnp-research obligations solve NODE_ID proof.body --async
++# Keep investigating another obligation. Use CHECK_ID from the returned JSON.
++pnp-research obligations collect CHECK_ID --poll
++# Exit 75 means pending; collect without --poll to wait.
++pnp-research obligations assemble ROOT_ID --candidate --output Candidate.lean
++# Submit the exact complete candidate through the ordinary submission pipeline.
++\`\`\`
++
++Integrators request exact types with repeated \`--requires NODE_ID\`. A node
++is ready when its required nodes are checked on the same base, not when
++its own proof is complete. In proof bodies, refer to dependencies as
++\`viche_o_NODE_ID\`. Executive assigns complementary nodes to specialists.
++Do not duplicate an active worker's obligation. Exact obligations deduplicate
++across origins when type, imports/options, revision and dependencies match.
++
++Remote async submission stores the immutable full source and request identity.
++Repeating the same check returns its existing ID. Collection validates the
++exact result identity, Lean exit status and axiom report. Completed remote
++checks can be recovered after agent exit or lease rotation by maintenance.
++A terminal failure may be retried explicitly with \`--retry\` on solve, or
++using a changed body/resource budget. A pending check is not a failed proof.
++Synchronous solve and managed \`--local\` are also available in a bound workspace.
++
++Different base? \`obligations fork OLD_ID\` returns the node mapping;
++\`obligations reuse OLD_ID NEW_ID --async\` rechecks a reusable proof body.
++Verification does not transfer automatically between commits. To edit the
++remapped body first, use \`obligations body OLD_ID --for-node NEW_ID --output FILE\`.
++Only the existing publisher and authoritative checker determine acceptance.
++
++## Independent methods
++
++The work packet provides a compatible public upstream revision when available:
++\`\`\`sh
+ pnp-research obligations request --base PUBLIC_SHA --family graph-circuit \
+   --provenance 'method research' --import Mathlib --statement 'True'
+-pnp-research obligations solve ID proof.body --method
+-```
+-The exact public base must be cached on Marceline. This does not touch the
+-desk or claim a lease. Use this for general reusable theorems, not to
+-circumvent the assigned proof rules.
+-
+-## Family-level construction and evaluation
+-
+-`pnp-research star GRAPH.json` accepts {"n":26,"edges":[[0,13],...]}.
+-It constructs an edge-owned star cover, using exact bipartite matching or
+-bounded branch-and-bound for other graphs. The verifier uses exact minimal
+-true sets, not truth-table enumeration. Resource limits produce unknown;
+-no claim of globally optimal circuit size. The output is a computational
+-certificate, not a Lean proof. General Boolean grouping and antichain
+-semantics have separate checked graph obligations.
+-
+-`pnp-research yield` reconstructs historical acquisition episodes including
+-archived leases. It uses censored exposure, observed submission/loss rates
+-and shrinkage for sparse families. Checker acceptance is not credited
+-leaderboard success. Estimates are a heuristic baseline, not calibrated
+-individual predictions, and do not control the desk. Compare with real
+-remaining proof work and current competition. No automatic release.
+-
+-Tests: `python3 tests/pnp-research.py`.
++# proof.body: by trivial
++pnp-research obligations solve NODE_ID proof.body --method --async
++pnp-research obligations collect CHECK_ID
++\`\`\`
++
++Method research is not an extra desk claim and cannot publish to arbitrary gaps.
++
++## Reusable proof-producing tools
++
++\`pnp-research certificate --output Candidate.lean\` attempts the exact bound
++assignment. Independently, provide \`certificate GRAPH.json --output Test.lean\`,
++where the graph format is {"n":26,"edges":[[0,13],...],"bound":64}.
++The star-cover construction uses minimum bipartite vertex cover or bounded
++branch-and-bound, and symbolic antichain verification. Its Lean certificate
++uses a permutation of concrete edges rather than exhaustive enumeration of
++Boolean assignments. A generated file still needs kernel verification;
++a failed construction does not prove a lower bound. The ordinary proof
++synthesis and cheap preflight use this generator when applicable, with
++fallback to legacy synthesis.
++
++\`pnp-research star GRAPH.json\` returns only the computational witness.
++Benchmark implementation: \`python3 -m missions.pnp.research.certificate_bench
++--help\`. Benchmark on distinct families and report actual kernel results.
++
++## Operations and decision support
++
++- Executive lifecycle uses the canonical standing dispatch helper; it
++  injects the playbook before launching a worker. For explicit independent
++  dispatch: \`pnp-research dispatch ROLE --agent ID --cwd WORKSPACE --task TASK\`.
++  Only Executive may use agent-launch/steer actions.
++- \`pnp-research adoption\` measures confirmed launches, discovery, substantive
++  commands and time to first use using the actual agent environment.
++  These are adoption measurements, not proof success or leaderboard credit.
++- \`pnp-research yield\` exposes censored historical family-level evidence,
++  shrinkage estimates, actual graph progress and competition. It is a
++  heuristic, not calibrated individual prediction or automatic release policy.
++- \`pnp-research knowledge ingest\` replays live and quarantined research findings.
++  \`pnp-research obligations reconcile\` collects terminal async jobs.
++  The mission cycle runs both in independent bounded maintenance.
++- State lives under PNP_STATE_ROOT/research, independent of lease workspaces.
++  SQLite stores graph and receipts; immutable artifact files use SHA-256.
++  Installation: \`missions/pnp/research/install.sh\` installs an atomic release.
++  Canonical code is used once the complete feature set is integrated.
++- Offline regression tests: \`python3 tests/pnp-research.py\`. Use the normal
++  delivery queue for integration. Do not add an onboarding approval gate.
+diff --git a/missions/pnp/research/async_check.py b/missions/pnp/research/async_check.py
+index 92d48b17..ab42c267 100644
+--- a/missions/pnp/research/async_check.py
++++ b/missions/pnp/research/async_check.py
+@@ -28,7 +28,7 @@ def identity(base,toolchain,attempt,source,wall=600,rss=8192):
+     raw=source.encode("utf-8")
+     if not raw or len(raw)>512*1024:
+         raise ValueError("proof closure empty or exceeds 512 KiB")
+-    if not 1<=wall<=1200 or not 256<=rss<=16384:
++    if not 1<=wall<=900 or not 256<=rss<=12288:
+         raise ValueError("remote resource bounds invalid")
+     job={"version":1,"mode":"scratch","base":base,"toolchain":toolchain,
+          "attempt":attempt,"wall_seconds":wall,"rss_mib":rss,
+@@ -79,7 +79,7 @@ def recover_request(job):
+         except (OSError,ValueError,AttributeError):continue
+     return None
+ 
+-def submit(c,oid,path,method=False,wall=600,rss=8192):
++def submit(c,oid,path,method=False,wall=600,rss=8192,retry=False):
+     table(c)
+     body,job,ident=make(c,oid,path,method,wall,rss)
+     cid=job["job"]
+@@ -95,7 +95,20 @@ def submit(c,oid,path,method=False,wall=600,rss=8192):
+             if request:
+                 with c:c.execute("UPDATE pending_check SET request=?,state='queued' WHERE id=?",(request,cid))
+                 old=snapshot(c,cid)
+-        return {"check":cid,"node":oid,"state":old["state"],"request":old["request"],"reused":True,"collect":"pnp-research obligations collect "+cid}
++        can_retry=old["state"]=="transport_failed" or (
++            old["state"]=="done" and json.loads(old["result"] or "{}").get("status")!="kernel_checked")
++        if retry and can_retry:
++            # Never retry an in-flight or verified job. A previous failed
++            # transport request may still exist: resume it if so.
++            request=recover_request(cid)
++            with c:
++                cursor=c.execute("""UPDATE pending_check SET request=?,at=?,state=?,result=NULL,identity=?
++                    WHERE id=? AND at=? AND state=?""",
++                    (request,time.time(),"queued" if request else "submitting",k.canon(ident),cid,old["at"],old["state"]))
++                new=cursor.rowcount==1 and not request
++            old=snapshot(c,cid)
++        if not new:
++            return {"check":cid,"node":oid,"state":old["state"],"request":old["request"],"reused":True,"collect":"pnp-research obligations collect "+cid}
+     try:
+         with tempfile.NamedTemporaryFile(mode="w",suffix=".json") as f:
+             f.write(k.canon(job));f.flush()
+@@ -107,7 +120,7 @@ def submit(c,oid,path,method=False,wall=600,rss=8192):
+         if not request:
+             with c:c.execute("UPDATE pending_check SET state='transport_failed',result=? WHERE id=?",
+                              (k.canon({"error":proc.stderr[-1000:]}),cid))
+-            raise ValueError("relay did not create a request; use a new resource budget or local check")
++            raise ValueError("relay did not create a request; retry explicitly with --retry, or use a local check")
+     except (OSError,subprocess.SubprocessError) as exc:
+         request=recover_request(cid)
+         if not request:
+@@ -134,7 +147,7 @@ def proof_result(c,row,result,stderr=""):
+         if ok or not prev or json.loads(prev[0]).get("status")!="kernel_checked":
+             c.execute("INSERT OR REPLACE INTO proof VALUES(?,?,?,?,?,?)",
+                       (row["node"],row["base"],row["body"],row["source"],k.canon(out),time.time()))
+-        c.execute("UPDATE pending_check SET state='done',result=? WHERE id=?",(k.canon(out),row["id"]))
++        c.execute("UPDATE pending_check SET state='done',result=? WHERE id=? AND at=?",(k.canon(out),row["id"],row["at"]))
+     return out
+ 
+ def collect(c,check,seconds=1100):
+@@ -147,9 +160,16 @@ def collect(c,check,seconds=1100):
+     if not 1<=seconds<=1800:raise ValueError("wait must be 1–1800 seconds")
+     proc=subprocess.run([RELAY,"wait",request,str(seconds)],capture_output=True,text=True,timeout=seconds+30)
+     try:
+-        receipt=json.loads(proc.stdout);result=receipt["result"]
+-        if not isinstance(result,dict):raise ValueError("invalid compiler result")
+-    except (ValueError,KeyError,TypeError):
++        receipt=json.loads(proc.stdout)
++        if receipt.get("id")==request and receipt.get("state")=="error":
++            out={"status":"transport_failed","check":row["id"],"detail":receipt.get("events",[])[-1:]}
++            with c:c.execute("UPDATE pending_check SET state='transport_failed',result=? WHERE id=? AND at=?",
++                             (k.canon(out),row["id"],row["at"]))
++            return out
++        result=receipt["result"]
++        if receipt.get("id")!=request or receipt.get("state")!="done" or not isinstance(result,dict):
++            raise ValueError("invalid compiler result")
++    except (ValueError,KeyError,TypeError,AttributeError):
+         # A short poll is not a failed proof. Leave the check recoverable.
+         if time.time()-row["at"]>24*3600:
+             with c:c.execute("UPDATE pending_check SET state='transport_failed',result=? WHERE id=?",
+diff --git a/missions/pnp/research/entry.py b/missions/pnp/research/entry.py
+index b53e479b..6b15a4b7 100644
+--- a/missions/pnp/research/entry.py
++++ b/missions/pnp/research/entry.py
+@@ -7,8 +7,11 @@ def main():
+     root=Path("/var/lib/lubko/wd/viche")
+     sys.path.insert(0,str(root))
+     import missions.pnp
+-    if not (root/"missions/pnp/research/knowledge.py").is_file():
+-        missions.pnp.__path__.append(str(Path(__file__).resolve().parent.parent))
++    canonical=root/"missions/pnp/research"
++    # A partial canonical rollout must not shadow the complete installed CLI.
++    required=("entry.py","playbook.py","async_check.py","adoption.py","certificate.py")
++    if not all((canonical/f).is_file() for f in required):
++        missions.pnp.__path__.insert(0,str(Path(__file__).resolve().parent.parent))
+     commands={"knowledge":"knowledge","obligations":"obligations","yield":"yield_model","star":"star","dispatch":"roles","start":"playbook","adoption":"adoption","guide":"playbook","certificate":"certificate"}
+     if len(sys.argv)<2 or sys.argv[1] not in commands:
+         print("pnp-research start|guide|knowledge|obligations|yield|star|certificate|adoption|dispatch --help")
+diff --git a/missions/pnp/research/install.sh b/missions/pnp/research/install.sh
+index 9e644304..17e6d4ce 100755
+--- a/missions/pnp/research/install.sh
++++ b/missions/pnp/research/install.sh
+@@ -1,17 +1,28 @@
+ #!/bin/sh
+ set -eu
+ src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+-dest="$HOME/.local/share/viche/pnp-research/research"
+-mkdir -p "$dest" "$HOME/.local/bin"
+-chmod 700 "$dest"
+-for f in "$src"/*.py; do
+-  name=$(basename "$f")
+-  install -m 600 "$f" "$dest/$name.tmp"
+-  mv "$dest/$name.tmp" "$dest/$name"
+-done
+-cat > "$HOME/.local/bin/pnp-research.tmp" <<'EOF'
++root="$HOME/.local/share/viche/pnp-research"
++mkdir -p "$root/releases" "$HOME/.local/bin"
++chmod 700 "$root" "$root/releases"
++# A running command always sees a complete, immutable release. Do not replace
++# its modules one at a time during deployment.
++version=$(cd "$src" && sha256sum ./*.py README.md | sha256sum | cut -c1-32)
++dest="$root/releases/$version"
++if [ ! -d "$dest/research" ]; then
++  tmp=$(mktemp -d "$root/releases/.install-XXXXXX")
++  trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++  mkdir -m 700 "$tmp/research"
++  for f in "$src"/*.py "$src/README.md"; do
++    install -m 600 "$f" "$tmp/research/$(basename "$f")"
++  done
++  mv -T "$tmp" "$dest" || [ -d "$dest/research" ]
++fi
++ln -s "$dest" "$root/.current-$$"
++mv -Tf "$root/.current-$$" "$root/current"
++cat > "$HOME/.local/bin/pnp-research.tmp-$$" <<'EOF'
+ #!/bin/sh
+-exec "$HOME/.local/bin/python3" "$HOME/.local/share/viche/pnp-research/research/entry.py" "$@"
++exec "$HOME/.local/bin/python3" "$HOME/.local/share/viche/pnp-research/current/research/entry.py" "$@"
+ EOF
+-chmod 700 "$HOME/.local/bin/pnp-research.tmp"
+-mv "$HOME/.local/bin/pnp-research.tmp" "$HOME/.local/bin/pnp-research"
++chmod 700 "$HOME/.local/bin/pnp-research.tmp-$$"
++mv -f "$HOME/.local/bin/pnp-research.tmp-$$" "$HOME/.local/bin/pnp-research"
++printf '%s\n' "$version"
+diff --git a/missions/pnp/research/knowledge.py b/missions/pnp/research/knowledge.py
+index b1d596d1..c7ec9cd7 100644
+--- a/missions/pnp/research/knowledge.py
++++ b/missions/pnp/research/knowledge.py
+@@ -58,6 +58,9 @@ def db():
+       key TEXT PRIMARY KEY, node TEXT REFERENCES object(id)
+     );
+     CREATE TABLE IF NOT EXISTS migration(name TEXT PRIMARY KEY);
++    CREATE TRIGGER IF NOT EXISTS object_origin_add AFTER INSERT ON object BEGIN
++      INSERT OR IGNORE INTO origin VALUES(new.id,new.family,new.provenance);
++    END;
+     CREATE INDEX IF NOT EXISTS origin_family ON origin(family,node);
+     CREATE INDEX IF NOT EXISTS origin_provenance ON origin(provenance);
+     CREATE INDEX IF NOT EXISTS object_family ON object(family,kind);
+@@ -163,6 +166,12 @@ def add(c, kind, fam, statement, detail, provenance, file=None, base=None, deps=
+         key=obligation_identity(statement,detail,base,deps) if kind=="obligation" else None
+         if key:
+             canonical=c.execute("SELECT node FROM obligation_key WHERE key=?",(key,)).fetchone()
++            if not canonical:
++                for row in c.execute("SELECT id,detail FROM object WHERE kind='obligation' AND statement=? AND base=? ORDER BY created,id",(statement,base)):
++                    existing=[r[0] for r in c.execute("SELECT target FROM edge WHERE source=? AND relation='requires'",(row["id"],))]
++                    if obligation_identity(statement,row["detail"],base,existing)==key:
++                        c.execute("INSERT OR IGNORE INTO obligation_key VALUES(?,?)",(key,row["id"]))
++                        canonical=(row["id"],);break
+             if canonical:
+                 oid=canonical[0]
+                 c.execute("INSERT OR IGNORE INTO origin VALUES(?,?,?)",(oid,fam,provenance))
+diff --git a/missions/pnp/research/obligations.py b/missions/pnp/research/obligations.py
+index a991b118..6ded5ec0 100644
+--- a/missions/pnp/research/obligations.py
++++ b/missions/pnp/research/obligations.py
+@@ -223,7 +223,7 @@ def main():
+     a=sub.add_parser("body");a.add_argument("id");a.add_argument("--output",required=True);a.add_argument("--for-node")
+     a=sub.add_parser("assign");a.add_argument("id");a.add_argument("worker")
+     a=sub.add_parser("solve");a.add_argument("id");a.add_argument("body");a.add_argument("--local",action="store_true");a.add_argument("--method",action="store_true")
+-    a.add_argument("--async",dest="asynchronous",action="store_true");a.add_argument("--wall",type=int,default=600);a.add_argument("--rss-mib",type=int,default=8192)
++    a.add_argument("--async",dest="asynchronous",action="store_true");a.add_argument("--wall",type=int,default=600);a.add_argument("--rss-mib",type=int,default=8192);a.add_argument("--retry",action="store_true",help="retry a terminal unsuccessful async check")
+     a=sub.add_parser("collect");a.add_argument("id");a.add_argument("--poll",action="store_true");a.add_argument("--timeout",type=int,default=1100)
+     sub.add_parser("pending");sub.add_parser("reconcile")
+     a=sub.add_parser("reuse");a.add_argument("old");a.add_argument("new");a.add_argument("--method",action="store_true");a.add_argument("--async",dest="asynchronous",action="store_true")
+@@ -285,8 +285,10 @@ def main():
+             if a.asynchronous:
+                 from . import async_check
+                 if a.local:raise ValueError("async uses remote Lean")
+-                out=async_check.submit(c,a.id,a.body,a.method,a.wall,a.rss_mib)
+-            else:out=solve(c,a.id,a.body,a.local,a.method)
++                out=async_check.submit(c,a.id,a.body,a.method,a.wall,a.rss_mib,a.retry)
++            else:
++                if a.retry or a.wall!=600 or a.rss_mib!=8192:raise ValueError("retry and resource overrides require --async")
++                out=solve(c,a.id,a.body,a.local,a.method)
+         elif a.cmd=="collect":
+             from . import async_check
+             out=async_check.collect(c,a.id,1 if a.poll else a.timeout)
+diff --git a/missions/pnp/tools.py b/missions/pnp/tools.py
+index 11af5f5d..95a82220 100644
+--- a/missions/pnp/tools.py
++++ b/missions/pnp/tools.py
+@@ -74,6 +74,19 @@ def inventory():
+         "At natural checkpoints, especially after expensive work.")
+     add("cli.py", "cli submit GAP FILE", "Queue exact completed proof for publication",
+         "Immediately when complete; never wait for an extra review.")
++    if present("research/entry.py"):
++        rows += [
++            {"command":"pnp-research start","purpose":"Short role-specific work packet with exact pinned revision, prior findings and open obligations","when":"First command after dispatch; no need to read every tool manual."},
++            {"command":"pnp-research guide ROLE","purpose":"Executable detailed examples for your role","when":"Only when you need the next unfamiliar operation."},
++            {"command":"pnp-research knowledge find QUERY","purpose":"Cumulative mathematical objects from current and archived leases","when":"Before rediscovering a lemma or failed approach."},
++            {"command":"pnp-research obligations ready --current","purpose":"Exact proof dependency graph for your current gap","when":"At decomposition and natural proof checkpoints."},
++            {"command":"pnp-research obligations solve NODE BODY --async","purpose":"Durable kernel check of a complete body and checked dependencies","when":"Parallel Lean iteration; collect CHECK_ID later."},
++            {"command":"pnp-research certificate --output Candidate.lean","purpose":"Generate exact star-cover Lean certificate using list permutation, not truth-table enumeration","when":"Compatible graph-circuit construction; normal publication checks still apply."},
++            {"command":"pnp-research yield","purpose":"Empirical family-level allocation baseline, current graph progress and competition","when":"Portfolio and lease evaluators."},
++            {"command":"pnp-research adoption","purpose":"Observed role-prompt delivery and actual agent tool calls","when":"Flow and Executive evaluation; not mathematical success."},
++        ]
++    if (Path.home()/".local/bin/pnp-remote-check").is_file():
++        rows.append({"command":"pnp-remote-check --scratch --async FILE.lean","purpose":"Remote Lean on exact pinned revision","when":"Heavy intermediate checks; use --availability once per checkout and --wait ID for result."})
+     return rows
+ 
+ 
+@@ -84,7 +97,7 @@ def snapshot():
+     h = hashlib.sha256(json.dumps(rows,sort_keys=True).encode())
+     files = [ROOT / "tools.py", ROOT / "compile.py", ROOT / "brief.py",
+              ROOT / "preflight.py"]
+-    for package in ("proofs", "adapter", "bench", "remote"):
++    for package in ("proofs", "adapter", "bench", "remote", "research"):
+         files += sorted((ROOT/package).glob("*.py"))
+     for p in files:
+         try:
+@@ -95,7 +108,8 @@ def snapshot():
+     return {"revision":h.hexdigest()[:16],"command":PREFIX+"tools",
+             "capabilities":rows,
+             "sat_dependency_available":importlib.util.find_spec("pysat") is not None,
+-            "remote_build_available":False,
++            "remote_client_installed":(Path.home()/".local/bin/pnp-remote-check").is_file(),
++            "remote_build_available":None,
+             "note":"Only implemented tools are listed. Heuristic candidates and SAT results are not kernel verdicts. Use --help for exact syntax. Do not delay publication to run irrelevant tools."}
+ 
+ 

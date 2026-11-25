@@ -1,0 +1,131 @@
+commit 70a20df9b022bb8bed9ef88ecd31fa498ae05d13
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 17:48:50 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 17:48:50 2026 +0000
+
+    Recover transient research-backend failures without exhausting fronts
+
+diff --git a/scripts/research_frontier.py b/scripts/research_frontier.py
+index 2002d06..19c2d66 100644
+--- a/scripts/research_frontier.py
++++ b/scripts/research_frontier.py
+@@ -87,17 +87,49 @@ def run(aid,path,prompt):
+     data=json.loads(r.stdout)
+     if data.get('state') != 'running':
+         raise RuntimeError('agent launch was not confirmed running: '+str(data)[:200])
++def retryable_failure(aid):
++    """Only measured transient backend failures, never a mathematical finding.
++    A new invocation continues the same owned research front, not a blind
++    replay of tool effects. Hard/unknown failures remain visible as blocked.
++    """
++    p=call([CLI,'agent','status','--id',aid,'--json'])
++    if p.returncode:return False
++    try:
++        meta=json.loads(p.stdout)
++        failure=meta.get('backend_error') or {}
++        return (meta.get('state')=='failed' and isinstance(failure,dict)
++                and failure.get('transient') is True)
++    except (ValueError,TypeError,AttributeError):
++        return False
++
++def queue_retry(q):
++    attempts=int(q.get('transient_failures',0))+1
++    q.update(status='ready',transient_failures=attempts,
++             retry_after=time.time()+min(3600,180*2**min(attempts,5)),
++             failure_kind='transient_backend_unavailable')
++    print('retry queued after provider cooldown',q['id'],'attempt',attempts,flush=True)
++
+ def reconcile(d,active):
+     for q in d['fronts']:
++        # Upgrade pre-fix ledgers: failed provider attempts must not permanently
++        # consume otherwise uninvestigated mathematical questions.
++        if (q['status']=='blocked' and q.get('exit_state')=='failed'
++                and q.get('agent_id') and retryable_failure(q['agent_id'])):
++            queue_retry(q)
++            continue
+         if q['status'] not in ('running','launching') or q.get('agent_id') in active:continue
+         s=status(q['agent_id']) if q.get('agent_id') else 'unavailable'
+         if s=='idle' and q['status']=='launching':
+             q['status']='ready'  # interrupted launch, reuse the reserved agent id
+             continue
+         if s not in ('succeeded','failed','stopped','killed'):continue
+-        q.update(status='investigated' if s=='succeeded' else 'blocked',
+-                 exit_state=s,finished_at=time.time(),finding_unverified=excerpt(q['agent_id']))
+-        print('research result',q['id'],s,flush=True)
++        q.update(exit_state=s,finished_at=time.time(),
++                 finding_unverified=excerpt(q['agent_id']))
++        if s=='failed' and retryable_failure(q['agent_id']):
++            queue_retry(q)
++        else:
++            q['status']='investigated' if s=='succeeded' else 'blocked'
++            print('research result',q['id'],s,flush=True)
+ def curate_done(d,active):
+     c=d.get('curator',{})
+     if not c.get('agent_id') or c['agent_id'] in active:return
+@@ -132,7 +164,7 @@ def dispatch(d,q):
+         save(d)
+     prompt=(BASE+'\nFRONT: '+q['question']+'\nFALSIFIER: '+q['falsifier']+
+             '\nCOMPLEXITY IMPLICATION: '+q['implication']+'\nEVIDENCE: '+q['basis']+
+-            '\nOn completion report a mathematical finding, concrete failed '
++            '\nIf resuming after an infrastructure failure, inspect earlier work '            'and avoid repeating side effects or claims. '            '\nOn completion report a mathematical finding, concrete failed '
+             'approach or exact obstruction; do not confuse process success with a proof.')
+     run(q['agent_id'],path,prompt)
+     q.update(status='running',started_at=time.time())
+@@ -161,7 +193,8 @@ def tick(d,dry=False):
+     active=live()
+     reconcile(d,active)
+     curate_done(d,active)
+-    ready=[q for q in d['fronts'] if q['status']=='ready']
++    ready=[q for q in d['fronts'] if q['status']=='ready'
++           and q.get('retry_after',0)<=time.time()]
+     if dry:
+         print('dry-run ready',len(ready),'active',len(active));return
+     for q in ready:
+diff --git a/tests/test_research_frontier.py b/tests/test_research_frontier.py
+index b2d3f8d..7a13cfe 100644
+--- a/tests/test_research_frontier.py
++++ b/tests/test_research_frontier.py
+@@ -78,6 +78,42 @@ class FrontierTests(unittest.TestCase):
+         self.assertFalse(d['curator'].get('agent_id'))
+         self.assertEqual(d['curator']['exit_state'],'launch_interrupted')
+ 
++    def test_transient_backend_failure_preserves_and_retries_same_front(self):
++        d={'version':1,'fronts':[dict(self.sample()[0],status='running',
++                agent_id='retry-agent')],'curator':{}}
++        with (mock.patch.object(F,'status',return_value='failed'),
++              mock.patch.object(F,'retryable_failure',return_value=True),
++              mock.patch.object(F,'excerpt',return_value='No final text')):
++            F.reconcile(d,set())
++        q=d['fronts'][0]
++        self.assertEqual(q['status'],'ready')
++        self.assertEqual(q['agent_id'],'retry-agent')
++        self.assertEqual(q['failure_kind'],'transient_backend_unavailable')
++        self.assertGreater(q['retry_after'],F.time.time())
++        seen=[]
++        with (mock.patch.object(F,'live',return_value=set()),
++              mock.patch.object(F,'dispatch',side_effect=lambda d,x:seen.append(x)),
++              mock.patch.object(F,'curate'),
++              mock.patch.object(F,'save')):
++            F.tick(d)
++        self.assertEqual(seen,[],'cooldown prevents immediate repeat-failure loop')
++
++    def test_preexisting_transient_block_is_reopened_without_research_loss(self):
++        d={'version':1,'fronts':[dict(self.sample()[0],status='blocked',
++                exit_state='failed',agent_id='stalled-agent')],'curator':{}}
++        with mock.patch.object(F,'retryable_failure',return_value=True):
++            F.reconcile(d,set())
++        self.assertEqual(d['fronts'][0]['status'],'ready')
++
++    def test_hard_failure_remains_blocked(self):
++        d={'version':1,'fronts':[dict(self.sample()[0],status='running',
++                agent_id='hard-agent')],'curator':{}}
++        with (mock.patch.object(F,'status',return_value='failed'),
++              mock.patch.object(F,'retryable_failure',return_value=False),
++              mock.patch.object(F,'excerpt',return_value='auth rejected')):
++            F.reconcile(d,set())
++        self.assertEqual(d['fronts'][0]['status'],'blocked')
++
+     def test_interrupted_launch_returns_to_ready(self):
+         d={'version':1,'fronts':[dict(self.sample()[0],status='launching',agent_id='reserved')],
+            'curator':{}}

@@ -1,0 +1,272 @@
+commit 74f767aac7e1c699103cbb8b0f74428bce5bbf11
+Author:     Viche operational maintenance <operator@viche.local>
+AuthorDate: Tue Nov 24 20:11:17 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 20:11:18 2026 +0000
+
+    Verify code once at integration and isolate test runtime
+
+diff --git a/government/DELIVERY.md b/government/DELIVERY.md
+index 59ac44be..576ac51c 100644
+--- a/government/DELIVERY.md
++++ b/government/DELIVERY.md
+@@ -11,9 +11,13 @@ From a clean branch in your own registered worktree:
+     /bin/sh /var/lib/lubko/wd/viche/government/propose-delivery.sh --office YOU short-description
+ 
+ YOU is your seat id (c1a000NN) or your office: clerk, executive, judiciary,
+-economy, innovation-office, recovery-steward. The script runs the applicable
+-suite on your branch, pushes it to `origin/delivery/short-description` without
+-force, and records the proposal. That is all you do.
++economy, innovation-office, recovery-steward. Run the targeted tests appropriate to your
++change. The script checks the exact clean head, runs the cheap records suite
++for records-only proposals, pushes it to `origin/delivery/short-description`
++without force, and records the proposal. Code proposals defer the mandatory
++full suite to the integrator's exact merged candidate; use `--verify` if a
++full source-branch preflight is useful. Deferred is not a green verdict.
++The independent review and Act 21 pre-landing gate remain mandatory.
+ 
+ ## The integration queue lands it
+ 
+diff --git a/government/propose-delivery.sh b/government/propose-delivery.sh
+index c0ed647d..29f61580 100644
+--- a/government/propose-delivery.sh
++++ b/government/propose-delivery.sh
+@@ -1,9 +1,9 @@
+ #!/bin/sh
+-# Agents publish signed, locally-tested branches for independent review
++# Agents publish clean, exact-head branches for independent review
+ # without GitHub API tokens or PR creation permissions.
+ # This script NEVER merges, enacts laws, edits ballots or changes the charter.
+ #
+-#   propose-delivery.sh --office OFFICE SHORT-SLUG
++#   propose-delivery.sh --office OFFICE [--verify] SHORT-SLUG
+ #
+ # OFFICE is who proposes (your seat id, or clerk, executive, judiciary, economy,
+ # innovation-office, recovery-steward). The integration queue (Act 31,
+@@ -13,20 +13,23 @@
+ set -eu
+ office=
+ slug=
++verify=no
+ while [ "$#" -gt 0 ]; do
+     case "$1" in
+         --office) [ "$#" -ge 2 ] || exit 2; office=$2; shift 2 ;;
++        --verify) verify=yes; shift ;;
+         -*) echo "unknown option: $1" >&2; exit 2 ;;
+         *) [ -z "$slug" ] || { echo 'one slug only' >&2; exit 2; }; slug=$1; shift ;;
+     esac
+ done
+ [ -n "$slug" ] && [ -n "$office" ] ||
+-    { echo 'Usage: propose-delivery.sh --office OFFICE SHORT-SLUG' >&2; exit 2; }
++    { echo 'Usage: propose-delivery.sh --office OFFICE [--verify] SHORT-SLUG' >&2; exit 2; }
+ printf '%s' "$office" | grep -Eqx '[a-z0-9][a-z0-9-]{0,63}' ||
+     { echo 'OFFICE is lowercase letters, digits and hyphens' >&2; exit 2; }
+ case "$slug" in
+     ''|*[!a-z0-9-]*) echo 'Expected a lowercase alphanumeric/hyphen slug' >&2; exit 2 ;;
+ esac
++verifier_dir=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+ repo=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+ cwd=$(pwd -P)
+@@ -56,10 +59,16 @@ if printf '%s\n' "$substantive" | grep -Eq '^(government/|tests/|constitution/|d
+     suite=tests/run-all.sh
+ fi
+ [ -s "$cwd/$suite" ] || { echo "Missing applicable suite: $suite" >&2; exit 1; }
+-# Source is clean at the exact HEAD verified above. CI on the proposed
+-# ref is a second check, not an Act 21 substitute.
+-if ! (cd "$cwd" && /bin/sh "$suite" > /dev/null); then
+-    echo "Verification failed on $head: $suite" >&2; exit 1
++# Act 21/31 require the suite on the exact merged candidate, not this
++# different parent/tree. Retain the cheap records preflight and an explicit
++# opt-in source suite. A deferred run is never labelled green; the integrator
++# always selects and runs its own authoritative suite after independent review.
++verification="deferred:$suite"
++if [ "$suite" = tests/records-smoke.sh ] || [ "$verify" = yes ]; then
++    if ! (cd "$cwd" && /bin/sh "$verifier_dir/suite-env.sh" /bin/sh "$suite" > /dev/null); then
++        echo "Verification failed on $head: $suite" >&2; exit 1
++    fi
++    verification="$suite"
+ fi
+ [ "$(git -C "$cwd" rev-parse HEAD)" = "$head" ] &&
+ [ -z "$(git -C "$cwd" status --porcelain)" ] ||
+@@ -70,9 +79,13 @@ git -C "$cwd" push origin "HEAD:$target" ||
+     { echo "Push to $target failed; no force push was attempted" >&2; exit 1; }
+ mkdir -p "$state/delivery"
+ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+-    "$(date -u +%FT%TZ)" "$branch" "$target" "$head" "$tree" "$suite" "$office" \
++    "$(date -u +%FT%TZ)" "$branch" "$target" "$head" "$tree" "$verification" "$office" \
+     >> "$state/delivery/proposals.tsv"
+-printf 'Proposed %s at %s for %s with green %s.\n' "$target" "$head" "$office" "$suite"
++if [ "$verification" = "$suite" ]; then
++    printf 'Proposed %s at %s for %s with green source %s.\n' "$target" "$head" "$office" "$suite"
++else
++    printf 'Proposed %s at %s for %s; %s deferred to exact-candidate integration gate.\n' "$target" "$head" "$office" "$suite"
++fi
+ printf 'Comparison: https://github.com/ottojung/viche/compare/main...delivery/%s\n' "$slug"
+ printf 'The integration queue lands it (Act 31); nothing else is needed from you.\n'
+ printf 'Outcome: python3 %s/government/integrator.py office %s\n' "$repo" "$office"
+diff --git a/government/suite-env.sh b/government/suite-env.sh
+new file mode 100755
+index 00000000..a646f449
+--- /dev/null
++++ b/government/suite-env.sh
+@@ -0,0 +1,29 @@
++#!/bin/sh
++# Isolate ordinary suite execution from production agent/model configuration.
++# This is an accidental-side-effect barrier, not an OS security sandbox.
++set -eu
++[ "$#" -gt 0 ] || exit 2
++scratch=$(mktemp -d "${TMPDIR:-/tmp}/viche-test-env.XXXXXXXX")
++trap 'rm -rf "$scratch"' 0
++trap 'exit 130' 1 2 3 15
++mkdir -p "$scratch/home" "$scratch/bin" "$scratch/config" "$scratch/state" "$scratch/data" "$scratch/cache" "$scratch/town-state" "$scratch/seats"
++# Never fall through to the real model provider or agent service. Fixtures
++# that need these commands must put their own mocks ahead of this directory.
++for cmd in antonina opencode; do
++    printf '#!/bin/sh\nprintf "Unmocked live agent/provider command refused in test suite\\n" >&2\nexit 126\n' > "$scratch/bin/$cmd"
++    chmod +x "$scratch/bin/$cmd"
++done
++HOME=$scratch/home
++XDG_CONFIG_HOME=$scratch/config
++XDG_STATE_HOME=$scratch/state
++XDG_DATA_HOME=$scratch/data
++XDG_CACHE_HOME=$scratch/cache
++VICHE_STATE_ROOT=$scratch/town-state
++VICHE_SEATS_ROOT=$scratch/seats
++PATH=$scratch/bin:$PATH
++export HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME
++export VICHE_STATE_ROOT VICHE_SEATS_ROOT PATH
++unset ANTONINA_HOST_XDG_CONFIG_HOME ANTONINA_HOST_XDG_STATE_HOME ANTONINA_HOST_XDG_DATA_HOME
++unset ANTONINA_OPENCODE_XDG_CONFIG_HOME ANTONINA_OPENCODE_XDG_STATE_HOME ANTONINA_OPENCODE_XDG_DATA_HOME
++unset VICHE_ANTONINA_CONFIG VICHE_ANTONINA_COOLDOWNS VICHE_ANTONINA_MODEL_HEALTH VICHE_OPENCODE_MODELS
++"$@"
+diff --git a/government/suite-status.sh b/government/suite-status.sh
+index 24775955..80b6b9ea 100644
+--- a/government/suite-status.sh
++++ b/government/suite-status.sh
+@@ -19,6 +19,7 @@
+ # Exit status: 0 if the recorded result is green, 1 if red (a standing incident).
+ set -eu
+ 
++verifier_dir=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ suite=${SUITE_STATUS_SUITE:-tests/run-all.sh}
+ commit=${SUITE_STATUS_COMMIT:-HEAD}
+@@ -80,7 +81,7 @@ git -C "$town" worktree add --quiet --detach "$checkout" "$sha" ||
+ # Run each replay in that immutable source checkout; emit an exit code and an
+ # output digest. Flaky-red reruns use the SAME original source revision.
+ run_once() {
+-    out=$(cd "$checkout" && VICHE_TOWN_ROOT="$checkout" /bin/sh "$suite" 2>&1) && rc=0 || rc=$?
++    out=$(cd "$checkout" && VICHE_TOWN_ROOT="$checkout" /bin/sh "$verifier_dir/suite-env.sh" /bin/sh "$suite" 2>&1) && rc=0 || rc=$?
+     hash=$(printf '%s' "$out" | sha256sum | cut -d ' ' -f1)
+     # Act 31: the integrator keeps the output so a proposer can see why a
+     # candidate was red. The recorded digest is of this same output.
+diff --git a/tests/integrator-smoke.sh b/tests/integrator-smoke.sh
+index 75abe68b..be438ae5 100755
+--- a/tests/integrator-smoke.sh
++++ b/tests/integrator-smoke.sh
+@@ -16,7 +16,7 @@ git -C "$town" config user.email fixture@example.invalid
+ git -C "$town" config commit.gpgsign false
+ git -C "$town" remote add origin "$remote"
+ mkdir -p "$town/government" "$town/tests" "$town/records" "$town/constitution"
+-for f in suite-status.sh integrator.py propose-delivery.sh review-delivery.sh dispatch-gate.sh; do
++for f in suite-env.sh suite-status.sh integrator.py propose-delivery.sh review-delivery.sh dispatch-gate.sh; do
+   cp "$repo/government/$f" "$town/government/$f"
+ done
+ # Suites: red when records/BREAK and records/ARM are both present (green on
+@@ -98,7 +98,10 @@ test "$(git -C "$remote" show main:records/ledger.tsv | wc -l)" -eq 2
+ seat c
+ printf '#!/bin/sh\necho v2\n' > "$tmp/c/government/tool.sh"
+ git -C "$tmp/c" add -A; git -C "$tmp/c" commit -qm 'tool v2'
++before=$(wc -l < "$tmp/suite-runs")
+ propose c executive tool
++test "$(wc -l < "$tmp/suite-runs")" -eq "$before"
++test "$(tail -1 "$state/delivery/proposals.tsv" | cut -f6)" = deferred:tests/run-all.sh
+ head=$(git -C "$tmp/c" rev-parse HEAD)
+ integrate
+ test "$(st tool)" = reviewing
+@@ -211,7 +214,28 @@ fi
+ printf '[{"status":"landed"}]\n' > "$state/delivery/office/c1a00004.json"
+ echo same | /bin/sh "$town/government/dispatch-gate.sh" check c1a00004 | grep -q inputs_changed
+ 
+-# 10. Proposals from before Act 31 (no office column) are never picked up.
++# 10. Deferring the proposer suite cannot let red code land.
++seat redcode
++printf '#!/bin/sh\nexit 1\n' > "$tmp/redcode/tests/run-all.sh"
++git -C "$tmp/redcode" add -A; git -C "$tmp/redcode" commit -qm 'deliberately red code'
++if (cd "$tmp/redcode" && /bin/sh "$town/government/propose-delivery.sh" --office executive --verify red-source) >/dev/null 2>&1; then
++  echo 'Explicit source preflight accepted red' >&2; exit 1
++fi
++if git -C "$remote" show-ref --verify --quiet refs/heads/delivery/red-source; then
++  echo 'Failed source preflight pushed a ref' >&2; exit 1
++fi
++propose redcode executive red-code
++test "$(tail -1 "$state/delivery/proposals.tsv" | cut -f6)" = deferred:tests/run-all.sh
++integrate
++test "$(st red-code)" = reviewing
++/bin/sh "$town/government/review-delivery.sh" delivery/red-code "$(git -C "$tmp/redcode" rev-parse HEAD)" approve \
++  --office c1a00005 --reason 'fixture review' >/dev/null
++base_red=$(git -C "$remote" rev-parse main)
++integrate
++test "$(st red-code)" = red
++test "$(git -C "$remote" rev-parse main)" = "$base_red"
++
++# 11. Proposals from before Act 31 (no office column) are never picked up.
+ printf '2026-11-10T00:00:00Z\twork-x\trefs/heads/delivery/legacy\t%s\ttree\ttests/run-all.sh\n' "$head" \
+   >> "$state/delivery/proposals.tsv"
+ integrate
+diff --git a/tests/reviewed-merge-smoke.sh b/tests/reviewed-merge-smoke.sh
+index 2a89d6f2..a5d28e29 100644
+--- a/tests/reviewed-merge-smoke.sh
++++ b/tests/reviewed-merge-smoke.sh
+@@ -16,7 +16,7 @@ git -C "$town" config user.email fixture@example.invalid
+ git -C "$town" config commit.gpgsign false
+ git -C "$town" remote add origin "$remote"
+ mkdir -p "$town/government" "$town/tests" "$town/records"
+-cp "$repo/government/suite-status.sh" "$town/government/suite-status.sh"
++cp "$repo/government/suite-status.sh" "$repo/government/suite-env.sh" "$town/government/"
+ printf '#!/bin/sh\nexit 0\n' > "$town/tests/records-smoke.sh"
+ printf '#!/bin/sh\nexit 0\n' > "$town/tests/run-all.sh"
+ printf 'canonical v1\n' > "$town/AGENTS.md"
+diff --git a/tests/suite-status-smoke.sh b/tests/suite-status-smoke.sh
+index f29474bd..c1ef4c71 100644
+--- a/tests/suite-status-smoke.sh
++++ b/tests/suite-status-smoke.sh
+@@ -6,7 +6,7 @@ scratch=$(mktemp -d)
+ trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+ town=$scratch/town
+ mkdir -p "$town/government" "$town/records" "$town/tests"
+-cp "$repo/government/suite-status.sh" "$town/government/"
++cp "$repo/government/suite-status.sh" "$repo/government/suite-env.sh" "$town/government/"
+ git -C "$town" init -q -b main
+ git -C "$town" config user.email fixture@example.invalid
+ git -C "$town" config user.name Fixture
+@@ -16,6 +16,17 @@ cat > "$town/tests/green.sh" <<'EOF'
+ #!/bin/sh
+ exit 0
+ EOF
++cat > "$town/tests/isolation.sh" <<'EOF'
++#!/bin/sh
++set -eu
++[ "$HOME" != "$ORIGINAL_HOME" ]
++[ "$XDG_CONFIG_HOME" != "$ORIGINAL_HOME/config" ]
++[ "$VICHE_STATE_ROOT" != "$ORIGINAL_HOME/state" ]
++[ -z "${ANTONINA_HOST_XDG_CONFIG_HOME:-}" ]
++[ -z "${VICHE_ANTONINA_CONFIG:-}" ]
++! antonina agent status --id dummy
++! opencode models
++EOF
+ cat > "$town/tests/red.sh" <<'EOF'
+ #!/bin/sh
+ echo boom
+@@ -40,6 +51,10 @@ check_result() {
+   jq -e --arg expected "$1" '.result == $expected' "$town/records/suite-status.json" >/dev/null
+ }
+ 
++export ORIGINAL_HOME="$HOME"
++ANTONINA_HOST_XDG_CONFIG_HOME="$HOME/config" VICHE_ANTONINA_CONFIG="$HOME/config/antonina.json" \
++  VICHE_STATE_ROOT="$HOME/state" run --suite tests/isolation.sh >/dev/null
++check_result green
+ run --suite tests/green.sh >/dev/null
+ check_result green
+ jq -e --arg commit "$(git -C "$town" rev-parse HEAD)" \

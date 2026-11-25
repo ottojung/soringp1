@@ -1,0 +1,87 @@
+commit 716d1ff61cec45f3216b8a6cf497573edca7687f
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Thu Nov 19 09:10:29 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Thu Nov 19 09:10:29 2026 +0000
+
+    Serialize integration worktree and safely retry verification races
+
+diff --git a/government/integrator.py b/government/integrator.py
+index 157ce4e6..57484932 100755
+--- a/government/integrator.py
++++ b/government/integrator.py
+@@ -48,6 +48,7 @@ Environment: VICHE_TOWN_ROOT, VICHE_STATE_ROOT, VICHE_INTEGRATOR=off,
+ VICHE_INTEGRATOR_NOW (tests), VICHE_INTEGRATOR_NO_REVIEWER=1 (never commission).
+ """
+ import datetime
++import fcntl
+ import hashlib
+ import json
+ import os
+@@ -436,7 +437,11 @@ def land(p, entry, review):
+             {"name": "carrier parent is the candidate", "expected": candidate, "actual": git("rev-parse", carrier + "^")},
+         ]
+         if any(a["expected"] != a["actual"] for a in assertions):
+-            entry.update({"status": "refused", "reason": "pre-landing assertion failed",
++            # No push occurred. A concurrent process may have replaced the
++            # temporary working HEAD during verification. Preserve the failed
++            # assertion and retry under the internal lock, never waive the gate.
++            entry.update({"status": "approved",
++                          "reason": "pre-landing assertion failed; no push; retry",
+                           "assertions": assertions})
+             return False
+         blocked = canonical_preflight(base, carrier)
+@@ -478,6 +483,19 @@ def run():
+     if os.environ.get("VICHE_INTEGRATOR", "on") == "off":
+         return 0
+     ROOT.mkdir(parents=True, exist_ok=True)
++    # Supervisor locking is not enough: agents may invoke integrator.py
++    # directly. Shared ROOT/work must never have two concurrent writers.
++    # A DIFFERENT file from the outer S6 run.lock avoids self-deadlock.
++    with (ROOT / "internal.lock").open("a+") as lock:
++        try:
++            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            log("internal lock busy; another integration run owns worktree")
++            return 0
++        return run_locked()
++
++
++def run_locked():
+     try:
+         git("fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main",
+             "+refs/heads/delivery/*:refs/remotes/origin/delivery/*")
+diff --git a/tests/integrator-lock-smoke.sh b/tests/integrator-lock-smoke.sh
+new file mode 100644
+index 00000000..58443a37
+--- /dev/null
++++ b/tests/integrator-lock-smoke.sh
+@@ -0,0 +1,28 @@
++#!/bin/sh
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++root=$(pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++python3 - "$root" "$scratch" <<'PY'
++import fcntl
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++root, temp = map(Path, sys.argv[1:])
++state=temp/"state"
++lock=state/"delivery/integrator/internal.lock"
++lock.parent.mkdir(parents=True, exist_ok=True)
++with lock.open("a+") as handle:
++    fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
++    env=dict(os.environ,VICHE_STATE_ROOT=str(state),
++             VICHE_TOWN_ROOT=str(temp/"missing-repo"))
++    p=subprocess.run([sys.executable,str(root/"government/integrator.py"),"run"],
++                      env=env,text=True,capture_output=True,timeout=6)
++    assert p.returncode==0,(p.returncode,p.stderr)
++    assert "internal lock busy" in p.stderr,p.stderr
++    assert not (state/"delivery/integrator/state.json").exists()
++print("integrator internal flock prevents competing workspace mutation")
++PY

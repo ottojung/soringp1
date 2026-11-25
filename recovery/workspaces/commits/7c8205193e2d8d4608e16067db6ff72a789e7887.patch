@@ -1,0 +1,155 @@
+commit 7c8205193e2d8d4608e16067db6ff72a789e7887
+Author:     Viche Operator <operator@viche.local>
+AuthorDate: Tue Nov 10 20:08:54 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Tue Nov 10 20:08:54 2026 +0000
+
+    Investigate stopped office holds promptly with existing recovery agent
+
+diff --git a/government/RECOVERY-STEWARD.md b/government/RECOVERY-STEWARD.md
+index 15ce2466..236dcb12 100644
+--- a/government/RECOVERY-STEWARD.md
++++ b/government/RECOVERY-STEWARD.md
+@@ -10,6 +10,27 @@ This is NOT a scriptable decision tree. Do not become an exception table, add ri
+ 
+ When an institutional officer is incapacitated, never require that same officer to repair itself. Use another capable office, yourself, or independent fresh investigators to restore continuity. The current Executive, Clerk, Judiciary and Innovation Office must each be evaluated, as must the wider useful frontier and meaningful verified delivery. Do not stop at reporting unhealthy status or declaring an incident. Pursue actual recovered work.
+ 
++**Unsafe appointment holds (O1 standing investigation duty):** At each
++assessment, inspect every nonempty file under
++`$VICHE_STATE_ROOT/liveness/unsafe-holds/` before declaring continuity
++healthy. A hold means a specific appointment stopped, was killed, or cannot
++safely be renewed; it is an **investigation trigger**, not permission to
++restart or replay the old agent. Independently inspect its agent status,
++intent, live runner, terminal evidence, steering, Git worktree, board effects
++and any prior replacement. Distinguish a deliberate stop, uncertain side
++effects, an unauthorized competing writer and a genuinely safe new
++appointment. Name an Executive owner; escalate legally restricted steps to
++the competent office and uncertain irreversible effects to independent
++Judiciary review. Do actual authorized repairs, with new independent
++instructions rather than replay. A hold remains blocking until a duly
++authorized Executive investigator durably records the specific evidence,
++decision, successor status (if any), review and reasons for release, then
++archives the hold without deleting the original evidence. Never clear a
++hold because an agent is merely alive, because a timer elapsed, or because
++two checks are green. If evidence cannot support safe resumption, retain
++the hold and identify the precise owner and next action. Avoid adding a
++new per-case monitor or status loop.
++
+ **Safety boundary:** A failed model continuation might already have performed tools or external side effects. Never blindly retry a failed turn, replay its prompt, duplicate its tool operations or forget pending steering. Preserve old status, logs, worktree HEAD, session and evidence; inspect actual Git/board/external effects; reconcile what occurred. A new appointment is a new *investigator*, not a replay. If effects cannot be independently verified, document the uncertainty and request Judiciary review; continue independent non-conflicting work without pretending ambiguity is resolved. Never run conflicting live writers on one worktree.
+ 
+ **Constitutional authority:** Founder alone changes the Constitution or originates external missions; Legislature alone votes on and enacts law; Judiciary independently measures and audits, without implementing its own oversight criteria; Executive implements lawful operational changes. Do not impersonate a government branch, fabricate votes, enact unratified bills, rewrite founder-owned bootstrap, or transfer the legislative Innovation Centre by fiat. Generate evidence-backed proposals when a legal change is necessary and help capable legislative agents deliberate lawfully. Do implement work already authorized by law and the Founder.
+diff --git a/government/recovery-steward-cycle.sh b/government/recovery-steward-cycle.sh
+index 6bdd1d35..866ff765 100644
+--- a/government/recovery-steward-cycle.sh
++++ b/government/recovery-steward-cycle.sh
+@@ -23,10 +23,24 @@ mode=$AGENT_STATE
+ fresh=no
+ case "$mode" in
+   running) exit 0 ;;
+-  failed|stopped|killed)
++  stopped|killed)
++    # This supervisor must obey the same stop-intent protection it applies
++    # to other offices. An out-of-band human stop can have null intent.
++    mkdir -p "$state/liveness/unsafe-holds"
++    hold=$state/liveness/unsafe-holds/recovery-steward
++    invocation=$(printf '%s\n' "$meta" | jq -r '.invocation_id // .finished_at // ""')
++    line=$(printf 'recovery-steward\t%s\t%s' "$id" "$invocation")
++    if [ ! -s "$hold" ] || ! grep -Fxq "$line" "$hold"; then
++      printf '%s\n' "$line" >> "$hold"
++    fi
++    echo "Recovery steward terminally $mode; manual Executive investigation required; no auto-renewal" >&2
++    exit 1 ;;
++  failed)
+     # No replay: the appointment service snapshots the old session first.
+-    printf '%s\n' "$meta" | jq -e '.alive == false' >/dev/null ||
++    printf '%s\n' "$meta" | jq -e '.alive == false and (.active_runner == false or .active_runner == null)' >/dev/null ||
+       { echo 'Cannot duplicate active runner' >&2; exit 1; }
++    printf '%s\n' "$meta" | jq -e '(.intent // "") != "stop"' >/dev/null ||
++      { echo 'Recovery steward intentionally stopped; refuse auto-renewal' >&2; exit 1; }
+     id=$(/bin/sh "$town/government/appointments.sh" replace recovery-steward "$id" recovery-steward terminal_new_session 'Fresh recovery investigator after terminal failure; no prompt or tool replay')
+     fresh=yes ;;
+   idle|clearexit) : ;;
+@@ -42,6 +56,15 @@ interval=3600
+ if [ -s "$state/branches/incident.json" ] ||
+    [ -s "$state/oversight/random/incident.json" ] ||
+    [ -s "$state/oversight/incident.json" ]; then interval=600; fi
++# A recorded unsafe hold is an institutional blocker, not a reason to
++# restart its stopped agent. Use the EXISTING expert investigator sooner;
++# the launcher must not infer intent, authorize renewal or clear evidence.
++for evidence in "$state"/liveness/unsafe-holds/*; do
++  if [ -f "$evidence" ] && [ -s "$evidence" ]; then
++    interval=600
++    break
++  fi
++done
+ if [ "$fresh" != yes ] && [ "$last" -gt 0 ] && [ "$now" -ge "$last" ] &&
+    [ $((now-last)) -lt "$interval" ]; then exit 0; fi
+ charter=${VICHE_CONSTITUTION:-}
+diff --git a/tests/recovery-steward-smoke.sh b/tests/recovery-steward-smoke.sh
+index 6f412c06..407b58d7 100644
+--- a/tests/recovery-steward-smoke.sh
++++ b/tests/recovery-steward-smoke.sh
+@@ -29,7 +29,12 @@ cat > "$d/bin/antonina" <<'MOCK'
+ case "$1 $2" in
+   'agent status')
+     case "$4" in
+-      old-agent) echo '{"state":"failed","alive":false,"backend_error":{"classification":"unknown","transient":false,"automatic_retry_safe":false}}' ;;
++      old-agent)
++        if [ -s "$MOCK_ROOT/terminal-status" ]; then
++          cat "$MOCK_ROOT/terminal-status"
++        else
++          echo '{"state":"failed","alive":false,"backend_error":{"classification":"unknown","transient":false,"automatic_retry_safe":false}}'
++        fi ;;
+       new-agent) echo '{"state":"clearexit","alive":false}' ;;
+       *) exit 2 ;;
+     esac ;;
+@@ -71,10 +76,47 @@ test -d "$d/seats/branches/recovery-steward"
+ sh "$repo/government/recovery-steward-cycle.sh"
+ test "$(wc -l < "$d/mock/replacements")" -eq 1
+ test "$(grep -cx 'agent' "$d/mock/runs")" -eq 1
++# After an ordinary dispatch, an unsafe-hold triggers this SAME capable
++# investigator at its existing incident cadence, but never renews the held
++# appointment, clears the evidence, or duplicates a recent dispatch.
++mkdir -p "$d/state/liveness/unsafe-holds"
++printf 'innovation-centre\tstopped-id\tunknown-intent\n' > "$d/state/liveness/unsafe-holds/innovation-centre"
++now=$(date +%s)
++printf '%s\n' "$((now - 601))" > "$d/state/recovery-steward/last-dispatch"
++sh "$repo/government/recovery-steward-cycle.sh"
++test "$(grep -cx 'agent' "$d/mock/runs")" -eq 2
++test -s "$d/state/liveness/unsafe-holds/innovation-centre"
++grep -Fq 'Unsafe appointment holds (O1 standing investigation duty)' "$d/mock/runs"
++sh "$repo/government/recovery-steward-cycle.sh"
++test "$(grep -cx 'agent' "$d/mock/runs")" -eq 2
++test "$(wc -l < "$d/mock/replacements")" -eq 1
++# An empty hold is not an incident and does not accelerate the schedule.
++: > "$d/state/liveness/unsafe-holds/innovation-centre"
++printf '%s\n' "$((now - 601))" > "$d/state/recovery-steward/last-dispatch"
++sh "$repo/government/recovery-steward-cycle.sh"
++test "$(grep -cx 'agent' "$d/mock/runs")" -eq 2
+ # Finished healthy session gets the next independent recovery cycle without
+ # replacing the appointment or replaying a prior invocation.
+ rm "$d/state/recovery-steward/last-dispatch"
+ sh "$repo/government/recovery-steward-cycle.sh"
+ test "$(wc -l < "$d/mock/replacements")" -eq 1
+-test "$(grep -cx 'agent' "$d/mock/runs")" -eq 2
+-echo 'Recovery steward fresh-session and non-replay smoke passed'
++test "$(grep -cx 'agent' "$d/mock/runs")" -eq 3
++# Explicit or ambiguous human stops must never be auto-renewed, even for
++# the Recovery Steward itself. The existing investigator cannot replay itself.
++printf 'old-agent\n' > "$d/mock/registry"
++printf '{"state":"stopped","intent":"stop","alive":false,"active_runner":false,"invocation_id":"human-stop"}\n' > "$d/mock/terminal-status"
++if sh "$repo/government/recovery-steward-cycle.sh" >/dev/null 2>&1; then
++    echo 'Intentional stop was automatically renewed' >&2
++    exit 1
++fi
++test "$(cat "$d/mock/registry")" = old-agent
++test "$(wc -l < "$d/mock/replacements")" -eq 1
++grep -Fq 'human-stop' "$d/state/liveness/unsafe-holds/recovery-steward"
++printf '{"state":"killed","intent":null,"alive":false,"active_runner":false,"invocation_id":"unexplained-kill"}\n' > "$d/mock/terminal-status"
++if sh "$repo/government/recovery-steward-cycle.sh" >/dev/null 2>&1; then
++    echo 'Ambiguous kill was automatically renewed' >&2
++    exit 1
++fi
++test "$(cat "$d/mock/registry")" = old-agent
++grep -Fq 'unexplained-kill' "$d/state/liveness/unsafe-holds/recovery-steward"
++echo 'Recovery steward fresh-session, hold escalation and non-replay smoke passed'

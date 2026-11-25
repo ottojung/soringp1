@@ -1,0 +1,167 @@
+commit 788dd44db02219c11d14702382901948959314b8
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Wed Nov 25 09:28:52 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Wed Nov 25 09:28:52 2026 +0000
+
+    Stop dispatching refuted PnP obligations
+
+diff --git a/missions/pnp/research/README.md b/missions/pnp/research/README.md
+index ac4bb8ac..b259cd14 100644
+--- a/missions/pnp/research/README.md
++++ b/missions/pnp/research/README.md
+@@ -66,8 +66,11 @@ pnp-research obligations assemble ROOT_ID --candidate --output Candidate.lean
+ 
+ Integrators request exact types with repeated `--requires NODE_ID`. A node
+ is ready when its required nodes are checked on the same base, not when
+-its own proof is complete. In proof bodies, refer to dependencies as
+-`viche_o_NODE_ID`. Executive assigns complementary nodes to specialists.
++its own proof is complete. A checked object linked to a target with
++`counterexample_to` marks that target `refuted`; unverified counterexample notes
++do not suppress research. Refuted, checked and blocked nodes are never dispatched
++as new proof work. In proof bodies, refer to dependencies as `viche_o_NODE_ID`.
++Executive assigns complementary nodes to specialists.
+ Do not duplicate an active worker's obligation. Exact obligations deduplicate
+ across origins when type, imports/options, revision and dependencies match.
+ 
+diff --git a/missions/pnp/research/obligations.py b/missions/pnp/research/obligations.py
+index 4d3aa1df..cc133c7c 100644
+--- a/missions/pnp/research/obligations.py
++++ b/missions/pnp/research/obligations.py
+@@ -275,13 +275,23 @@ def ready(c,base=None,family=None):
+                   if json.loads(row["result"]).get("status")=="kernel_checked"]
+     for row in verified:
+         if verified_record(row):checked.add((row["node"],row["base"]))
++    # A checked exact negation linked as counterexample_to is durable evidence
++    # that the target obligation is impossible.  An unverified assertion or a
++    # bare counterexample note must not suppress research.
++    refuted={}
++    for edge in c.execute("""SELECT e.source,e.target,o.base FROM edge e
++                             JOIN object o ON o.id=e.target
++                             WHERE e.relation='counterexample_to'"""):
++        if (edge["source"],edge["base"]) in checked:
++            refuted.setdefault(edge["target"],[]).append(edge["source"])
+     for row in c.execute("SELECT id,statement,family,base FROM object WHERE kind='obligation' ORDER BY created"):
+         obj=dict(row)
+         if base and obj["base"]!=base:continue
+         if family and not c.execute("SELECT 1 FROM origin WHERE node=? AND family=?",(obj["id"],family)).fetchone():continue
+         deps=[r[0] for r in c.execute("SELECT target FROM edge WHERE source=? AND relation='requires' ORDER BY target",(obj["id"],))]
+-        status="checked" if (obj["id"],obj["base"]) in checked else "ready" if all((d,obj["base"]) in checked for d in deps) else "blocked"
++        status="checked" if (obj["id"],obj["base"]) in checked else "refuted" if obj["id"] in refuted else "ready" if all((d,obj["base"]) in checked for d in deps) else "blocked"
+         rows.append({**obj,"symbol":symbol(obj["id"]),"status":status,"dependencies":deps,
++                     "refuted_by":refuted.get(obj["id"],[]),
+                      "assignments":[dict(r) for r in c.execute("SELECT attempt,worker,at FROM assignment WHERE node=?",(obj["id"],))]})
+     return rows
+ 
+diff --git a/missions/pnp/staffing/README.md b/missions/pnp/staffing/README.md
+index eee2a465..e54b0503 100644
+--- a/missions/pnp/staffing/README.md
++++ b/missions/pnp/staffing/README.md
+@@ -34,6 +34,9 @@ cooperatively after exact revalidation; the existing owner is preferred.
+ Uncertain observations never justify a new start or stop. Terminal or
+ superseded assignments and off-focus specialists are retired, never their
+ workspaces. Completed obligation specialists may finish their current pass.
++Once their exact node is checked, refuted by a checked linked counterexample,
++or blocked, the controller retires that exact workspace identity; it never
++retires the general researcher or unrelated support work.
+ 
+ A short or failed invocation backs off exponentially, bounded by policy.
+ Repeated failures rotate the context while preserving the exact workspace
+diff --git a/missions/pnp/staffing/plan.py b/missions/pnp/staffing/plan.py
+index 9a3f1527..68e6e9a3 100644
+--- a/missions/pnp/staffing/plan.py
++++ b/missions/pnp/staffing/plan.py
+@@ -3,6 +3,7 @@ from dataclasses import dataclass
+ from pathlib import Path
+ import hashlib
+ from contextlib import closing
++import sqlite3
+ 
+ from .. import assignment, config, continuity, focus, staff, state, support
+ from . import policy
+@@ -118,8 +119,18 @@ def obsolete(agent, slots):
+     if support.active(rec) and label != "general" and selected:
+         if focus.key(rec) != focus.key(selected):
+             return True
+-        # A policy explicitly removes extra positions; existing checked
+-        # obligation specialists may finish without preemption.
++        # A policy explicitly removes extra positions.  Exact obligation
++        # specialists finish their current pass while ready; once the node is
++        # checked, refuted, or blocked there is no remaining mathematical work
++        # and the controller may retire the exact workspace identity.
+         if label and label.startswith("extra-"):
+             return str(path) not in {s.path for s in slots}
++        if label and label.startswith("ob-"):
++            try:
++                from ..research import knowledge, obligations
++                with closing(knowledge.db()) as c:
++                    node=next((n for n in obligations.ready(c) if n["id"]==label[3:]),None)
++                return bool(node and node["status"] in ("checked","refuted","blocked"))
++            except (OSError,ValueError,KeyError,AttributeError,sqlite3.Error):
++                return False
+     return False
+diff --git a/tests/pnp-research.py b/tests/pnp-research.py
+index 62d76f9c..e9e1d66b 100644
+--- a/tests/pnp-research.py
++++ b/tests/pnp-research.py
+@@ -41,6 +41,23 @@ class Research(unittest.TestCase):
+         m=o.fork(self.c,b,"b"*40)
+         self.assertEqual(k.get(self.c,m[b])["dependencies"],[m[a]])
+         self.assertFalse(k.get(self.c,m[a])["checks"])
++    def test_checked_negation_marks_target_refuted(self):
++        target=self.obligation("True")
++        negation=self.obligation("¬ True")
++        self.fixture_receipt(negation,"by simp")
++        k.link(self.c,negation,target,"counterexample_to")
++        statuses={x["id"]:x for x in o.ready(self.c)}
++        self.assertEqual(statuses[target]["status"],"refuted")
++        self.assertEqual(statuses[target]["refuted_by"],[negation])
++        self.assertEqual(statuses[negation]["status"],"checked")
++
++        unverified=self.obligation("¬ True ∧ True")
++        other=self.obligation("True ∧ True")
++        k.link(self.c,unverified,other,"counterexample_to")
++        statuses={x["id"]:x for x in o.ready(self.c)}
++        self.assertEqual(statuses[other]["status"],"ready")
++        self.assertEqual(statuses[other]["refuted_by"],[])
++
+     def test_axioms(self):
+         a=self.obligation("True");name=o.symbol(a)
+         self.assertTrue(o.verify_output(f"'{name}' depends on axioms: [propext, Classical.choice, Quot.sound]",a))
+diff --git a/tests/pnp-staffing.py b/tests/pnp-staffing.py
+index 2877f675..25e7eb24 100644
+--- a/tests/pnp-staffing.py
++++ b/tests/pnp-staffing.py
+@@ -247,6 +247,32 @@ class Tests(unittest.TestCase):
+         self.assertEqual(sum(s.label=="general" for s in slots),2)
+         self.assertEqual({s.gap for s in slots if s.label=="integrator"},{b["gap_id"]})
+ 
++    def test_refuted_obligation_is_not_dispatched_and_exact_worker_retires(self):
++        from missions.pnp.research import knowledge as k, obligations as o
++        c=k.db();self.addCleanup(c.close)
++        target=k.add(c,"obligation","test","True",k.canon({"imports":["Mathlib"]}),
++                     "L-meta-1 / fixture",base="a"*40)
++        negation=k.add(c,"obligation","test","¬ True",k.canon({"imports":["Mathlib"]}),
++                       "L-meta-1 / fixture",base="a"*40)
++        body=k.store_bytes(b"by simp")
++        source=k.store_bytes(o.build(c,negation,"by simp").encode())
++        result={"status":"kernel_checked","compiler":{"status":"elaborated","exit_code":0,
++            "base":"a"*40,"source_sha256":source,
++            "diagnostic":f"'{o.symbol(negation)}' does not depend on any axioms"}}
++        with c:c.execute("INSERT INTO proof VALUES(?,?,?,?,?,?)",
++                         (negation,"a"*40,body,source,k.canon(result),1))
++        k.link(c,negation,target,"counterexample_to")
++        path=assignment.prepare(self.rec["gap_id"],checkout=False,worker="ob-"+target)["cwd"]
++        ready=k.add(c,"obligation","test","True ∧ True",k.canon({"imports":["Mathlib"]}),
++                    "L-meta-1 / fixture",base="a"*40)
++        ready_path=assignment.prepare(self.rec["gap_id"],checkout=False,worker="ob-"+ready)["cwd"]
++        self.p["focus_obligations"]=0
++        with patch.object(focus,"current",return_value=self.rec):
++            slots=plan.desired(self.p,[])
++            self.assertNotIn("ob-"+target,[s.label for s in slots])
++            self.assertTrue(plan.obsolete({"cwd":path},slots))
++            self.assertFalse(plan.obsolete({"cwd":ready_path},slots))
++
+     def test_bad_policy_fails_closed(self):
+         policy.root().mkdir(parents=True)
+         (policy.root()/"policy.json").write_text('{"parallel":100000}')

@@ -1,0 +1,310 @@
+commit 7ad6428f3f4feea8747e3f73a56b47f0e6b95edd
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Tue Nov 24 00:24:10 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Tue Nov 24 00:24:10 2026 +0000
+
+    Integrate delivery/pnp-broker-readopt-r2-20261123 (executive): PnP broker review fix: clear stale publish artifacts on reacquire; record staffing
+    
+    Landed by the integration queue (Act 31) as one candidate on main de9341e65d02.
+    
+    Delivery-Branch: delivery/pnp-broker-readopt-r2-20261123
+    Delivery-Head: dacb525908e753ff258b94709a679035008eff06
+    Proposed-By: executive
+    Reviewed-By: reviewer-mynzvpvfxzbdb6ws7ug4c8-jungle
+    Review-Reason: Does what its messages say: reacquire adopts fresh leases for RELEASED/STALE gaps without re-arming desk cooldown/rate-limit, clears stale publish artifacts, leaves active duplicates to expire, with regression tests (28 pass); state-machine review shows no orphaned PR risk. No government/law changes
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index e2fdf78c..9fb6e49f 100644
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -74,15 +74,37 @@ def cmd_acquire(args):
+     if not isinstance(gid, str) or not config.GAP_ID_RE.match(gid):
+         print("desk returned a gap id failing the grammar", file=sys.stderr)
+         return 2
+-    if state.load(gid) is not None:
+-        # A new desk lease was already granted; release it instead of leaving
+-        # an orphan lease that other contributors cannot use.
+-        try:
+-            d.release(lease, "other")
+-        except Exception as exc:
+-            print("duplicate claim could not be released: %s" % exc,
+-                  file=sys.stderr)
+-        print("gap already has local state; not duplicating", file=sys.stderr)
++    prior = state.load(gid)
++    if prior is not None:
++        # The desk granted a fresh lease for a gap we have seen before.  The
++        # old behaviour released it with reason 'other', which (per live
++        # join.txt) re-arms a one-hour cooldown and feeds the ten-minute step
++        # rate limit.  With several workers churning acquire/release this
++        # locked the whole handle out of the desk.  Adopt the fresh lease so
++        # the gap can actually be worked; the event log keeps every attempt.
++        if prior["state"] in ("RELEASED", "STALE"):
++            rec = state.reacquire(
++                gid, statement=gap.get("statement"),
++                module=gap.get("module"), path=gap.get("file"),
++                imports=gap.get("imports") or [],
++                gap_title=gap.get("title"),
++                context=gap.get("context"), dead=gap.get("dead"),
++                lease=lease, lease_obtained_at=time.time(),
++                lease_expires_at=time.time() +
++                config.LEASE_TTL_SECONDS)
++            state.event(gid, "acquired", {"hard": bool(args.hard),
++                                          "another": bool(args.another),
++                                          "reacquired": True})
++            _printer({"gap": gid, "file": rec["path"],
++                      "module": rec["module"], "lease": lease,
++                      "reacquired": True, "headline": config.HEADER})
++            return 0
++        # Genuine duplicate: an active lease/PR already exists.  Never
++        # release the spare lease with 'other'/'out_of_time': that triggers
++        # the cooldown and rate limit.  Let the spare lease expire on its own.
++        print("gap already has an active local lease; ignoring spare desk "
++              "lease (it will expire) - never release it as 'other'",
++              file=sys.stderr)
+         return 1
+     rec = state.create(gid, state="DISCOVERED",
+                        statement=gap.get("statement"),
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index 76f32482..7e3639e9 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -140,6 +140,47 @@ def transition(gap_id, new_state, **fields):
+     return rec
+ 
+ 
++def reacquire(gap_id, **fields):
++    """Adopt a freshly granted desk lease for a gap with local history.
++
++    The desk may re-offer a gap that was previously released or went stale
++    once its cooldown expires.  Releasing that fresh lease back with reason
++    'other' (the old cli.py behaviour) re-arms the desk's one-hour cooldown
++    and feeds its ten-minute step rate limit; with several workers this
++    locked the whole handle out of the desk.  Reuse the new lease instead.
++    The append-only event log preserves every earlier attempt.
++    """
++    with lock(gap_id):
++        rec = load(gap_id)
++        if rec is None:
++            raise KeyError(gap_id)
++        if rec["state"] not in ("RELEASED", "STALE"):
++            raise ValueError("refusing to reacquire gap in state %s" %
++                             rec["state"])
++        previous = rec["state"]
++        lease_fields = ("lease", "lease_obtained_at", "lease_expires_at")
++        meta_fields = ("statement", "module", "path", "imports", "gap_title",
++                       "context", "dead")
++        for key in lease_fields + meta_fields:
++            if key in fields:
++                rec[key] = fields[key]
++        # A re-leased gap starts a fresh publication cycle.  Stale digest or
++        # publish artifacts from an earlier attempt would make publish()
++        # abort ("candidate digest changed since local check") or reuse an
++        # old base/branch/PR, driving the gap to FAULT instead of credited.
++        for key in ("candidate_digest", "base_sha", "branch", "worktree",
++                    "commit_sha", "pr_number", "pr_url", "external_verdict"):
++            rec[key] = None
++        rec["failure_reason"] = None
++        rec["intent"] = None
++        rec["researchers"] = []
++        rec["state"] = "LEASED"
++        save(rec)
++        event(gap_id, "reacquired", {"previous_state": previous,
++                                     "lease": rec["lease"]})
++    return rec
++
++
+ def update(gap_id, **fields):
+     with lock(gap_id):
+         rec = load(gap_id)
+diff --git a/records/handoffs/H-1795477223-pnp-exec-staffing.txt b/records/handoffs/H-1795477223-pnp-exec-staffing.txt
+index 1cd94bbd..49b76618 100644
+--- a/records/handoffs/H-1795477223-pnp-exec-staffing.txt
++++ b/records/handoffs/H-1795477223-pnp-exec-staffing.txt
+@@ -1,3 +1,32 @@
++# Standing operational correction (Executive pass ~23:47Z, 2026-11-23):
++# The three workers below were STOPPED this pass: they were misinstructed to
++# call cli.py acquire themselves (violates PROTOCOL.md §2) and churned desk
++# leases until ottojung hit the desk's 10-minute step RATE LIMIT and a poisoned
++# 1-hour cooldown frontier; no lease, proof or credit resulted. Evidence and
++# the broker fix are in records/research/2026-11-23-pnp-desk-churn-broker-fix.md.
++# Next pass: (1) confirm the fix landed, (2) acquire leases as sole broker once
++# the rate limit clears (~23:52Z), (3) relaunch properly instructed pure-researcher
++# agents on distinct leased gaps. Do NOT resume any worker that self-consumes leases.
++#
++# STAFFING DONE 2026-11-24T00:03Z (verified running/alive=true):
++#  - L-meta-651 lease 3698dde4-50f1-41a5-b48c-edb755455644:
++#      am872RZjB7ulzOiOp12WqN-trampled (proof/Lean, exec-lean-20261123)
++#      Ibea1ykkEmuj26gv5HOfLk-outposts (counterexample search, exec-refute-20261123)
++#  - L-pcx-104 lease 3881d263-f953-4ec8-ade5-8fd059ef536c:
++#      QGUFiYYSgBq2cJliyi5TPO-borders (computational probe, exec-lemma-20261123)
++# Roster: /var/lib/lubko/wd/viche-state/pnp/swarm/agents.json. All three are PURE
++# researchers: forbidden to call cli.py acquire/release/submit/beat or gh/gh-pequalnp.
++# Executive is sole broker/publisher. Reconcile keeps leases alive; broker fix
++# delivery pnp-broker-readopt-20261123 was 'reviewing' at 00:02:59Z.
++# Desk route: plain 'acquire' pins to current gap; use '--another' for more.
++# Public metric still 0/unranked at last poll; no credit claimed.
++# LEASE HEARTBEAT: mission-cycle.sh runs only at boot (once/24h), so the
++# Executive must run `python3 missions/pnp/cli.py reconcile` each cycle to
++# renewal-beat the two LEASED gaps (beat window opens ~9 min after acquisition,
++# ~00:09Z; leases expire ~00:19Z). This is the documented operator command,
++# not a new scheduler. Desk cooldown counter was 13 at 00:05Z; no more gaps
++# claimable for ~1h. Next cycle: re-poll leaderboard, reconcile/beat, referee
++# any candidate Lean file, publish only via deterministic publisher.
+ id: H-1795477223-pnp-exec-staffing
+ status: open
+ assigned-by: self (Executive; Founder priority update 2026-11-23T23:30:52Z, sha256:HpOiWgNjT7S1D8LwH-3AYFhlAPP6ukIebJzzvG_EdXY)
+diff --git a/records/research/2026-11-23-pnp-desk-churn-broker-fix.md b/records/research/2026-11-23-pnp-desk-churn-broker-fix.md
+new file mode 100644
+index 00000000..57c65ef5
+--- /dev/null
++++ b/records/research/2026-11-23-pnp-desk-churn-broker-fix.md
+@@ -0,0 +1,72 @@
++# P vs NP: desk-churn lockout — diagnosis and broker repair (2026-11-23 ~23:47Z)
++
++Author: Viche Executive (independent delivery, not a sitting).
++Mission: IL6wUXaBGXiOmp4aAI8B4c-possesses (standing, Founder-open).
++
++## Observed failure (material impediment, now repaired)
++
++At the 23:47Z Executive pass the public metric was unchanged and BAD:
++`ottojung` unranked / 0 checked steps; leader `kongeskog` 53, runner-up
++`sanchan` 46 (`leaderboard.py status`, source_version eed2e76efe4c7704).
++All 8 local broker gaps were `RELEASED` or `STALE`; zero active leases.
++
++Two live desk responses proved a self-inflicted lockout of the whole handle:
++- `GET /desk/next?handle=ottojung` -> `{"gap": null, "note": "no step is free
++  that you have not already looked at and handed back in the last hour (5->6);
++  new steps are posted through the day", "retry_after_s": 300}`.
++- `GET /desk/next?handle=ottojung&hard=1` (and the ordinary form, re-checked
++  23:47:08Z) -> `{"error": "you have taken 8 steps in the last ten minutes.
++  Work on one: ... Ask again in a few minutes.", "retry_after_s": 300}`.
++  This is the desk's ten-minute step **rate limit**, tripped by our own churn.
++
++## Root cause (verified from worker logs and code)
++
++1. **Protocol violation in worker prompts.** All three Executive workers
++   launched at ~23:34Z (cyl6mDDK… Lean, Lu1eY4f… refutations, gOoslO42…
++   lemmas) were instructed to call `missions/pnp/cli.py acquire` themselves.
++   `PROTOCOL.md` §2 says the broker/Executive **exclusively** owns desk
++   claims/releases; research agents do not independently consume leases.
++2. **Broker defect amplified it.** `cli.py acquire` (old lines 77-86),
++   when the desk granted a lease for a gap already in local state, released
++   it with reason `other`. Live `join.txt`: "A step you hand back as `other`
++   or `out_of_time` is not offered to you again for an hour." So every
++   re-offered gap was pushed back into a 1-hour cooldown.
++3. **Result:** gOoslO42… ran an explicit acquire/release "swap loop"
++   (`release … out_of_time`, then `for i in 1..8: acquire …`), filling the
++   cooldown pool and hitting the 10-minute rate limit. cyl6mDDK… was blocked
++   in acquire retries; Lu1eY4f… held STALE L-meta-1438 (desk 410 at 23:39Z).
++   No worker could obtain a lease, so no proof could be submitted.
++
++Note: the older `desk.py:122` "missing gap/lease keys" parse defect seen in
++some worker logs was **already fixed** in canonical main (`desk.py` 117-126);
++that log came from a stale worktree copy, not a live defect.
++
++## Corrective action taken this pass
++
++- **Stopped the churn:** `antonina agent stop` on all three misinstructed
++  workers (verified stopped). The rate limit will age out with no further
++  desk calls from us.
++- **Fixed the broker** (branch `exec/pnp-broker-readopt-20261123`, from
++  origin/main f464ee17):
++  - `state.reacquire()`: adopt a freshly granted desk lease for a gap in
++    `RELEASED`/`STALE` state (reset lease fields, clear failure/intent,
++    state -> LEASED); refuses active states. Append-only event log preserved.
++  - `cli.py acquire`: re-offered released/stale gaps are **re-leased**, never
++    released as `other`; a genuine active duplicate's spare lease is left to
++    expire rather than re-arming cooldown/rate limit.
++  - Regression tests for both paths; all 28 `tests/pnp-pipeline.py` tests,
++    `tests/pnp-pipeline-smoke.sh` (6) and `tests/pnp-leaderboard-smoke.sh` green.
++- **Role split restored:** Executive is the sole desk broker and assigns
++  leased gaps to pure researchers; researchers never call acquire/release/
++  submit or authenticated GitHub mutation.
++
++## Next falsifiable actions
++
++1. Land the fix via Act 31; re-check `integrator.py office executive`.
++2. Once the desk rate limit clears (~10 min after the last lease, ~23:52Z),
++   acquire up to three leases as broker (one per independent front) and
++   relaunch properly-instructed researchers on DISTINCT gaps.
++3. Route any accepted Lean candidate through the deterministic publisher;
++   re-poll the public export for site-credited steps only. No completion
++   claim until the site credits steps to ottojung.
++4. Keep IL6wUXaBGXiOmp4aAI8B4c-possesses OPEN (Founder revocation required to close).
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index cf5b70d0..7d235d4c 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -206,6 +206,11 @@ class TestState(unittest.TestCase):
+         self.assertIn("state", kinds)
+         self.assertIn("update", kinds)
+ 
++    def test_reacquire_rejects_active_states(self):
++        new_state("LEASED")
++        with self.assertRaises(ValueError):
++            state.reacquire(GAP, lease="fresh")
++
+ 
+ class TestPublish(unittest.TestCase):
+     def setUp(self):
+@@ -348,6 +353,58 @@ class TestCli(unittest.TestCase):
+                 type("Args", (), {"gap": GAP, "candidate": "/tmp/proof"})()), 0)
+         self.assertEqual(seen, [(GAP, "/tmp/proof", "CANDIDATE_READY")])
+ 
++    def test_reacquire_adopts_fresh_lease_without_releasing(self):
++        """A re-offered released/stale gap must be re-leased, not handed back.
++
++        Releasing with 'other' re-arms the desk's one-hour cooldown and the
++        ten-minute step rate limit; churning workers used to lock the handle
++        out of the desk entirely.
++        """
++        from missions.pnp import cli
++        args = type("Args", (), {"hard": False, "another": False})()
++        answer = {"gap": gap_meta(), "lease": "fresh-lease"}
++        for previous in ("RELEASED", "STALE"):
++            with self.subTest(previous=previous):
++                fresh()
++                new_state(previous, lease="old-lease",
++                          failure_reason="out_of_time",
++                          base_sha="old-base", branch="pnp/old",
++                          worktree="/tmp/old-wt", commit_sha="old-sha",
++                          pr_number=7, pr_url="https://old/pr/7",
++                          external_verdict="REJECTED")
++                fake = FakeDesk()
++                fake.next_gap = lambda **kw: answer
++                with mock.patch.object(cli.desk_mod, "Desk",
++                                       return_value=fake):
++                    self.assertEqual(cli.cmd_acquire(args), 0)
++                # Crucially, no 'other'/'out_of_time' release -> no cooldown.
++                self.assertEqual(fake.releases, [])
++                rec = state.load(GAP)
++                self.assertEqual(rec["state"], "LEASED")
++                self.assertEqual(rec["lease"], "fresh-lease")
++                self.assertIsNone(rec["failure_reason"])
++                # Reviewer finding: stale publish artifacts must be cleared so
++                # a fresh candidate can be checked and submitted without a
++                # false "candidate digest changed since local check" FAULT.
++                for stale in ("candidate_digest", "base_sha", "branch",
++                              "worktree", "commit_sha", "pr_number",
++                              "pr_url", "external_verdict"):
++                    self.assertIsNone(rec[stale], stale)
++
++    def test_active_lease_duplicate_is_not_released_into_cooldown(self):
++        from missions.pnp import cli
++        fresh()
++        new_state("RESEARCHING", lease="active-lease")
++        fake = FakeDesk()
++        fake.next_gap = lambda **kw: {"gap": gap_meta(),
++                                      "lease": "spare-lease"}
++        args = type("Args", (), {"hard": False, "another": False})()
++        with mock.patch.object(cli.desk_mod, "Desk", return_value=fake):
++            self.assertEqual(cli.cmd_acquire(args), 1)
++        self.assertEqual(fake.releases, [])
++        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
++        self.assertEqual(state.load(GAP)["lease"], "active-lease")
++
+ 
+ class TestReconcile(unittest.TestCase):
+     def setUp(self):
