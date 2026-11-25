@@ -1,0 +1,203 @@
+commit 0cc0526ae3cd7e3ec35fef978511ed113e960fb4
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 17:40:33 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 17:40:33 2026 +0000
+
+    Fail closed on unverifiable case closure provenance
+    
+    Every office runs as one Unix identity and the whole state root is writable
+    by it, so a JSON artifact naming "clerk" or "judiciary" asserts provenance
+    rather than proving it. Act 23 §5.1/§5.2 therefore cannot be satisfied by the
+    current artifact scheme, and the previous code closed cases on exactly that
+    self-assertion.
+    
+    Keep all content validation (case identity, accepted office, ordering against
+    the observed failure, in-root regular-file evidence with matching sha256), but
+    classify any resulting artifact as closure_eligible=false and preserve it as
+    unverified_verification_claim for audit. Cases stay open and visible until a
+    verifier identity anchored outside the writable root exists.
+    
+    Tests now assert both directions: a well-formed self-authored artifact is
+    retained for audit but cannot close a case, and continuity receipts alone
+    likewise cannot close one.
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 77951743..3b5c2c16 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -151,23 +151,20 @@ def _within_root(ref):
+ 
+ 
+ def verification_artifact(case, now):
+-    """Validate the case-bound verification artifact, or None.
+-
+-    Closure needs evidence recorded for THIS case by an office other than the
+-    one that owns the repair:
+-
+-      * ``case_id`` equals this case's id (no reuse for a later case);
+-      * ``verified_by`` names an independent office;
+-      * ``first_seen < verified_at <= last_seen <= now``: the verification must
+-        postdate the last observed failure and cannot be future-dated;
+-      * ``evidence`` names a regular file inside the state root, reached with
+-        no symlinks and within a size cap, whose sha256 matches the recorded
+-        digest.
+-
+-    Honest limit: all offices run as the same host user, so this validates the
+-    artifact's contents, not who wrote it. Provenance is enforced by process
+-    (the verification pipeline is the only intended writer), not by
+-    cryptography.
++    """Validate the content of a case-bound verification artifact, or None.
++
++    This still checks every content property the case machinery can check:
++    case identity, an accepted office name, ordering against the observed
++    failure, and a resolvable in-root evidence digest. It cannot check who
++    wrote the bytes: every office runs as one Unix user and the whole state
++    root is writable by that same identity, so naming ``clerk`` or
++    ``judiciary`` in JSON asserts provenance rather than proving it.
++
++    Consequently the returned record is explicitly **not** closure-eligible
++    until an independent identity anchored outside this writable root exists.
++    Callers must record it as an unverified claim and keep the case open.
++    Do not substitute an allow-list or a signature checked against a key the
++    same office owner can replace: that only relocates the self-assertion.
+     """
+     signal = case.get("signal")
+     if not isinstance(signal, str) or not signal:
+@@ -211,7 +208,9 @@ def verification_artifact(case, now):
+         "verified_at": verified_at,
+         "evidence_ref": ref,
+         "evidence_sha256": digest,
+-        "provenance": "declared_by_artifact_content_not_cryptographically_enforced",
++        "provenance": "self_asserted_by_writable_artifact",
++        "closure_eligible": False,
++        "blocking_reason": "no independently controlled verifier identity",
+     }
+ 
+ 
+@@ -255,7 +254,8 @@ def reconcile():
+                     "legislature": "consider_evidence_and_legislation_if_needed",
+                     "executive": "investigate_and_repair_within_existing_authority",
+                     "owner": owner(signal),
+-                    "closure_rule": "independent verification artifact bound to this case; "
++                    "closure_rule": "case-bound independent verification, unavailable until "
++                                    "an independently controlled trust root exists; "
+                                     "healthy probes are only a precondition",
+                 }
+             case["last_seen"] = now
+@@ -275,23 +275,37 @@ def reconcile():
+                 case["clear_observations"] = case.get("clear_observations", 0) + 1
+                 case["last_clear_observation"] = health_observation[0]
+             if case.get("clear_observations", 0) >= 2:
+-                # Healthy probes are necessary but NOT sufficient. An open
+-                # case closes only on a case-bound artifact from an
+-                # independent office whose cited evidence resolves.
++                # Healthy probes are necessary but NOT sufficient. A case may
++                # close only on verification whose provenance is established
++                # independently of the writable state root. Until such an
++                # identity exists, a well-formed artifact is preserved as an
++                # auditable unverified claim, never as closure.
+                 artifact = verification_artifact(case, now)
+                 continuity = None
+                 if signal.startswith("continuity_unverified_"):
+                     continuity = continuity_receipt(signal[len("continuity_unverified_"):])
+-                if artifact is None or (signal.startswith("continuity_unverified_") and continuity is None):
++                eligible = (artifact is not None
++                            and artifact.get("closure_eligible") is True
++                            and not (signal.startswith("continuity_unverified_")
++                                     and continuity is None))
++                if not eligible:
+                     case["awaiting_independent_verification"] = True
+                     case.pop("closure_evidence", None)
++                    if artifact is None:
++                        case.pop("unverified_verification_claim", None)
++                    else:
++                        claim = dict(artifact)
++                        if continuity is not None:
++                            claim["continuity_receipt"] = continuity
++                        case["unverified_verification_claim"] = claim
+                 else:
+                     case["state"] = "verified_closed"
+                     case["verified_at"] = now
+                     case.pop("awaiting_independent_verification", None)
++                    case.pop("unverified_verification_claim", None)
+                     case["verification"] = (
+-                        "closed on a case-bound independent verification artifact "
+-                        "with resolvable cited evidence")
++                        "closed on independently attributable verification "
++                        "of this case with resolvable cited evidence")
+                     case["closure_evidence"] = artifact
+                     if continuity is not None:
+                         case["closure_evidence"]["continuity_receipt"] = continuity
+diff --git a/tests/branch-health-smoke.sh b/tests/branch-health-smoke.sh
+index c44e5a43..baad9b9e 100755
+--- a/tests/branch-health-smoke.sh
++++ b/tests/branch-health-smoke.sh
+@@ -80,8 +80,9 @@ digest=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"r
+ case_id=$(jq -r '.id' "$scratch/institutional-cases/outcomes_stale.json")
+ printf '{"case_id":"%s","verified_by":"judiciary","verified_at":5200,"evidence":{"ref":"evidence/verification.txt","sha256":"%s"}}\n' "$case_id" "$digest" > "$scratch/verification/outcomes_stale.json"
+ VICHE_CASE_NOW=5300 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="verified_closed" and .closure_evidence.verified_by=="judiciary"' "$scratch/institutional-cases/outcomes_stale.json" >/dev/null
+-# That artifact must not be reusable for a later case of the same signal.
++jq -e '.state=="open" and .awaiting_independent_verification==true and (has("closure_evidence")|not)' "$scratch/institutional-cases/outcomes_stale.json" >/dev/null
++# The artifact is self-authored by this fixture and cannot prove Judiciary
++# identity. It must remain open, and must not be reusable for a later case.
+ rm "$scratch/institutional-cases/outcomes_stale.json" "$scratch/institutional-outcomes/latest.json"
+ VICHE_BRANCH_NOW=5400; export VICHE_BRANCH_NOW
+ sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 8e6ffeb4..fa67c515 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -78,8 +78,9 @@ VICHE_CASE_NOW=1200 python3 "$repo/government/institutional-cases.py" reconcile
+ jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ printf '1250\tclear\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1250 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-# Healthy probes alone must NOT close an obligation: an independent, case-bound
+-# verification artifact with resolvable evidence is required.
++# Healthy probes alone must NOT close an obligation. The current host has no
++# independently-controlled verifier identity, so even a well-formed artifact
++# is insufficient and the case must remain open.
+ jq -e '.state=="open" and .clear_observations==2 and .awaiting_independent_verification==true' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ jq -e '.state=="open"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ mkdir -p "$d/state/verification" "$d/state/evidence"
+@@ -89,8 +90,8 @@ write_artifact() {
+   printf '{"case_id":"%s","verified_by":"%s","verified_at":%s,"evidence":{"ref":"%s","sha256":"%s"}}\n' \
+     "$1" "$2" "$3" "$4" "$5" > "$d/state/verification/innovation_stale.json"
+ }
+-# Pre-dated artifact, wrong case identity, non-independent verifier, missing
+-# evidence and a mismatched digest must all be refused.
++# A fabricated artifact written by this same test actor must be refused, even
++# when its JSON claims an independent clerk identity and valid evidence hash.
+ write_artifact 'innovation_stale:9999' clerk 1300 evidence/repair.txt "$digest"
+ VICHE_CASE_NOW=1260 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==2 and .awaiting_independent_verification==true' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+@@ -127,9 +128,12 @@ VICHE_CASE_NOW=1295 python3 "$repo/government/institutional-cases.py" reconcile
+ jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ write_artifact 'innovation_stale:1000' clerk 1300 evidence/repair.txt "$digest"
+ VICHE_CASE_NOW=1300 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="verified_closed" and .closure_evidence.verified_by=="clerk" and .closure_evidence.evidence_sha256=="'"$digest"'"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+-# Only a matching independent Judiciary verification can discharge the
+-# uncertain-effects reconciliation case.
++# The well-formed artifact is preserved for audit, but provenance is only
++# self-asserted by a writable JSON file: it must NOT close the case.
++jq -e '.state=="open" and .awaiting_independent_verification==true and (has("closure_evidence")|not) and .unverified_verification_claim.verified_by=="clerk" and .unverified_verification_claim.closure_eligible==false' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++# A self-authored continuity record also cannot establish Judiciary
++# provenance; retain it as unverified while the shared-identity limitation
++# remains.
+ printf '{"previous_agent":"old-agent","successor_agent":"new-agent","verified_by":"judiciary","verification_scope":"external_effect_reconciled","evidence_ref":"fixture:independent-reviewed-effects"}\n' > "$d/state/continuity/verified-innovation-centre.json"
+ VICHE_CASE_NOW=1400 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+@@ -142,10 +146,8 @@ VICHE_CASE_NOW=1500 python3 "$repo/government/institutional-cases.py" reconcile
+ jq -e '.state=="open" and .clear_observations==2 and .awaiting_independent_verification==true' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ printf '{"case_id":"continuity_unverified_innovation-centre:1000","verified_by":"judiciary","verified_at":1500,"evidence":{"ref":"evidence/repair.txt","sha256":"%s"}}\n' "$digest" > "$d/state/verification/continuity_unverified_innovation-centre.json"
+ VICHE_CASE_NOW=1510 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="verified_closed" and .closure_evidence.verified_by=="judiciary" and .closure_evidence.continuity_receipt.previous_agent=="old-agent"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+-# Withdrawing the case-specific receipt must keep a fresh case open: generic
+-# healthy probes are not continuity evidence, and even a matching artifact
+-# cannot substitute for the missing reconciliation receipt.
++jq -e '.state=="open" and .awaiting_independent_verification==true and (has("closure_evidence")|not) and .unverified_verification_claim.continuity_receipt.previous_agent=="old-agent"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++# Withdrawing the case-specific receipt must keep a fresh case open as well.
+ rm "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" "$d/state/continuity/verified-innovation-centre.json"
+ printf '{"signals":["continuity_unverified_innovation-centre"],"observed_at":1600}\n' > "$d/state/branches/incident.json"
+ VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null

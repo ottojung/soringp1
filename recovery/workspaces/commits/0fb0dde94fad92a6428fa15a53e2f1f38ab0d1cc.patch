@@ -1,0 +1,284 @@
+commit 0fb0dde94fad92a6428fa15a53e2f1f38ab0d1cc
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Thu Nov 5 18:38:01 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Thu Nov 5 18:38:01 2026 +0000
+
+    Viche: remove obsolete unsafe-hold dispatch vetoes
+
+diff --git a/government/APPOINTMENT-RECOVERY.md b/government/APPOINTMENT-RECOVERY.md
+index 5ec47ade..a7af253c 100644
+--- a/government/APPOINTMENT-RECOVERY.md
++++ b/government/APPOINTMENT-RECOVERY.md
+@@ -42,20 +42,25 @@ stop leaves the old appointment in place and does **not** start cooldown.
+ This prevents two live agents writing one seat worktree. Existing dirty
+ worktrees and the durable handoff queue are preserved.
+ 
+-A *new*, independently specified prompt may be dispatched following a failed
+-front only when Antonina explicitly marks the preceding failure both
+-`transient=true` and `automatic_retry_safe=true`; the previous
+-side-effecting prompt is not blindly replayed. If retry safety is false or
+-unknown, a durable unsafe hold prevents both generic Executive dispatch and
+-parliamentary sittings until independent review/authorization. Permanent
+-failure is surfaced, not silently reset. This prevents unsafe retries but
+-also means some outages cannot be autonomously recovered without an
+-independently justified next action or a lawful Act 19 amendment.
++A *new*, independently specified prompt may follow a failed front
++only when Antonina positively classifies the preceding failure as both
++`transient=true` and `automatic_retry_safe=true`. Otherwise, preserve
++the failure evidence and use a new reconciliatory appointment when the
++supervisor's continuity procedure authorizes it; never replay an uncertain
++side-effecting prompt. Permanent failures remain visible for investigation.
+ 
+-The complete real-appointments regression covers failure-event identity,
+-fractional timestamps, unreadable status, a single reset, permanent errors,
+-retry-safe fresh handoffs and unsafe holds. Separate source code review and
+-Act 21 exact merged-commit attestation are still required before delivery.
++The old per-seat `unsafe-holds` marker files were removed as dispatch
++gates on 2026-11-05. They could outlive an agent reset and prevent completely
++new V2 agents from working, even when the old agent no longer existed.
++Historical markers remain archived as evidence, but their mere presence no
++longer blocks Parliament or the Executive. Checks of current agent state,
++quiescence, real failure classification, and resource headroom remain.
++
++The real-appointments regression covers failure-event identity, fractional
++timestamps, unreadable status, a single reset, permanent errors,
++retry-safe fresh handoffs, and stale markers not blocking new appointments.
++Separate source code review and Act 21 exact merged-commit attestation
++are still required before delivery.
+ 
+ The Executive and Legislature must implement the complete lawful treatment
+ of that contradiction under the explicitly billy-dev-assigned Antonina
+diff --git a/government/RESTART-RECONCILIATION.md b/government/RESTART-RECONCILIATION.md
+index 64c35d68..f3464ad5 100644
+--- a/government/RESTART-RECONCILIATION.md
++++ b/government/RESTART-RECONCILIATION.md
+@@ -58,7 +58,8 @@ legislative clarification is needed. No legislation is enacted by this
+ engineering change.
+ 
+ Tests: `tests/appointments-smoke.sh` covers precise restart orphan
+-recognition, non-replay, evidence preservation, idempotence, unsafe holds,
+-old/new epoch mismatch, explicit backend errors and queued steers.
++recognition, non-replay, evidence preservation, idempotence, stale hold
++markers not blocking new appointments, old/new epoch mismatch, explicit
++backend errors and queued steers.
+ `tests/continuity-incidents-smoke.sh` covers idempotent incident
+ records and correct classification. Both are included in the full suite.
+diff --git a/government/appointments.sh b/government/appointments.sh
+index a54f63d2..c3ef7f4e 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -90,10 +90,9 @@ fi
+ # physically lost during a positively identified PID1 restart is NOT an
+ # Antonina-model transient-error reset under Act19 §3.1. Replace its dead
+ # *appointment*, never resume the interrupted prompt or old session.
+-# Do not bypass any unsafe prompt hold; those require an independent review.
++# A confirmed restart orphan is replaced as a new appointment, not replayed.
+ restart_orphan=no
+ if [ "$action" = ensure ] && [ -n "$old" ] && [ "${status:-}" = failed ] &&
+-   [ ! -s "${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness/unsafe-holds/$key" ] &&
+    [ -s "$town/government/restart-orphan.sh" ] &&
+    printf '%s\n' "$meta" | /bin/sh "$town/government/restart-orphan.sh"; then
+   restart_orphan=yes
+diff --git a/government/branch-bootstrap.sh b/government/branch-bootstrap.sh
+index 46a02dcd..3f397303 100755
+--- a/government/branch-bootstrap.sh
++++ b/government/branch-bootstrap.sh
+@@ -42,7 +42,6 @@ if [ "$mode" = failed ]; then
+     unsafe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == false then "yes" else "no" end')
+     retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+     oc_record_failure "$liv" "$branch" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$cwd" || exit 1
+-    [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$liv" "$branch" "$id" "$invocation"
+   else
+     oc_surface_permanent "$liv" "$id" "$reason"
+   fi
+diff --git a/government/branch-liveness.sh b/government/branch-liveness.sh
+index 4f85dabb..112a67e5 100755
+--- a/government/branch-liveness.sh
++++ b/government/branch-liveness.sh
+@@ -51,7 +51,6 @@ if [ "$bootstrap_ok" = true ] && [ -n "$id" ] && [ -s "$town/government/$program
+       if [ "$bootstrap_ok" = true ]; then
+         retry_safe=$(printf '%s\n' "$chk" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+         [ "$retry_safe" = yes ] || bootstrap_ok=false
+-        [ ! -s "$state/liveness/unsafe-holds/$key" ] || bootstrap_ok=false
+       fi ;;
+   esac
+ fi
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+index 42c6ad05..e894ebb3 100644
+--- a/government/clerk-liveness.sh
++++ b/government/clerk-liveness.sh
+@@ -19,14 +19,12 @@ reason=$(printf '%s\n' "$metadata" | jq -r '.backend_error.classification // ""'
+ . "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/office-continuity.sh"
+ now=$(date +%s)
+ tflag=$(printf '%s\n' "$metadata" | jq -r '.backend_error.transient // false')
+-unsafe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_safe == false then "yes" else "no" end')
+ invocation=$(printf '%s\n' "$metadata" | jq -r '.invocation_id // .run_id // .finished_at // ""')
+ finished=$(printf '%s\n' "$metadata" | jq -r '.finished_at // ""')
+ if [ "$kind" = failed ]; then
+   if oc_is_transient "$reason" "$tflag"; then
+     retry_safe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+     oc_record_failure "$state" "$seat_id" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$seats/$seat_id"
+-    [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$state" "$seat_id" "$id" "$invocation"
+   else
+     oc_surface_permanent "$state" "$id" "$reason"
+   fi
+@@ -66,7 +64,7 @@ fi
+ if [ "${1:-}" = --gate ]; then
+   if [ "$kind" = failed ]; then
+     retry_safe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+-    [ "$retry_safe" = yes ] && [ ! -s "$state/unsafe-holds/$seat_id" ] ||
++    [ "$retry_safe" = yes ] ||
+       { echo "Viche: Clerk terminal failure not safe to re-dispatch" >&2; exit 1; }
+   fi
+   exit 0
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index e4262b9f..03a867b4 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -16,10 +16,6 @@ python3 "$town/government/predict-scorer.py" || {
+ }
+ id=$(/bin/sh "$town/government/appointments.sh" ensure executive)
+ [ -n "$id" ] || { echo "Viche: missing executive seat" >&2; exit 1; }
+-if [ -s "$state/liveness/unsafe-holds/executive" ]; then
+-  echo "Viche: unsafe Executive failed invocation is on durable hold" >&2
+-  exit 1
+-fi
+ # Act 19 §3.2: the durable handoff queue at $town/records/handoffs/ is the
+ # dispatch's single input. Read it FIRST, before any failure-prone work
+ # (board fetch, agent status). If the script fails before this read, no
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index 09fdb204..1927fbf6 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -144,22 +144,6 @@ oc_clear_failures() {
+   return 0
+ }
+ 
+-# Mark an unsafe failed invocation as requiring explicit handoff review before
+-# any new session can dispatch work. The durable intent remains open in the
+-# handoff queue; this marker prevents an automatic duplicate side effect.
+-oc_mark_unsafe_hold() {
+-  # $1 liveness dir, $2 office key, $3 agent id, $4 invocation
+-  mkdir -p "$1/unsafe-holds" || return 1
+-  oc_hold_file=$1/unsafe-holds/$2
+-  oc_hold_line=$(printf '%s\t%s\t%s' "$2" "$3" "$4")
+-  # Repeated 3-minute observations are not new invocations; the same
+-  # unsafe hold must be recorded ONCE, not 158 times or once per sitting.
+-  if [ -s "$oc_hold_file" ] && grep -Fxq "$oc_hold_line" "$oc_hold_file"; then
+-    return 0
+-  fi
+-  printf '%s\n' "$oc_hold_line" >> "$oc_hold_file"
+-}
+-
+ # Surface a permanent or UNCLASSIFIED failure exactly once per agent and
+ # classification. An absent backend_error is NOT evidence of permanence.
+ # Durable incident records survive restart without flooding each sitting.
+diff --git a/government/seat-liveness.sh b/government/seat-liveness.sh
+index 604c501b..61dd873a 100644
+--- a/government/seat-liveness.sh
++++ b/government/seat-liveness.sh
+@@ -35,7 +35,6 @@ if ! oc_is_transient "$reason" "$tflag"; then
+ fi
+ retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+ oc_record_failure "$root" "$seat_id" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$seats/$seat_id"
+-[ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$root" "$seat_id" "$id" "$invocation"
+ oc_commit_age_signal "$root" "$id" "$seats/$seat_id" "$now"
+ oc_worktree=$seats/$seat_id
+ if ! oc_reset_due "$root" "$seat_id" "$now"; then
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 879d5858..c905e294 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -6,10 +6,6 @@ seat=$1
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ tab=$(printf '\t')
+ clerk=$(sed -n "1s/$tab.*//p" "$town/government/seats.tsv")
+-if [ -s "${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/liveness/unsafe-holds/$seat" ]; then
+-  echo "Viche: unsafe seat invocation, preserve work for review" >&2
+-  exit 1
+-fi
+ if [ "$seat" = "$clerk" ] && [ -f "$town/government/clerk-liveness.sh" ]; then
+     /bin/sh "$town/government/clerk-liveness.sh" --gate || {
+         echo "Viche: Clerk sitting deferred until endpoint retry cooldown" >&2
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index 11b1c71d..dad30246 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -11,6 +11,7 @@ cp "$repo/government/appointments.sh" "$repo/government/branch-bootstrap.sh" \
+   "$repo/government/executive-cycle.sh" "$repo/government/office-continuity.sh" \
+   "$repo/government/terminal-appointment-evidence.sh" "$repo/government/policy-sync.sh" \
+   "$repo/government/seat-liveness.sh" "$repo/government/predict-scorer.py" \
++  "$repo/government/handoff-queue.sh" "$repo/government/AGENT-REPORTING-POLICY.md" \
+   "$d/town/government/"
+ git -C "$d/seats/branches/executive" init -q
+ git -C "$d/seats/branches/executive" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
+@@ -151,7 +152,7 @@ run_branch
+ id5=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve "$office")
+ test "$id5" = "$id4"
+ test "$(wc -l < "$registry")" -eq 1
+-test -s "$VICHE_STATE_ROOT/liveness/unsafe-holds/executive"
++test ! -e "$VICHE_STATE_ROOT/liveness/unsafe-holds/executive"
+ printf 'founder charter fixture\n' > "$d/charter"
+ touch "$VICHE_STATE_ROOT/inaugurated"
+ export VICHE_CONSTITUTION="$d/charter"
+@@ -166,7 +167,8 @@ mkdir -p "$d/safe/town/government" "$d/safe/town/records" \
+   "$d/safe/seats/branches/executive" "$d/safe/state/appointments"
+ cp "$repo/government/appointments.sh" "$repo/government/executive-cycle.sh" \
+   "$repo/government/handoff-queue.sh" "$repo/government/terminal-appointment-evidence.sh" \
+-  "$repo/government/predict-scorer.py" "$d/safe/town/government/"
++  "$repo/government/predict-scorer.py" "$repo/government/AGENT-REPORTING-POLICY.md" \
++  "$d/safe/town/government/"
+ printf 'c1a00001\tClerk\tintake\n' > "$d/safe/town/government/seats.tsv"
+ printf 'executive\tsafe-id\n' > "$d/safe/state/appointments/appointments.tsv"
+ printf '{"state":"idle","model":null,"variant":null}\n' > "$MOCK_ROOT/safe-id.json"
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+index 9a76b876..84696eb3 100644
+--- a/tests/appointments-smoke.sh
++++ b/tests/appointments-smoke.sh
+@@ -157,12 +157,14 @@ printf failed-restart-with-steer > "$MOCK/$i"
+ [ "$(/bin/sh "$script" ensure executive)" = "$i" ]
+ j=$(/bin/sh "$script" replace executive "$i" appointments-smoke fixture 'pending steer fixture')
+ [ "$j" = fresh-10 ]
+-# Even true container orphans may not bypass an explicit unsafe hold.
++# A stale marker from a previous agent may not prevent a fresh restart
++# appointment. Its old session is never replayed.
+ mkdir -p "$tmp/state/liveness/unsafe-holds"
+ printf 'executive\told-id\tunsafe\n' > "$tmp/state/liveness/unsafe-holds/executive"
+ printf failed-restart > "$MOCK/$j"
+-[ "$(/bin/sh "$script" ensure executive)" = "$j" ]
+-[ "$(wc -l < "$tmp/state/appointments/restart-renewals.jsonl")" -eq 1 ]
++k=$(/bin/sh "$script" ensure executive)
++[ "$k" = fresh-11 ]
++[ "$(wc -l < "$tmp/state/appointments/restart-renewals.jsonl")" -eq 2 ]
+ # A post-registry provenance rename failure is a successful replacement with
+ # its prepared intent retained for reconciliation, never a failed retry signal.
+ printf stopped > "$MOCK/$y"
+diff --git a/tests/continuity-incidents-smoke.sh b/tests/continuity-incidents-smoke.sh
+index 32b7b4fe..a9e6735e 100644
+--- a/tests/continuity-incidents-smoke.sh
++++ b/tests/continuity-incidents-smoke.sh
+@@ -1,16 +1,11 @@
+ #!/bin/sh
+-# Repeated observing of one failure is not N failures or N unsafe holds.
++# Repeated observations must not duplicate permanent incident reports.
+ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ tmp=$(mktemp -d)
+ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+ . "$repo/government/office-continuity.sh"
+ mkdir -p "$tmp/liveness"
+-oc_mark_unsafe_hold "$tmp/liveness" executive agent-1 run-1
+-oc_mark_unsafe_hold "$tmp/liveness" executive agent-1 run-1
+-[ "$(wc -l < "$tmp/liveness/unsafe-holds/executive")" -eq 1 ]
+-oc_mark_unsafe_hold "$tmp/liveness" executive agent-1 run-2
+-[ "$(wc -l < "$tmp/liveness/unsafe-holds/executive")" -eq 2 ]
+ oc_surface_permanent "$tmp/liveness" agent-1 ""
+ oc_surface_permanent "$tmp/liveness" agent-1 ""
+ grep -Fq 'unclassified_failure classification=missing_backend_classification' \
+@@ -30,4 +25,4 @@ cp "$tmp/liveness/permanent-incidents.log" "$tmp/previous-log"
+ : > "$tmp/liveness/permanent-incidents.log"
+ oc_surface_permanent "$tmp/liveness" agent-2 invalid_api_key
+ [ "$(wc -l < "$tmp/liveness/permanent-incidents.log")" -eq 1 ]
+-echo 'Idempotent holds and honest incident classifications smoke passed'
++echo 'Honest incident classification and idempotency smoke passed'

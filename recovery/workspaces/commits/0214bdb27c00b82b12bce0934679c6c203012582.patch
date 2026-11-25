@@ -1,0 +1,65 @@
+commit 0214bdb27c00b82b12bce0934679c6c203012582
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 17 11:06:37 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 17 11:07:02 2026 +0000
+
+    Janitor: state-relative quarantine dir; test isolation + reclaim-quarantined coverage
+    
+    - janitor.conf: drop the hardcoded absolute quarantine_dir so it defaults to
+      $VICHE_STATE_ROOT/quarantine; tests and alternate state roots can no longer
+      touch the live quarantine.
+    - tests/janitor-smoke.sh: pre-stamp last-inventory so the hermetic cycle does not
+      scan the real box; add step 6 covering reclaim-quarantined (removes only items
+      past grace).
+
+diff --git a/government/janitor.conf b/government/janitor.conf
+index ecb3a37d..6a6bd35b 100644
+--- a/government/janitor.conf
++++ b/government/janitor.conf
+@@ -30,5 +30,7 @@ reclaim_enabled=1
+ inventory_min_kb=102400
+ 
+ # Quarantine directory and grace period (seconds) before quarantined items are removed.
+-quarantine_dir=/var/lib/lubko/wd/viche-state/quarantine
++# quarantine_dir defaults to "$VICHE_STATE_ROOT/quarantine" when unset (state-relative,
++# so tests and alternate state roots never touch the live quarantine). Set an absolute
++# path only if quarantine must live outside the state root.
+ quarantine_grace_seconds=604800
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+index fb59c2cf..9a960203 100644
+--- a/tests/janitor-smoke.sh
++++ b/tests/janitor-smoke.sh
+@@ -23,6 +23,9 @@ mkdir -p "$state/janitor/tmp"
+ printf 'old junk\n' > "$state/janitor/tmp/old.tmp"
+ printf 'fresh\n' > "$state/janitor/tmp/fresh.tmp"
+ touch -d '3 days ago' "$state/janitor/tmp/old.tmp"
++# Pre-stamp the inventory clock so the hermetic cycle does not scan the real box
++# (the box inventory is exercised separately; this keeps the test isolated/fast).
++date +%s > "$state/janitor/last-inventory"
+ 
+ VICHE_TOWN_ROOT=$town
+ VICHE_STATE_ROOT=$state
+@@ -77,4 +80,21 @@ export PATH
+ grep -q 'INCIDENT level=critical' "$state/janitor/alerts.log"
+ grep -q 'level=critical' "$state/janitor/status"
+ 
+-printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, and responds to critical capacity\n'
++# 6. reclaim-quarantined removes only items past the grace window (when enabled);
++#    the quarantine dir is state-relative, so the live quarantine is untouched.
++q=$state/quarantine
++mkdir -p "$q/old-item" "$q/new-item"
++printf 'x\n' > "$q/old-item/f"
++printf 'x\n' > "$q/new-item/f"
++now=$(date -u +%s)
++{
++    printf 'ts\tsrc\tdest\tsize_kb\tquarantined_at\n'
++    printf '2026-01-01T00:00:00Z\t/old\t%s/old-item\t1\t1\n' "$q"
++    printf '2026-01-01T00:00:00Z\t/new\t%s/new-item\t1\t%s\n' "$q" "$now"
++} > "$state/janitor/quarantined.tsv"
++printf 'safe_reclaim_enabled=1\nreclaim_enabled=1\n' >> "$town/government/janitor.conf"
++/bin/sh "$town/government/janitor.sh" reclaim-quarantined
++[ ! -d "$q/old-item" ]
++[ -d "$q/new-item" ]
++
++printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, responds to critical capacity, and reclaims only quarantined items past grace\n'

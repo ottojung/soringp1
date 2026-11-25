@@ -1,0 +1,656 @@
+commit 076b4c91aa3d574013dade258f5762021e5a2ea0
+Author:     economy <economy@viche.local>
+AuthorDate: Wed Nov 25 12:21:39 2026 +0000
+Commit:     economy <economy@viche.local>
+CommitDate: Wed Nov 25 12:21:39 2026 +0000
+
+    Candidate: fail-closed resolve-session for unbound held reservations
+    
+    Add a separate guarded knowledge-budget.sh resolve-session subcommand that
+    closes a held reservation only on independently attested terminal agent
+    identity (antonina status re-read by the command itself), with monotone,
+    never-reductive accounting, resolution provenance and no replay/live rebind.
+    Add isolated adversarial tests and an implementation/verification note.
+    
+    Candidate only: bill not enacted, nothing deployed, no production state touched.
+
+diff --git a/government/knowledge-budget.sh b/government/knowledge-budget.sh
+index 2df31475..c69f8e36 100644
+--- a/government/knowledge-budget.sh
++++ b/government/knowledge-budget.sh
+@@ -613,6 +613,128 @@ resolve_locked() {
+ 
+ resolve() { init; with_lock resolve_locked "${1:-}" "${2:-}"; }
+ 
++# ---- operator resolution against an independently attested terminal session ---
++#
++# A held row whose native_session_id is null has no in-script exit through the
++# ordinary resolve path, which can only match a STORED session id. This is a
++# separate, fail-closed command (draft "Held Reservation Resolution Act"). It
++# closes such a row ONLY when the operator supplies a native session id that the
++# command re-attests itself against antonina for the row's EXACT agent, and that
++# agent is terminal. It never rebinds a live session, never replays a failed
++# turn, never reduces a recorded liability, runs no agent action and performs no
++# hand edit of the ledger. Existing resolve/reconcile/guard semantics are not
++# modified: this is an additional guarded path only.
++resolve_session_locked() {
++  _rx_id=$1; _rx_reason=$2; _rx_sid=$3; _rx_by=$4
++  _rx_cur=$(res_read "$_rx_id")
++  [ "$(printf '%s\n' "$_rx_cur" | jq -r '.state')" = held ] ||
++    die 'only a held reservation can be resolved via resolve-session'
++  [ -n "$_rx_reason" ] || die 'a resolution reason is required'
++
++  _rx_caps=$(printf '%s\n' "$_rx_cur" | jq -c '.caps')
++  # Pessimistic basis for every unresolved path. It is NOT a measurement:
++  # cost_reported stays false and no raw meter reading is presented as final
++  # usage. It includes the existing charge floor so a failed resolution can
++  # never lower a recorded liability (Act 33 §3 / Act 34 §3(2), §4(1)).
++  _rx_pess=$(printf '%s\n' "$_rx_cur" | jq -c --argjson c "$_rx_caps" \
++    '{tokens_total: ([$c.tokens_total, (.charge.tokens_total // 0),
++                      (.meter.tokens.total // 0)] | max),
++      cpu_seconds: ([$c.cpu_seconds, (.charge.cpu_seconds // 0),
++                     (.meter.cpu_seconds // 0)] | max),
++      wall_seconds: ([$c.wall_seconds, (.charge.wall_seconds // 0),
++                      (.usage.wall_seconds // 0)] | max),
++      cost:0, cost_reported:false, source:"unmetered_pessimistic_charge", at:0}')
++
++  _rx_agent=$(printf '%s\n' "$_rx_cur" | jq -r '.agent_id // ""')
++  [ -n "$_rx_agent" ] && [ "$_rx_agent" != null ] || {
++    tighten_held_locked "$_rx_id" 'operator_resolution_agent_missing' "$_rx_pess"; return 0; }
++  [ -n "$_rx_by" ] && [ "$_rx_by" != null ] || {
++    tighten_held_locked "$_rx_id" 'operator_resolution_resolver_absent' "$_rx_pess"; return 0; }
++  [ -n "$_rx_sid" ] && [ "$_rx_sid" != null ] || {
++    tighten_held_locked "$_rx_id" 'operator_resolution_session_absent' "$_rx_pess"; return 0; }
++
++  # Independent attestation: re-read Antonina status for the EXACT row agent.
++  if ! _rx_status=$(agent_status "$_rx_agent") ||
++     ! printf '%s\n' "$_rx_status" | jq -e 'type=="object"' >/dev/null 2>&1; then
++    tighten_held_locked "$_rx_id" 'operator_resolution_status_unreadable' "$_rx_pess"; return 0
++  fi
++  # If the instrument names an agent id, it must be the row's agent, not a
++  # different session recovered under another identity.
++  _rx_status_agent=$(printf '%s\n' "$_rx_status" | jq -r '.id // empty' 2>/dev/null || :)
++  if [ -n "$_rx_status_agent" ] && [ "$_rx_status_agent" != "$_rx_agent" ]; then
++    tighten_held_locked "$_rx_id" 'operator_resolution_agent_mismatch' "$_rx_pess"; return 0
++  fi
++  _rx_status_sid=$(printf '%s\n' "$_rx_status" | jq -r '.native_session_id // empty' 2>/dev/null || :)
++  [ -n "$_rx_status_sid" ] || {
++    tighten_held_locked "$_rx_id" 'operator_resolution_session_missing' "$_rx_pess"; return 0; }
++  [ "$_rx_status_sid" = "$_rx_sid" ] || {
++    tighten_held_locked "$_rx_id" 'operator_resolution_session_mismatch' "$_rx_pess"; return 0; }
++  _rx_state=$(printf '%s\n' "$_rx_status" | jq -r '.state // "unknown"' 2>/dev/null || :)
++  case "$_rx_state" in
++    clearexit|failed|stopped|killed) :;;
++    *) tighten_held_locked "$_rx_id" 'operator_resolution_agent_not_terminal' "$_rx_pess"; return 0;;
++  esac
++  # A row that was previously bound to a different native session must never
++  # be metered or merged across identities, even for a terminal agent.
++  _rx_row_sid=$(printf '%s\n' "$_rx_cur" | jq -r '.native_session_id // ""')
++  if [ -n "$_rx_row_sid" ] && [ "$_rx_row_sid" != null ] && [ "$_rx_row_sid" != "$_rx_sid" ]; then
++    tighten_held_locked "$_rx_id" 'operator_resolution_identity_mismatch' "$_rx_pess"; return 0
++  fi
++
++  # Terminal state is independently verified: run wall liability through it.
++  _rx_started=$(printf '%s\n' "$_rx_cur" | jq -r '.started_at // 0' 2>/dev/null || :)
++  case "$_rx_started" in ''|null|*[!0-9]*) _rx_started=0;; esac
++  _rx_created=$(printf '%s\n' "$_rx_cur" | jq -r '.created_at // 0' 2>/dev/null || :)
++  case "$_rx_created" in ''|null|*[!0-9]*) _rx_created=0;; esac
++  _rx_wall=0
++  if [ "$_rx_started" -gt 0 ]; then _rx_wall=$(( $(date +%s) - _rx_started ));
++  elif [ "$_rx_created" -gt 0 ]; then _rx_wall=$(( $(date +%s) - _rx_created )); fi
++  [ "$_rx_wall" -ge 0 ] || _rx_wall=0
++
++  _rx_db=$(printf '%s\n' "$_rx_cur" | jq -r '.meter_db')
++  _rx_pid=$(printf '%s\n' "$_rx_status" | jq -r '.runner_pid // .pid // empty' 2>/dev/null || :)
++  _rx_previous=$(printf '%s\n' "$_rx_cur" | jq -c '.meter // null')
++  if ! _rx_snap=$(python3 "$TOOL" snapshot "$_rx_db" "$_rx_sid" "$_rx_pid" 2>/dev/null); then
++    tighten_held_locked "$_rx_id" 'operator_resolution_meter_unreadable' "$_rx_pess"; return 0
++  fi
++  # A snapshot is a raw host reading; a missing upper-bound flag means the CPU
++  # delta was never applied and the reading cannot bound this session.
++  if [ "$(printf '%s\n' "$_rx_snap" | jq -r '.cpu_upper_bound // false' 2>/dev/null || :)" != true ]; then
++    _rx_base=$(printf '%s\n' "$_rx_cur" | jq -c '.cpu_baseline')
++    if ! _rx_snap=$(cpu_adjust "$_rx_base" "$_rx_snap" "$_rx_previous"); then
++      tighten_held_locked "$_rx_id" 'operator_resolution_cpu_invalid' "$_rx_pess"; return 0
++    fi
++  fi
++  _rx_snap=$(merge_usage_snapshots "$_rx_snap" "$_rx_previous")
++  _rx_usage=$(usage_from_snapshot "$_rx_snap" "$_rx_wall")
++  # aggregate() charges a CLOSED row from .usage, not .charge (tool line 311).
++  # Floor usage at every cap AND the prior charge on each dimension, so closing
++  # the hold can never reduce aggregate liability below what was already held.
++  _rx_usage=$(printf '%s\n' "$_rx_usage" | jq -ce --argjson c "$_rx_caps" \
++    --argjson old "$_rx_cur" \
++    'reduce ["tokens_total","cpu_seconds","wall_seconds"][] as $k (. ;
++      .[$k] = ([ (.[$k] // 0), ($c[$k] // 0), ($old.charge[$k] // 0) ] | max))')
++  _rx_usage=$(retain_overrun_floor "$_rx_usage" "$_rx_cur")
++
++  _rx_now=$(date +%s)
++  _rx_new=$(printf '%s\n' "$_rx_cur" | jq -c \
++    --arg reason "$_rx_reason" --arg by "$_rx_by" --arg sid "$_rx_sid" \
++    --arg agent "$_rx_agent" --arg state "$_rx_state" --argjson now "$_rx_now" \
++    --argjson u "$_rx_usage" --argjson snap "$_rx_snap" \
++    '.state="closed" | .usage=$u | .charge=$u | .meter=$snap |
++      .closed_at=$now | .closed_reason=("operator_resolved_session:" + $reason) |
++      .resolved_by=$by |
++      .resolution_attestation={session_id:$sid, agent_id:$agent, state:$state,
++        resolver:$by, reason:$reason, observed_at:$now,
++        status_source:"antonina agent status", command:"resolve-session"} |
++      .history += [{at:$now,event:"operator_resolved_session",reason:$reason,
++        session_id:$sid,agent_id:$agent,resolver:$by,state:$state}]')
++  res_write "$_rx_id" "$_rx_new"
++  refresh_aggregate "$(printf '%s\n' "$_rx_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
++resolve_session() { init; with_lock resolve_session_locked "$@"; }
++
+ launch_monitor() {
+   _lm_id=$1
+   _lm_log="$ROOT/monitor-$_lm_id.log"
+@@ -862,7 +984,7 @@ report() {
+ }
+ 
+ cmd=${1:-}
+-[ -n "$cmd" ] || { echo 'usage: knowledge-budget.sh config|guard|reserve|mark-dispatched|start|monitor|reconcile|resolve|report' >&2; exit 2; }
++[ -n "$cmd" ] || { echo 'usage: knowledge-budget.sh config|guard|reserve|mark-dispatched|start|monitor|reconcile|resolve|resolve-session|report' >&2; exit 2; }
+ shift || :
+ case "$cmd" in
+   config) config_cmd "$@";;
+@@ -882,6 +1004,24 @@ case "$cmd" in
+   monitor) init; monitor "${1:-}";;
+   reconcile) init; with_lock reconcile_locked;;
+   resolve) init; with_lock resolve_locked "${1:-}" "${2:-}";;
++  resolve-session)
++    init
++    _rxcli_id=${1:-}; _rxcli_reason=${2:-}
++    if [ "$#" -ge 2 ]; then shift 2;
++    elif [ "$#" -ge 1 ]; then shift; fi
++    _rxcli_sid=; _rxcli_by=
++    while [ "$#" -gt 0 ]; do
++      case "$1" in
++        --session) _rxcli_sid=${2:-}; [ "$#" -ge 2 ] && shift 2 || shift;;
++        --by) _rxcli_by=${2:-}; [ "$#" -ge 2 ] && shift 2 || shift;;
++        *) echo "unknown argument to resolve-session: $1" >&2; exit 2;;
++      esac
++    done
++    case "$_rxcli_id" in
++      ''|*/*|*..*) echo 'usage: resolve-session RESERVATION_ID REASON --session SID --by OPERATOR' >&2; exit 2;;
++    esac
++    with_lock resolve_session_locked "$_rxcli_id" "$_rxcli_reason" "$_rxcli_sid" "$_rxcli_by"
++    ;;
+   report) report;;
+   *) echo "unknown command: $cmd" >&2; exit 2;;
+ esac
+diff --git a/records/investigations/held-reservation-resolve-session-candidate-20261125.md b/records/investigations/held-reservation-resolve-session-candidate-20261125.md
+new file mode 100644
+index 00000000..488661c9
+--- /dev/null
++++ b/records/investigations/held-reservation-resolve-session-candidate-20261125.md
+@@ -0,0 +1,96 @@
++# Held Reservation Resolution Act — reviewable technical candidate (2026-11-25)
++
++Status: **candidate implementation and isolated tests only.** The bill
++`records/bills/held-reservation-resolution-act.md` is a DRAFT and is **not
++enacted**. Nothing here is deployed, proposed for delivery, merged, activated or
++claimed as a repair of the live foresight lockout. Work is confined to worktree
++branch `executive/held-reservation-candidate-20261125` (base `d8c906cb`).
++
++## Authority and semantics review (stop condition checked)
++
++No conflict with enacted law or existing safety semantics was found that would
++require stopping before implementation. The draft's narrow resolution path is
++consistent with the fail-closed rules, provided one accounting floor is applied:
++
++- Act 32 §3 / amendment H: unknown meter state blocks dispatch — preserved. The
++  new path closes only on independently attested terminal identity plus a
++  readable, validly bounded meter; every other path tightens the hold at full
++  cap (`/var/lib/lubko/wd/viche/government/LAWS.md` lines 489–760).
++- Act 33 §3 and Act 34 §3(2), §4(1): the cumulative UPPER_BOUND liability is
++  non-resettable and never reduced by restart/rename/re-permit (LAWS.md lines
++  762–776, 808, 875). `knowledge-budget-tool.py` `charges()` charges a **closed**
++  row from `.usage`, not `.charge` (tool line 311). Therefore the candidate
++  floors `.usage` at every cap **and** the prior `.charge` on each dimension;
++  otherwise closure with a small real meter reading would have reduced the held
++  liability. `retain_overrun_floor` and monotone `merge_usage_snapshots` are
++  retained. This is a preservation requirement, not a relaxation.
++- Act 34 §4(3) (ledger/stop-hold semantics) and §4(4) (enforcement bytes): a
++  real deployment of this behaviour needs a Parliament law change, Executive
++  permit terms, Economy re-verification and independent verification of the
++  exact bytes (LAWS.md lines 879–881). This candidate performs none of those.
++- Act 32 §9 activation gate and draft §5: closing the reservation removes only
++  the budget blocker; `guard` still applies all existing admission checks and
++  a fresh appointment still needs new independent instructions. No replay or
++  live-session rebind is implemented.
++
++## What changed
++
++- `government/knowledge-budget.sh`: added a **separate** guarded subcommand
++  `resolve-session RESERVATION_ID REASON --session SID --by OPERATOR` and its
++  locked worker `resolve_session_locked()`. It operates only on `state=held`,
++  uses the existing flock/atomic-write/res_write conventions, and changes no
++  other subcommand. The command itself re-reads `antonina agent status` for the
++  row's exact non-empty agent and requires a non-empty native session id equal
++  to `SID` and a terminal state (`clearexit|failed|stopped|killed`); unreadable or
++  malformed status, agent-id mismatch, SID mismatch/missing, non-terminal agent,
++  empty row agent id, absent resolver and absent SID all stay held with a
++  recorded reason via `tighten_held_locked`. A bound row whose stored native
++  session differs from `SID` is also held (no cross-session metering). On a
++  passing attestation an unreadable meter or invalid/reset CPU bound keeps the
++  full-cap hold; a valid snapshot is merged monotonically, floored as above and
++  applied to `retain_overrun_floor`. Closure writes `closed_reason =
++  operator_resolved_session:<REASON>`, `resolved_by`, a `resolution_attestation`
++  (SID, agent, terminal state, resolver, reason, timestamp, status source),
++  appends history and calls `refresh_aggregate`. No agent kill/stop, run, replay
++  or hand ledger edit. POSIX `/bin/sh`, no bashisms (`/bin/sh -n` clean).
++- `tests/held-reservation-resolve-session-smoke.sh`: new isolated adversarial
++  suite (scratch state, PATH-first antonina stub, no live credentials or
++  `/var/lib/lubko/wd/viche-state/knowledge/budget` access).
++
++## Verification (from this worktree, via canonical suite-env)
++
++- `/bin/sh /var/lib/lubko/wd/viche/government/suite-env.sh /bin/sh tests/held-reservation-resolve-session-smoke.sh`
++  → PASS. Covers: valid null-session closure with attestation, provenance and
++  monotone charge and unchanged aggregate; `guard foresight` flip to ok only
++  after valid closure; unreadable/malformed status, SID mismatch, non-terminal,
++  wrong agent, empty row agent, absent/empty SID, absent resolver; missing
++  meter; reset/invalid CPU bound; above-cap charge never reduced; all four
++  terminal states; no cross-session rebind; existing `resolve` unchanged;
++  non-held row refused; concurrent resolves close exactly once under flock;
++  no reported cost → `cost_reported=false`; no kill/stop or new reservation
++  (no replay); unrelated office reservation byte-identical and still guarded.
++- `suite-env.sh /bin/sh tests/knowledge-budget-smoke.sh` → PASS.
++- `suite-env.sh /bin/sh tests/knowledge-budget-finalize-after-stop-smoke.sh`
++  → PASS (T1–T19).
++- `suite-env.sh /bin/sh tests/knowledge-budget-negative-20261122.sh` → T1–T7
++  PASS; **T8 fails because the shipped config has all offices `enabled: true`**.
++  Verified on a pristine `git archive HEAD` copy: the same T8 failure is
++  pre-existing and unrelated to this candidate. No full suite was run here;
++  the exact-candidate full suite is the integration gate.
++
++## Limitations / open obligations
++
++- Not law, not deployed, not reviewed by an independent party. No claim that
++  foresight is repaired; the live held row `r1795595445-NZIjZE34` was not read
++  or touched.
++- A fresh foresight appointment with new instructions and the no-replay
++  acceptance item require lawful Executive action after enactment; they are
++  outside this code candidate and are not asserted here.
++- The trust boundary is the `antonina agent status` instrument; the command
++  re-reads it but cannot independently prove the runtime's integrity.
++- The pre-existing `knowledge-budget-negative-20261122.sh` T8 config mismatch
++  is left unchanged (out of scope); it should be tracked separately.
++
++No production ledger, activation, permit, attestation, board, budget state,
++credential, live agent or external side effect was created, edited or replayed
++by this work.
+diff --git a/tests/held-reservation-resolve-session-smoke.sh b/tests/held-reservation-resolve-session-smoke.sh
+new file mode 100644
+index 00000000..1899cef6
+--- /dev/null
++++ b/tests/held-reservation-resolve-session-smoke.sh
+@@ -0,0 +1,365 @@
++#!/bin/sh
++# Isolated adversarial regressions for the DRAFT Held Reservation Resolution
++# Act candidate: knowledge-budget.sh resolve-session. No live agent, provider,
++# credentials or production ledger: antonina is a PATH-first recording stub and
++# every budget/ledger lives in a private temp directory under suite-env scratch.
++# This test does not enact law, deploy code, replay a turn or bind a live agent.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tool=$repo/government/knowledge-budget-tool.py
++engine=$repo/government/knowledge-budget.sh
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++
++fail() { echo "FAIL: $*" >&2; exit 1; }
++base_state=$VICHE_STATE_ROOT
++town=$tmp/town
++mkdir -p "$town/government" "$tmp/bin"
++cp "$repo/government/knowledge-budget.conf" "$town/government/config.template"
++
++# Exact frozen identifiers from the foresight case evidence. The whole suite
++# exercises the real target shape (native_session_id=null, charge=full cap).
++sid=ses_dee2bc2a9ffevFtsM61Ljl2TvW
++agent=15bm8Esub3exygbtVQDIMX-issues
++sid2=ses_statistics_unrelated
++agent2=statistics-unrelated-agent
++
++# Per-case authoritative meter with the exact session_v2 schema the tool reads.
++mkdb() { # path, tokens
++  python3 - "$1" "$2" "$sid" "$sid2" <<'PY'
++import sqlite3,sys
++path,tokens,s1,s2=sys.argv[1:]
++c=sqlite3.connect(path)
++c.execute('create table session_v2 (id text primary key,tokens_input int,tokens_output int,tokens_reasoning int,tokens_cache_read int,tokens_cache_write int,cost real,time_updated int)')
++for s in (s1,s2):
++    c.execute("insert into session_v2 values (?,?,0,0,0,0,0.0,1795279700000)",(s,int(tokens)))
++c.commit()
++PY
++}
++
++mkdbnull() { # path — meter row with no reported cost
++  python3 - "$1" "$sid" "$sid2" <<'PY'
++import sqlite3,sys
++path,s1,s2=sys.argv[1:]
++c=sqlite3.connect(path)
++c.execute('create table session_v2 (id text primary key,tokens_input int,tokens_output int,tokens_reasoning int,tokens_cache_read int,tokens_cache_write int,cost real,time_updated int)')
++for s in (s1,s2):
++    c.execute("insert into session_v2 values (?,?,0,0,0,0,NULL,1795279700000)",(s,100))
++c.commit()
++PY
++}
++
++mkcfg() { # state_root, db
++  cp "$town/government/config.template" "$town/government/knowledge-budget.conf"
++  python3 - "$town/government/knowledge-budget.conf" "$2" <<'PY'
++import json,sys
++p,db=sys.argv[1:]
++c=json.load(open(p))
++c['metering']['opencode_db']=db
++c['monitor_interval_seconds']=300
++for office in ('foresight','statistics'):
++    c['offices'][office]['caps']={'tokens_total':5000,'cpu_seconds':5000,'wall_seconds':5000}
++    c['offices'][office]['per_run_caps']={'tokens_total':1000,'cpu_seconds':1000,'wall_seconds':1000}
++json.dump(c,open(p,'w'))
++PY
++  mkdir -p "$1/knowledge/budget/reservations"
++}
++
++cat > "$tmp/mkheld.py" <<'PY'
++import json,sys,time
++path,agent,sid=sys.argv[1:4]
++a=json.load(open(path))
++now=int(time.time())
++a.update(state='held',agent_id=agent,native_session_id=None,runner_pid=None,
++         meter=None,usage=None,started_at=None,expires_at=None,
++         charge=dict(a['caps']),held_at=now,
++         held_reason='meter_or_session_binding_unknown_after_launch',
++         history=[{'at':a['created_at'],'event':'reserved','office':a['office']},
++                  {'at':now,'event':'held','reason':'meter_or_session_binding_unknown_after_launch'}])
++json.dump(a,open(path,'w'))
++PY
++
++# The stub is the ONLY antonina any case can see. It never dispatches anything.
++cat > "$tmp/bin/antonina" <<'SH'
++#!/bin/sh
++case "$1 $2" in
++  'agent status')
++    case "${TEST_MODE:-terminal}" in
++      unreadable) exit 9;;
++      malformed) printf 'not-json-at-all\n'; exit 0;;
++      nonterminal) printf '{"id":"%s","state":"running","native_session_id":"%s","runner_pid":123}\n' "$TEST_AGENT" "$TEST_SID";;
++      mismatch) printf '{"id":"%s","state":"killed","native_session_id":"other-session","runner_pid":123}\n' "$TEST_AGENT";;
++      empty_sid) printf '{"id":"%s","state":"killed","native_session_id":"","runner_pid":123}\n' "$TEST_AGENT";;
++      agent_mismatch) printf '{"id":"another-agent","state":"killed","native_session_id":"%s","runner_pid":123}\n' "$TEST_SID";;
++      no_id) printf '{"state":"%s","native_session_id":"%s","runner_pid":123}\n' "${TEST_STATE:-killed}" "$TEST_SID";;
++      *) printf '{"id":"%s","state":"%s","native_session_id":"%s","runner_pid":123}\n' "$TEST_AGENT" "${TEST_STATE:-killed}" "$TEST_SID";;
++    esac
++    ;;
++  'agent kill'|'agent stop')
++    printf '%s\n' "$*" >> "$TEST_AGENT_KILLS"
++    exit 0
++    ;;
++  *) exit 17 ;;
++esac
++SH
++chmod +x "$tmp/bin/antonina"
++export PATH="$tmp/bin:$PATH"
++export TEST_AGENT_KILLS="$tmp/kills.log"; : > "$TEST_AGENT_KILLS"
++export VICHE_TOWN_ROOT="$town" VICHE_BUDGET_TOOL="$tool"
++
++newcase() { # case_dir_suffix, db_suffix
++  s="$base_state/$1"; db="$tmp/$2.db"
++  mkdir -p "$s"
++  mkdb "$db" 100
++  mkcfg "$s" "$db"
++  VICHE_STATE_ROOT="$s"
++  export VICHE_STATE_ROOT TEST_DB="$db" TEST_AGENT="$agent" TEST_SID="$sid"
++  export TEST_MODE=terminal TEST_STATE=killed
++  rid=$(/bin/sh "$engine" reserve foresight "$agent")
++  f="$s/knowledge/budget/reservations/$rid.json"
++  python3 "$tmp/mkheld.py" "$f" "$agent" "$sid"
++}
++
++guard_ok() { # office
++  /bin/sh "$engine" guard "$1" > "$tmp/guard.out" 2>&1 ||
++    fail "guard $1 failed: $(cat "$tmp/guard.out")"
++  grep -q "guard ok: $1" "$tmp/guard.out" || fail "guard $1 did not report ok"
++}
++guard_fails() { # office
++  if /bin/sh "$engine" guard "$1" > "$tmp/guard.out" 2>&1; then
++    fail "guard $1 unexpectedly ok"
++  fi
++}
++
++echo '--- A1: null-session held row closes with attestation; charge monotone; guard ok ---'
++newcase c1 m1
++agg_before=$(jq -r '.tokens_total' "$s/knowledge/budget/aggregate.json")
++charge_before=$(jq -r '.charge.tokens_total' "$f")
++files_before=$(find "$s/knowledge/budget/reservations" -name '*.json' | wc -l)
++/bin/sh "$engine" resolve-session "$rid" 'confirmed terminal' --session "$sid" --by c1e00002 \
++  >/dev/null 2>&1 || fail 'resolve-session rejected a valid attestation'
++jq -e --argjson prior "$charge_before" --arg sid "$sid" --arg agent "$agent" '
++  .state=="closed" and
++  .closed_reason=="operator_resolved_session:confirmed terminal" and
++  .resolved_by=="c1e00002" and
++  .resolution_attestation.session_id==$sid and
++  .resolution_attestation.agent_id==$agent and
++  .resolution_attestation.state=="killed" and
++  .resolution_attestation.resolver=="c1e00002" and
++  .resolution_attestation.reason=="confirmed terminal" and
++  .resolution_attestation.status_source=="antonina agent status" and
++  .resolution_attestation.command=="resolve-session" and
++  (.resolution_attestation.observed_at|type=="number") and
++  (.charge.tokens_total >= $prior) and
++  (.usage.tokens_total >= $prior) and
++  (.charge.cpu_seconds >= 1000) and (.usage.cpu_seconds >= 1000) and
++  (.charge.wall_seconds >= 1000) and (.usage.wall_seconds >= 1000) and
++  ([.history[]|select(.event=="operator_resolved_session")]|length)==1
++' "$f" >/dev/null || fail 'closure fields, provenance or monotone charge are wrong'
++agg_after=$(jq -r '.tokens_total' "$s/knowledge/budget/aggregate.json")
++[ "$agg_before" = "$agg_after" ] || fail "aggregate liability changed: $agg_before -> $agg_after"
++files_after=$(find "$s/knowledge/budget/reservations" -name '*.json' | wc -l)
++[ "$files_before" = "$files_after" ] || fail 'resolve-session created a new reservation (replay)'
++guard_ok foresight
++echo 'A1 ok'
++
++echo '--- A2: unreadable status stays held at full cap with reason ---'
++newcase c2 m2
++TEST_MODE=unreadable /bin/sh "$engine" resolve-session "$rid" 'r2' --session "$sid" --by op \
++  >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_status_unreadable" and
++        .charge.tokens_total>=1000 and .usage.cost_reported==false' "$f" >/dev/null ||
++  fail 'unreadable status released or reduced the hold'
++echo 'A2 ok'
++
++echo '--- A3: malformed status stays held at full cap with reason ---'
++newcase c3 m3
++TEST_MODE=malformed /bin/sh "$engine" resolve-session "$rid" 'r3' --session "$sid" --by op \
++  >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_status_unreadable" and
++        .charge.tokens_total>=1000' "$f" >/dev/null ||
++  fail 'malformed status released or reduced the hold'
++echo 'A3 ok'
++
++echo '--- A4: SID mismatch stays held with reason ---'
++newcase c4 m4
++TEST_MODE=mismatch /bin/sh "$engine" resolve-session "$rid" 'r4' --session "$sid" --by op \
++  >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_session_mismatch" and
++        .charge.tokens_total>=1000' "$f" >/dev/null ||
++  fail 'SID mismatch released the hold'
++echo 'A4 ok'
++
++echo '--- A5: non-terminal agent stays held with reason ---'
++newcase c5 m5
++TEST_MODE=nonterminal /bin/sh "$engine" resolve-session "$rid" 'r5' --session "$sid" --by op \
++  >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_agent_not_terminal" and
++        .charge.tokens_total>=1000' "$f" >/dev/null ||
++  fail 'non-terminal agent was closed'
++echo 'A5 ok'
++
++echo '--- A6: wrong agent (status id mismatch) stays held with reason ---'
++newcase c6 m6
++TEST_MODE=agent_mismatch /bin/sh "$engine" resolve-session "$rid" 'r6' --session "$sid" --by op \
++  >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_agent_mismatch" and
++        .charge.tokens_total>=1000' "$f" >/dev/null ||
++  fail 'wrong agent identity was accepted'
++echo 'A6 ok'
++
++echo '--- A7: empty row agent id stays held with reason ---'
++newcase c7 m7
++jq '.agent_id=""' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
++/bin/sh "$engine" resolve-session "$rid" 'r7' --session "$sid" --by op >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_agent_missing" and
++        .charge.tokens_total>=1000' "$f" >/dev/null ||
++  fail 'empty row agent id was accepted'
++echo 'A7 ok'
++
++echo '--- A8: absent --session stays held with reason ---'
++newcase c8 m8
++/bin/sh "$engine" resolve-session "$rid" 'r8' --by op >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_session_absent"' "$f" >/dev/null ||
++  fail 'absent SID was accepted'
++echo 'A8 ok'
++
++echo '--- A9: empty native_session_id in status stays held with reason ---'
++newcase c9 m9
++TEST_MODE=empty_sid /bin/sh "$engine" resolve-session "$rid" 'r9' --session "$sid" --by op \
++  >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_session_missing"' "$f" >/dev/null ||
++  fail 'empty native session id was accepted'
++echo 'A9 ok'
++
++echo '--- A10: missing meter stays held at full cap ---'
++newcase c10 m10
++mv "$db" "$db.moved"
++/bin/sh "$engine" resolve-session "$rid" 'r10' --session "$sid" --by op >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_meter_unreadable" and
++        .charge.tokens_total==1000' "$f" >/dev/null ||
++  fail 'missing meter released an optimistic charge'
++echo 'A10 ok'
++
++echo '--- A11: reset/invalid CPU bound stays held at full cap ---'
++newcase c11 m11
++jq '.cpu_baseline.cpu_boot_id="00000000-0000-0000-0000-000000000000"' "$f" > "$f.tmp" &&
++  mv "$f.tmp" "$f"
++/bin/sh "$engine" resolve-session "$rid" 'r11' --session "$sid" --by op >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_cpu_invalid" and
++        .charge.tokens_total==1000' "$f" >/dev/null ||
++  fail 'invalid/reset CPU bound released the hold'
++echo 'A11 ok'
++
++echo '--- A12: prior charge above cap is never reduced by closure ---'
++newcase c12 m12
++jq '.charge.tokens_total=500000 | .charge.cpu_seconds=9000 | .charge.wall_seconds=9000' \
++  "$f" > "$f.tmp" && mv "$f.tmp" "$f"
++aggtool() { python3 "$tool" aggregate "$s/knowledge/budget/reservations" 3888000 "$(date +%s)" \
++  | jq -r '.tokens_total'; }
++agg_before=$(aggtool)
++/bin/sh "$engine" resolve-session "$rid" 'r12' --session "$sid" --by op >/dev/null 2>&1 ||
++  fail 'resolve-session failed on a valid attestation with an above-cap charge'
++jq -e '.state=="closed" and .charge.tokens_total>=500000 and .usage.tokens_total>=500000 and
++        .charge.cpu_seconds>=9000 and .usage.cpu_seconds>=9000 and
++        .charge.wall_seconds>=9000 and .usage.wall_seconds>=9000' "$f" >/dev/null ||
++  fail 'closure reduced a previously observed above-cap charge'
++agg_after=$(aggtool)
++[ "$agg_before" = "$agg_after" ] ||
++  fail "above-cap charge reduced in aggregate: $agg_before -> $agg_after"
++echo 'A12 ok'
++
++echo '--- A13: all four terminal states close; provenance records each ---'
++for st in clearexit failed stopped killed; do
++  newcase "c13-$st" "m13-$st"
++  TEST_STATE=$st /bin/sh "$engine" resolve-session "$rid" "term-$st" \
++    --session "$sid" --by op >/dev/null 2>&1 || fail "$st did not close"
++  jq -e --arg st "$st" '.state=="closed" and .resolution_attestation.state==$st and
++        .closed_reason==("operator_resolved_session:term-" + $st)' "$f" >/dev/null ||
++    fail "$st provenance wrong"
++done
++echo 'A13 ok'
++
++echo '--- A14: guard unblocks only after valid closure; unrelated office preserved ---'
++newcase c14 m14
++guard_fails foresight
++TEST_MODE=nonterminal /bin/sh "$engine" resolve-session "$rid" 'r14-invalid' \
++  --session "$sid" --by op >/dev/null 2>&1 || :
++guard_fails foresight
++rid2=$(/bin/sh "$engine" reserve statistics "$agent2")
++f2="$s/knowledge/budget/reservations/$rid2.json"
++python3 "$tmp/mkheld.py" "$f2" "$agent2" "$sid2"
++guard_fails statistics
++before2=$(sha256sum "$f2" | awk '{print $1}')
++/bin/sh "$engine" resolve-session "$rid" 'r14-valid' --session "$sid" --by op \
++  >/dev/null 2>&1 || fail 'valid closure failed'
++guard_ok foresight
++guard_fails statistics
++after2=$(sha256sum "$f2" | awk '{print $1}')
++[ "$before2" = "$after2" ] || fail 'resolve-session mutated an unrelated office reservation'
++echo 'A14 ok'
++
++echo '--- A15: a row bound to a different native session cannot be rebound ---'
++newcase c15 m15
++jq '.native_session_id="ses_other_bound"' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
++/bin/sh "$engine" resolve-session "$rid" 'r15' --session "$sid" --by op >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_identity_mismatch" and
++        .native_session_id=="ses_other_bound"' "$f" >/dev/null ||
++  fail 'a bound row was re-meted across a different native session'
++echo 'A15 ok'
++
++echo '--- A16: existing resolve semantics are unchanged ---'
++newcase c16 m16
++/bin/sh "$engine" resolve "$rid" 'operator asked' >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_identity_unresolved"' "$f" \
++  >/dev/null || fail 'existing resolve path was changed by the new subcommand'
++echo 'A16 ok'
++
++echo '--- A17: absent resolver is recorded, not silently accepted ---'
++newcase c17 m17
++/bin/sh "$engine" resolve-session "$rid" 'r17' --session "$sid" >/dev/null 2>&1 || :
++jq -e '.state=="held" and .held_reason=="operator_resolution_resolver_absent"' "$f" \
++  >/dev/null || fail 'absent resolver was not recorded'
++echo 'A17 ok'
++
++echo '--- A18: resolve-session refuses a non-held row ---'
++newcase c18 m18
++jq '.state="active"' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
++if /bin/sh "$engine" resolve-session "$rid" 'r18' --session "$sid" --by op \
++    >/dev/null 2>&1; then fail 'resolve-session accepted a non-held row'; fi
++echo 'A18 ok'
++
++echo '--- A19: concurrent resolves close exactly once ---'
++newcase c19 m19
++/bin/sh "$engine" resolve-session "$rid" 'concurrent-A' --session "$sid" --by opA \
++  >/dev/null 2>&1 & p1=$!
++/bin/sh "$engine" resolve-session "$rid" 'concurrent-B' --session "$sid" --by opB \
++  >/dev/null 2>&1 & p2=$!
++r1=0; wait "$p1" || r1=$?
++r2=0; wait "$p2" || r2=$?
++nclosed=$(jq '[.history[]|select(.event=="operator_resolved_session")]|length' "$f")
++[ "$nclosed" = 1 ] || fail "concurrent resolves produced $nclosed closures"
++if { [ "$r1" = 0 ] && [ "$r2" != 0 ]; } || { [ "$r1" != 0 ] && [ "$r2" = 0 ]; }; then
++  :
++else
++  fail "concurrent resolves did not serialize (rc $r1/$r2)"
++fi
++jq -e '.state=="closed"' "$f" >/dev/null || fail 'concurrent resolve left row not closed'
++echo 'A19 ok'
++
++echo '--- A20a: no real cost reading means cost_reported=false ---'
++newcase c20a m20a
++rm -f "$db"
++mkdbnull "$db"
++/bin/sh "$engine" resolve-session "$rid" 'r20a' --session "$sid" --by op \
++  >/dev/null 2>&1 || fail 'resolve-session failed on a meter with no reported cost'
++jq -e '.state=="closed" and .meter.cost_reported==false and .usage.cost_reported==false and
++        .charge.tokens_total>=1000 and .usage.tokens_total>=1000' "$f" >/dev/null ||
++  fail 'a missing real cost reading was reported as measured cost'
++echo 'A20a ok'
++
++echo '--- A20: no agent kill/stop/replay was issued by any path ---'
++[ ! -s "$TEST_AGENT_KILLS" ] || fail "resolve-session issued an agent action: $(cat "$TEST_AGENT_KILLS")"
++echo 'A20 ok'
++
++echo 'PASS: held-reservation resolve-session fail-closed accounting, provenance, guard gating, no replay and concurrency verified'

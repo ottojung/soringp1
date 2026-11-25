@@ -1,0 +1,125 @@
+commit 0285a55fffb24ab6ca24852fb0af0d3463de30a1
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 20:52:47 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 20:52:47 2026 +0000
+
+    Preserve continuity case history on re-signal
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 77951743..a133649b 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -6,6 +6,7 @@ to enact law. Observation and routing remain deterministic even if every model
+ is down. Existing independent Judiciary/Parliament/Executive powers remain.
+ """
+ import argparse
++import datetime
+ import hashlib
+ import json
+ import os
+@@ -58,6 +59,29 @@ def continuity_receipt(office):
+         return None
+     if verified.get("verification_scope") != "external_effect_reconciled":
+         return None
++    # A receipt that says the successor was running cannot be accepted if its
++    # durable terminal record says it had already failed by verification time.
++    # This is a contradiction check, not proof that free-form evidence text is
++    # truthful or that every external effect was reconciled.
++    successor = receipt.get("successor_agent")
++    verified_at = verified.get("verified_at")
++    if (not isinstance(successor, str)
++            or not successor
++            or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in successor)
++            or not isinstance(verified_at, str)):
++        return None
++    try:
++        verified_time = datetime.datetime.fromisoformat(verified_at.replace("Z", "+00:00"))
++        if verified_time.tzinfo is None:
++            return None
++        verified_epoch = verified_time.timestamp()
++    except (ValueError, OverflowError):
++        return None
++    terminal = read(ROOT / "appointments/terminal-evidence" / successor / "status.json")
++    if terminal.get("state") == "failed":
++        finished_at = terminal.get("finished_at")
++        if isinstance(finished_at, (int, float)) and finished_at <= verified_epoch:
++            return None
+     ref = verified.get("evidence_ref")
+     if not isinstance(ref, str) or not ref.strip():
+         return None
+@@ -246,7 +270,7 @@ def reconcile():
+         path = STORE / (signal + ".json")
+         case = read(path)
+         if signal in signals:
+-            if not case or case.get("state") == "verified_closed":
++            if not case:
+                 case = {
+                     "id": f"{signal}:{now}", "signal": signal,
+                     "first_seen": now, "state": "open",
+@@ -258,6 +282,23 @@ def reconcile():
+                     "closure_rule": "independent verification artifact bound to this case; "
+                                     "healthy probes are only a precondition",
+                 }
++            elif case.get("state") == "verified_closed":
++                # Re-signal an existing historical case in place. Never replace
++                # its identity, first_seen, verification time, or observation
++                # history with a synthetic new case.
++                closure = {
++                    key: case[key] for key in ("verified_at", "verification", "closure_evidence")
++                    if key in case
++                }
++                if closure:
++                    case.setdefault("closure_history", []).append(closure)
++                case["state"] = "open"
++                case["reopened_at"] = now
++                case["reopen_reason"] = "monitored signal reappeared after recorded closure"
++                case["reopen_count"] = case.get("reopen_count", 0) + 1
++                case["clear_observations"] = 0
++                case.pop("last_clear_observation", None)
++                case.pop("awaiting_independent_verification", None)
+             case["last_seen"] = now
+             case["observations"] = case.get("observations", 0) + 1
+             case["clear_observations"] = 0
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 8e6ffeb4..b44d2717 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -130,7 +130,7 @@ VICHE_CASE_NOW=1300 python3 "$repo/government/institutional-cases.py" reconcile
+ jq -e '.state=="verified_closed" and .closure_evidence.verified_by=="clerk" and .closure_evidence.evidence_sha256=="'"$digest"'"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ # Only a matching independent Judiciary verification can discharge the
+ # uncertain-effects reconciliation case.
+-printf '{"previous_agent":"old-agent","successor_agent":"new-agent","verified_by":"judiciary","verification_scope":"external_effect_reconciled","evidence_ref":"fixture:independent-reviewed-effects"}\n' > "$d/state/continuity/verified-innovation-centre.json"
++printf '{"previous_agent":"old-agent","successor_agent":"new-agent","verified_by":"judiciary","verification_scope":"external_effect_reconciled","verified_at":"1970-01-01T00:25:00Z","evidence_ref":"fixture:independent-reviewed-effects"}\n' > "$d/state/continuity/verified-innovation-centre.json"
+ VICHE_CASE_NOW=1400 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ printf '1450\tclear\n' >> "$d/state/branches/observations.tsv"
+@@ -143,6 +143,28 @@ jq -e '.state=="open" and .clear_observations==2 and .awaiting_independent_verif
+ printf '{"case_id":"continuity_unverified_innovation-centre:1000","verified_by":"judiciary","verified_at":1500,"evidence":{"ref":"evidence/repair.txt","sha256":"%s"}}\n' "$digest" > "$d/state/verification/continuity_unverified_innovation-centre.json"
+ VICHE_CASE_NOW=1510 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="verified_closed" and .closure_evidence.verified_by=="judiciary" and .closure_evidence.continuity_receipt.previous_agent=="old-agent"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++# A successor failure that predates its claimed verification invalidates the
++# continuity receipt. Re-signalling must reopen the original object in place.
++mkdir -p "$d/state/appointments/terminal-evidence/new-agent"
++printf '{"state":"failed","finished_at":1400}\n' > "$d/state/appointments/terminal-evidence/new-agent/status.json"
++original_id=$(jq -r '.id' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json")
++original_first_seen=$(jq -r '.first_seen' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json")
++original_verified_at=$(jq -r '.verified_at' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json")
++original_observations=$(jq -r '.observations' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json")
++VICHE_CASE_NOW=1520 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e --arg id "$original_id" --argjson first "$original_first_seen" \
++  --argjson verified "$original_verified_at" --argjson observations "$original_observations" \
++  '.state=="open" and .id==$id and .first_seen==$first and .verified_at==$verified and .closure_history[0].verified_at==$verified and .observations==($observations+1) and .reopened_at==1520 and .reopen_count==1' \
++  "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++# A closed non-continuity case must likewise retain its old identity/history
++# when its monitored signal returns.
++jq '.state="verified_closed" | .first_seen=900 | .verified_at=950 | .observations=7 | .id="innovation_stale:900"' \
++  "$d/state/institutional-cases/innovation_stale.json" > "$d/state/institutional-cases/innovation_stale.json.tmp"
++mv "$d/state/institutional-cases/innovation_stale.json.tmp" "$d/state/institutional-cases/innovation_stale.json"
++printf '{"signals":["innovation_stale"],"observed_at":1600}\n' > "$d/state/branches/incident.json"
++VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .id=="innovation_stale:900" and .first_seen==900 and .verified_at==950 and .closure_history[0].verified_at==950 and .observations==8 and .reopened_at==1600 and .reopen_count==1' \
++  "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ # Withdrawing the case-specific receipt must keep a fresh case open: generic
+ # healthy probes are not continuity evidence, and even a matching artifact
+ # cannot substitute for the missing reconciliation receipt.

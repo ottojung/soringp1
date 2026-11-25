@@ -1,0 +1,405 @@
+commit 0e41e5c4bf71bdcf18f30d6c489b4f24c86069ef
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 17:52:13 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 17:52:13 2026 +0000
+
+    Validate immutable repository identity and recover published proofs
+
+diff --git a/missions/pnp/PROTOCOL.md b/missions/pnp/PROTOCOL.md
+index 93309468..60563831 100644
+--- a/missions/pnp/PROTOCOL.md
++++ b/missions/pnp/PROTOCOL.md
+@@ -7,7 +7,7 @@ Implementation issue: R4WYVaWyRxoD911soUtcAo-sciatic.
+ The standing issue remains open until Vitalik explicitly revokes the mission. No idle period, checker fault, single PR, or successful setup closes it. Implementation issues may close individually only after independently evidenced acceptance tests. The ongoing research loop remains part of ordinary Viche Executive scheduling. No other host may run Viche agents. Preserve Viche resource policies and current Founder-authorized mission scope.
+ 
+ ## Precise interfaces
+-Upstream: brilliant-hq/pequalnp-proofs, base branch main.
++Upstream: open-goat/pequalnp-proofs, base branch main.
+ Fork: ottojung/pequalnp-proofs.
+ Desk: https://pequalnp.com/desk with documented next/beat/release endpoints.
+ Instructions: https://pequalnp.com/join.txt and upstream CONTRIBUTING.md (live version takes precedence).
+@@ -104,9 +104,9 @@ commit.verification.verified == true for the exact pushed SHA. If false, STOP
+ without opening a PR and record the reason.
+ Before opening PR, search upstream existing open/closed PRs for this exact
+ head branch and gap ID. If already present, reuse its ID; never open duplicates.
+-Only create PR to brilliant-hq/pequalnp-proofs, base main, title gap ID,
++Only create PR to open-goat/pequalnp-proofs, base main, title gap ID,
+ head ottojung:<branch>. Then GET created PR and verify author == ottojung,
+-head repo == ottojung/pequalnp-proofs, base repo == brilliant-hq/pequalnp-proofs,
++head repo == ottojung/pequalnp-proofs, base repository ID == 1468025030 (open-goat/pequalnp-proofs),
+ base ref == main, changed file list exactly one added proof, PR commit list
+ contains exactly the expected signed SHA, GitHub verification == true.
+ If post-create validation fails, report and stop automated mutations; do not
+@@ -151,3 +151,5 @@ Only send substantial milestones or verified blockers to Founder-facing channels
+ 
+ Do not report agent setup, branch push, an unmerged PR, or a merely local
+ compilation as a mathematically accepted contribution.
++
++Repository names can change. Validate immutable GitHub IDs for upstream and fork, and recover existing PRs by verified signed revision even after a local FAULT. Old official checker links remain recognized.
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index ff5713ae..fcff17b3 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -40,7 +40,7 @@ interruption, the normal mission cycle resumes the saved candidate.
+   commit. `git verify-commit`, `%G?` in {G,U}, exact `%GF`, author and
+   committer must all pass before push.
+ - Identity is checked before mutation. Push goes only to
+-  `ottojung/pequalnp-proofs`; PR only to `brilliant-hq/pequalnp-proofs`
++  `ottojung/pequalnp-proofs`; PR only to `open-goat/pequalnp-proofs`
+   base `main`. Existing PRs are reused; no merge/close/settings/deletes.
+ - GitHub commit verification must be true and commit identity correct before
+   a PR is opened; post-create validation stops automation on any discrepancy.
+diff --git a/missions/pnp/config.py b/missions/pnp/config.py
+index 3b23949d..42e61c94 100644
+--- a/missions/pnp/config.py
++++ b/missions/pnp/config.py
+@@ -6,8 +6,11 @@ file.  Only the operator CLI may choose a gap id and a local candidate path.
+ import os
+ import re
+ 
+-UPSTREAM = "brilliant-hq/pequalnp-proofs"
++UPSTREAM = "open-goat/pequalnp-proofs"
++UPSTREAM_ID = 1468025030
++UPSTREAM_NAMES = (UPSTREAM, "brilliant-hq/pequalnp-proofs")
+ FORK = "ottojung/pequalnp-proofs"
++FORK_ID = 1469318535
+ BASE_REF = "main"
+ GH_USER = "ottojung"
+ 
+@@ -63,7 +66,7 @@ ALLOWED = {
+     "PUSHED": {"PR_OPEN", "FAULT"},
+     "PR_OPEN": {"ACCEPTED", "REJECTED", "STALE", "FAULT"},
+     "REJECTED": {"RESEARCHING", "SIGNED", "FAULT", "STALE"},
+-    "FAULT": {"RESEARCHING", "RELEASED"},
++    "FAULT": {"RESEARCHING", "RELEASED", "PR_OPEN"},
+ }
+ 
+ 
+diff --git a/missions/pnp/github.py b/missions/pnp/github.py
+index a22e5756..70f8d85b 100644
+--- a/missions/pnp/github.py
++++ b/missions/pnp/github.py
+@@ -57,7 +57,7 @@ def pr_exists_for(branch, gap_id, api=None):
+     for pr in prs:
+         head = pr.get("head") or {}
+         if (head.get("ref") == branch and
+-                (head.get("repo") or {}).get("full_name") == config.FORK and
++                (head.get("repo") or {}).get("id") == config.FORK_ID and
+                 (pr.get("title") == gap_id or gap_id in (pr.get("title") or ""))):
+             return pr.get("number")
+     return None
+@@ -78,8 +78,8 @@ def create_pr(branch, gap_id):
+ def get_pr(number):
+     expr = ("{number: .number, state: .state, title: .title, "
+             "author: .user.login, head_sha: .head.sha, merged: .merged, "
+-            "head_ref: .head.ref, head_repo: .head.repo.full_name, "
+-            "base_ref: .base.ref, base_repo: .base.repo.full_name, "
++            "head_ref: .head.ref, head_repo: .head.repo.full_name, head_repo_id: .head.repo.id, "
++            "base_ref: .base.ref, base_repo: .base.repo.full_name, base_repo_id: .base.repo.id, "
+             "url: .html_url}")
+     return json.loads(gh("api", "repos/" + config.UPSTREAM + "/pulls/" +
+                          str(number), "--jq", expr))
+@@ -108,10 +108,12 @@ def validate_created(number, expected_sha, expected_path,
+     problems = []
+     if pr.get("author") != config.GH_USER:
+         problems.append("PR author is not ottojung")
+-    if pr.get("head_repo") != config.FORK:
++    if pr.get("head_repo_id") != config.FORK_ID:
+         problems.append("head repo is not the fork")
+-    if pr.get("base_repo") != config.UPSTREAM:
++    if pr.get("base_repo_id") != config.UPSTREAM_ID:
+         problems.append("base repo is not upstream")
++    if pr.get("head_sha") != expected_sha:
++        problems.append("PR head SHA differs from the signed revision")
+     if pr.get("base_ref") != config.BASE_REF:
+         problems.append("base ref is not main")
+     files = pr_files(number)
+diff --git a/missions/pnp/publish.py b/missions/pnp/publish.py
+index 05eba33a..d2634d96 100644
+--- a/missions/pnp/publish.py
++++ b/missions/pnp/publish.py
+@@ -55,6 +55,40 @@ def _read_candidate(path):
+         return f.read()
+ 
+ 
++def release_submitted(gap_id, desk):
++    """A validated PR is tracked even if the desk release needs retry."""
++    rec = state.load(gap_id)
++    if not rec.get("release_pending"):
++        return
++    try:
++        desk.release(rec["lease"], "submitted")
++    except Exception as exc:
++        state.update(gap_id, failure_reason="release retry needed: %s" % exc)
++        return
++    state.update(gap_id, release_pending=False, failure_reason=None)
++
++
++def record_pr(gap_id, rec, number, pr, desk):
++    """Commit verified PR identity before attempting the separate desk effect."""
++    with state.lock(gap_id):
++        current = state.load(gap_id)
++        if (current.get("commit_sha") != rec.get("commit_sha") or
++                current.get("lease") != rec.get("lease") or
++                current["state"] not in ("SIGNED", "PUSHED", "LOCAL_CHECKED", "FAULT", "PR_OPEN")):
++            raise StopPublish("publication changed during PR verification")
++        release = bool(current.get("lease") and not current.get("pr_number")
++                       and not current.get("correction_from_sha"))
++        current.update(state="PR_OPEN", pr_number=number, pr_url=pr.get("url"),
++                       pending_pr_number=None, external_verdict="pending",
++                       queued_lease=None, failure_reason=None, correction_from_sha=None,
++                       release_pending=release or current.get("release_pending", False),
++                       intent=None)
++        state.save(current)
++        state.event(gap_id, "published", {"sha": current.get("commit_sha"),
++                                          "pr": number, "digest": current.get("candidate_digest")})
++    release_submitted(gap_id, desk)
++
++
+ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+             build_runner=None, signer=None, pusher=None, known_prs=None):
+     """Publish a complete statically validated candidate immediately. Idempotent."""
+@@ -237,7 +271,7 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+             ver.get("email") != config.AUTHOR_EMAIL):
+         _stop(gap_id, "GitHub commit identity mismatch; no PR opened")
+ 
+-    number = rec.get("pr_number") or gh.pr_exists_for(
++    number = rec.get("pr_number") or rec.get("pending_pr_number") or gh.pr_exists_for(
+         branch, gap_id, api=known_prs)
+     if not number:
+         if not correction:
+@@ -256,26 +290,14 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+             number = gh.create_pr(branch, gap_id)
+         except Exception as e:
+             _retry_later(gap_id, "PR creation failed; reconcile before retry: %s" % e)
+-        state.clear_intent(gap_id)
++        # Persist the observed number before any fallible validation call.
++        state.update(gap_id, pending_pr_number=int(number), intent=None)
+     number = int(number)
+     pr, problems = gh.validate_created(number, sha, rec["path"],
+                                        expected_commits=expected_commits)
+     if problems:
+         _stop(gap_id, "post-create PR validation failed: " + "; ".join(problems))
+-    if rec.get("lease") and not correction and not rec.get("pr_number"):
+-        try:
+-            desk.release(rec["lease"], "submitted")
+-        except Exception as e:
+-            state.update(gap_id, failure_reason="release retry needed: %s" % e)
+-    if state.load(gap_id)["state"] in ("PUSHED", "SIGNED", "LOCAL_CHECKED"):
+-        state.transition(gap_id, "PR_OPEN", pr_number=number,
+-                         pr_url=pr.get("url"), external_verdict="pending",
+-                         queued_lease=None, failure_reason=None, correction_from_sha=None)
+-    else:
+-        state.update(gap_id, pr_number=number, pr_url=pr.get("url"),
+-                     external_verdict="pending", queued_lease=None, correction_from_sha=None)
+-    state.event(gap_id, "published", {"sha": sha, "pr": number,
+-                                      "digest": digest})
++    record_pr(gap_id, state.load(gap_id), number, pr, desk)
+     return {"gap": gap_id, "sha": sha, "pr": number, "url": pr.get("url"),
+             "digest": digest}
+ 
+diff --git a/missions/pnp/reconcile.py b/missions/pnp/reconcile.py
+index 128b0c18..9106f2cc 100644
+--- a/missions/pnp/reconcile.py
++++ b/missions/pnp/reconcile.py
+@@ -24,7 +24,9 @@ def current_verdict(comments, sha):
+         body = comment.get("body") or ""
+         match = VERDICT.search(body)
+         if (match and sha.startswith(match[1]) and
+-                re.search(r"^Run: https://github\.com/brilliant-hq/pequalnp-proofs/actions/runs/[0-9]+$", body, re.M)):
++                any(re.search(r"^Run: https://github\.com/" + re.escape(repo) +
++                              r"/actions/runs/[0-9]+$", body, re.M)
++                    for repo in config.UPSTREAM_NAMES)):
+             verdicts.append((comment.get("created_at", ""), match[2]))
+     return max(verdicts)[1] if verdicts else None
+ 
+@@ -47,6 +49,36 @@ def _heartbeat(gap_id, rec, desk, force=False):
+         state.update(gap_id, lease_expires_at=now + config.LEASE_TTL_SECONDS)
+ 
+ 
++def recover_fault(gap_id, rec, desk, gh):
++    """Recover only an existing, fully validated PR; never create one here."""
++    if rec["state"] != "FAULT" or not rec.get("commit_sha"):
++        return False
++    from . import jobs, publish
++    fd = jobs.claim(gap_id)
++    if fd is None:
++        return False
++    try:
++        rec = state.load(gap_id)
++        if rec["state"] != "FAULT" or not rec.get("commit_sha"):
++            return False
++        number = rec.get("pr_number") or rec.get("pending_pr_number") or gh.pr_exists_for(
++            rec.get("branch") or config.branch_for(gap_id), gap_id)
++        if not number:
++            return False
++        number = int(number)
++        sha = rec["commit_sha"]
++        pr, problems = gh.validate_created(number, sha, rec["path"],
++                                           expected_commits=rec.get("expected_commits") or [sha])
++        if problems:
++            state.update(gap_id, pending_pr_number=number,
++                         failure_reason="PR recovery validation failed: " + "; ".join(problems))
++            return False
++        publish.record_pr(gap_id, rec, number, pr, desk)
++        return True
++    finally:
++        os.close(fd)
++
++
+ def reconcile_gap(gap_id, desk=None, gh=None, git=None, observed=None):
+     """Return a short summary; never raise for one bad gap."""
+     desk = desk or desk_mod.Desk()
+@@ -55,9 +87,18 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None, observed=None):
+     rec = state.load(gap_id)
+     if rec is None:
+         return {"gap": gap_id, "result": "no-state"}
++    if rec.get("release_pending"):
++        from . import publish
++        publish.release_submitted(gap_id, desk)
++        rec = state.load(gap_id)
+     if rec["state"] in ("ACCEPTED", "RELEASED", "STALE"):
+         return {"gap": gap_id, "result": "terminal", "state": rec["state"]}
+ 
++    if rec["state"] == "FAULT":
++        if not recover_fault(gap_id, rec, desk, gh):
++            return {"gap": gap_id, "result": "unresolved-fault", "state": "FAULT"}
++        rec = state.load(gap_id)
++
+     # Missing from a complete fresh frontier is a reason to confirm, not a verdict.
+     _heartbeat(gap_id, rec, desk, force=frontier.missing(observed or {}, gap_id))
+     rec = state.load(gap_id)
+@@ -84,7 +125,7 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None, observed=None):
+         # Branch disappeared: do not silently re-push; record for inspection.
+         state.update(gap_id, failure_reason="pushed branch missing at fork")
+ 
+-    number = rec.get("pr_number")
++    number = rec.get("pr_number") or rec.get("pending_pr_number")
+     if not number and rec["state"] in ("SIGNED", "PUSHED", "PR_OPEN"):
+         number = gh.pr_exists_for(branch, gap_id)
+     if not number and rec["state"] in ("SIGNED", "PUSHED"):
+@@ -112,9 +153,17 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None, observed=None):
+         number = int(number)
+         pr = gh.get_pr(number)
+         if rec["state"] in ("PUSHED", "SIGNED", "LOCAL_CHECKED") and pr.get("head_sha") == rec.get("commit_sha"):
+-            state.transition(gap_id, "PR_OPEN", pr_number=number,
+-                             pr_url=pr.get("url"),
+-                             external_verdict="pending")
++            validated, problems = gh.validate_created(number, rec["commit_sha"], rec["path"],
++                expected_commits=rec.get("expected_commits") or [rec["commit_sha"]])
++            if problems:
++                state.update(gap_id, pending_pr_number=number,
++                             failure_reason="PR recovery validation failed: " + "; ".join(problems))
++                return {"gap": gap_id, "result": "invalid-pr", "state": rec["state"]}
++            from . import publish
++            publish.record_pr(gap_id, rec, number, validated, desk)
++        if rec["state"] in ("PUSHED", "SIGNED", "LOCAL_CHECKED") and pr.get("head_sha") != rec.get("commit_sha"):
++            state.update(gap_id, pending_pr_number=number, failure_reason="PR recovery head mismatch")
++            return {"gap": gap_id, "result": "invalid-pr", "state": rec["state"]}
+         state.update(gap_id, pr_number=number, pr_url=pr.get("url"))
+         current = state.load(gap_id)
+         if current["state"] in ("PR_OPEN", "REJECTED") and not current.get("queued_lease") and pr.get("head_sha") == current.get("commit_sha"):
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index db13b17f..713f2c48 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -34,6 +34,8 @@ EMPTY = {
+     "worktree": None,
+     "commit_sha": None,
+     "pr_number": None,
++    "pending_pr_number": None,
++    "release_pending": False,
+     "pr_url": None,
+     "external_verdict": None,
+     "failure_reason": None,
+@@ -173,6 +175,8 @@ def reacquire(gap_id, **fields):
+                     "commit_sha", "pr_number", "pr_url", "external_verdict"):
+             rec[key] = None
+         rec["failure_reason"] = None
++        rec["pending_pr_number"] = None
++        rec["release_pending"] = False
+         rec["queued_lease"] = None
+         rec["build_evidence"] = None
+         rec["local_check_status"] = None
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 5a43c6a5..547ebcb4 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -400,9 +400,24 @@ class TestSignatureFields(unittest.TestCase):
+ 
+ 
+ class TestGitHubValidation(unittest.TestCase):
++    def test_repository_rename_and_identity(self):
++        pr = {"author": config.GH_USER, "head_repo": config.FORK,
++              "head_repo_id": config.FORK_ID, "base_repo": "renamed/project",
++              "base_repo_id": config.UPSTREAM_ID, "head_sha": SHA, "base_ref": "main"}
++        with mock.patch.object(github, "get_pr", return_value=pr), \
++             mock.patch.object(github, "pr_files", return_value=[PATH]), \
++             mock.patch.object(github, "pr_commits", return_value=[SHA]), \
++             mock.patch.object(github, "commit_verification", return_value={
++                 "verified": True, "name": config.AUTHOR_NAME, "email": config.AUTHOR_EMAIL}):
++            self.assertEqual(github.validate_created(1, SHA, PATH)[1], [])
++            pr.update(base_repo=config.UPSTREAM, base_repo_id=999)
++            self.assertIn("base repo is not upstream", github.validate_created(1, SHA, PATH)[1])
++
+     def test_post_create_checks(self):
+         pr = {"number": 1, "author": config.GH_USER,
+               "head_repo": config.FORK, "base_repo": config.UPSTREAM,
++              "head_repo_id": config.FORK_ID, "base_repo_id": config.UPSTREAM_ID,
++              "head_sha": SHA,
+               "base_ref": "main", "url": "u"}
+         with mock.patch.object(github, "get_pr", return_value=pr), \
+              mock.patch.object(github, "pr_files", return_value=[PATH]), \
+@@ -555,6 +570,51 @@ class TestReconcile(unittest.TestCase):
+         self.assertEqual(state.load(GAP)["state"], "ACCEPTED")
+         self.assertEqual(r["state"], "ACCEPTED")
+ 
++    def test_fault_adopts_existing_validated_pr_without_duplicate(self):
++        new_state("FAULT", commit_sha=SHA, branch=config.branch_for(GAP),
++                  queued_lease="lease-1", expected_commits=[SHA])
++        gh = FakeGH(existing=8143)
++        gh.get_pr = lambda n: {"url": "u", "head_sha": SHA, "state": "open"}
++        gh.pr_comments = lambda n: []
++        d = FakeDesk()
++        reconcile.reconcile_gap(GAP, desk=d, gh=gh, git=FakeGit(remote=SHA))
++        self.assertEqual(state.load(GAP)["state"], "PR_OPEN")
++        self.assertEqual(state.load(GAP)["pr_number"], 8143)
++        self.assertIsNone(state.load(GAP)["queued_lease"])
++        self.assertEqual(gh.created, 0)
++        self.assertEqual(d.releases, [("lease-1", "submitted")])
++
++    def test_release_retry_does_not_lose_pr(self):
++        new_state("FAULT", commit_sha=SHA, pending_pr_number=8143)
++        gh = FakeGH()
++        gh.get_pr = lambda n: {"url": "u", "head_sha": SHA, "state": "open"}
++        gh.pr_comments = lambda n: []
++        d = FakeDesk()
++        with mock.patch.object(d, "release", side_effect=OSError("offline")):
++            reconcile.reconcile_gap(GAP, desk=d, gh=gh, git=FakeGit(remote=SHA))
++        self.assertEqual(state.load(GAP)["state"], "PR_OPEN")
++        self.assertTrue(state.load(GAP)["release_pending"])
++        reconcile.reconcile_gap(GAP, desk=d, gh=gh, git=FakeGit(remote=SHA))
++        self.assertFalse(state.load(GAP)["release_pending"])
++        self.assertEqual(d.releases, [("lease-1", "submitted")])
++
++    def test_fault_does_not_adopt_wrong_pr(self):
++        new_state("FAULT", commit_sha=SHA, pending_pr_number=8143)
++        gh = FakeGH()
++        gh.validate_created = lambda *a, **k: ({}, ["head mismatch"])
++        d = FakeDesk()
++        reconcile.reconcile_gap(GAP, desk=d, gh=gh, git=FakeGit(remote=SHA))
++        self.assertEqual(state.load(GAP)["state"], "FAULT")
++        self.assertIsNone(state.load(GAP)["pr_number"])
++        self.assertEqual(d.releases, [])
++
++    def test_renamed_checker_link(self):
++        c = verdict_comment(SHA, "ACCEPTED")
++        c["body"] = c["body"].replace("brilliant-hq/pequalnp-proofs", config.UPSTREAM)
++        self.assertEqual(reconcile.current_verdict([c], SHA), "ACCEPTED")
++        c["body"] = c["body"].replace(config.UPSTREAM, "unrelated/pequalnp-proofs")
++        self.assertIsNone(reconcile.current_verdict([c], SHA))
++
+     def test_old_or_untrusted_verdict_ignored(self):
+         new_state("PR_OPEN", commit_sha=SHA, pr_number=123)
+         gh = FakeGH()

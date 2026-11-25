@@ -1,0 +1,64 @@
+commit 08a05b2aa47dcf66459ed90ddadd40a1f991509d
+Author:     Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sun Nov 8 04:50:07 2026 +0000
+Commit:     Viche Executive <executive@viche.local>
+CommitDate: Sun Nov 8 05:14:52 2026 +0000
+
+    government/appointments.sh: do not fail identity resolution on a transient agent status
+    
+    Oversight-watch raised 64 flapping telemetry_unavailable incidents because
+    appointments.sh resolve exits 1 whenever Antonina reports a transient
+    "unknown" (or any unrecognized) agent state. Identity lookup must not depend on
+    a live state sample; only mutations (ensure/replace) need a positively
+    identified terminal state. Fixes oversight flapping and the same failure mode in
+    sitting, branch-liveness, clerk-liveness, terminal-continuity and
+    branch-bootstrap callers.
+    
+    Adds a regression case to tests/appointments-smoke.sh. appointments-smoke
+    passes; appointment-recovery-integration-smoke and clerk-liveness-smoke fail
+    identically before and after (pre-existing test-environment gaps).
+    
+    (cherry picked from commit 3e28d146cc7c1d4778af617f17a71fa98a5fae01)
+
+diff --git a/government/appointments.sh b/government/appointments.sh
+index a54f63d2..c6b85f5f 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -69,7 +69,19 @@ if [ -n "$old" ]; then
+     exit 1
+   fi
+   status=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
+-  case "$status" in running|idle|clearexit) live=true;; failed|stopped|killed) :;; *) echo "unknown status $status" >&2; exit 1;; esac
++  case "$status" in
++    running|idle|clearexit) live=true;;
++    failed|stopped|killed) :;;
++    *)
++      # A transient or unrecognized status (e.g. Antonina reporting "unknown"
++      # while a session transitions or recovers) is not evidence of a dead
++      # agent. Identity resolution must not fail for it, or a single transient
++      # sample breaks every caller (sitting, liveness, oversight). Mutations
++      # still require a positively identified terminal state.
++      if [ "$action" = resolve ]; then live=unknown
++      else echo "unknown status $status" >&2; exit 1
++      fi;;
++  esac
+ fi
+ if [ "$action" = replace ] && [ -n "$expected" ] && [ "$old" != "$expected" ]; then
+   echo "Viche: stale recovery appointment $expected for $key; actual is $old" >&2
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+index 9a76b876..b0ea3877 100644
+--- a/tests/appointments-smoke.sh
++++ b/tests/appointments-smoke.sh
+@@ -58,6 +58,12 @@ r=$(/bin/sh "$script" resolve a1)
+ printf clearexit > "$MOCK/$a"
+ [ "$(/bin/sh "$script" ensure a1)" = "$a" ]
+ [ "$(/bin/sh "$script" resolve a1)" = "$a" ]
++# A transient/unrecognized status ("unknown" while a session transitions) must
++# not break identity resolution; otherwise one sample flaps oversight incidents
++# and liveness/sitting callers. Mutations still require a terminal state.
++printf unknown > "$MOCK/$a"
++[ "$(/bin/sh "$script" resolve a1)" = "$a" ] || { echo 'resolve failed on transient unknown status' >&2; exit 1; }
++printf clearexit > "$MOCK/$a"
+ test "$(cat "$MOCK/counter")" -eq 1
+ rm "$MOCK/$a"
+ if /bin/sh "$script" resolve a1 >/dev/null 2>&1; then echo 'resolve invented missing agent' >&2; exit 1; fi

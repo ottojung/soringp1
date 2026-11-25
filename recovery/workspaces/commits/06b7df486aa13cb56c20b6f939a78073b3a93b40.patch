@@ -1,0 +1,1758 @@
+commit 06b7df486aa13cb56c20b6f939a78073b3a93b40
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Wed Nov 25 03:48:55 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Wed Nov 25 03:48:55 2026 +0000
+
+    Replace model-driven PnP staffing with supervised durable reconciliation
+
+diff --git a/deploy/s6/viche-pnp-staffing/run b/deploy/s6/viche-pnp-staffing/run
+new file mode 100755
+index 00000000..970d86e6
+--- /dev/null
++++ b/deploy/s6/viche-pnp-staffing/run
+@@ -0,0 +1,6 @@
++#!/bin/sh
++set -eu
++. /home/lubko/.profile
++export VICHE_TOWN_ROOT=/var/lib/lubko/wd/viche
++export VICHE_STATE_ROOT=/var/lib/lubko/wd/viche-state
++exec /bin/sh "$VICHE_TOWN_ROOT/missions/pnp/staffing.sh" supervised
+diff --git a/government/executive-agenda.md b/government/executive-agenda.md
+index 20c01e4c..0dba41df 100644
+--- a/government/executive-agenda.md
++++ b/government/executive-agenda.md
+@@ -138,6 +138,8 @@ Executive coordinator when the current appointment changes.
+ Standing deterministic mission orders may run in the Executive's independent
+ mission hook even while its model session is occupied. They execute only
+ explicitly prescribed routine duties, not discretionary allocation choices.
+-The Executive remains accountable for actual continuity, decisions and
+-replenishment; inspect hook failures and choose further independent work.
++The Executive remains accountable for actual continuity and outcomes. For PnP,
++programmatic staffing is the standing controller’s responsibility; inspect its
++health, diagnose persistent vacancies, repair failures and adjust policy rather
++than manually launching or replenishing agents.
+ Do not substitute a completed pass or old note for a continuing obligation.
+diff --git a/missions/pnp/PROTOCOL.md b/missions/pnp/PROTOCOL.md
+index accb9bf3..cc0974a1 100644
+--- a/missions/pnp/PROTOCOL.md
++++ b/missions/pnp/PROTOCOL.md
+@@ -34,7 +34,7 @@ Define the stable operator interface:
+ The exact file structure can vary only if the commands and behaviors remain equally clear and tested.
+ 
+ ## Responsibilities (do not conflate)
+-1. **Viche Executive/research coordinator** chooses whether to invest effort and dispatches independently chosen mathematical approaches to Antonina-managed workers. The automatic allocator requests ordinary gaps first, then hard gaps to fill all available lease slots. No numeric cap on researchers except the desk's active lease limit and actual resource constraints.
++1. **Viche Executive/research coordinator** monitors and repairs the standing staffing controller, which reconciles desired research positions using the allocator’s exact assignments. The automatic allocator requests ordinary gaps first, then hard gaps to fill all available lease slots. No numeric cap on researchers except the desk's active lease limit and actual resource constraints.
+ 2. **Desk broker** exclusively owns desk claims/lease renewals/release/reconciliation for the ottojung handle. Research agents do not independently consume leases. Max five active leases under the current desk rule; every researchable lease has one general researcher; only the selected focus receives additional specialists. Re-read desk docs on startup, rather than trusting old pnp.sh comments.
+ 3. **Research workers** produce Lean candidate files, mathematical arguments, and negative results. They never call authenticated GitHub mutating operations as part of their task. They may read public repositories, use Lean, and communicate with the coordinator. A candidate is input data, not an approved Git commit.
+ 4. **Publisher** is a deterministic program, not a reasoning agent. It is the only *supported workflow* for authenticated repository mutations. Its parameters are only gap ID and local candidate filename. It never accepts a repository, URL, PR target, author, committer, signing key, shell command, or branch from the worker. It signs and constructs the commit itself.
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index 12aafe89..e29330c6 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -9,7 +9,7 @@ authenticated GitHub mutation commands directly.
+ ## Commands (stable interface)
+ 
+     python3 missions/pnp/cli.py status
+-    python3 -m missions.pnp.staff GAP --worker LABEL=APPROACH
++    python3 -m missions.pnp.staffing.controller status
+     python3 missions/pnp/cli.py beat <gap-id>
+     python3 missions/pnp/cli.py release <gap-id> <reason> --operator-override --attempt ATTEMPT --evidence EVIDENCE
+     python3 missions/pnp/cli.py submit <gap-id> <candidate-file>
+@@ -84,9 +84,9 @@ contributors export it names. Run python3 missions/pnp/leaderboard.py update
+ last verified snapshot through outages. Only checked steps credited to
+ ottojung count. Source and observations persist under Viche state, never
+ under government. The status.sh adapter reports leaderboard movement plus
+-actual Antonina P vs NP worker visibility; only Executive dispatches them.
++actual Antonina P vs NP worker visibility; the standing controller dispatches them.
+ 
+-The Executive runs python3 -m missions.pnp.staff --baseline to maintain one general researcher per researchable lease, and the staff batch helper for extra distinct approaches on the selected focus. Findings flow directly through the bound guard and portfolio inspect. Manual acquisition is reserved for maintenance while the allocator is stopped. Raw desk next calls mutate state and are not diagnostics.
++The independent standing staffing controller maintains one general researcher per researchable lease and focused specialists. The Executive monitors and repairs it rather than dispatching agents manually. See [staffing](staffing/README.md). Findings flow directly through the bound guard and portfolio inspect. Manual acquisition is reserved for maintenance while the allocator is stopped. Raw desk next calls mutate state and are not diagnostics.
+ 
+ 
+ ## Reusable mathematical search
+diff --git a/missions/pnp/assignment.py b/missions/pnp/assignment.py
+index 76e9253f..b5752499 100644
+--- a/missions/pnp/assignment.py
++++ b/missions/pnp/assignment.py
+@@ -76,7 +76,7 @@ def first_attempt(gap):
+         return False
+ 
+ 
+-def prepare(gap, checkout=True, worker=None, base=None):
++def prepare(gap, checkout=True, worker=None, base=None, expected=None):
+     """Executive calls once per assignment. Never relabel an old checkout."""
+     from . import gitctl, focus
+     if not isinstance(gap, str) or not config.GAP_ID_RE.fullmatch(gap):
+@@ -86,6 +86,8 @@ def prepare(gap, checkout=True, worker=None, base=None):
+         if not rec or (rec.get("state") not in ("LEASED", "RESEARCHING") and not focus.correction(rec)) or not rec.get("lease"):
+             raise ValueError("no live research assignment")
+         lease = rec["lease"]
++        if expected is not None and lease != expected:
++            raise ValueError("assignment generation changed")
+         root = Path(state.gap_dir(gap))
+         old = root / "path"
+         legacy = root / "research-assignment.json"
+diff --git a/missions/pnp/continuity.py b/missions/pnp/continuity.py
+index f1df2966..f82539d1 100644
+--- a/missions/pnp/continuity.py
++++ b/missions/pnp/continuity.py
+@@ -53,6 +53,8 @@ def support_path(role):
+ 
+ 
+ def support_pass(role, records, selected, agents):
++    if Path(config.STATE_ROOT).resolve() == Path("/var/lib/lubko/wd/viche-state/pnp"):
++        raise RuntimeError("standing controller owns live dispatch")
+     path = support_path(role)
+     path.mkdir(parents=True, exist_ok=True)
+     receipt = path / "dispatch.json"
+@@ -182,6 +184,8 @@ def already_covered(records, selected, observed):
+ 
+ 
+ def execute():
++    if Path(config.STATE_ROOT).resolve() == Path("/var/lib/lubko/wd/viche-state/pnp"):
++        raise RuntimeError("standing controller owns live dispatch")
+     records = live()
+     selected = focus.current()
+     observed = status.workers()
+@@ -211,6 +215,10 @@ def execute():
+ 
+ 
+ if __name__ == "__main__":
++    if Path(config.STATE_ROOT).resolve() == Path("/var/lib/lubko/wd/viche-state/pnp"):
++        from .staffing import store
++        print(json.dumps(store.read_health(),indent=2))
++        raise SystemExit(0)
+     try:
+         print(json.dumps(execute(), ensure_ascii=False))
+     except (OSError, ValueError, subprocess.SubprocessError) as exc:
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index a361f08d..210cf0a8 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -1,6 +1,6 @@
+ #!/bin/sh
+ # Durable nonblocking P vs NP lease maintenance, invoked each Town boot cycle.
+-# No agent/model starts here: the Executive assigns mathematical research.
++# Staffing is independently reconciled under the standing founder order.
+ set -eu
+ . "$(dirname "$0")/runtime.sh"
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+@@ -11,6 +11,12 @@ cd "$town"
+ mkdir -p "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}"
+ nohup setsid /bin/sh "$town/missions/pnp/allocator.sh" </dev/null \
+     >>"${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/allocator.log" 2>&1 &
++# Supervise the standing staffing controller independently of model sessions.
++# It owns its lifetime lock, and each tick is bounded and crash-recoverable.
++if [ ! -d /run/service/viche-pnp-staffing ]; then
++    nohup setsid /bin/sh "$town/missions/pnp/staffing.sh" </dev/null \
++        >/dev/null 2>&1 &
++fi
+ # Start independent local resource reclamation before any network I/O.
+ python3 -m missions.pnp.watchdog || :
+ # Independent checked-proof scout. A slow fetch/index never blocks leasing,
+diff --git a/missions/pnp/executive.sh b/missions/pnp/executive.sh
+index 02f7bd75..5d7bab60 100644
+--- a/missions/pnp/executive.sh
++++ b/missions/pnp/executive.sh
+@@ -1,7 +1,6 @@
+ #!/bin/sh
+-# Standing Executive allocation order; not part of the desk allocator.
++# Executive monitors standing staffing health; no agent starts in this hook.
+ set -eu
+ . "$(dirname "$0")/runtime.sh"
+-export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:/bin:$PATH
+ cd "$town"
+-python3 -m missions.pnp.continuity
++python3 -m missions.pnp.staffing.controller status
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 18eef5fd..f732e9eb 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -357,7 +357,7 @@ complete proof immediately without waiting for any scout, review, or Executive
+ approval. Executive delivers urgent coordination findings promptly; preempt
+ only when confirmed material benefit outweighs interruption and preserve
+ ongoing useful computations. Never dispatch, restart or steer an agent from
+-a support agent. Executive retains sole lifecycle authority.
++a support agent. The standing staffing controller executes lifecycle actions; Executive monitors and repairs it.
+ 
+ ## Continuous lease allocation (Founder priority)
+ 
+@@ -367,7 +367,7 @@ and keeps polling even with no work. The desk chooses exact gaps; do not
+ attempt arbitrary ID claims. The allocator selects one stable research focus, preferring concrete,
+ ordinary and low-competition work among held gaps until the portfolio
+ researcher makes an evidence-based decision. Every held researchable lease
+-has one general researcher. The Executive owns agent starts/stops; do not
++has one general researcher. The staffing controller owns routine agent starts/stops; do not
+ duplicate allocator polling. Missing staffing is a replenishment signal,
+ not a mathematical release decision. The lease evaluator decides honest
+ releases. Preserve work artifacts and protect queued/publishing candidates.
+@@ -416,7 +416,7 @@ for launching other agents. The existing baseline and focus rules remain.
+ 
+ When an approach admits a useful decomposition, the proof integrator
+ requests exact Lean obligations with `pnp-research obligations request`
+-and specifies their dependencies. Executive assigns unresolved ready nodes
++and specifies their dependencies. The standing controller assigns unresolved ready nodes
+ to complementary specialists; do not allocate every specialist the same
+ complete theorem. Keep independent approaches when useful. New focused
+ specialists should share the general researcher's exact pinned base. Existing
+@@ -482,7 +482,7 @@ The allocator executes the documented reason other, preserves artifacts,
+ protects queued/publishing candidates, honors hard-step minimum holding time,
+ and refills the slot. No additional review or approval. Never release
+ merely because a lease is temporarily unstaffed. Both evaluators finish their passes
+-rather than manufacturing activity. The Executive alone staffs and retires
++rather than manufacturing activity. The standing controller staffs and retires
+ agents, and immediately obeys a valid focus decision.
+ 
+ ## Baseline research on every lease (latest Founder priority)
+@@ -498,12 +498,11 @@ focus, not its general researcher. Do not count support roles as lease workers.
+ When a general researcher finishes, replenish promptly while the lease is
+ still live. A queued complete proof is owned by the publisher instead.
+ 
+-Executive: fill missing_general before unrelated coordination using:
+-`python3 -m missions.pnp.staff --baseline`
+-This is an idempotent batch dispatch for all researchable leases. Use
+-staff GAP --worker LABEL=APPROACH for extra specialists on research_focus only.
+-The status fields general_workers, missing_general, and off_focus_workers
+-identify exact coverage and excess sessions.
++The standing staffing controller replenishes missing general researchers.
++The Executive inspects controller health and persistent vacancies, diagnoses
++failures and changes exact-attempt policy when necessary. Routine manual
++agent starts or stops are not part of the Executive model turn.
++See missions/pnp/staffing/README.md for commands and fault recovery.
+ 
+ All bound researchers share substantial mathematical findings directly,
+ including promising routes, failed approaches, precise blockers and checked
+@@ -519,14 +518,14 @@ The allocator must never infer mathematical abandonment from agent absence.
+ 
+ ## Standing Executive continuity order (Founder priority, supersedes vacancy holds)
+ 
+-The Executive's prescribed mechanical staffing duties run through the generic
+-Executive mission hook independently of its reasoning session. This is the
+-Executive executing a standing order, NOT the desk allocator, an external
+-assistant, a support agent, or a new discretionary scheduler. The Executive
+-retains lifecycle authority and chooses additional approaches, intervenes on
+-duplicates, and resolves resource or model failures. Do not manually run the
+-live hook from another office. The hook uses the same staffing lock as the
+-Executive's interactive commands; only the existing allocator claims leases.
++Founder directive (2026-11-25): routine staffing is programmatic and
++independent of the Executive model and branch. The standing staffing
++controller reconciles every exact desired position continuously. The
++Executive monitors, debugs, and adjusts policy; the controller exclusively
++owns routine research-agent starts, replenishment and cooperative retirement.
++Only the existing allocator claims leases; the independent evaluators own
++evidence-based allocation decisions. There is no manual staffing fallback
++that competes with the controller.
+ 
+ Every researchable lease has an actively reasoning general researcher.
+ A completed bounded pass is NOT a reason to leave a reserve empty. Reuse the
+@@ -536,8 +535,8 @@ demonstrated resource/model blocker ends this obligation. Prior records holding
+ vacancies until a new idea appears are superseded. The standing allocation
+ order also supplies an integrator and at least one independent alternative when
+ those fronts are uncovered, and a correction owner when the selected PR needs repair.
+-These are starting roles, never a maximum; the Executive chooses additional
+-useful distinct approaches. Support passes are replenished on new assignments
++These are starting roles, never a maximum; the Executive may declare additional
++useful exact-attempt approaches in controller policy. Support passes are replenished on new assignments
+ or substantive primary evidence, not identical status polling. No additional
+ report, approval or publication gate is introduced.
+ 
+diff --git a/missions/pnp/research/README.md b/missions/pnp/research/README.md
+index 1481ee2f..009d5253 100644
+--- a/missions/pnp/research/README.md
++++ b/missions/pnp/research/README.md
+@@ -4,7 +4,7 @@
+ 
+ `pnp-research start` in a research workspace returns the current role, pinned
+ revision, assigned subproblem, checked/open dependencies, and relevant earlier
+-results (including released leases). The Executive dispatch helper injects a
++results (including released leases). The standing staffing controller injects a
+ short role-specific prompt automatically. For an unfamiliar command, use
+ `pnp-research guide ROLE` for executable examples or the command's `--help`.
+ Do not read every manual before doing mathematics. A stale work packet explains\nthat the assignment ended and points only to preservation and receipt collection.\nPublished-proof corrections receive correction-specific commands.
+@@ -124,10 +124,10 @@ Benchmark implementation: `python3 -m missions.pnp.research.certificate_bench
+ 
+ ## Operations and decision support
+ 
+-- Executive lifecycle uses the canonical standing dispatch helper; it
++- The standing staffing controller manages lifecycle; it
+   injects the playbook before launching a worker. For explicit independent
+   dispatch: `pnp-research dispatch ROLE --agent ID --cwd WORKSPACE --task TASK`.
+-  Only Executive may use agent-launch/steer actions.
++  Routine research-agent lifecycle actions belong to the standing controller; Executive monitors and debugs.
+ - `pnp-research adoption` measures confirmed launches, discovery, substantive
+   commands, help calls before first use, and time to first successful use
+   using the actual agent environment.
+diff --git a/missions/pnp/research/roles.py b/missions/pnp/research/roles.py
+index 30bc7469..0857861a 100644
+--- a/missions/pnp/research/roles.py
++++ b/missions/pnp/research/roles.py
+@@ -3,6 +3,7 @@ import argparse
+ import subprocess
+ from pathlib import Path
+ 
++from .. import config
+ from .playbook import ROLES, guide
+ from . import adoption
+ 
+@@ -15,7 +16,9 @@ def main():
+     if not a.agent:
+         print(text);return 0
+     if not a.cwd or not a.cwd.is_dir() or not a.task:p.error("explicit task and existing cwd required")
+-    # Existing agents are created and selected only by Executive.
++    if Path(config.STATE_ROOT).resolve() == Path("/var/lib/lubko/wd/viche-state/pnp"):
++        p.error("staffing controller owns research launches; use its policy and health")
++    # Legacy noncanonical fixture entry point.
+     did=adoption.planned(a.agent,a.cwd,a.role,text)
+     result=subprocess.run(["antonina","agent","run","--id",a.agent,"--cwd",str(a.cwd.resolve()),
+                             "--prompt",text,"--detach","--json"]+(["--steer"] if a.steer else []),capture_output=True,text=True)
+diff --git a/missions/pnp/staff.py b/missions/pnp/staff.py
+index 1519e0fd..da8ec0f0 100644
+--- a/missions/pnp/staff.py
++++ b/missions/pnp/staff.py
+@@ -163,6 +163,8 @@ def staffing_lock():
+ 
+ def dispatch(gap, plans, agents=None, locked=False):
+     """adopt by exact cwd; ``agents`` may be a baseline's single snapshot."""
++    if Path(config.STATE_ROOT).resolve() == Path("/var/lib/lubko/wd/viche-state/pnp"):
++        raise RuntimeError("standing controller owns live dispatch")
+     rec = state.load(gap)
+     if not focus.eligible(rec) or rec.get("queued_lease"):
+         raise ValueError("not a live research or correction assignment")
+@@ -281,6 +283,8 @@ GENERAL_APPROACH = ("Develop a broad mathematical understanding of the exact pro
+ 
+ 
+ def baseline(agents=None, locked=False):
++    if Path(config.STATE_ROOT).resolve() == Path("/var/lib/lubko/wd/viche-state/pnp"):
++        raise RuntimeError("standing controller owns live dispatch")
+     if not locked:
+         with staffing_lock():
+             return baseline(agents, locked=True)
+@@ -316,6 +320,14 @@ def main():
+     p.add_argument("--baseline", action="store_true", help="staff one general researcher on every live lease")
+     p.add_argument("--worker", action="append", metavar="LABEL=APPROACH")
+     args = p.parse_args()
++    # Interactive legacy entry points must not race the standing controller.
++    # Hermetic callers of the old helpers remain supported for regression tests.
++    if Path(config.STATE_ROOT).resolve() == Path("/var/lib/lubko/wd/viche-state/pnp"):
++        from .staffing import store
++        if args.worker:
++            p.error("declare exact-attempt extras in staffing/policy.json; controller owns launches")
++        print(json.dumps(store.read_health(),indent=2))
++        return
+     try:
+         if args.baseline:
+             if args.gap or args.worker:
+diff --git a/missions/pnp/staffing.sh b/missions/pnp/staffing.sh
+new file mode 100755
+index 00000000..589de223
+--- /dev/null
++++ b/missions/pnp/staffing.sh
+@@ -0,0 +1,26 @@
++#!/bin/sh
++# Independent persistent controller, not an Executive model turn.
++set -eu
++. "$(dirname "$0")/runtime.sh"
++export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:$PATH
++export PNP_STAFFING_DAEMON=1
++cd "$town"
++dir="$PNP_STATE_ROOT/staffing"
++mkdir -p "$dir"
++exec 9>"$dir/loop.lock"
++if [ "${1:-}" = supervised ]; then
++    flock 9
++else
++    flock -n 9 || exit 0
++fi
++while [ -f missions/pnp/staffing/controller.py ]; do
++    # Re-read code and policy on each pass. No long-running Python process
++    # pins an old implementation after a canonical deployment.
++    timeout -k 5 180 python3 -m missions.pnp.staffing.controller tick || :
++    # Keep the log bounded via journaling in SQLite, not per-tick append.
++    interval=$(python3 -c 'from missions.pnp.staffing.policy import load; print(load()["interval"])' 2>/dev/null) || interval=5
++    if [ "${1:-}" != supervised ] && [ -d /run/service/viche-pnp-staffing ]; then
++        exit 0
++    fi
++    sleep "$interval"
++done
+diff --git a/missions/pnp/staffing/README.md b/missions/pnp/staffing/README.md
+new file mode 100644
+index 00000000..67b9c7f2
+--- /dev/null
++++ b/missions/pnp/staffing/README.md
+@@ -0,0 +1,96 @@
++# Standing PnP staffing controller
++
++The Founder delegates routine research-agent lifecycle management to this
++persistent controller. The Executive monitors health, repairs bugs and
++changes policy when justified; no model turn is needed to refill a vacancy.
++The controller neither chooses a mathematical focus nor acquires/releases
++leases. The existing allocator and independent evaluators retain those
++decisions. The publisher retains all submission and signing authority.
++
++## Desired state and control loop
++
++Each immutable lease attempt has one general position. The selected focus
++gets an integrator and an alternative, plus up to two ready independent
++obligation specialists by default; a published correction gets a correction
++owner. The independent method/tool teams and support roles are separate.
++Roles that complete a useful support pass wait for new evidence or a
++bounded periodic refresh. General and focus workers resume promptly after
++normal exits. Additional focused approaches can be declared in policy.
++
++The controller derives positions from current authoritative records, uses
++the exact attempt-bound workspace as identity, and observes Antonina's
++running roster and exact agent status. Existing workers are adopted.
++Historical pagination is only needed for unknown identities. Known slots
++continue concurrently while history is retrieved. Every new identity and
++launch intent is recorded before calling Antonina. A launch acknowledgement
++does not count as coverage: exact live status must confirm it.
++
++An uncertain launch is reconciled on the same identity before retry. An
++ambiguous creation can leave an idle orphan, which is adopted from complete
++history; no blind second launch occurs. A confirmed removed identity may be
++replaced. Explicitly orphaned runners are repaired through Antonina's stop
++operation after a grace period. Duplicate live agents are retired
++cooperatively after exact revalidation; the existing owner is preferred.
++Uncertain observations never justify a new start or stop. Terminal or
++superseded assignments and off-focus specialists are retired, never their
++workspaces. Completed obligation specialists may finish their current pass.
++
++A short or failed invocation backs off exponentially, bounded by policy.
++Repeated failures rotate the context while preserving the exact workspace
++and its evidence. Normal completion reuses the same context. The existing
++town resource guard applies before new work. Bounded concurrent operations
++limit dispatch pressure, not the number of active workers. Prompt files
++avoid command-line size limits. A malformed policy fails closed and remains
++available for inspection.
++
++## Operation
++
++The canonical mission cycle starts the independent daemon if no dedicated
++S6 service is registered. A dedicated S6 service is preferred; its template
++is in deploy/s6/viche-pnp-staffing/run. Both paths share a lifetime lock;
++fallback relinquishes it when the supervisor registers. Each bounded tick
++loads canonical code and policy anew. A crash leaves its durable intents,
++and the next tick reconciles them. The service does not require an Executive
++appointment or working model session to start.
++
++From the canonical checkout:
++
++    python3 -m missions.pnp.staffing.controller status
++    python3 -m missions.pnp.staffing.controller metrics --hours 1
++    python3 -m missions.pnp.staffing.controller policy
++    python3 -m missions.pnp.staffing.controller set-policy --json '{"interval":3,"parallel":6}'
++    python3 -m missions.pnp.staffing.controller pause
++    python3 -m missions.pnp.staffing.controller resume
++
++Pause disables new starts and automated stops, not observations or the
++existing allocator. It does not kill running research. Additional
++specialists are policy entries with exact gap, attempt (from portfolio
++inspect), label starting with extra-, and a concrete approach. Changes take
++effect on the next tick. There is no active-worker ceiling beyond standing
++roles, exact extra assignments and resource constraints.
++
++State is under pnp/staffing: controller.sqlite (FULL synchronous SQLite
++transactions, WAL), health.json (atomic snapshot), policy.json, loop.lock.
++The journal records identities, intents, acknowledgements, observed starts,
++failures and rotations; no prompt or credential bytes. Coverage samples
++are retained for seven days; lifecycle events for thirty days. Metrics
++report observed general slot-seconds and unobserved intervals separately.
++A stale health snapshot is not evidence of coverage. A live but quiet
++worker exposes last activity; the controller does not kill one simply for
++being quiet (it might be compiling). A sustained vacancy or stale health
++requires Executive diagnosis, not another independent staffing loop.
++
++The Antonina interface does not provide a server-side idempotency key or
++atomic lease/launch transaction. This is reconciliation, not a claim of
++exactly-once external effects. The trusted shared Unix UID is not a security
++boundary. Out-of-band lifecycle commands can violate ownership and must not
++be used for routine replenishment.
++
++## Verification
++
++python3 tests/pnp-staffing.py exercises backend timeouts, crashes after
++side effects, unknown/deleted identities, short-run backoff and rotation,
++duplicates, focus changes, resource guards, policy validation, independent
++slot progress and truthful coverage. Production runtime-isolation tests
++prevent copied worktrees and boot fixtures from starting live services.
++The full town suite remains the canonical integration gate.
+diff --git a/missions/pnp/staffing/__init__.py b/missions/pnp/staffing/__init__.py
+new file mode 100644
+index 00000000..e6de1c73
+--- /dev/null
++++ b/missions/pnp/staffing/__init__.py
+@@ -0,0 +1 @@
++"""Persistent reconciliation of the Executive's standing research orders."""
+diff --git a/missions/pnp/staffing/backend.py b/missions/pnp/staffing/backend.py
+new file mode 100644
+index 00000000..ce4b48cd
+--- /dev/null
++++ b/missions/pnp/staffing/backend.py
+@@ -0,0 +1,159 @@
++"""Bounded Antonina operations. Prompt files avoid ARG_MAX and secret argv."""
++import json
++import os
++from pathlib import Path
++import re
++import subprocess
++import tempfile
++import fcntl
++
++from .. import assignment, config, gitctl, staff, state, support
++from ..research import adoption, playbook
++from . import plan
++
++
++class Uncertain(RuntimeError):
++    pass
++
++
++class MissingAgent(Uncertain):
++    pass
++
++
++def wire(*args, timeout=12):
++    p = subprocess.run(["antonina","agent",*args],capture_output=True,text=True,
++                       timeout=timeout,check=True)
++    return p.stdout.strip()
++
++
++def object_row(text):
++    row=json.loads(text)
++    if not isinstance(row,dict):
++        raise Uncertain("invalid backend response")
++    return row
++
++
++def running():
++    # No destructive operations from partial/unreadable observations.
++    rows={}
++    for page in range(1,65):
++        data=object_row(wire("list","--running","--page",str(page),"--limit","100","--json"))
++        agents=data.get("agents")
++        if not isinstance(agents,list) or data.get("unreadable"):
++            raise Uncertain("running roster unavailable")
++        for a in agents:
++            if not isinstance(a,dict) or not isinstance(a.get("id"),str) or a["id"] in rows:
++                raise Uncertain("unstable running roster")
++            rows[a["id"]]=a
++        if len(agents)<100:
++            return list(rows.values())
++    raise Uncertain("running roster exceeds bounded scan")
++
++
++def status(aid):
++    try:
++        row=object_row(wire("status","--id",aid,"--json"))
++    except subprocess.CalledProcessError as exc:
++        if exc.returncode==3 and (exc.stderr or "").strip()=="antonina: unknown agent: "+aid:
++            raise MissingAgent("agent deleted") from exc
++        raise
++    if row.get("id")!=aid or not isinstance(row.get("state"),str) or type(row.get("alive")) is not bool:
++        raise Uncertain("agent identity unavailable")
++    return row
++
++
++def same(row,path):
++    return (row.get("invocation_cwd") or row.get("cwd"))==path
++
++
++def live(row):
++    return row.get("state")=="running" and row.get("alive") is True
++
++
++def known_terminal(row):
++    return row.get("state") in staff._REUSABLE and row.get("alive") is False
++
++
++def prepare(slot):
++    if not slot.gap:
++        Path(slot.path).mkdir(parents=True,exist_ok=True)
++        return
++    rec=state.load(slot.gap)
++    if not plan.current(slot):
++        raise Uncertain("assignment changed")
++    path=Path(slot.path)
++    base=slot.base or None
++    if not (path/".git").exists() and not base:
++        general=Path(state.gap_dir(slot.gap),"attempts",assignment.attempt_id(rec["lease"]),"workers/general/path")
++        if slot.label!="general" and (general/".git").exists():
++            base=subprocess.check_output(["git","-C",str(general),"rev-parse","HEAD"],text=True,timeout=5).strip()
++        else:
++            # Staffing never waits for a network fetch when a local public
++            # mirror is available. The independent mirror refresh owns freshness.
++            try:
++                base=gitctl.run(["git","--git-dir="+gitctl.MIRROR,"rev-parse","refs/remotes/upstream/main"]).stdout.strip()
++            except gitctl.GitError:
++                # Bootstrap only if the local mirror/ref is absent. Serialize
++                # the repair; other slots retry rather than race a clone.
++                root=Path(config.CACHE_DIR);root.mkdir(parents=True,exist_ok=True)
++                with (root/"staffing-mirror.lock").open("a+") as lock:
++                    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++                    base=gitctl.ensure_mirror()
++    result=assignment.prepare(slot.gap,worker=slot.label,base=base,expected=rec["lease"])
++    if result["cwd"]!=slot.path or not plan.current(slot):
++        raise Uncertain("assignment changed during preparation")
++
++
++def new(slot):
++    title=("Viche P vs NP research: "+slot.gap+" "+slot.label if slot.gap
++           else support.PREFIX+" "+slot.label)
++    aid=wire("new","--cwd",slot.path,"--title",title)
++    if not re.fullmatch(r"[A-Za-z0-9_-]+",aid):
++        raise Uncertain("unreadable created agent identity")
++    return aid
++
++
++def resource_ready():
++    # Use the existing town memory safety policy, not a private worker cap.
++    root=Path(__file__).resolve().parents[3]
++    p=subprocess.run(["/bin/sh",str(root/"government/resource-safety.sh"),"pnp-staffing"],
++                     capture_output=True,text=True,timeout=5)
++    return p.returncode==0
++
++
++def run(slot,aid):
++    role=playbook.role_for(slot.label,slot.label=="general") if slot.gap else slot.label
++    if slot.gap:
++        rec=state.load(slot.gap)
++        text=staff.prompt(rec,slot.task,slot.label=="general",slot.label)
++        text+="\nContinue the durable mathematical work from this workspace. Do not end a pass after only reporting status. If no route remains, preserve exact exhaustion evidence for the evaluator."
++    else:
++        text=("Continue the durable support work in this workspace. Read current assignments and prior findings. "
++              "Deliver concrete results and preserve them. No agent launches, lease acquisition or direct publication. "
++              "Do not repeat identical work without new evidence.\n"+slot.task)
++    text=playbook.guide(role)+"\n\n"+text
++    did=adoption.planned(aid,Path(slot.path),role,text)
++    with tempfile.NamedTemporaryFile(mode="w",encoding="utf-8",prefix="pnp-staff-",delete=True) as f:
++        f.write(text);f.flush()
++        if not plan.current(slot):
++            raise Uncertain("assignment changed before run")
++        row=object_row(wire("run","--id",aid,"--cwd",slot.path,"--prompt-file",f.name,
++                           "--detach","--json",timeout=30))
++    if row.get("id")!=aid or row.get("state")!="running":
++        raise Uncertain("launch acknowledgement not confirmed")
++    adoption.confirmed(did)
++    if slot.gap and slot.label.startswith("ob-"):
++        # Advisory assignment record; dispatch already happened.
++        try:
++            from contextlib import closing
++            from ..research import knowledge
++            import time
++            with closing(knowledge.db()) as c,c:
++                c.execute("INSERT OR REPLACE INTO assignment VALUES(?,?,?,?)",
++                          (slot.label[3:],slot.attempt,slot.label,time.time()))
++        except Exception:
++            pass
++
++
++def stop(aid):
++    wire("stop","--id",aid,timeout=15)
+diff --git a/missions/pnp/staffing/controller.py b/missions/pnp/staffing/controller.py
+new file mode 100644
+index 00000000..f5411a7b
+--- /dev/null
++++ b/missions/pnp/staffing/controller.py
+@@ -0,0 +1,127 @@
++"""Single-writer, independently supervised desired-state reconciliation."""
++import argparse
++from concurrent.futures import ThreadPoolExecutor
++import json
++import os
++from pathlib import Path
++import sys
++import time
++
++from .. import staff
++from . import backend, plan, policy, reconcile, store
++
++
++def tick():
++    now=time.time()
++    p=policy.load()
++    # The lock also fences legacy helpers during the migration.
++    with staff.staffing_lock():
++        running=backend.running()
++        issues=[]
++        slots=plan.desired(p,running,issues)
++        # Known positions do not wait for the historical registry scan.
++        # Cold/ambiguous identities need complete history before creating.
++        warm=[];cold=[]
++        for s in slots:
++            if store.get(s.key).get("agent") or any(backend.same(a,s.path) for a in running):
++                warm.append(s)
++            else:
++                cold.append(s)
++        rows=[]
++        def finish(s,f):
++            try:
++                row=f.result()
++            except Exception as exc:
++                row={"phase":"unknown","reason":"slot error "+type(exc).__name__}
++            rows.append({"key":s.key,"label":s.label,"gap":s.gap,
++                         **{k:row.get(k) for k in ("phase","reason","agent","vacant_since","next_at","failures","started","activity","model")}})
++        def history_scan():
++            try:
++                return staff.roster()
++            except reconcile.ERRORS:
++                return None
++        with ThreadPoolExecutor(max_workers=1) as scan:
++            history_future=scan.submit(history_scan) if cold and not p["paused"] else None
++            with ThreadPoolExecutor(max_workers=p["parallel"]) as pool:
++                jobs=[(s,pool.submit(reconcile.reconcile,s,p,running,None))
++                      for s in sorted(warm,key=lambda s:s.priority)]
++                # Known positions already reconcile while the scan is underway.
++                history=history_future.result() if history_future else None
++                jobs.extend((s,pool.submit(reconcile.reconcile,s,p,running,history))
++                            for s in sorted(cold,key=lambda s:s.priority))
++                for s,f in jobs:
++                    finish(s,f)
++        # Retire exact obsolete agents independently, never arbitrary processes.
++        retired=[]
++        if not p["paused"]:
++            for a in running:
++                try:
++                    if plan.obsolete(a,slots):
++                        fresh=backend.status(a["id"])
++                        if backend.live(fresh) and plan.obsolete(fresh,slots):
++                            backend.stop(a["id"])
++                            retired.append(a["id"])
++                except reconcile.ERRORS:
++                    pass
++        t=time.time()
++        store.sample(rows,t)
++        out={"at":t,"last_good_at":t,"state":"paused" if p["paused"] else "degraded" if issues or any(r["phase"]=="unknown" for r in rows) else "healthy" if all(r["phase"] in ("running","completed") for r in rows) else "reconciling","issues":issues,
++             "duration":round(t-now,3),"slots":rows,"retired":retired,
++             "desired":len(rows),"running":sum(r["phase"]=="running" for r in rows),
++             "unknown":sum(r["phase"]=="unknown" for r in rows)}
++        store.health(out)
++        return out
++
++
++def main():
++    ap=argparse.ArgumentParser(description=__doc__)
++    ap.add_argument("command",choices=("tick","status","metrics","policy","set-policy","pause","resume"),default="status",nargs="?")
++    ap.add_argument("--hours",type=float,default=1)
++    ap.add_argument("--json",help="JSON object of policy fields to update")
++    args=ap.parse_args()
++    if args.command=="status":
++        print(json.dumps(store.read_health(),indent=2));return 0
++    if args.command=="metrics":
++        if not 0<args.hours<=168:
++            ap.error("metrics window must be within 0–168 hours")
++        print(json.dumps(store.metrics(args.hours),indent=2));return 0
++    if args.command=="policy":
++        print(json.dumps(policy.load(),indent=2));return 0
++    if args.command in ("set-policy","pause","resume"):
++        if Path(__file__).resolve().parents[3]!=Path("/var/lib/lubko/wd/viche") or policy.root()!=Path("/var/lib/lubko/wd/viche-state/pnp/staffing"):
++            ap.error("policy edits require canonical deployment")
++        try:
++            patch=json.loads(args.json or "{}") if args.command=="set-policy" else {"paused":args.command=="pause"}
++            if not isinstance(patch,dict) or not patch:
++                raise ValueError("nonempty policy object required")
++            print(json.dumps(policy.change(lambda p:{**p,**patch}),indent=2))
++            return 0
++        except (OSError,ValueError,TypeError) as exc:
++            ap.error(str(exc))
++    # Only the canonical launcher can mutate live state. Hermetic tests call
++    # the pure tick with an isolated state root and mocked backend.
++    if (Path(__file__).resolve().parents[3]!=Path("/var/lib/lubko/wd/viche")
++            or os.environ.get("PNP_STAFFING_DAEMON")!="1"
++            or policy.root()!=Path("/var/lib/lubko/wd/viche-state/pnp/staffing")):
++        ap.error("live ticks belong to canonical staffing daemon")
++    try:
++        result=tick()
++        print(json.dumps({k:v for k,v in result.items() if k!="slots"}),flush=True)
++        return 0
++    except Exception as exc:
++        # Preserve previous evidence while making uncertainty explicit.
++        previous=store.read_health()
++        t=time.time()
++        rows=[{**r,"phase":"unknown"} for r in previous.get("slots",[])]
++        if rows:
++            try:store.sample(rows,t)
++            except Exception:pass
++        store.health({**previous,"at":t,"state":"unknown","slots":rows,
++                      "running":None,"unknown":len(rows),
++                      "reason":type(exc).__name__,"last_good_at":previous.get("last_good_at",previous.get("at"))})
++        print("staffing tick deferred: "+type(exc).__name__,file=sys.stderr,flush=True)
++        return 1
++
++
++if __name__=="__main__":
++    raise SystemExit(main())
+diff --git a/missions/pnp/staffing/plan.py b/missions/pnp/staffing/plan.py
+new file mode 100644
+index 00000000..9a3f1527
+--- /dev/null
++++ b/missions/pnp/staffing/plan.py
+@@ -0,0 +1,125 @@
++"""Pure desired-state derivation; no agent or desk mutations."""
++from dataclasses import dataclass
++from pathlib import Path
++import hashlib
++from contextlib import closing
++
++from .. import assignment, config, continuity, focus, staff, state, support
++from . import policy
++
++
++@dataclass(frozen=True)
++class Slot:
++    path: str
++    label: str
++    task: str
++    gap: str = ""
++    attempt: str = ""
++    signature: str = ""
++    base: str = ""
++    priority: int = 0
++
++    @property
++    def key(self):
++        return hashlib.sha256(self.path.encode()).hexdigest()[:32]
++
++
++def bound(rec, label, task, priority, base=""):
++    path = Path(state.gap_dir(rec["gap_id"]), "attempts",
++                assignment.attempt_id(rec["lease"]), "workers", label, "path")
++    return Slot(str(path), label, task, rec["gap_id"], support.attempt(rec),
++                base=base, priority=priority)
++
++
++def current(slot):
++    if not slot.gap:
++        return True
++    rec = state.load(slot.gap)
++    return bool(rec and focus.eligible(rec) and support.attempt(rec) == slot.attempt
++                and staff.current_matches(rec, slot.label == "general"))
++
++
++def desired(p, running, issues=None):
++    issues = [] if issues is None else issues
++    records=[]
++    for gap in state.all_gaps():
++        try:
++            r=state.load(gap)
++            if support.active(r) and not r.get("queued_lease"):
++                records.append(r)
++        except Exception as exc:
++            issues.append(gap+": state "+type(exc).__name__)
++    try:
++        selected=focus.current()
++    except Exception as exc:
++        selected=None
++        issues.append("focus: "+type(exc).__name__)
++    slots = [bound(r, "general", staff.GENERAL_APPROACH, 0) for r in records]
++    if selected and focus.eligible(selected):
++        if focus.correction(selected):
++            slots.append(bound(selected, "correction", "Repair the exact published proof using checker diagnostics.", 1))
++        else:
++            for label, task in continuity.FRONTS:
++                slots.append(bound(selected, label, task, 1))
++            try:
++                from ..research import knowledge, obligations
++                if (Path(config.STATE_ROOT)/"research/knowledge.sqlite").exists():
++                    with closing(knowledge.db()) as c:
++                        nodes = [n for n in obligations.ready(c) if n["status"] == "ready"
++                                 and knowledge.belongs(c, n["id"], selected["gap_id"]+" / ")]
++                    # Keep currently running ready fronts before allocating new ones.
++                    paths = {a.get("cwd") for a in running}
++                    nodes.sort(key=lambda n: (bound(selected,"ob-"+n["id"],"",2).path not in paths,n["id"]))
++                    for n in nodes[:p["focus_obligations"]]:
++                        slots.append(bound(selected, "ob-"+n["id"],
++                            "Solve exact obligation "+n["id"]+
++                            ". Inspect it, submit a proof body, collect the check, and share the result. Preserve exact blockers.", 2,n["base"]))
++            except Exception as exc:
++                issues.append("obligation planning: "+type(exc).__name__)
++        for x in p["extras"]:
++            if x["gap"] == selected["gap_id"] and x["attempt"] == support.attempt(selected):
++                slots.append(bound(selected,x["label"],x["approach"],2))
++    for role in continuity.required_support(records):
++        # Stable evidence signatures, plus bounded periodic refresh. Independent
++        # method/tool fronts continue even without a lease.
++        try:
++            sig = continuity.signature(role,records,selected)
++        except Exception as exc:
++            issues.append(role+": signature "+type(exc).__name__)
++            continue
++        if role in support.FAMILY_ROLES:
++            # No dependency on the old fixed ten-minute cadence.
++            sig = role
++        path = continuity.support_path(role)
++        slots.append(Slot(str(path),role,continuity.SUPPORT[role],signature=sig,priority=3))
++    return slots
++
++
++def obsolete(agent, slots):
++    """Only retire exact bound workspaces, never arbitrary agents by title."""
++    cwd = agent.get("invocation_cwd") or agent.get("cwd")
++    if not cwd:
++        return False
++    path = Path(cwd)
++    binding = assignment.binding(path)
++    if not binding:
++        return False
++    rec = state.load(binding[0])
++    if not rec:
++        return False  # missing/corrupt authority is uncertainty
++    if rec.get("lease") != binding[1]:
++        return True
++    if rec.get("state") in ("RELEASED", "STALE", "ACCEPTED"):
++        return True
++    label = assignment.worker_label(path)
++    selected = focus.current()
++    # Publication/correction transitions are not a license to interrupt a
++    # worker mid-submit. Retire off-focus specialists only in research state.
++    if support.active(rec) and label != "general" and selected:
++        if focus.key(rec) != focus.key(selected):
++            return True
++        # A policy explicitly removes extra positions; existing checked
++        # obligation specialists may finish without preemption.
++        if label and label.startswith("extra-"):
++            return str(path) not in {s.path for s in slots}
++    return False
+diff --git a/missions/pnp/staffing/policy.py b/missions/pnp/staffing/policy.py
+new file mode 100644
+index 00000000..3a021653
+--- /dev/null
++++ b/missions/pnp/staffing/policy.py
+@@ -0,0 +1,67 @@
++"""Validated live tuning, without permission to acquire or release leases."""
++import json
++import re
++import fcntl
++from pathlib import Path
++
++from .. import config, state
++
++DEFAULT = {
++    "interval": 5, "parallel": 4, "retry_min": 5, "retry_max": 180,
++    "short_run": 20, "ambiguity_grace": 45, "support_refresh": 600,
++    "focus_obligations": 2, "rotate_after": 3, "paused": False, "extras": [],
++}
++BOUNDS = {
++    "interval": (2, 60), "parallel": (1, 12), "retry_min": (2, 60),
++    "retry_max": (30, 1800), "short_run": (5, 120),
++    "ambiguity_grace": (30, 600), "support_refresh": (120, 3600),
++    "focus_obligations": (0, 12), "rotate_after": (2, 12),
++}
++
++
++def root():
++    return Path(config.STATE_ROOT, "staffing")
++
++
++def load():
++    path = root() / "policy.json"
++    raw = json.loads(path.read_text()) if path.exists() else {}
++    return validate(raw)
++
++
++def validate(raw):
++    if not isinstance(raw, dict) or set(raw) - set(DEFAULT):
++        raise ValueError("invalid staffing policy keys")
++    p = {**DEFAULT, **raw}
++    for key, (lo, hi) in BOUNDS.items():
++        if type(p[key]) is not int or not lo <= p[key] <= hi:
++            raise ValueError("invalid staffing policy " + key)
++    if p["retry_max"] < p["retry_min"] or type(p["paused"]) is not bool:
++        raise ValueError("invalid retry bounds or pause")
++    if not isinstance(p["extras"], list) or len(p["extras"]) > 24:
++        raise ValueError("invalid extra assignments")
++    seen = set()
++    for x in p["extras"]:
++        if not isinstance(x, dict) or set(x) != {"gap", "attempt", "label", "approach"}:
++            raise ValueError("extra assignment must bind exact attempt")
++        if (not config.GAP_ID_RE.fullmatch(x["gap"])
++                or not re.fullmatch(r"[a-f0-9]{24}-[a-f0-9]{16}", x["attempt"])
++                or not re.fullmatch(r"extra-[A-Za-z0-9_-]{1,40}", x["label"])
++                or not isinstance(x["approach"], str) or not x["approach"].strip()
++                or len(x["approach"]) > 4000):
++            raise ValueError("invalid extra assignment")
++        key = (x["gap"], x["attempt"], x["label"])
++        if key in seen:
++            raise ValueError("duplicate extra assignment")
++        seen.add(key)
++    return p
++
++def change(update):
++    directory=root()
++    directory.mkdir(parents=True,exist_ok=True,mode=0o700)
++    with (directory/"policy.lock").open("a+") as lock:
++        fcntl.flock(lock,fcntl.LOCK_EX)
++        p=load()
++        p=validate(update(p))
++        state.atomic_write(str(directory/"policy.json"),json.dumps(p,indent=2,sort_keys=True)+"\n")
++        return p
+diff --git a/missions/pnp/staffing/reconcile.py b/missions/pnp/staffing/reconcile.py
+new file mode 100644
+index 00000000..372f7070
+--- /dev/null
++++ b/missions/pnp/staffing/reconcile.py
+@@ -0,0 +1,206 @@
++"""One slot state machine. Persist intent BEFORE any ambiguous side effect."""
++import time
++import subprocess
++import sqlite3
++from .. import gitctl
++from . import backend, plan, store
++
++ERRORS = (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError, gitctl.GitError, sqlite3.Error)
++
++
++def update(row, phase, reason="", **kw):
++    row.update(phase=phase,reason=reason,**kw)
++    return row
++
++
++def save(slot,row,phase,reason="",event=None,**kw):
++    update(row,phase,reason,**kw)
++    store.put(slot.key,row,event)
++    return row
++
++
++def delay(p,n):
++    return min(p["retry_max"],p["retry_min"]*2**min(12,max(0,n-1)))
++
++
++def failure(slot,row,p,now,reason,uncertain=False):
++    n=row.get("failures",0)+1
++    return save(slot,row,"unknown" if uncertain else "retry",reason,"failure",
++                failures=n,next_at=now+delay(p,n))
++
++
++def inspect(slot,row,roster,p,now):
++    # Always consider observed running workers, even when a persisted ID exists.
++    live=[a for a in roster if backend.same(a,slot.path)]
++    if len(live)>1:
++        exact=[backend.status(a["id"]) for a in live]
++        if any(not backend.same(a,slot.path) or
++               not (backend.live(a) or backend.known_terminal(a)) for a in exact):
++            return save(slot,row,"unknown","duplicate identities uncertain")
++        live=[a for a in exact if backend.live(a)]
++        if len(live)>1:
++            keep=min(live,key=lambda a:(a["id"]!=row.get("agent"),
++                                         a.get("started_at") or 0,a["id"]))
++            row=save(slot,row,"unknown","duplicate running identities","duplicate",
++                     agent=keep["id"],duplicates=[a["id"] for a in live if a!=keep])
++            if not p["paused"] and plan.current(slot):
++                for a in live:
++                    if a==keep:
++                        continue
++                    fresh=backend.status(a["id"])
++                    if backend.same(fresh,slot.path) and backend.live(fresh) and plan.current(slot):
++                        backend.stop(fresh["id"])
++            # Confirm retirement on a new observation, never launch here.
++            return row
++    if live:
++        found=backend.status(live[0]["id"])
++        if not backend.same(found,slot.path):
++            return save(slot,row,"unknown","running identity moved")
++        if backend.live(found):
++            changed=row.get("agent")!=found["id"] or row.get("phase")!="running"
++            return save(slot,row,"running","observed live","adopted" if changed else None,
++                        agent=found["id"],started=found.get("started_at",now),
++                        activity=found.get("last_activity_at"),model=found.get("model"),
++                        vacant_since=None,intent=None,next_at=0,duplicates=[],orphan_since=None)
++        # A roster entry may have terminated since enumeration. Preserve its
++        # exact identity for recovery, including an explicitly orphaned runner.
++        if not row.get("agent") or not backend.known_terminal(found):
++            row=save(slot,row,"unknown","reconciling observed identity",agent=found["id"])
++    if not row.get("agent"):
++        return row
++    try:
++        found=backend.status(row["agent"])
++    except backend.MissingAgent:
++        # Explicit authoritative not-found, not a timeout or malformed reply.
++        return save(slot,row,"vacant","agent removed; rediscover workspace","identity_lost",
++                    agent=None,intent=None,next_at=now+p["retry_min"],vacant_since=now)
++    if not backend.same(found,slot.path):
++        return save(slot,row,"unknown","stored agent no longer bound to exact workspace","binding_conflict")
++    if row.get("reason") in ("duplicate running identities","duplicate identities uncertain",
++                             "running identity moved","running observation not confirmed"):
++        row=save(slot,row,"vacant","exact identity reconciled",duplicates=[])
++    if backend.live(found):
++        return save(slot,row,"running","confirmed by exact status",agent=found["id"],
++                    started=found.get("started_at",now),activity=found.get("last_activity_at"),model=found.get("model"),vacant_since=None,intent=None,next_at=0,orphan_since=None)
++    if not backend.known_terminal(found):
++        if found.get("state")=="running" and found.get("alive") is False:
++            since=row.get("orphan_since") or now
++            row=save(slot,row,"unknown","running identity has no live process",orphan_since=since)
++            if not p["paused"] and now-since>=p["ambiguity_grace"] and plan.current(slot):
++                # Ask Antonina to repair its own orphan; never signal a PID.
++                backend.stop(found["id"])
++                row=save(slot,row,"unknown","orphan stop requested","orphan_stop",orphan_since=now)
++            return row
++        return save(slot,row,"unknown","nonterminal or inconsistent backend state")
++    ended=found.get("finished_at") or 0
++    started=found.get("started_at") or 0
++    if row.get("phase")=="running" or ended>row.get("last_finish",0):
++        short=ended-started<p["short_run"] if ended and started else True
++        good=found.get("state")=="clearexit" and not short
++        n=0 if good else row.get("failures",0)+1
++        row=save(slot,row,"vacant","completed" if good else "short or failed invocation",
++                 "finished",last_finish=ended,failures=n,finished_ok=good,
++                 completed_signature=row.get("launched_signature"),vacant_since=now,
++                 intent=None,next_at=now+(p["retry_min"] if good else delay(p,n)))
++        if not good and n>=p["rotate_after"]:
++            # A fresh agent gets the same durable workspace, not a reset
++            # checkout. Do not recycle an exhausted context indefinitely.
++            row=save(slot,row,"vacant","rotate repeatedly short/failed context","rotate",
++                     retired_agent=found["id"],agent=None,created_after=now,
++                     failures=0,next_at=now+p["retry_min"])
++    return row
++
++
++def reconcile(slot,p,roster,history,now=None):
++    now=time.time() if now is None else now
++    row=store.get(slot.key) or {"path":slot.path,"label":slot.label,"gap":slot.gap,
++        "attempt":slot.attempt,"vacant_since":now,"phase":"vacant","failures":0}
++    # A read failure never becomes evidence of absence.
++    try:
++        row=inspect(slot,row,roster,p,now)
++    except ERRORS as exc:
++        return save(slot,row,"unknown","status unavailable: "+type(exc).__name__)
++    if row["phase"]=="running":
++        return row
++    if row["phase"]=="unknown" and row.get("reason") in (
++            "duplicate running identities","stored agent no longer bound to exact workspace",
++            "nonterminal or inconsistent backend state","running observation not confirmed",
++            "duplicate identities uncertain","running identity has no live process","orphan stop requested","running identity moved"):
++        return row
++    if p["paused"]:
++        return save(slot,row,"paused","operator pause")
++    if not plan.current(slot):
++        return save(slot,row,"obsolete","assignment changed")
++    if row.get("next_at",0)>now:
++        return row
++    # A run intent can survive process death, a broken pipe or a timeout.
++    # Exact status above is authoritative; wait before retrying a terminal
++    # status that may predate an in-flight command.
++    intent=row.get("intent")
++    if intent and intent["at"]>now:
++        # Rebase the conservative grace period after a wall-clock rollback.
++        return save(slot,row,"unknown","clock moved backwards; renewing ambiguity grace",
++                    intent={**intent,"at":now},next_at=now+p["ambiguity_grace"])
++    if intent and now-intent["at"]<p["ambiguity_grace"]:
++        return save(slot,row,"unknown","awaiting ambiguous operation reconciliation")
++    if slot.signature and row.get("finished_ok") and row.get("completed_signature")==slot.signature:
++        if now-row.get("last_finish",0)<p["support_refresh"]:
++            return save(slot,row,"completed","current evidence already investigated")
++    try:
++        if not backend.resource_ready():
++            return save(slot,row,"deferred","town resource safety guard",next_at=now+p["retry_min"])
++        if not row.get("agent"):
++            # History must be available and complete before creating a new ID.
++            # Idle orphan creation is harmless; never launch two IDs for a slot.
++            if history is None:
++                return save(slot,row,"unknown","historical roster unavailable")
++            candidates=[a for a in history if backend.same(a,slot.path)]
++            reusable=[]
++            for a in candidates:
++                try:
++                    exact=backend.status(a["id"])
++                except backend.MissingAgent:
++                    continue
++                if not backend.same(exact,slot.path):
++                    return save(slot,row,"unknown","historical identity changed")
++                if backend.live(exact):
++                    return save(slot,row,"running","adopted historical live agent","adopted",
++                                agent=a["id"],intent=None,vacant_since=None,started=exact.get("started_at",now),
++                                activity=exact.get("last_activity_at"),model=exact.get("model"))
++                if not backend.known_terminal(exact):
++                    return save(slot,row,"unknown","historical agent state uncertain")
++                if (exact.get("created_at") or 0)>=row.get("created_after",0):
++                    reusable.append(exact)
++            if reusable:
++                aid=max(reusable,key=lambda a:(a.get("created_at") or 0,a["id"]))["id"]
++                row=save(slot,row,"vacant","adopted exact historical identity","identity",agent=aid,intent=None)
++        backend.prepare(slot)
++        if not plan.current(slot):
++            return save(slot,row,"obsolete","assignment changed during preparation")
++        if not row.get("agent"):
++            row=save(slot,row,"unknown","new identity intent","create_intent",
++                     intent={"op":"new","at":time.time()})
++            aid=backend.new(slot)
++            row=save(slot,row,"vacant","created identity","identity",agent=aid,intent=None)
++        aid=row["agent"]
++        found=backend.status(aid)
++        if not backend.same(found,slot.path):
++            return save(slot,row,"unknown","stored agent no longer bound to exact workspace")
++        if backend.live(found):
++            return save(slot,row,"running","observed before run",agent=aid,intent=None,vacant_since=None)
++        if not backend.known_terminal(found):
++            return save(slot,row,"unknown","nonterminal or inconsistent backend state")
++        if not plan.current(slot):
++            return save(slot,row,"obsolete","assignment changed before run")
++        # A fresh timestamp, not the time the possibly slow preparation began.
++        at=time.time()
++        row=save(slot,row,"unknown","launch intent","run_intent",
++                 intent={"op":"run","at":at},launched_signature=slot.signature,
++                 finished_ok=False,last_finish=max(row.get("last_finish",0),found.get("finished_at") or 0))
++        backend.run(slot,aid)
++        # Ack is not coverage; only a subsequent exact observation is.
++        return save(slot,row,"starting","launch acknowledged","ack",next_at=0)
++    except ERRORS as exc:
++        # No stderr/prompt/credentials in the durable controller journal.
++        return failure(slot,row,p,time.time(),"operation "+type(exc).__name__,
++                       uncertain=bool(row.get("intent")))
+diff --git a/missions/pnp/staffing/store.py b/missions/pnp/staffing/store.py
+new file mode 100644
+index 00000000..149aa1f6
+--- /dev/null
++++ b/missions/pnp/staffing/store.py
+@@ -0,0 +1,100 @@
++"""Single-controller durable intents, bounded observations and health."""
++import json
++import os
++import sqlite3
++from contextlib import contextmanager
++from pathlib import Path
++import time
++
++from .. import state
++from . import policy
++
++
++def connect():
++    root = policy.root()
++    root.mkdir(parents=True,exist_ok=True,mode=0o700)
++    c = sqlite3.connect(root/"controller.sqlite", timeout=10)
++    c.row_factory = sqlite3.Row
++    c.execute("PRAGMA journal_mode=WAL")
++    c.execute("PRAGMA synchronous=FULL")
++    c.executescript("""
++        CREATE TABLE IF NOT EXISTS slots(key TEXT PRIMARY KEY, data TEXT NOT NULL);
++        CREATE TABLE IF NOT EXISTS events(at REAL, slot TEXT, kind TEXT, detail TEXT);
++        CREATE INDEX IF NOT EXISTS events_at ON events(at);
++        CREATE TABLE IF NOT EXISTS coverage(at REAL PRIMARY KEY, desired INTEGER,
++             running INTEGER, unknown INTEGER, general_desired INTEGER, general_running INTEGER);
++    """)
++    return c
++
++
++@contextmanager
++def db():
++    c = connect()
++    try:
++        with c:
++            yield c
++    finally:
++        c.close()
++
++
++def get(key):
++    with db() as c:
++        r = c.execute("SELECT data FROM slots WHERE key=?",(key,)).fetchone()
++    return json.loads(r[0]) if r else {}
++
++
++def put(key, data, event=None):
++    with db() as c:
++        c.execute("INSERT OR REPLACE INTO slots VALUES(?,?)",(key,json.dumps(data,sort_keys=True)))
++        if event:
++            c.execute("INSERT INTO events VALUES(?,?,?,?)",
++                      (time.time(),key,event,json.dumps({k:data.get(k) for k in
++                        ("agent","phase","reason","failures","next_at")})))
++
++
++def health(data):
++    p = policy.root()/"health.json"
++    state.atomic_write(str(p),json.dumps(data,sort_keys=True,indent=2)+"\n")
++
++
++def read_health():
++    try:
++        x=json.loads((policy.root()/"health.json").read_text())
++        x["age_seconds"]=round(max(0,time.time()-x["at"]),1)
++        x["stale"]=x["age_seconds"]>60
++        if x["stale"]:
++            x["state"]="stale"
++        return x
++    except (OSError,ValueError,KeyError,TypeError):
++        return {"state":"unknown"}
++
++
++def sample(rows, now):
++    general=[r for r in rows if r["label"]=="general"]
++    with db() as c:
++        c.execute("INSERT OR REPLACE INTO coverage VALUES(?,?,?,?,?,?)",
++                  (now,len(rows),sum(r["phase"]=="running" for r in rows),
++                   sum(r["phase"]=="unknown" for r in rows),len(general),
++                   sum(r["phase"]=="running" for r in general)))
++        # Bounded history; slot/intent identity is not discarded.
++        c.execute("DELETE FROM coverage WHERE at<?",(now-7*86400,))
++        c.execute("DELETE FROM events WHERE at<?",(now-30*86400,))
++
++
++def metrics(hours=1):
++    with db() as c:
++        rows=c.execute("SELECT * FROM coverage WHERE at>=? ORDER BY at",(time.time()-hours*3600,)).fetchall()
++        events=dict(c.execute("SELECT kind,count(*) FROM events WHERE at>=? GROUP BY kind",
++                              (time.time()-hours*3600,)).fetchall())
++    # Integrate observed samples; do not fill outages with invented coverage.
++    desired=covered=unknown=unobserved=0.0
++    for a,b in zip(rows,rows[1:]):
++        span=max(0,b["at"]-a["at"])
++        dt=min(60,span)
++        unobserved+=span-dt
++        desired+=dt*a["general_desired"]
++        covered+=dt*a["general_running"]
++        unknown+=dt*a["unknown"]
++    return {"hours":hours,"samples":len(rows),"general_slot_seconds":desired,
++            "general_covered_seconds":covered,"unknown_slot_seconds":unknown,
++            "general_coverage":covered/desired if desired else None,"unobserved_seconds":unobserved,"events":events}
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index a92d2d28..fe33df72 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -127,7 +127,16 @@ def snapshot():
+             related.append({"gap": gid, "title": item.get("title"), "held": held, "parallel": parallel})
+     related.sort(key=lambda x: (x["held"], x["gap"]))
+     from missions.pnp import continuity
+-    missing_fronts = [p[0] for p in continuity.focus_plans(selected,w["agents"])] if w["coverage"]=="complete" else []
++    from missions.pnp.staffing import plan as staffing_plan, policy as staffing_policy, store as staffing_store
++    controller_health=staffing_store.read_health()
++    missing_fronts=[]
++    if w["coverage"]=="complete":
++        try:
++            running_paths={a.get("cwd") for a in w["agents"]}
++            missing_fronts=[slot.label for slot in staffing_plan.desired(staffing_policy.load(),w["agents"])
++                            if slot.gap==focus_gap and slot.label!="general" and slot.path not in running_paths]
++        except (OSError,ValueError,RuntimeError):
++            pass
+     coordination_due = bool(w["coverage"] == "complete" and (
+         stale_workers or unstaffed or missing_general or off_focus or
+         missing_fronts))
+@@ -141,7 +150,10 @@ def snapshot():
+         needed.add("lease-evaluation")
+     if len(active) > 1:
+         needed.add("portfolio")
+-    complete = continuity.completed_roles(continuity.live(), selected)
++    if controller_health.get("state") not in ("stale","unknown"):
++        complete={r["label"] for r in controller_health.get("slots",[]) if r.get("phase")=="completed"}
++    else:
++        complete=set()
+     missing_support = sorted(needed - covered - complete) if w["coverage"] == "complete" else []
+     try:
+         memory = json.loads((STATE / "pnp/allocator.json").read_text())
+@@ -163,22 +175,21 @@ def snapshot():
+     score["available"] = lb.get("available", False)
+     score["stale"] = stale
+     by_state = dict(collections.Counter(r["state"] for r in rows))
+-    return {
++    return {"staffing_controller":controller_health,
+         "observed": len(rows), "by_state": by_state, "recent": rows[-12:],
+         "leaderboard": score, "workers": w,
+         "research_support": {"agents": scouts, "completed_current_evidence": sorted(complete), "coverage_missing": missing_support,
+                              "coordination_findings": findings,
+                              "portfolio_decisions": decisions,
+-                             "action": "Executive owns staffing and material steering; support findings are advisory and arrive directly in worker guards."},
++                             "action": "Controller reconciles staffing; Executive monitors, debugs and adjusts standing policy. Support findings are advisory."},
+         "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
+         "frontier_fresh": bool(observed), "active_lease_gaps": active,
+         "research_focus": focus_gap, "missing_focus_fronts": missing_fronts, "focus_workers": focus_workers, "reserve_gaps": reserves,
+         "general_workers": general_workers, "missing_general": missing_general,
+-        "baseline_command":"python3 -m missions.pnp.staff --baseline",
++        "baseline_command":"python3 -m missions.pnp.staffing.controller status",
+         "focus_details": ({k: selected.get(k) for k in ("gap_title", "statement", "imports", "context")}
+                           if selected else None),
+-        "staff_command": ("python3 -m missions.pnp.staff " + focus_gap + " --worker LABEL=APPROACH"
+-                          if focus_gap else None),
++        "staff_command": ("python3 -m missions.pnp.staffing.controller policy" if focus_gap else None),
+         "off_focus_workers": off_focus,
+         "unstaffed_active_gaps": unstaffed, "active_lease_age_minutes": age,
+         "potential_fronts": related[:12],
+@@ -188,24 +199,11 @@ def snapshot():
+         "lean_headroom_bytes": frontier.build_control.headroom(),
+         "resource_deferred_gaps": [r["gap"] for r in rows if r.get("resource_deferred")],
+         "workers_on_terminal_gaps": stale_workers,
+-        "owned_by": "Viche Executive; other operators do not launch agents",
++        "owned_by": "Standing staffing controller; Executive owns monitoring, debugging and policy",
+         "action": (
+-            "Executive: retire obsolete workers cooperatively, preserve one general researcher per live lease, and concentrate extra specialists on research_focus."
+-            if stale_workers else
+-            "Executive: run the baseline_command now to fill missing general researchers on every live lease."
+-            if missing_general else
+-            "Executive must concentrate additional independent researchers on research_focus; every live lease keeps its general researcher."
+-            if not focus_workers else
+-            "Executive must parallelize distinct proof approaches on research_focus, "
+-            "not distribute researchers across reserve gaps."
+-            if len(focus_workers) == 1 else
+-            "Executive must restore visibility of the actual worker roster."
+-            if w["count"] is None else
+-            "Executive must increase the verified checked-step lead over #2 "
+-            "and protect the lead trajectory."
+-            if score.get("rank") == 1 else
+-            "Executive must increase checked-step throughput to gain #1; "
+-            "evaluate research yield, resources and worker replenishment."),
++            "Executive: inspect staffing controller health and repair persistent failures; do not manually replenish workers. "
++            "Evaluate mathematical yield and publication blockers. Only externally credited steps establish success."
++        ),
+         # No timestamps here: the general government dispatch gate changes
+         # only when mission facts or staffing change, not every refresh.
+         "dispatch_signal": {
+@@ -213,6 +211,7 @@ def snapshot():
+                             (score.get("leader") or {}).get("steps"),
+                             (score.get("runner_up") or {}).get("steps")],
+             "workers": w["count"], "coverage": w["coverage"],
++            "staffing_health":controller_health.get("state","unknown"),
+             "gaps": by_state, "active": sorted(active), "focus": focus_gap,
+             "off_focus": off_focus, "missing_general": missing_general,
+             "general_workers": general_workers,
+diff --git a/missions/pnp/support.py b/missions/pnp/support.py
+index f90af196..d89e6355 100644
+--- a/missions/pnp/support.py
++++ b/missions/pnp/support.py
+@@ -226,8 +226,9 @@ def scan(refresh=False):
+ def roles(agent):
+     try:
+         cwd=Path(agent.get("cwd") or "").resolve()
+-        for role in FAMILY_ROLES:
+-            if cwd==Path(config.STATE_ROOT,"swarm","independent",role).resolve():
++        for role in (*ROLES,*DECISION_ROLES,*FAMILY_ROLES):
++            group="independent" if role in FAMILY_ROLES else "standing-support"
++            if cwd==Path(config.STATE_ROOT,"swarm",group,role).resolve():
+                 return [role]
+     except (OSError,ValueError,TypeError):pass
+     title = agent.get("title") or ""
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index 2d404931..b87ee7ff 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -17,6 +17,7 @@ python3 tests/pnp-allocator.py
+ /bin/sh tests/pnp-runtime-isolation-smoke.sh
+ 
+ python3 tests/pnp-continuity.py
++python3 tests/pnp-staffing.py
+ 
+ python3 tests/pnp-brief.py
+ python3 tests/pnp-tool-discovery.py
+diff --git a/tests/pnp-runtime-isolation-smoke.sh b/tests/pnp-runtime-isolation-smoke.sh
+index d9507baa..c4e0dd78 100644
+--- a/tests/pnp-runtime-isolation-smoke.sh
++++ b/tests/pnp-runtime-isolation-smoke.sh
+@@ -5,7 +5,7 @@ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ tmp=$(mktemp -d)
+ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+ mkdir -p "$tmp/town/missions/pnp" "$tmp/bin"
+-for f in runtime.sh cycle.sh heartbeat.sh allocator.sh executive.sh status.sh; do
++for f in runtime.sh cycle.sh heartbeat.sh allocator.sh staffing.sh executive.sh status.sh; do
+     cp "$repo/missions/pnp/$f" "$tmp/town/missions/pnp/$f"
+ done
+ # If any launch proceeds past the guard, the fake marker will detect it.
+@@ -13,10 +13,12 @@ printf '#!/bin/sh\ntouch "$PNP_TEST_MARKER"\nexit 99\n' > "$tmp/bin/python3"
+ cp "$tmp/bin/python3" "$tmp/bin/nohup"
+ chmod +x "$tmp/bin/"*
+ touch "$tmp/town/missions/pnp/cli.py" "$tmp/town/missions/pnp/allocator.py"
++mkdir -p "$tmp/town/missions/pnp/staffing"
++touch "$tmp/town/missions/pnp/staffing/controller.py"
+ export PNP_TEST_MARKER="$tmp/side-effect" PATH="$tmp/bin:$PATH"
+ export VICHE_TOWN_ROOT="$tmp/town" VICHE_STATE_ROOT="$tmp/state"
+ unset PNP_STATE_ROOT
+-for f in cycle.sh heartbeat.sh allocator.sh executive.sh; do
++for f in cycle.sh heartbeat.sh allocator.sh staffing.sh executive.sh; do
+     timeout 3 /bin/sh "$tmp/town/missions/pnp/$f" 2>"$tmp/err"
+     grep -q 'skipped outside canonical deployment' "$tmp/err"
+ done
+@@ -26,7 +28,7 @@ test ! -e "$PNP_TEST_MARKER"
+ # Even if a copied launcher inherits production roots, its actual pathname
+ # still disqualifies it. This exercises the most dangerous test configuration.
+ unset VICHE_TOWN_ROOT VICHE_STATE_ROOT
+-for f in cycle.sh heartbeat.sh allocator.sh executive.sh; do
++for f in cycle.sh heartbeat.sh allocator.sh staffing.sh executive.sh; do
+     timeout 3 /bin/sh "$tmp/town/missions/pnp/$f" 2>"$tmp/err"
+     grep -q 'skipped outside canonical deployment' "$tmp/err"
+ done
+diff --git a/tests/pnp-staffing.py b/tests/pnp-staffing.py
+new file mode 100644
+index 00000000..7114fdbd
+--- /dev/null
++++ b/tests/pnp-staffing.py
+@@ -0,0 +1,284 @@
++#!/usr/bin/env python3
++"""Hermetic failure-injection tests of the standing staffing controller."""
++import json
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import time
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
++from missions.pnp import assignment, config, focus, state, support, staff
++from missions.pnp.staffing import backend, controller, plan, policy, reconcile, store
++
++
++class Fake:
++    def __init__(self):
++        self.agents={}
++        self.created=0
++        self.runs=[]
++        self.stops=[]
++        self.mode=""
++        self.clock=time.time()
++
++    def status(self,aid):
++        if self.mode=="unknown":
++            raise subprocess.TimeoutExpired("status",1)
++        if aid not in self.agents:
++            raise backend.MissingAgent("deleted")
++        return dict(self.agents[aid])
++
++    def new(self,slot):
++        self.created+=1
++        aid="agent-"+str(self.created)
++        self.agents[aid]={"id":aid,"cwd":slot.path,"state":"idle","alive":False,
++                          "created_at":time.time()}
++        if self.mode=="create-timeout":
++            raise subprocess.TimeoutExpired("new",1)
++        return aid
++
++    def run(self,slot,aid):
++        self.runs.append(aid)
++        self.agents[aid].update(state="running",alive=True,started_at=time.time())
++        if self.mode=="run-timeout":
++            raise subprocess.TimeoutExpired("run",1)
++        if self.mode=="crash":
++            raise KeyboardInterrupt()
++
++    def stop(self,aid):
++        self.stops.append(aid)
++        self.agents[aid].update(state="stopped",alive=False,finished_at=time.time())
++
++    def running(self):
++        return [dict(x) for x in self.agents.values() if x["state"]=="running"]
++
++    def history(self):
++        return [dict(x) for x in self.agents.values()]
++
++    def finish(self,aid,seconds=100,failed=False):
++        self.agents[aid].update(state="failed" if failed else "clearexit",alive=False,
++                                started_at=time.time()-seconds,finished_at=time.time())
++
++
++class Tests(unittest.TestCase):
++    def setUp(self):
++        self.tmp=tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        root=self.tmp.name
++        q=patch.multiple(config,STATE_ROOT=root,GAPS_DIR=root+"/gaps",CACHE_DIR=root+"/cache")
++        q.start();self.addCleanup(q.stop)
++        self.fake=Fake()
++        q=patch.multiple(backend,status=self.fake.status,new=self.fake.new,run=self.fake.run,
++                         stop=self.fake.stop,running=self.fake.running,prepare=lambda s:None,
++                         resource_ready=lambda:True)
++        q.start();self.addCleanup(q.stop)
++        self.p=dict(policy.DEFAULT)
++        self.rec=state.create("L-meta-1",state="LEASED",lease="fixture",statement="True",
++                              lease_expires_at=time.time()+3600)
++        self.slot=plan.bound(self.rec,"general","fixture",0)
++
++    def step(self,slot=None,now=None,history=True):
++        return reconcile.reconcile(slot or self.slot,self.p,self.fake.running(),
++                                   self.fake.history() if history else None,now)
++
++    def launch(self):
++        r=self.step()
++        self.assertEqual(r["phase"],"starting")
++        self.assertEqual(self.step()["phase"],"running")
++        return r["agent"]
++
++    def age_intent(self,slot=None):
++        s=slot or self.slot
++        r=store.get(s.key)
++        r["intent"]["at"]-=120
++        r["next_at"]=0
++        store.put(s.key,r)
++
++    def test_ack_is_not_coverage_and_restarts_same_workspace(self):
++        aid=self.launch()
++        self.fake.finish(aid)
++        r=self.step()
++        self.assertEqual(r["phase"],"vacant")
++        self.assertEqual(self.step()["phase"],"vacant")
++        self.assertEqual(self.step(now=r["next_at"]+1)["phase"],"starting")
++        self.assertEqual(self.fake.runs,[aid,aid])
++        self.assertEqual(self.fake.created,1)
++
++    def test_run_timeout_recovers_observed_effect(self):
++        self.fake.mode="run-timeout"
++        r=self.step()
++        self.assertEqual(r["phase"],"unknown")
++        self.assertEqual(store.get(self.slot.key)["intent"]["op"],"run")
++        self.fake.mode=""
++        self.assertEqual(self.step()["phase"],"running")
++        self.assertEqual(len(self.fake.runs),1)
++
++    def test_process_crash_after_run_before_ack(self):
++        self.fake.mode="crash"
++        with self.assertRaises(KeyboardInterrupt):
++            self.step()
++        self.assertEqual(store.get(self.slot.key)["intent"]["op"],"run")
++        self.fake.mode=""
++        self.assertEqual(self.step()["phase"],"running")
++        self.assertEqual(len(self.fake.runs),1)
++
++    def test_new_timeout_adopts_idle_orphan(self):
++        self.fake.mode="create-timeout"
++        r=self.step()
++        self.assertEqual(r["phase"],"unknown")
++        self.assertEqual(store.get(self.slot.key)["intent"]["op"],"new")
++        self.fake.mode=""
++        self.assertEqual(self.step()["phase"],"unknown")
++        self.age_intent()
++        self.assertEqual(self.step()["phase"],"starting")
++        self.assertEqual(self.fake.created,1)
++
++    def test_ambiguous_launch_without_effect_is_retried_only_after_grace(self):
++        aid=self.fake.new(self.slot)
++        with patch.object(backend,"run",side_effect=subprocess.TimeoutExpired("run",1)):
++            self.assertEqual(self.step()["phase"],"unknown")
++        self.assertEqual(self.step()["phase"],"unknown")
++        self.age_intent()
++        self.assertEqual(self.step()["phase"],"starting")
++        self.assertEqual(self.fake.runs,[aid])
++
++    def test_unknown_backend_never_authorizes_replacement(self):
++        aid=self.launch()
++        self.fake.mode="unknown"
++        self.assertEqual(self.step()["phase"],"unknown")
++        self.assertEqual(self.fake.runs,[aid])
++        self.fake.mode=""
++        self.assertEqual(self.step()["phase"],"running")
++
++    def test_no_history_no_create(self):
++        self.assertEqual(self.step(history=False)["phase"],"unknown")
++        self.assertEqual(self.fake.created,0)
++
++    def test_deleted_identity_recovers(self):
++        aid=self.launch()
++        self.fake.finish(aid)
++        del self.fake.agents[aid]
++        r=self.step()
++        self.assertIsNone(r["agent"])
++        self.assertEqual(self.step(now=r["next_at"]+1)["phase"],"starting")
++        self.assertEqual(self.fake.created,2)
++
++    def test_duplicate_retirement_keeps_previous_owner(self):
++        aid=self.launch()
++        other=self.fake.new(self.slot)
++        self.fake.run(self.slot,other)
++        self.assertEqual(self.step()["phase"],"unknown")
++        self.assertEqual(self.fake.stops,[other])
++        self.assertEqual(self.step()["agent"],aid)
++        self.assertEqual(self.step()["phase"],"running")
++
++    def test_duplicate_pause_does_not_stop(self):
++        self.launch()
++        self.fake.run(self.slot,self.fake.new(self.slot))
++        self.p["paused"]=True
++        self.assertEqual(self.step()["phase"],"unknown")
++        self.assertFalse(self.fake.stops)
++
++    def test_orphaned_running_identity_reconciled(self):
++        aid=self.launch()
++        self.fake.agents[aid]["alive"]=False
++        now=time.time()
++        self.assertEqual(self.step(now=now)["phase"],"unknown")
++        self.assertFalse(self.fake.stops)
++        self.step(now=now+self.p["ambiguity_grace"]+1)
++        self.assertEqual(self.fake.stops,[aid])
++
++    def test_rotate_after_repeated_short_exit_preserves_workspace(self):
++        aid=self.launch()
++        self.p["rotate_after"]=2
++        for i in range(2):
++            self.fake.finish(aid,seconds=1)
++            r=self.step()
++            r=self.step(now=r["next_at"]+1)
++            if i==0:
++                self.assertEqual(r["agent"],aid)
++                self.step()
++        # Second failed context gets a different identity, same exact slot.
++        self.assertEqual(self.fake.created,2)
++        self.assertNotEqual(r["agent"],aid)
++        self.assertEqual(self.fake.agents[r["agent"]]["cwd"],self.slot.path)
++
++    def test_lease_change_during_prepare_no_launch(self):
++        def swap(s):
++            state.update(self.rec["gap_id"],lease="replacement")
++        with patch.object(backend,"prepare",side_effect=swap):
++            r=self.step()
++        self.assertEqual(r["phase"],"obsolete")
++        self.assertFalse(self.fake.runs)
++        self.assertEqual(self.fake.created,0)
++        with self.assertRaises(ValueError):
++            assignment.prepare(self.rec["gap_id"],checkout=False,worker="general",expected="fixture")
++
++    def test_resource_deferral_no_launch(self):
++        with patch.object(backend,"resource_ready",return_value=False):
++            r=self.step()
++        self.assertEqual(r["phase"],"deferred")
++        self.assertFalse(self.fake.runs)
++
++    def test_support_same_evidence_completes_then_refreshes(self):
++        s=plan.Slot(str(Path(config.STATE_ROOT,"swarm","standing-support","knowledge")),
++                    "knowledge","task",signature="v1")
++        aid=self.step(s)["agent"]
++        self.step(s)
++        self.fake.finish(aid)
++        r=self.step(s)
++        r=self.step(s,now=r["next_at"]+1)
++        self.assertEqual(r["phase"],"completed")
++        self.assertEqual(len(self.fake.runs),1)
++        self.assertEqual(self.step(s,now=r["last_finish"]+601)["phase"],"starting")
++
++    def test_focus_switch_keeps_general_and_retires_exact_specialist(self):
++        b=state.create("L-meta-2",state="LEASED",lease="second",statement="True",
++                       lease_expires_at=time.time()+3600)
++        path=assignment.prepare(self.rec["gap_id"],checkout=False,worker="integrator")["cwd"]
++        a={"cwd":path,"id":"old"}
++        gen={"cwd":assignment.prepare(self.rec["gap_id"],checkout=False,worker="general")["cwd"]}
++        with patch.object(focus,"current",return_value=b):
++            self.assertTrue(plan.obsolete(a,[]))
++            self.assertFalse(plan.obsolete(gen,[]))
++            slots=plan.desired(self.p,[])
++        self.assertEqual(sum(s.label=="general" for s in slots),2)
++        self.assertEqual({s.gap for s in slots if s.label=="integrator"},{b["gap_id"]})
++
++    def test_bad_policy_fails_closed(self):
++        policy.root().mkdir(parents=True)
++        (policy.root()/"policy.json").write_text('{"parallel":100000}')
++        with self.assertRaises(ValueError):policy.load()
++        (policy.root()/"policy.json").write_text('{"paused":true,"interval":3}')
++        self.assertTrue(policy.load()["paused"])
++
++    def test_tick_runs_known_slots_despite_history_error(self):
++        aid=self.launch()
++        other=state.create("L-meta-2",state="LEASED",lease="b",statement="True",
++                           lease_expires_at=time.time()+3600)
++        with patch.object(staff,"roster",side_effect=ValueError("history unavailable")):
++            out=controller.tick()
++        r=next(x for x in out["slots"] if x["key"]==self.slot.key)
++        self.assertEqual(r["phase"],"running")
++        self.assertEqual(r["agent"],aid)
++        cold=next(x for x in out["slots"] if x["gap"]==other["gap_id"] and x["label"]=="general")
++        self.assertEqual(cold["phase"],"unknown")
++
++    def test_partial_running_snapshot_never_starts(self):
++        with patch.object(backend,"running",side_effect=backend.Uncertain("partial")):
++            with self.assertRaises(backend.Uncertain):controller.tick()
++        self.assertFalse(self.fake.runs)
++
++    def test_metrics_no_imputation_across_outage(self):
++        t=time.time()-300
++        a=[{"label":"general","phase":"running"}]
++        store.sample(a,t)
++        store.sample(a,t+200)
++        m=store.metrics()
++        self.assertEqual(m["general_covered_seconds"],60)
++        self.assertEqual(m["unobserved_seconds"],140)
++
++if __name__=="__main__":
++    unittest.main(verbosity=2)

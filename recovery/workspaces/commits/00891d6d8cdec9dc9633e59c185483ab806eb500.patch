@@ -1,0 +1,60 @@
+commit 00891d6d8cdec9dc9633e59c185483ab806eb500
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 19:14:53 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 19:14:53 2026 +0000
+
+    Bound the unsafe-hold archive lock wait
+    
+    A stale lock that cannot be removed, or a live holder, must not spin the
+    retry loop forever. Count every failed acquisition attempt (including a failed
+    stale-lock steal) against the 50-attempt budget; on exhaustion leave the live
+    hold in place and warn. Add a regression that a lock backdated two minutes is
+    stolen and archiving proceeds.
+
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index 38c6098a..3fa77e6c 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -164,15 +164,17 @@ oc_archive_hold() {
+   oc_lock=$1/unsafe-holds/.archive-lock
+   oc_wait=0
+   while ! mkdir "$oc_lock" 2>/dev/null; do
+-    if [ -d "$oc_lock" ] && [ -n "$(find "$oc_lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+-      rmdir "$oc_lock" 2>/dev/null || :
+-      continue
+-    fi
++    # Bounded attempts: a live holder or an unremovable stale lock must not
++    # spin forever. The live hold stays in place, so nothing is lost.
+     oc_wait=$((oc_wait + 1))
+     if [ "$oc_wait" -ge 50 ]; then
+       echo "Viche: unsafe-hold archive busy for $2; leaving the hold in place" >&2
+       return 0
+     fi
++    if [ -d "$oc_lock" ] && [ -n "$(find "$oc_lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
++      rmdir "$oc_lock" 2>/dev/null || :
++      continue
++    fi
+     sleep 0.1 2>/dev/null || sleep 1
+   done
+   oc_extract=$oc_hold_file.extract.$$
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index 602847b0..6c451236 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -159,6 +159,15 @@ oc_archive_hold "$holdtest" executive old-c
+ test "$(grep -c 'run-c' "$holdtest/archived-unsafe-holds/executive-old-c")" -eq 1 ||
+   { echo 'Interrupted archive retry duplicated evidence' >&2; exit 1; }
+ test ! -e "$holdtest/unsafe-holds/executive"
++# A lock left by a crashed archiver must be stolen after a minute, not block
++# archiving forever, while a live lock is respected.
++printf 'executive\told-d\trun-d\n' > "$holdtest/unsafe-holds/executive"
++mkdir "$holdtest/unsafe-holds/.archive-lock"
++touch -d '2 minutes ago' "$holdtest/unsafe-holds/.archive-lock"
++oc_archive_hold "$holdtest" executive old-d
++test -s "$holdtest/archived-unsafe-holds/executive-old-d" ||
++  { echo 'Stale archive lock blocked archiving' >&2; exit 1; }
++test ! -e "$holdtest/unsafe-holds/.archive-lock"
+ if MOCK_STOP_FAIL=yes oc_quiesce_for_reset "$oc_quiesce_for_reset_test_id"; then
+   echo 'Failed quiescence incorrectly reported success' >&2; exit 1
+ fi

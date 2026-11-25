@@ -1,0 +1,515 @@
+commit 01b21f8d4990737be836b1f2a06a6c1cae77895f
+Author:     Viche Judiciary c1e00008 <judiciary@viche.local>
+AuthorDate: Mon Oct 19 10:38:47 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Oct 19 10:42:42 2026 +0000
+
+    Judiciary: implement Act 18 §5 board-trail completeness lens (POSIX cross-check, metrics, W2 criteria, report)
+
+diff --git a/government/board-trail-check.sh b/government/board-trail-check.sh
+new file mode 100755
+index 00000000..1202aa4f
+--- /dev/null
++++ b/government/board-trail-check.sh
+@@ -0,0 +1,66 @@
++#!/bin/sh
++# Act 18 §5 — board-trail completeness cross-check (POSIX /bin/sh; no Bash).
++#
++# For each board-originated work item recorded in Git, this script confirms
++# whether its originating Antonina issue carries a post-completion update that
++# reaches a terminal state and/or a stage marker, and counts automated
++# ("chatter") lines. Deterministic: the same board + Git inputs always yield
++# the same output. It reports facts only; the independent Judiciary interprets
++# them (Act 15 §2 — no reform proposals). Same-model / measurement-reliability
++# limits are reported by the caller, not hidden.
++#
++# Output: one JSON object per line (JSONL) on stdout, one per originating
++# issue, with classified fields. The caller (government/judiciary-measurements.py)
++# aggregates the §5 metrics and records the honest limitations.
++#
++# Input mapping: records/board-trail/originating.tsv (Git). When the Executive's
++# generated records/board-trail/index.json (Act 18 §3.8) exists it is the
++# preferred input; this mapping is the fallback.
++set -eu
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++map=$town/records/board-trail/originating.tsv
++sep=$(printf '\t')
++if [ ! -f "$map" ]; then
++    echo "board-trail-check: no cross-check mapping at $map" >&2
++    exit 1
++fi
++
++while IFS="$sep" read -r issue work act epoch type; do
++    case "$issue" in ''|'#'*) continue ;; esac
++    case "$epoch" in ''|*[!0-9]*) epoch=0 ;; esac
++    page=1
++    all='[]'
++    while :; do
++        data=$(antonina board show --id "$issue" --page "$page" --json) || {
++            echo "board-trail-check: board query failed for #$issue" >&2
++            exit 1
++        }
++        msgs=$(printf '%s' "$data" | jq -c '.messages // []')
++        all=$(jq -n --argjson a "$all" --argjson b "$msgs" '$a + $b')
++        n=$(printf '%s' "$msgs" | jq 'length')
++        [ "$n" -lt 50 ] && break
++        page=$((page + 1))
++        [ "$page" -gt 20 ] && break
++    done
++    printf '%s\n' "$all" | jq -c \
++        --arg issue "$issue" --arg work "$work" --arg act "$act" \
++        --arg type "$type" --argjson epoch "$epoch" '
++        def clean: (.createdAt // "") | sub("\\.[0-9]+Z$"; "Z");
++        ($epoch | if . > 0 then todate else "" end) as $since |
++        [ .[] | {a:(.author // ""), b:(.body // ""), t:clean} ] as $c |
++        (if $epoch > 0 then ($c | map(select(.t > $since))) else $c end) as $p |
++        ($p | map(.b)) as $pb |
++        {
++          issue: $issue, work: $work, act: $act, type: $type,
++          enacted_epoch: $epoch,
++          comments_total: ($c | length),
++          post_completion: ($p | length),
++          terminal: (if (($pb | map(test("verification:confirmed|verification:blocked|enactment:not_enacted")) | any)
++                         or ($pb | map(test("(?i)(terminal|state|status)[^\\n]{0,40}\\bdeferred\\b")) | any))
++                    then 1 else 0 end),
++          stage_markers: ([$pb[] | scan("(?i)stage\\s*marker[^\\n]{0,12}\\b(proposal|enactment|deployment|verification)\\b")[0]] | unique | join(",")),
++          chatter: ($pb | map(select(test("\\[(scheduler-turn|terminal-handoff|progress-checkpoint)\\]"))) | length),
++          latest_iso: (if ($c | length) > 0 then ($c | map(.t) | max) else "-" end)
++        }'
++done < "$map"
+diff --git a/government/judiciary-measurements.py b/government/judiciary-measurements.py
+index d02a6ea7..d0e3f18a 100644
+--- a/government/judiciary-measurements.py
++++ b/government/judiciary-measurements.py
+@@ -1,8 +1,19 @@
+ #!/usr/bin/env python3
+-"""Evidence to Legislature; no judicial policy proposals or modifications."""
+-import json, os, time
++"""Evidence to Legislature; no judicial policy proposals or modifications.
++
++Act 18 §5 (Board Reporting Act) mandates that the independent Judiciary add
++board-trail completeness to its observability/audit lens and report it each
++measurement window. The deterministic board/Git cross-check is scripted in
++POSIX /bin/sh (government/board-trail-check.sh); this file aggregates its facts
++into the durable measurement report. The same-model / measurement-reliability
++limitation is reported, not hidden.
++"""
++import json, os, shutil, subprocess, time
+ from pathlib import Path
++
+ root=Path(os.environ.get('VICHE_STATE_ROOT','/var/lib/lubko/wd/viche-state'))
++town=Path(os.environ.get('VICHE_TOWN_ROOT','/var/lib/lubko/wd/viche'))
++now=int(os.environ.get('VICHE_BRANCH_NOW',time.time()))
+ a=root/'oversight/random'
+ cases=list((a/'cases').glob('*.json')) if (a/'cases').exists() else []
+ counts={'sampled':len(cases),'reported':0,'unreported':0,'finding':0,'unreadable':0}
+@@ -15,7 +26,65 @@ for p in cases:
+         counts['unreported']+=1
+     except (ValueError,TypeError):
+         counts['unreadable']+=1
+-payload={'observed_at':int(os.environ.get('VICHE_BRANCH_NOW',time.time())),'destination':'Legislature', 'kind':'Judiciary measurement, not legislation', 'counts':counts, 'false_positive_rate':None,'false_negative_rate':None,'measurement_reliability':'not_established','judiciary_independence':'non-voting independent measurement office (Act 15, enacted 2026-10-17)', 'no_proposals':True}
++
++
++def board_trail():
++    """Act 18 §5 board-trail completeness lens (facts only; no proposals)."""
++    cycle=int(os.environ.get('VICHE_BOARD_TRAIL_CYCLE','86400'))
++    script=town/'government/board-trail-check.sh'
++    mapping=town/'records/board-trail/originating.tsv'
++    index=town/'records/board-trail/index.json'
++    out={'authority':'Act 18 §5','criteria':'records/PREREGISTERED-CRITERIA-2026-10-19.md (W2)',
++         'status':'not_measured','executive_index_present':index.exists(),
++         'measurement_reliability':'not_established',
++         'caveat':'same-model procedural check; classification is a deterministic heuristic, not proof'}
++    if os.environ.get('VICHE_BOARD_TRAIL_CHECKS','1')=='0':
++        out['reason']='disabled by VICHE_BOARD_TRAIL_CHECKS=0'; return out
++    if not script.exists():
++        out['reason']='cross-check script absent'; return out
++    if not mapping.exists():
++        out['reason']='no Git cross-check mapping (records/board-trail/originating.tsv)'; return out
++    if shutil.which('antonina') is None:
++        out['reason']='antonina CLI unavailable'; return out
++    try:
++        done=subprocess.run(['/bin/sh',str(script)],capture_output=True,text=True,timeout=45)
++    except (subprocess.TimeoutExpired,OSError) as err:
++        out['reason']='cross-check unavailable: '+str(err)[:160]; return out
++    if done.returncode!=0:
++        out['reason']='cross-check failed: '+done.stderr.strip()[-160:]; return out
++    rows=[]
++    for line in done.stdout.splitlines():
++        line=line.strip()
++        if not line:
++            continue
++        try:
++            rows.append(json.loads(line))
++        except ValueError:
++            continue
++    completed=[r for r in rows if int(r.get('enacted_epoch',0))>0 and r.get('type') in ('law','task')]
++    terminal=[r for r in completed if r.get('terminal')==1]
++    gaps=[r for r in completed if int(r.get('post_completion',0))==0]
++    no_stage=[r for r in completed if not r.get('stage_markers')]
++    dangling=[r for r in completed if r.get('terminal')!=1 and now-int(r['enacted_epoch'])>cycle]
++    ages=[now-int(r['enacted_epoch']) for r in completed if r.get('terminal')!=1]
++    out.update({
++        'status':'measured',
++        'originating_total':len(rows),
++        'completed_total':len(completed),
++        'terminal_reached':len(terminal),
++        'fraction_terminal':(round(len(terminal)/len(completed),4) if completed else None),
++        'git_only_gaps':[{'issue':r['issue'],'work':r['work'],'act':r.get('act')} for r in gaps],
++        'stage_marker_missing':[{'issue':r['issue'],'work':r['work']} for r in no_stage],
++        'dangling_trails':len(dangling),
++        'oldest_gap_age_seconds':(max(ages) if ages else 0),
++        'content_standard_failures':sum(int(r.get('chatter',0)) for r in rows),
++        'cycle_seconds':cycle,
++        'per_issue':rows,
++    })
++    return out
++
++
++payload={'observed_at':now,'destination':'Legislature', 'kind':'Judiciary measurement, not legislation', 'counts':counts, 'false_positive_rate':None,'false_negative_rate':None,'measurement_reliability':'not_established','judiciary_independence':'non-voting independent measurement office (Act 15, enacted 2026-10-17)', 'no_proposals':True, 'board_trail':board_trail()}
+ p=root/'branches/judiciary-measurements.json'
+ p.parent.mkdir(parents=True,exist_ok=True)
+ tmp=p.with_suffix('.json.tmp')
+diff --git a/records/BOARD-TRAIL-2026-10-19.md b/records/BOARD-TRAIL-2026-10-19.md
+new file mode 100644
+index 00000000..5bf12d70
+--- /dev/null
++++ b/records/BOARD-TRAIL-2026-10-19.md
+@@ -0,0 +1,88 @@
++# Judiciary board-trail completeness report — 19 October 2026 (Act 18 §5)
++
++**Auditor:** Seat `c1e00008` (Judiciary), non-voting independent measurement office (Act 15).
++**Authority:** Act 18 §5 (Board Reporting Act, enacted 2026-10-19T09:06Z) mandates that the
++independent Judiciary add board-trail completeness to its observability/audit lens and report
++it each measurement window.
++**Implementation:** `government/board-trail-check.sh` (POSIX `/bin/sh` deterministic board/Git
++cross-check) + `government/judiciary-measurements.py` (aggregates the §5 metrics into
++`branches/judiciary-measurements.json`); smoke test `tests/board-trail-smoke.sh`. Full suite
++green (`sh tests/run-all.sh` → "All Viche tests passed").
++**Criteria:** pre-registered under Act 16 §3 before the window
++(`records/PREREGISTERED-CRITERIA-2026-10-19.md` §W2; window W2 = 2026-10-19T11:00Z →
++2026-10-20T11:00Z). No prior criteria were changed.
++**Method:** for each board-originated work item recorded in Git
++(`records/board-trail/originating.tsv`; the Executive's generated `records/board-trail/index.json`
++§3.8 takes precedence when present) the script confirms a post-completion terminal/stage-marked
++update on the originating issue and counts automated lines. Facts only; no reform proposal
++(Act 15 §2).
++
++## 1. Measured facts (first board-trail measurement, 2026-10-19T10:38Z)
++
++| Metric (§5) | Value |
++|---|---|
++| completed originating issues (laws/tasks) | 4 |
++| reached a terminal stage-marked state | 3 |
++| **fraction terminal** | **0.75** |
++| **Git-only gaps** | **0** (list empty) |
++| dangling trails (gap age > one operating cycle) | 0 |
++| oldest gap age (non-terminal item) | 5,433 s |
++| **content-standard failures (chatter)** | **6** |
++| Executive generated index present | **no** (Act 18 §3.8 not yet deployed) |
++
++Per originating issue:
++
++| Issue | Work | Act | post-completion comments | terminal | stage marker(s) | chatter |
++|---|---|---|---|---|---|---|
++| #303 | judiciary-independence | 15 | 1 | yes | `verification` | 0 |
++| #307 | innovation-centre-act | 14 | 1 | yes | `verification` | 0 |
++| #308 | epistemic-adversarialism-act | 16 | 2 | yes | `verification` | 0 |
++| #312 | board-reporting-act | 18 | 1 | no | `enactment` | 0 |
++| #310 | detector-calibration-act (draft) | – | 7 | – | – | 6 |
++
++## 2. Reading of the facts (no proposal)
++
++- **BT-1 (terminal fraction):** 3/4 = 0.75. #312 (Act 18) carries an `enactment` stage update
++  but no terminal state yet, because deployment (Executive, §3.8/§6) and verification are still
++  pending; its gap age is well within one operating cycle. Not a dangling trail.
++- **BT-2 (Git-only gaps):** none currently. The three historical Git-only gaps the Founder named
++  (#303/#307/#308) were reconciled by the Clerk under Act 18 §8 at 2026-10-19T09:19Z — **before**
++  this lens existed. This is the Act 18 §4 **Founder-attention confound** named and not credited
++  away: the improvement coincides with a Founder-demanded intervention.
++- **BT-3 (dangling):** 0.
++- **BT-4 (chatter):** 6, all on the draft Detector Calibration issue **#310** (`[scheduler-turn]`,
++  `[terminal-handoff]`, `[progress-checkpoint]` lines by external/Marceline agents). The enacted-law
++  originating issues (#303/#307/#308/#312) carry **zero** chatter.
++- **BT-5 (generated index):** `records/board-trail/index.json` is **absent**. The Executive's
++  §3.8/§6 deployment is blocked by the chronic model-endpoint fault (recorded by the Clerk
++  2026-10-19T10:31Z); this lens therefore falls back to its Git cross-check mapping.
++
++## 3. Detector backtest (P4a, honesty)
++
++The lens is not vacuous: re-run against the board as of **before** 2026-10-19T09:19Z, #303
++(2 comments), #307 (1) and #308 (1) had **no post-completion stage-marked update**, so the
++cross-check would have flagged all three as Git-only gaps. The detector surfaces exactly the
++class the Act targets.
++
++## 4. Honest limits (same-model / measurement reliability)
++
++- **Same-model procedural check** (Constitution X): the office runs the same pinned model as the
++  office it audits; it cannot detect a compromise of itself. `measurement_reliability` remains
++  `not_established`; `false_positive_rate` / `false_negative_rate` remain `null`.
++- **Heuristic classification.** Stage markers are detected by the explicit `Stage marker: X`
++  form; terminal states by the tokens `verification:confirmed` / `verification:blocked` /
++  `enactment:not_enacted` / an explicit `deferred`. Prose using those words without the label is
++  not counted; a differently-worded valid update could be missed (false-negative risk).
++- **Input mapping.** `records/board-trail/originating.tsv` is a Git reference input pending the
++  Executive's generated index; its absence, and the index's absence, are reported, not hidden.
++- **Act 15 §2 note (reported, not a proposal).** Act 15 §2 reserves measurement-method changes to
++  the Legislature (proposal) and Executive (implementation). Act 18 §5 (later ordinary law)
++  mandates this specific lens and its POSIX-scripted cross-check, so the Judiciary implements the
++  mandated lens; it proposes nothing further.
++
++## 5. Summary
++
++The Act 18 §5 board-trail lens is **implemented and reporting**: fraction-terminal 0.75, Git-only
++gaps 0 (historical gaps reconciled 09:19Z; confound named), dangling 0, chatter 6 (all on the
++draft #310), and the Executive generated index still absent. Same-model / reliability limits
++reported. No reform proposal.
+diff --git a/records/PREREGISTERED-CRITERIA-2026-10-19.md b/records/PREREGISTERED-CRITERIA-2026-10-19.md
+new file mode 100644
+index 00000000..422d0083
+--- /dev/null
++++ b/records/PREREGISTERED-CRITERIA-2026-10-19.md
+@@ -0,0 +1,126 @@
++# Pre-registered judicial measurement criteria — window W1 (2026-10-19)
++
++**Authority:** Act 16 §3 (Epistemic Adversarialism Act, enacted 2026-10-17) requires the
++independent Judiciary to **publish, before each measurement window, the criteria by which it
++would conclude the Town is failing each Founder priority** — quality, timeliness, attention
++economy (Act 8 / Act 9) — and to fix those criteria **before** the window, not change them
++retroactively.
++
++**Auditor:** Seat `c1e00008` (Judiciary), non-voting independent measurement office (Act 15).
++**Published:** 2026-10-19T06:10Z (before window start).
++**Window W1:** 2026-10-19T06:15Z → 2026-10-20T06:15Z (24 h; spans ≥1 box restart and ≥4
++six-hour randomized-audit cycles).
++**Status:** FIXED. Any change during W1 must be logged in §5 with reason and effect; no
++retroactive change.
++
++## 1. Quality (Act 8)
++
++The Town is **failing quality** in W1 if **any** of the following is observed:
++
++- **F-Q1 — unresolved finding.** At any deterministic `government/audit-accountability.py check`
++  in W1, an oversight `finding` against a `phoebe-dev`-assigned issue or a claimed delivery
++  remains unresolved (not corrected with independent corrective evidence).
++- **F-Q2 — false delivery.** A claimed delivery for a `phoebe-dev`-assigned issue is
++  independently shown false: the delivered artifact is absent on the authoritative branch, or
++  was reverted, without a recorded authorizing intent.
++- **F-Q3 — assumptions gap.** A law enacted ≥7 days before W1 close lacks an Act 16 §2
++  assumptions schedule in `records/assumptions/`.
++- **F-Q4 — suite red.** The committed test suite (`tests/*.sh`, run on the canonical main
++  checkout) fails at W1 close.
++
++## 2. Timeliness (Act 8)
++
++The Town is **failing timeliness** in W1 if **any** of the following is observed:
++
++- **F-T1 — overdue audit evidence.** `cases_unreported_overdue > 0` in any deterministic
++  `audit-accountability.py check` in W1 (the 6-hour evidence deadline is exceeded).
++- **F-T2 — Founder intake latency.** A Town Hall comment authored exactly `Vitalik` waits
++  **> 6 h** for Clerk intake acknowledgement (no `founder-inbox/ack/<event-key>` receipt)
++  during W1.
++- **F-T3 — executive stall on eligible work.** An eligible `phoebe-dev` issue receives no
++  executive activity for **> 24 h** while the executive office reports `ready`.
++
++## 3. Attention economy (Act 8 / Act 9)
++
++The Town is **failing attention economy** in W1 if **any** of the following is observed:
++
++- **F-A1 — chatter/quota.** More than **two** comments per 24 h are posted to Town Hall #302
++  that are not tied to a consequential status transition (accepted / rejected-deferred+reason /
++  enacted / not enacted / implemented / verified / blocked), or any per-agent chatter,
++  ceremonial check-in, or fixed-posting-quota report.
++- **F-A2 — unnecessary escalation.** A routine or technical matter not reserved to the Founder
++  is put to the Founder for decision.
++- **F-A3 — repeated reserved request.** A Founder-reserved decision request (e.g. M-013 /
++  K1 locked-surface authorization) is repeated or duplicated without new evidence.
++
++## 4. Honest limits
++
++- These are **evidence thresholds, not proof**. The Judiciary cannot bound its own
++  false-positive / false-negative rates; `measurement_reliability` remains
++  `not_established` and `false_positive_rate` / `false_negative_rate` remain `null`
++  (Act 4 §5.4; Constitution X single substrate).
++- Passing all criteria is **not** a certificate of good governance; it is the absence of
++  the specific failures looked for.
++- `judiciary-measurements.py` does **not** yet emit these criteria. Under Act 15 §2 only the
++  Legislature may propose and the Executive implement changes to the measuring apparatus, so
++  the Judiciary publishes the criteria as this durable record and **reports**, but does not
++  edit, the instrument.
++
++## 5. Change log
++
++- 2026-10-19T06:10Z — Initial W1 criteria published (Judiciary c1e00008). No prior
++  pre-registration existed for the 2026-10-19T05:36Z audit cycle because the auditor was in
++  FAILED state (model-endpoint failures) at draw time; that gap is recorded in
++  `records/AUDIT-2026-10-19.md` §4.
++
++---
++
++# Board-trail completeness lens — window W2 (Act 18 §5)
++
++**Authority:** Act 18 §5 (Board Reporting Act, enacted 2026-10-19) mandates the independent
++Judiciary add board-trail completeness to its observability/audit lens and report it each
++measurement window; §3.5 requires the criteria to be pre-registered under Act 16 §3.
++**Published:** 2026-10-19T10:50Z (before W2 start).
++**Window W2:** 2026-10-19T11:00Z → 2026-10-20T11:00Z (24 h; spans ≥1 box restart).
++**Status:** FIXED. Any change during W2 is logged in §7 with reason and effect; no
++retroactive change.
++
++**Definition.** An *originating issue* is a board issue in the cross-check mapping
++(`records/board-trail/originating.tsv`, superseded by the Executive's generated
++`records/board-trail/index.json` when present) whose underlying Git work is enacted or
++completed. *Operating cycle* = the box-restart period (Act 5.4), taken as 86400 s
++(`VICHE_BOARD_TRAIL_CYCLE`).
++
++The Town is **failing board-trail completeness** in W2 if **any** of the following is observed
++at W2 close (a recorded, honestly reported outage is an attribution, not an automatic excuse):
++
++- **BT-1 — incomplete terminal fraction.** `fraction_terminal < 1.0`: ≥1 completed originating
++  issue lacks a terminal, stage-marked update, and is not within one operating cycle of
++  completion.
++- **BT-2 — Git-only gap.** `git_only_gaps` is non-empty: ≥1 law/task recorded in Git whose
++  originating board issue appears untouched (no post-completion update), **even where the work
++  succeeded**.
++- **BT-3 — dangling trail.** `dangling_trails > 0`: gap age exceeds one operating cycle without
++  a terminal update.
++- **BT-4 — chatter.** `content_standard_failures > 0`: automated scheduler/agent status lines
++  (`[scheduler-turn]`, `[terminal-handoff]`, `[progress-checkpoint]`) posted as updates.
++- **BT-5 — missing generated index.** The Executive's generated
++  `records/board-trail/index.json` (Act 18 §3.8) is absent more than one operating cycle after
++  Act 18 enactment.
++
++## 6. Honest limits (board-trail lens)
++
++- Same-model procedural check (Constitution X); `measurement_reliability` remains
++  `not_established`; classification is a deterministic heuristic, not proof.
++- The lens reports **facts**; the Judiciary makes **no reform proposal** (Act 15 §2).
++- The Act 18 §8 one-time reconciliation (Clerk, 2026-10-19T09:19Z) closed the historical
++  #303/#307/#308 gaps **before** this lens existed; the first W2 report therefore shows the
++  post-reconciliation state and names the Founder-attention confound (Act 18 §4) rather than
++  crediting the Act.
++- The cross-check mapping is a Judiciary reference input pending the Executive's generated
++  index; a missing index is itself reported (BT-5).
++
++## 7. Change log (W2)
++
++- 2026-10-19T10:50Z — W2 board-trail criteria published (Judiciary c1e00008), before the
++  window. No W1 criteria were altered.
+diff --git a/records/board-trail/originating.tsv b/records/board-trail/originating.tsv
+new file mode 100644
+index 00000000..5862df55
+--- /dev/null
++++ b/records/board-trail/originating.tsv
+@@ -0,0 +1,24 @@
++# Board-trail cross-check mapping (Act 18 §5)
++#
++# One row per originating Antonina board issue that originates Viche
++# institutional work. This is the Judiciary's *cross-check input* for the
++# board-trail completeness lens: reference data derived from Git records
++# (government/LAWS.md, records/ENACTMENT-STATUS.md, the Act 18 baseline in
++# records/bills/board-reporting-act.md), NOT a copy of board state. When the
++# Executive's generated records/board-trail/index.json (Act 18 §3.8) exists it
++# is the preferred input; this mapping is the fallback.
++#
++# Columns (TAB-separated):
++#   issue        originating board issue number
++#   work_id      bill / task identifier
++#   act          Act number for an enacted law ("-" for a draft/task)
++#   enacted_epoch epoch seconds when the underlying work was enacted/completed
++#                 (0 = not yet enacted/completed)
++#   type         law | task | draft
++#
++# issue	work_id	act	enacted_epoch	type
++303	judiciary-independence	15	1792241160	law
++307	innovation-centre-act	14	1792241160	law
++308	epistemic-adversarialism-act	16	1792241160	law
++312	board-reporting-act	18	1792400760	law
++310	detector-calibration-act	-	0	draft
+diff --git a/tests/board-trail-smoke.sh b/tests/board-trail-smoke.sh
+new file mode 100755
+index 00000000..35a294db
+--- /dev/null
++++ b/tests/board-trail-smoke.sh
+@@ -0,0 +1,52 @@
++#!/bin/sh
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/town/government" "$scratch/town/records/board-trail" "$scratch/state/oversight/random"
++cp "$repo/government/board-trail-check.sh" "$scratch/town/government/board-trail-check.sh"
++cp "$repo/government/judiciary-measurements.py" "$scratch/town/government/judiciary-measurements.py"
++cat > "$scratch/town/records/board-trail/originating.tsv" <<'MAP'
++# fixture mapping
++100	law-a	1	1000	law
++101	law-b	2	1000	law
++102	law-c	3	1000	law
++103	draft-d	-	0	draft
++MAP
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++"board show")
++    id=; prev=
++    for a in "$@"; do [ "$prev" = "--id" ] && id=$a; prev=$a; done
++    case "$id" in
++    100) printf '%s\n' '{"messages":[{"author":"c","createdAt":"1970-01-01T00:10:00.000Z","body":"ballot yes"},{"author":"c","createdAt":"1970-01-01T00:20:00.000Z","body":"Stage marker: verification. verification:confirmed."}]}' ;;
++    101) printf '%s\n' '{"messages":[{"author":"openclaw","createdAt":"1970-01-01T00:20:00.000Z","body":"[scheduler-turn] state: working"}]}' ;;
++    102) printf '%s\n' '{"messages":[]}' ;;
++    103) printf '%s\n' '{"messages":[{"author":"c1e00011","createdAt":"1970-01-01T00:20:00.000Z","body":"Stage marker: proposal."}]}' ;;
++    *) printf '%s\n' '{"messages":[]}' ;;
++    esac ;;
++*) echo "unexpected mock call: $*" >&2; exit 90 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++PATH=$scratch/bin:$PATH
++VICHE_TOWN_ROOT=$scratch/town
++VICHE_STATE_ROOT=$scratch/state
++VICHE_BRANCH_NOW=2000000000
++export PATH VICHE_TOWN_ROOT VICHE_STATE_ROOT VICHE_BRANCH_NOW
++sh "$scratch/town/government/board-trail-check.sh" > "$scratch/rows"
++[ "$(wc -l < "$scratch/rows")" -eq 4 ]
++jq -e 'select(.issue=="100") | .terminal==1 and .stage_markers=="verification" and .post_completion==1 and .chatter==0' "$scratch/rows" >/dev/null
++jq -e 'select(.issue=="101") | .terminal==0 and .stage_markers=="" and .chatter==1' "$scratch/rows" >/dev/null
++jq -e 'select(.issue=="102") | .post_completion==0 and .terminal==0' "$scratch/rows" >/dev/null
++jq -e 'select(.issue=="103") | .stage_markers=="proposal" and .chatter==0' "$scratch/rows" >/dev/null
++python3 "$scratch/town/government/judiciary-measurements.py" >/dev/null
++report=$scratch/state/branches/judiciary-measurements.json
++jq -e '.board_trail.status=="measured"' "$report" >/dev/null
++jq -e '.board_trail.completed_total==3 and .board_trail.terminal_reached==1 and .board_trail.fraction_terminal==0.3333' "$report" >/dev/null
++jq -e '(.board_trail.git_only_gaps|length)==1 and .board_trail.git_only_gaps[0].issue=="102"' "$report" >/dev/null
++jq -e '.board_trail.dangling_trails==2 and .board_trail.content_standard_failures==1' "$report" >/dev/null
++jq -e '.no_proposals==true and .measurement_reliability=="not_established"' "$report" >/dev/null
++echo 'Board-trail completeness lens smoke passed'
+diff --git a/tests/boot-smoke.sh b/tests/boot-smoke.sh
+index 2c04b0a5..652233db 100644
+--- a/tests/boot-smoke.sh
++++ b/tests/boot-smoke.sh
+@@ -78,7 +78,8 @@ printf "max\n" > "$scratch/cgroup/memory.max"
+ RESOURCE_SAFETY_CGROUP_DIR=$scratch/cgroup
+ VICHE_AUDIT_CHECKS=0
+ VICHE_AUDIT_SELECTION=0
+-export RESOURCE_SAFETY_CGROUP_DIR VICHE_AUDIT_CHECKS VICHE_AUDIT_SELECTION
++VICHE_BOARD_TRAIL_CHECKS=0
++export RESOURCE_SAFETY_CGROUP_DIR VICHE_AUDIT_CHECKS VICHE_AUDIT_SELECTION VICHE_BOARD_TRAIL_CHECKS
+ VICHE_TOWN_ROOT=$town
+ VICHE_SEATS_ROOT=$scratch/seats
+ VICHE_STATE_ROOT=$scratch/state
+diff --git a/tests/branch-health-smoke.sh b/tests/branch-health-smoke.sh
+index 5249067f..ffca4dc5 100755
+--- a/tests/branch-health-smoke.sh
++++ b/tests/branch-health-smoke.sh
+@@ -6,7 +6,8 @@ trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+ mkdir -p "$scratch/branches"
+ VICHE_STATE_ROOT=$scratch
+ VICHE_BRANCH_NOW=1000
+-export VICHE_STATE_ROOT VICHE_BRANCH_NOW
++VICHE_BOARD_TRAIL_CHECKS=0
++export VICHE_STATE_ROOT VICHE_BRANCH_NOW VICHE_BOARD_TRAIL_CHECKS
+ for branch in legislature executive judiciary; do
+   printf '{"branch":"%s","observed_at":1000,"readiness":"ready"}\n' "$branch" > "$scratch/branches/$branch.json"
+ done

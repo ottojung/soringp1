@@ -1,0 +1,202 @@
+commit 00f50464500f25f5eed818ec2cd1227dfc3d4f55
+Author:     Viche operator <operator@viche>
+AuthorDate: Tue Nov 24 22:27:59 2026 +0000
+Commit:     Viche operator <operator@viche>
+CommitDate: Tue Nov 24 22:27:59 2026 +0000
+
+    PnP: independently verify explicit joint re-read circuits and render small certificates
+
+diff --git a/missions/pnp/proofs/circuit.py b/missions/pnp/proofs/circuit.py
+index d0589429..e8ba3b09 100644
+--- a/missions/pnp/proofs/circuit.py
++++ b/missions/pnp/proofs/circuit.py
+@@ -2,6 +2,7 @@
+ import re
+ 
+ from .. import validate
++from . import reread
+ 
+ GATE = re.compile(r"⟨PEqualNP\.CircuitLowerBounds\.GateOp\.(and|or|not),\s*\[([0-9, ]*)\]⟩")
+ EDGE = re.compile(r"\(x (\d+) && x (\d+)\)")
+@@ -11,6 +12,11 @@ INPUT = re.compile(r"∀ x : Fin (\d+) → Bool, C\.eval \(List\.ofFn x\) =")
+ def explicit_circuit(meta):
+     """Recognize only explicit circuit equality rows; reject ambiguous shapes."""
+     s = meta["statement"]
++    r = reread.verify(s)
++    if r is not None:
++        # Large certificates have independent semantic checks, but the
++        # small direct Lean renderer is not yet validated for that budget.
++        return r if r["auto_render"] else None
+     head = re.match(r"let C : PEqualNP\.CircuitLowerBounds\.Circuit := \(⟨\[(.*?)\],\s*(\d+)⟩ : PEqualNP\.CircuitLowerBounds\.Circuit\);", s, re.S)
+     if not head:
+         return None
+@@ -61,6 +67,11 @@ def explicit_circuit(meta):
+ 
+ 
+ def render(meta, proof):
++    if proof == "decide" and reread.parse(meta["statement"]) is not None:
++        r = reread.verify(meta["statement"])
++        if not r or not r["verified"] or not r["auto_render"]:
++            raise ValueError("explicit re-read certificate does not satisfy the statement")
++        proof = reread.PROOF
+     imports = ["Mathlib"] + [m for m in meta["imports"] if m != "Mathlib"]
+     text = "\n".join("import "+m for m in imports) + "\n\n"
+     text += "set_option maxRecDepth 100000 in\nset_option maxHeartbeats 0 in\n"
+diff --git a/missions/pnp/proofs/reread.py b/missions/pnp/proofs/reread.py
+new file mode 100644
+index 00000000..06c774e6
+--- /dev/null
++++ b/missions/pnp/proofs/reread.py
+@@ -0,0 +1,114 @@
++"""Recognize the explicit IsAO2/size/edge-function/ReadTwiceAt data family.
++
++Strict full-statement recognition; never treat title or partial match as proof.
++The independent verification uses joint read-once trees, not scalar minima.
++"""
++import re
++
++CIRCUIT = r"PEqualNP\.CircuitLowerBounds\.Circuit"
++OP = r"PEqualNP\.CircuitLowerBounds\.GateOp\.(and|or)"
++GATE = re.compile(r"\{ op := " + OP + r", inputs := \[(\d+), (\d+)\] \}")
++PAIR = re.compile(r"\((\d+), (\d+)\)")
++
++
++def _pairs(text, n):
++    pairs = [(int(a), int(b)) for a, b in PAIR.findall(text)]
++    if PAIR.sub("", text).replace(",", "").strip():
++        raise ValueError("unexpected edge list")
++    if any(not (0 <= a < n and 0 <= b < n and a != b) for a, b in pairs):
++        raise ValueError("invalid edge")
++    if len(pairs) != len(set(pairs)):
++        raise ValueError("duplicate edge")
++    return pairs
++
++
++def parse(statement):
++    s = " ".join(statement.split())
++    # Exact grammar of the published family. If the desk changes its printer
++    # or adds another condition, leave it for the researcher instead.
++    header = re.match(r"∀ (\w+) : " + CIRCUIT + r", \1 = \(\{ gates := \[(.*?)\], output := (\d+) \} : " + CIRCUIT + r"\) → ", s)
++    if not header:
++        return None
++    c, gate_text, out = header.groups()
++    tail = s[header.end():]
++    p = (r"PEqualNP\.TopForm\.IsAO2 (\d+) " + c + r" ∧ " + c + r"\.size = (\d+) ∧ "
++         r"\(∀ (\w+) : Fin \1 → Bool, PEqualNP\.MetaComplexity\.circuitFun \1 " + c +
++         r" \3 = decide \(∃ (\w+) ∈ \(\[(.*?)\] : List \(Fin \1 × Fin \1\)\), "
++         r"\3 \4\.1 = true ∧ \3 \4\.2 = true\)\) ∧ "
++         r"\(∀ (\w+) ∈ \(\[(.*?)\] : List \(Fin \1 × Fin \1\)\), "
++         r"PEqualNP\.Core\.ReadTwiceAt \1 " + c + r" \(" + c + r"\.output - \1\) \6\.1 \6\.2 ↔ "
++         r"\6 ∈ \(\[(.*?)\] : List \(Fin \1 × Fin \1\)\)\)")
++    m = re.fullmatch(p, tail)
++    if not m:
++        return None
++    n, size, _, _, edges, _, edges2, reread = m.groups()
++    n, size, out = int(n), int(size), int(out)
++    if not 2 <= n <= 16 or not 1 <= size <= 96 or not n <= out < n + size:
++        return None
++    gates = [(op, int(a), int(b)) for op, a, b in GATE.findall(gate_text)]
++    if len(gates) != size or GATE.sub("", gate_text).replace(",", "").strip():
++        return None
++    if any(a >= n+i or b >= n+i for i, (_, a, b) in enumerate(gates)):
++        return None
++    try:
++        e, e2, rr = _pairs(edges, n), _pairs(edges2, n), _pairs(reread, n)
++    except ValueError:
++        return None
++    if not e or e != e2 or not set(rr) <= set(e):
++        return None
++    return n, gates, out, e, rr
++
++
++def read_once(n, gates, output, u, v):
++    # A proof tree with each leaf used at most once is represented by its
++    # support mask. OR chooses one subtree; AND combines disjoint supports.
++    wires = [{1} if i == u else {2} if i == v else set() for i in range(n)]
++    for op, a, b in gates:
++        x, y = wires[a], wires[b]
++        wires.append(x | y if op == "or" else {i | j for i in x for j in y if not i & j})
++    return bool(wires[output])
++
++
++def verify(statement):
++    parsed = parse(statement)
++    if parsed is None:
++        return None
++    n, gates, out, edges, reread = parsed
++    cases = 1 << n
++    # Bitset evaluation of all assignments.
++    wires = [sum(1 << row for row in range(cases) if row >> i & 1)
++             for i in range(n)]
++    expected = 0
++    for a, b in edges:
++        expected |= wires[a] & wires[b]
++    for op, a, b in gates:
++        wires.append(wires[a] | wires[b] if op == "or" else wires[a] & wires[b])
++    mismatch = wires[out] ^ expected
++    actual = [e for e in edges if not read_once(n, gates, out, *e)]
++    return {"family":"explicit_reread", "verified":not mismatch and set(actual)==set(reread),
++            "inputs":n, "gates":len(gates), "output":out, "cases":cases,
++            "edges":edges, "expected_reread":reread, "actual_reread":actual,
++            "first_counterexample":(mismatch & -mismatch).bit_length()-1 if mismatch else None,
++            "local_lean_checked":False, "auto_render":n<=8}
++
++
++PROOF = """intro C hC
++  subst C
++  refine ⟨by decide +kernel, rfl, ?_, ?_⟩
++  · intro x
++    revert x
++    decide +kernel
++  · decide +kernel"""
++
++def main():
++    """Independently inspect an explicitly supplied public or bound statement."""
++    import argparse
++    import json
++    from pathlib import Path
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument("statement",type=Path)
++    a=p.parse_args()
++    print(json.dumps(verify(a.statement.read_text()),ensure_ascii=False,indent=2))
++
++if __name__=="__main__":
++    main()
+diff --git a/tests/pnp-proof-tools.py b/tests/pnp-proof-tools.py
+index cf77b84c..53373481 100644
+--- a/tests/pnp-proof-tools.py
++++ b/tests/pnp-proof-tools.py
+@@ -36,6 +36,33 @@ class ProofTools(unittest.TestCase):
+         bad = dict(META, statement=META["statement"].replace("((x 0 && x 1))", "((x 0 && x 1) && (x 0 && x 1))"))
+         self.assertIsNone(circuit.explicit_circuit(bad))
+ 
++    def test_joint_reread_certificate(self):
++        # AND(AND(x0,x1),OR(x0,x1)) computes one edge. Each scalar
++        # minimum is 1, but no single proof tree is simultaneously read-1.
++        from missions.pnp.proofs import reread
++        c = "PEqualNP.CircuitLowerBounds."
++        gates = ", ".join("{ op := "+c+"GateOp."+op+", inputs := ["+str(a)+", "+str(b)+"] }"
++                          for op,a,b in (("and",0,1),("or",0,1),("and",2,3)))
++        edge = "([(0, 1)] : List (Fin 2 × Fin 2))"
++        statement = (f"∀ C : {c}Circuit, C = ({{ gates := [{gates}], output := 4 }} : {c}Circuit) → "
++          f"PEqualNP.TopForm.IsAO2 2 C ∧ C.size = 3 ∧ "
++          f"(∀ x : Fin 2 → Bool, PEqualNP.MetaComplexity.circuitFun 2 C x = decide (∃ e ∈ {edge}, x e.1 = true ∧ x e.2 = true)) ∧ "
++          f"(∀ e ∈ {edge}, PEqualNP.Core.ReadTwiceAt 2 C (C.output - 2) e.1 e.2 ↔ e ∈ {edge})")
++        meta = dict(META,statement=statement)
++        r = circuit.explicit_circuit(meta)
++        self.assertEqual(r["actual_reread"],[(0,1)])
++        self.assertTrue(r["verified"])
++        src=circuit.render(meta,"decide")
++        self.assertIn("subst C",src)
++        validate.validate(meta,src.encode())
++        bad = dict(meta,statement=statement.removesuffix(edge+")")+"([] : List (Fin 2 × Fin 2)))")
++        self.assertFalse(circuit.explicit_circuit(bad)["verified"])
++        with self.assertRaises(ValueError):
++            circuit.render(bad,"decide")
++        self.assertIsNone(circuit.explicit_circuit(dict(meta,statement=statement+" ∧ False")))
++        self.assertFalse(reread.read_once(2,[("and",0,1),("or",0,1),("and",2,3)],4,0,1))
++        self.assertTrue(reread.read_once(2,[("and",0,1)],2,0,1))
++
+     def test_synthesis_bound_and_truth_table(self):
+         meta = dict(META, statement=("∃ C : PEqualNP.CircuitLowerBounds.Circuit, "
+           "PEqualNP.MetaComplexity.Monotone2 C ∧ C.size ≤ 3 ∧ ∀ x : Fin 4 → Bool, "

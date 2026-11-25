@@ -1,0 +1,604 @@
+commit 0ab5527837160d57bf1ea2b46ac8755d895fec86
+Merge: d8b9851d 93d21b87
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Fri Oct 16 13:29:04 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Fri Oct 16 13:29:04 2026 -0700
+
+    Merge pull request #23 from ottojung/feat/randomized-accountability-audits
+    
+    Randomize independent Auditor oversight and make omissions costly
+
+diff --git a/government/OVERSIGHT.md b/government/OVERSIGHT.md
+index 0b1b6b10..1a32d76d 100644
+--- a/government/OVERSIGHT.md
++++ b/government/OVERSIGHT.md
+@@ -2,10 +2,10 @@
+ 
+ ## Authority and separation
+ 
+-This implementation executes **existing** Founding Acts 4 (independent audit), 5 (durability), 8 (quality, timeliness, Founder attention) and 9 (Viche/Kawun only). It does not amend the Constitution or enact new legislation. Parliament can revise it by ordinary law.
++This implementation executes **existing** Founding Acts 4 (independent audit), 5 (durability), 8 (quality, timeliness, Founder attention) and the latest Founder-authorized productive mandate. It does not amend the Constitution or enact new legislation. Parliament can revise it by ordinary law.
+ 
+ - **Watchdog** (`government/oversight-watch.sh`): deterministic, invoked each ten-minute government reconciliation, independent of the Clerk, executive, Auditor, and model provider. Writes readable, durable observations and a current incident into the host's persistent Viche state. Does not edit Git working trees, close board issues, or judge wrongdoing.
+-- **Independent Auditor** (`government/audit-cycle.sh`): autonomously dispatched for an open incident or a periodic six-hour sample when the provider permits; retains its own seat and constitutional model restriction. Must verify actual outcomes and investigate measurement blind spots, not rely on executive self-reports.
++- **Independent Auditor** (`government/audit-cycle.sh`): autonomously dispatched for an open incident or a periodic bounded four-case random sample when the provider permits; retains its own seat and constitutional model restriction. Must verify actual outcomes and investigate measurement blind spots, not rely on executive self-reports.
+ - **Clerk/Parliament** (`government/sitting.sh`): receive active oversight incidents **as mandatory agenda items**, independently of Founder communications. The Clerk coordinates evidence and parliamentary remedies, not executive task selection.
+ - **Executive**: remains independent, accountable to outcomes, and can correct operational shortcomings under existing law without parliamentary ceremony.
+ 
+@@ -22,3 +22,40 @@ Persistent evidence is under `${VICHE_STATE_ROOT}/oversight/`: `observations.tsv
+ Watchdog automatically clears an incident only when **its measured signals** disappear, with closure explicitly marked as requiring independent outcome verification. It may reopen when poor delivery recurs. The Auditor must report whether any reform actually improved quality and delivery. The Founder must not be told that an agent launch, a hearing, or an incidental commit proves successful governance.
+ 
+ The watchdog's on-box state survives S6 and container restarts. Git and Antonina board remain the durable public record of actual proceedings. Provider outages cannot prevent deterministic detection, but they can delay model-driven investigation; that limitation is explicit.
++
++## Randomized adversarial oversight (existing Auditor; no new office)
++
++The independent selector (`government/audit-selection.py`) reads **all paginated
++open and closed issue summaries**, and recent government decisions directly. It
++freezes that universe before drawing a 256-bit secret seed. Selection is
++reproducible from the stored seed and snapshot hash, but cannot be known
++from a public timestamp before the draw. Every source item has nonzero
++selection weight; items not inspected recently are weighted more heavily.
++
++Every ordinary six-hour Audit Member cycle selects at most four deep cases:
++**two independently chosen open issues**, **one closed claim**, and **one
++government decision**. The Auditor independently checks whether the open
++issues are assigned to `phoebe-dev` from their bodies and current Founder
++communications, then inspects neglect only if eligible. A random unassigned
++issue is NOT a violation. Sample selection does not use the executive's list.
++
++Outcomes must be filed per case using `government/audit-accountability.py
++report --case CASE_ID --verdict ... --evidence REF`. Valid verdicts are
++`verified`, `not_assigned`, `finding`, and `inconclusive`; an outstanding
++`finding` requires a later `verified_fixed` with independent corrective
++evidence. These reports are auditable assertions, not machine-verified proofs.
++
++The deterministic controller runs on every government reconciliation and
++records `${VICHE_STATE_ROOT}/oversight/random/health.json`. It checks **all**
++currently running agent records through individual model/variant status reads,
++and scans **all** issued audit cases for missed evidence and findings. If the
++controller cannot inspect the inventory, it records missing telemetry instead
++of falsely reporting compliance. Overdue selections and unresolved findings
++produce `random/incident.json`, placed on the Clerk's mandatory agenda. Two
++findings against the same subject also produce a repeated-finding signal.
++
++Incident rechecks use the existing draw; they do not flood the Audit Member
++with a fresh four-case sample every thirty minutes. Neither a successful
++agent exit nor a board comment silently clears a finding. No sampling
++scheme guarantees detection of every violation; its goal is to make persistent
++selective neglect hard to conceal without replaying all substantive work.
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+new file mode 100644
+index 00000000..7569006f
+--- /dev/null
++++ b/government/audit-accountability.py
+@@ -0,0 +1,157 @@
++#!/usr/bin/env python3
++"""Deterministic oversight of randomized audit coverage and recorded findings.
++
++Auditor submissions are claims with evidence references, not independently verified
++facts. The controller never declares an issue solved from agent completion alone.
++"""
++import argparse
++import re
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import time
++
++
++def json_file(path, fallback=None):
++    return json.loads(path.read_text()) if path.exists() else fallback
++
++
++def atomic(path, data):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    temp = path.with_suffix(".tmp")
++    temp.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n")
++    os.replace(temp, path)
++
++
++def base():
++    return Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state")) / "oversight" / "random"
++
++
++def report(args):
++    root = base()
++    if not re.fullmatch(r"[0-9a-f]{18}", args.case):
++        raise ValueError("invalid audit case identifier")
++    case = json_file(root / "cases" / f"{args.case}.json")
++    if case is None:
++        raise ValueError("unknown audit case")
++    if not args.evidence or not args.evidence.strip():
++        raise ValueError("durable evidence reference is required")
++    path = root / "outcomes" / f"{args.case}.json"
++    prior = json_file(path)
++    if prior and prior["verdict"] != "finding":
++        raise ValueError("case already has a final verdict")
++    if args.verdict == "verified_fixed" and (not prior or prior["verdict"] != "finding"):
++        raise ValueError("verified_fixed requires a previous finding")
++    now = int(os.environ.get("VICHE_OVERSIGHT_NOW", time.time()))
++    result = {"case_id": args.case, "population": case["population"],
++              "subject": case["id"], "verdict": args.verdict, "at": now,
++              "evidence_ref": args.evidence, "details": args.details[:1000],
++              "caveat": "auditor_report_not_independent_proof"}
++    atomic(path, result)
++    print(json.dumps(result))
++
++
++def listed_agents():
++    all_agents = []
++    for page in range(1, 101):
++        p = subprocess.run(["antonina", "agent", "list", "--running",
++                            "--page", str(page), "--json"], capture_output=True,
++                           text=True, timeout=30)
++        if p.returncode:
++            raise RuntimeError(f"agent list failed: {p.stderr[-160:]}")
++        data = json.loads(p.stdout)
++        if isinstance(data, dict):
++            if data.get("unreadable", 0):
++                raise RuntimeError("unreadable agent inventory entries")
++            items = data.get("agents")
++        else:
++            items = data
++        if not isinstance(items, list):
++            raise RuntimeError("invalid agent list response")
++        all_agents.extend(items)
++        if len(items) < 50:
++            return all_agents
++    raise RuntimeError("incomplete agent list")
++
++
++def check(args):
++    root = base()
++    now = int(os.environ.get("VICHE_OVERSIGHT_NOW", time.time()))
++    deadline = int(os.environ.get("VICHE_AUDIT_EVIDENCE_DEADLINE", "21600"))
++    if deadline <= 0:
++        raise ValueError("invalid deadline")
++    signals = []
++    cases = list((root / "cases").glob("*.json")) if (root / "cases").exists() else []
++    findings = {}
++    overdue = 0
++    for path in cases:
++        case = json_file(path)
++        verdict = json_file(root / "outcomes" / path.name)
++        if verdict is None and now - int(case["at"]) > deadline:
++            overdue += 1
++            signals.append({"type": "unreported_sample", "case_id": case["case_id"]})
++        if verdict is not None and verdict["verdict"] == "finding":
++            subject = f"{case['population']}:{case['id']}"
++            findings[subject] = findings.get(subject, 0) + 1
++            signals.append({"type": "unresolved_finding", "case_id": case["case_id"],
++                            "evidence_ref": verdict["evidence_ref"]})
++        if verdict is not None and verdict["verdict"] == "inconclusive" and now - verdict["at"] > deadline:
++            signals.append({"type": "unresolved_inconclusive", "case_id": case["case_id"]})
++    for subject, count in findings.items():
++        if count >= 2:
++            signals.append({"type": "repeated_finding", "subject": subject,
++                            "count": count})
++    agents = 0
++    try:
++        inventory = listed_agents()
++        agents = len(inventory)
++        for agent in inventory:
++            agent_id = str(agent.get("id", ""))
++            p = subprocess.run(["antonina", "agent", "status", "--id", agent_id, "--json"],
++                               capture_output=True, text=True, timeout=25)
++            if p.returncode:
++                signals.append({"type": "agent_status_unavailable", "agent_id": agent_id})
++                continue
++            metadata = json.loads(p.stdout)
++            if metadata.get("model") != "opencode-go/longcat-2.5-preview-free" or metadata.get("variant") != "low":
++                signals.append({"type": "host_model_mismatch_requires_attribution", "agent_id": str(agent.get("id", "unknown"))})
++    except Exception as e:
++        signals.append({"type": "agent_inventory_unavailable", "detail": str(e)[:180]})
++    evidence = {"at": now, "cases_total": len(cases), "cases_unreported_overdue": overdue,
++                "running_agents_checked": agents, "signals": signals,
++                "finding_count": sum(findings.values()),
++                "assessment": "requires_investigation_not_a_guilt_verdict"}
++    atomic(root / "health.json", evidence)
++    incident = root / "incident.json"
++    if signals:
++        atomic(incident, evidence)
++    elif incident.exists():
++        os.replace(incident, root / f"cleared-{now}.json")
++    print(json.dumps(evidence))
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("action", choices=["check", "report"])
++    p.add_argument("--case", default="")
++    p.add_argument("--verdict", choices=["verified", "not_assigned",
++                                           "finding", "inconclusive", "verified_fixed"])
++    p.add_argument("--evidence", default="")
++    p.add_argument("--details", default="")
++    args = p.parse_args()
++    if args.action == "report":
++        if not args.case or not args.verdict:
++            raise ValueError("case and verdict are required")
++        report(args)
++    else:
++        check(args)
++
++
++if __name__ == "__main__":
++    try:
++        main()
++    except Exception as err:
++        print(f"Audit accountability failed: {err}", file=sys.stderr)
++        sys.exit(1)
+diff --git a/government/audit-cycle.sh b/government/audit-cycle.sh
+index df14a2ea..e694330d 100644
+--- a/government/audit-cycle.sh
++++ b/government/audit-cycle.sh
+@@ -6,6 +6,10 @@ seats=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}
+ root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/oversight
+ charter=${VICHE_CONSTITUTION:?authoritative Founder charter required}
+ now=${VICHE_OVERSIGHT_NOW:-$(date +%s)}
++mkdir -p "$root"
++if [ "${VICHE_AUDIT_CHECKS:-1}" = 1 ]; then
++  python3 "$town/government/audit-accountability.py" check > "$root/random-check.log" || exit 1
++fi
+ id=c1a00008
+ [ -s "$charter" ] && [ -d "$seats/$id" ] || exit 1
+ [ -f "$root/observations.tsv" ] || exit 0
+@@ -23,20 +27,31 @@ variant=$(printf '%s\n' "$meta" | jq -r '.variant // empty')
+ # broad audits at least once every six hours when there is no incident.
+ incident=no
+ cadence=21600
+-if [ -s "$root/incident.json" ]; then incident=yes; cadence=1800; fi
++if [ -s "$root/incident.json" ] || [ -s "$root/random/incident.json" ]; then incident=yes; cadence=1800; fi
+ last=0
+ if [ -s "$root/last-audit-dispatch" ]; then last=$(cat "$root/last-audit-dispatch"); fi
+ case "$last" in ''|*[!0-9]*) last=0;; esac
+ [ $((now-last)) -ge "$cadence" ] || exit 0
+ 
+-evidence='No active incident; review sampled observations and seek blind spots.'
+-if [ "$incident" = yes ]; then evidence=$(cat "$root/incident.json"); fi
++evidence='No ordinary incident.'
++[ ! -s "$root/incident.json" ] || evidence=$(cat "$root/incident.json")
++[ ! -s "$root/random/incident.json" ] || evidence="$evidence $(cat "$root/random/incident.json")"
++selection='Test-only no sample'
++if [ "${VICHE_AUDIT_SELECTION:-1}" = 1 ]; then
++  if [ "$incident" = yes ] && [ -s "$root/random/latest.json" ]; then
++    selection=$(cat "$root/random/latest.json")
++  else
++    selection=$(python3 "$town/government/audit-selection.py") || exit 1
++  fi
++fi
+ prompt=$(cat <<EOF
+ You are the independent Viche Audit Member under Act 4, accountable to
+ Parliament and the Founder, not to the executive or Clerk. Independently audit
+-whether Viche is making the Founder happier: quality of finished Kawun work,
++whether Viche is making the Founder happier: quality of assigned work,
+ timeliness, and conservation of Founder attention (Acts 8 and 9). Examine
+ actual Git changes, tests, merges, deployment, live owners and board issues.
++The sample is drawn from the board without executive cooperation. Auditing an
++unassigned issue is not acquiring it for productive work.
+ An agent being alive or writing a report is NOT evidence of useful delivery.
+ Do not equate number of commits or a stale local main checkout with success.
+ Separate verified evidence, uncertainty, and mere leading indicators.
+@@ -47,6 +62,17 @@ $(cat "$charter")
+ 
+ Current deterministic watchdog evidence:
+ $evidence
++Randomized audit cases (bounded deep review):
++$selection
++
++For each sampled open issue, verify actual host assignment from its description
++and latest Founder comments, then investigate unjustified neglect if assigned.
++For sampled completed work verify delivery; for government decisions check
++lawfulness and effect. Submit an evidence-backed verdict for EVERY sampled case
++using $town/government/audit-accountability.py report with --case, --verdict
++(verified, not_assigned, finding, inconclusive) and --evidence. Record a
++finding for neglect or false delivery, not for a mere absence of information.
++Use verified_fixed with new evidence only for later independent correction.
+ 
+ Inspect the complete, current ordinary laws at $town/government/LAWS.md and
+ oversight guidance at $town/government/OVERSIGHT.md.
+diff --git a/government/audit-selection.py b/government/audit-selection.py
+new file mode 100644
+index 00000000..8be70433
+--- /dev/null
++++ b/government/audit-selection.py
+@@ -0,0 +1,130 @@
++#!/usr/bin/env python3
++"""Randomized, independent audit selection. Does not trust executive task lists."""
++import hashlib
++from datetime import datetime
++import json
++import os
++from pathlib import Path
++import random
++import secrets
++import subprocess
++import sys
++import time
++
++
++def command(*argv):
++    p = subprocess.run(argv, text=True, capture_output=True, timeout=40)
++    if p.returncode:
++        raise RuntimeError(f"{argv[:3]} failed: {p.stderr[-250:]}")
++    return p.stdout
++
++
++def board(state):
++    found, ids = [], set()
++    for page in range(1, 101):
++        data = json.loads(command("antonina", "board", "list", "--state",
++                                  state, "--page", str(page), "--json"))
++        if not isinstance(data, list):
++            raise RuntimeError("unexpected board response")
++        for issue in data:
++            if issue["number"] in ids:
++                raise RuntimeError("duplicate issue in board snapshot")
++            ids.add(issue["number"])
++            found.append(issue)
++        if len(data) < 50:
++            return found
++    raise RuntimeError("incomplete board snapshot")
++
++
++def write(path, payload):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    tmp = path.with_suffix(".tmp")
++    tmp.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
++    os.replace(tmp, path)
++
++
++def choose(rng, items, size, now, root, kind):
++    chosen = []
++    items = items[:]
++    for _ in range(min(size, len(items))):
++        weights = []
++        for item in items:
++            key = hashlib.sha256(f"{kind}:{item['id']}".encode()).hexdigest()
++            previous = root / "seen" / key
++            last = int(previous.read_text()) if previous.exists() else 0
++            age = now - last if last else now
++            try:
++                created = datetime.fromisoformat(item.get("createdAt", "").replace("Z", "+00:00")).timestamp()
++                issue_age = max(0, now - created)
++            except (ValueError, TypeError):
++                issue_age = 0
++            # Persistently old issues grow harder to neglect even if somebody
++            # comments on them. No project title or executive report is used.
++            weights.append(1.0 + min(8.0, max(0, age) / (3 * 86400))
++                           + (min(6.0, issue_age / (7 * 86400)) if kind == "ignored_work" else 0))
++        threshold = rng.random() * sum(weights)
++        for i, weight in enumerate(weights):
++            threshold -= weight
++            if threshold < 0:
++                break
++        chosen.append(items.pop(i))
++    return chosen
++
++
++def main():
++    now = int(os.environ.get("VICHE_OVERSIGHT_NOW", time.time()))
++    root = Path(os.environ.get("VICHE_STATE_ROOT",
++                               "/var/lib/lubko/wd/viche-state")) / "oversight" / "random"
++    town = os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche")
++    open_issues = board("open")
++    closed = board("closed")
++    decisions = []
++    log = command("git", "-C", town, "log", "-40", "--format=%H%x09%s",
++                  "--", "government/", "records/bills/")
++    for line in log.splitlines():
++        sha, _, title = line.partition("\t")
++        if len(sha) == 40:
++            decisions.append({"id": sha, "title": title})
++    pools = {
++        "ignored_work": [{"id": str(i["number"]), "title": i["title"], "createdAt": i.get("createdAt", "")} for i in open_issues],
++        "claimed_delivery": [{"id": str(i["number"]), "title": i["title"]} for i in closed],
++        "government_decision": decisions,
++    }
++    # The board/git universe is captured before the random seed exists.
++    digest = hashlib.sha256(json.dumps(pools, sort_keys=True).encode()).hexdigest()
++    seed = secrets.token_hex(32)
++    rng = random.Random(int(seed, 16))
++    sample = []
++    for name, count in (("ignored_work", 2), ("claimed_delivery", 1),
++                        ("government_decision", 1)):
++        for entry in choose(rng, pools[name], count, now, root, name):
++            case = {"population": name, **entry}
++            case["case_id"] = hashlib.sha256(
++                f"{now}:{seed}:{name}:{entry['id']}".encode()).hexdigest()[:18]
++            if name != "government_decision":
++                issue = json.loads(command("antonina", "board", "show", "--id",
++                                           entry["id"], "--page", "1", "--json"))
++                case["body"] = issue.get("body", "")[:4000]
++                case["recent_comments"] = [
++                    {"author": c.get("author", ""), "body": c.get("body", "")[:550]}
++                    for c in issue.get("messages", [])[-3:]]
++            sample.append(case)
++    batch = {"at": now, "snapshot_sha256": digest, "seed_after_snapshot": seed,
++             "universe": {k: len(v) for k, v in pools.items()},
++             "cases": sample, "not_a_compliance_certificate": True}
++    write(root / "latest.json", batch)
++    for case in sample:
++        write(root / "cases" / f"{case['case_id']}.json", {"at": now, **case})
++        key = hashlib.sha256(f"{case['population']}:{case['id']}".encode()).hexdigest()
++        seen = root / "seen" / key
++        seen.parent.mkdir(parents=True, exist_ok=True)
++        seen.write_text(str(now))
++    print(json.dumps(batch, sort_keys=True))
++
++
++if __name__ == "__main__":
++    try:
++        main()
++    except Exception as error:
++        print(f"Independent audit sampler failed: {error}", file=sys.stderr)
++        sys.exit(1)
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index e8c69d51..45b2eca5 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -39,9 +39,9 @@ NOT a parliamentary sitting. Do not do the parliamentary Clerk work.
+ === AUTHORITATIVE CONSTITUTION ===
+ $(cat "$charter")
+ === END AUTHORITATIVE CONSTITUTION ===
+-Obey $town/government/LAWS.md, especially Acts 2, 8 and 9.
++Follow current Founder mandates and current ordinary laws. Report contradictory older law rather than treating an unenacted bill as law.
+ Follow the current operational agenda at $town/government/executive-agenda.md.
+-Independently own Kawun progress, even without Founder messages or summons.
++Independently discover all open board issues explicitly assigned to phoebe-dev, regardless of project. Do not infer eligibility from titles.
+ Maintain durable issue ownership, dependencies, completed work and blockers.
+ Verify current issue comments, agents and PRs before assigning; avoid duplicates.
+ Prioritize tested merged deliverables, not ceremonial discussion or agent counts.
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 7a54eda5..fa5e4604 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -28,8 +28,7 @@ You are the provisional parliamentary clerk. Poll Town Hall issue
+ Treat the author exactly Vitalik as Founder, without signatures or verification.
+ Page backwards until all new comments have been examined and persist the cursor
+ at $town/records/TOWNHALL_CURSOR.md. Other authors are not the Founder.
+-Your agenda MUST cover only Viche self-governance/improvement and Kawun delivery;
+-do not take unrelated Antonina board tasks. See Acts 8 and 9 of the founding laws.
++Determine productive scope from explicit phoebe-dev issue assignments, not a fixed project list. Resolve older-law conflicts under the newer Founder mandate.
+ Executive discovery, issue prioritization and delivery belong to the independent
+ executive office under Act 2. The Clerk is not its task scheduler.
+ Prepare a concise parliamentary agenda and publish it in durable records or Antonina.
+@@ -49,8 +48,7 @@ You are a voting parliamentarian, not the Town Hall intake clerk.
+ You are being summoned for current business. Prioritize your latest specific
+ assignment, not an earlier completed ballot or historical agenda. Read the
+ current laws and verify all material facts before making changes.
+-Work only on improving Viche itself or delivering Kawun tasks, never other
+-Antonina projects. Review the exclusive mandate in Founding Act 9.
++Read the latest Founder instructions and act on work assigned to phoebe-dev, regardless of project; do not assume an issue title grants assignment.
+ Form an independent assessment and deliberate; record explicit ballots when
+ appropriate. Delegate useful independent tasks without numerical worker caps.
+ Do not independently repeat the clerk's entire Town Hall intake.
+@@ -87,7 +85,7 @@ if [ "$seat" = "$clerk" ]; then
+ $(cat "$oversight/incident.json")
+ === END OVERSIGHT INCIDENT ===
+ Do not adjourn for "no business": independently investigate this open incident.
+-Examine the auditor's findings and actual Kawun outcomes, convene an inquiry
++Examine the auditor's findings and actual assigned-work outcomes, convene an inquiry
+ and summon needed members for evidence or corrective legislation. Require
+ a concrete corrective action, its owner and a follow-up evaluation date.
+ For incident first_seen ID from JSON, publish a real hearing record on the
+@@ -117,3 +115,18 @@ Do not ask the Founder to resolve ordinary Git conflicts or agent failures.
+ EOF
+     fi
+ fi
++
++# Unresolved randomized audit findings and missed independent checks are mandatory.
++if [ "$seat" = "$clerk" ]; then
++    audit=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/oversight/random
++    if [ -s "$audit/incident.json" ]; then
++        cat <<EOF
++=== MANDATORY RANDOM AUDIT INQUIRY ===
++$(cat "$audit/incident.json")
++=== END RANDOM AUDIT INQUIRY ===
++Investigate with the existing Auditor and require evidence-backed corrective
++action. A government acknowledgement is not independent verification.
++Confirmed findings remain until the Auditor verifies a fix.
++EOF
++    fi
++fi
+diff --git a/tests/boot-smoke.sh b/tests/boot-smoke.sh
+index fecbf3a3..2ca11907 100644
+--- a/tests/boot-smoke.sh
++++ b/tests/boot-smoke.sh
+@@ -70,6 +70,12 @@ chmod +x "$scratch/bin/antonina"
+ 
+ MOCK_STATE=$scratch/mock
+ PATH=$scratch/bin:$PATH
++mkdir -p "$scratch/cgroup"
++printf "max\n" > "$scratch/cgroup/memory.max"
++RESOURCE_SAFETY_CGROUP_DIR=$scratch/cgroup
++VICHE_AUDIT_CHECKS=0
++VICHE_AUDIT_SELECTION=0
++export RESOURCE_SAFETY_CGROUP_DIR VICHE_AUDIT_CHECKS VICHE_AUDIT_SELECTION
+ VICHE_TOWN_ROOT=$town
+ VICHE_SEATS_ROOT=$scratch/seats
+ VICHE_STATE_ROOT=$scratch/state
+diff --git a/tests/oversight-smoke.sh b/tests/oversight-smoke.sh
+index 84f02b90..f822e14c 100644
+--- a/tests/oversight-smoke.sh
++++ b/tests/oversight-smoke.sh
+@@ -52,7 +52,9 @@ NOTICES=$scratch/notices
+ VICHE_TOWNHALL_ID=302
+ export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION
+ export VICHE_KAWUN_REPO VICHE_OVERSIGHT_NOW MOCK_BOARD EXEC_STATE ERROR LAST
+-export AUDIT_STATE MODEL VARIANT DISPATCHES NOTICES VICHE_TOWNHALL_ID
++VICHE_AUDIT_SELECTION=0
++VICHE_AUDIT_CHECKS=0
++export AUDIT_STATE MODEL VARIANT DISPATCHES NOTICES VICHE_TOWNHALL_ID VICHE_AUDIT_SELECTION VICHE_AUDIT_CHECKS
+ /bin/sh "$repo/government/oversight-watch.sh"
+ incident=$scratch/state/oversight/incident.json
+ jq -e '.first_seen == 20000 and (.signals | index("executive_failed")) and .open_kawun_issues_first_page == 1' "$incident" >/dev/null
+diff --git a/tests/randomized-audit-smoke.sh b/tests/randomized-audit-smoke.sh
+new file mode 100755
+index 00000000..c7abb5aa
+--- /dev/null
++++ b/tests/randomized-audit-smoke.sh
+@@ -0,0 +1,61 @@
++#!/bin/sh
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/state/oversight" "$scratch/seats/c1a00008" "$scratch/town/records"
++printf 'charter fixture\n' > "$scratch/charter"
++printf 'observation\n' > "$scratch/state/oversight/observations.tsv"
++: > "$scratch/town/records/SUMMONED.txt"
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++"board list")
++  case "$*" in
++    *"--state closed"*) echo '[{"number":8,"title":"Claimed completed work"}]' ;;
++    *"--page 1"*) echo '[{"number":301,"title":"SoringP1"},{"number":155,"title":"Kawun"},{"number":66,"title":"Other task"},{"number":302,"title":"Town Hall"}]' ;;
++    *) echo '[]' ;;
++  esac ;;
++"board show")
++  echo '{"body":"Execution host: phoebe-dev. Independent task.","messages":[{"author":"Vitalik","body":"Carry out assigned work."}]}' ;;
++"agent list")
++  echo '{"agents":[{"id":"c1a00008"}],"unreadable":0}' ;;
++"agent status")
++  echo '{"state":"idle","model":"opencode-go/longcat-2.5-preview-free","variant":"low"}' ;;
++"agent run")
++  printf 'invoked\n' >> "$DISPATCHES" ;;
++*) echo "unexpected mock call: $*" >&2; exit 90 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++PATH=$scratch/bin:$PATH
++VICHE_STATE_ROOT=$scratch/state
++VICHE_TOWN_ROOT=$repo
++VICHE_SEATS_ROOT=$scratch/seats
++VICHE_CONSTITUTION=$scratch/charter
++VICHE_OVERSIGHT_NOW=2000000000
++VICHE_AUDIT_EVIDENCE_DEADLINE=7200
++DISPATCHES=$scratch/dispatches
++export PATH VICHE_STATE_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_CONSTITUTION VICHE_OVERSIGHT_NOW VICHE_AUDIT_EVIDENCE_DEADLINE DISPATCHES
++python3 "$repo/government/audit-selection.py" > "$scratch/sample"
++jq -e '.universe.ignored_work==4 and .universe.claimed_delivery==1 and .universe.government_decision>0 and (.cases|length)==4 and ([.cases[].case_id]|unique|length)==4' "$scratch/sample" > /dev/null
++jq -e '([.cases[].population]|sort)==["claimed_delivery","government_decision","ignored_work","ignored_work"]' "$scratch/sample" >/dev/null
++# All selections happen from board, independent of executive supplied task claims.
++[ "$(find "$scratch/state/oversight/random/cases" -type f | wc -l)" -eq 4 ]
++/bin/sh "$repo/government/audit-cycle.sh"
++[ "$(wc -l < "$DISPATCHES")" -eq 1 ]
++# Both ordinary oversight and randomized findings are linked to evidence.
++id=$(jq -r '.cases[0].case_id' "$scratch/sample")
++python3 "$repo/government/audit-accountability.py" report --case "$id" --verdict finding --evidence "commit:abc" >/dev/null
++python3 "$repo/government/audit-accountability.py" check > "$scratch/check"
++jq -e '[.signals[].type]|index("unresolved_finding")' "$scratch/check" >/dev/null
++python3 "$repo/government/audit-accountability.py" report --case "$id" --verdict verified_fixed --evidence "commit:def" >/dev/null
++python3 "$repo/government/audit-accountability.py" check > "$scratch/check"
++jq -e '(.signals|length==0)' "$scratch/check" >/dev/null
++VICHE_OVERSIGHT_NOW=2000010000
++export VICHE_OVERSIGHT_NOW
++python3 "$repo/government/audit-accountability.py" check > "$scratch/check"
++jq -e '[.signals[].type]|index("unreported_sample")' "$scratch/check" >/dev/null
++[ -s "$scratch/state/oversight/random/incident.json" ]
++echo 'Randomized audit selection and accountability smoke passed'

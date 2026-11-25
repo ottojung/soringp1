@@ -1,0 +1,341 @@
+commit 09195baa0b36d4a889dbe49d17b543823b3799f4
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 08:24:24 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 08:24:24 2026 +0000
+
+    Retire reclaimed quarantine records safely
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index 40eaaec9..e5da0525 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -61,6 +61,25 @@ is_num() {
+     esac
+ }
+ 
++normalize_decimal() {
++    _nd=$1
++    is_num "$_nd" || return 1
++    while [ "${_nd#0}" != "$_nd" ]; do _nd=${_nd#0}; done
++    [ -n "$_nd" ] || _nd=0
++    printf '%s' "$_nd"
++}
++
++decimal_greater() {
++    # Compare arbitrary-length unsigned decimal strings without shell arithmetic.
++    _dg_a=$(normalize_decimal "$1") || return 2
++    _dg_b=$(normalize_decimal "$2") || return 2
++    [ "${#_dg_a}" -gt "${#_dg_b}" ] && return 0
++    [ "${#_dg_a}" -lt "${#_dg_b}" ] && return 1
++    [ "$_dg_a" = "$_dg_b" ] && return 1
++    _dg_last=$(printf '%s\n%s\n' "$_dg_a" "$_dg_b" | LC_ALL=C sort | tail -n 1)
++    [ "$_dg_last" = "$_dg_a" ]
++}
++
+ confval() {
+     # confval <key> <default>
+     if [ -f "$conf" ]; then
+@@ -163,6 +182,7 @@ quarantine_path_ok() {
+     _qpo_path=$1
+     [ -n "$quarantine_dir" ] && [ "$quarantine_dir" != / ] || return 1
+     [ -d "$_qpo_path" ] || return 1
++    [ ! -L "$_qpo_path" ] || return 1
+     _qpo_root=$(readlink -f "$quarantine_dir" 2>/dev/null) || return 1
+     _qpo_dest=$(readlink -f "$_qpo_path" 2>/dev/null) || return 1
+     [ -n "$_qpo_root" ] && [ "$_qpo_root" != / ] || return 1
+@@ -783,39 +803,117 @@ reclaim_quarantined() {
+     }
+     log_append "$jstate/actions.log" "$ts reclaim-quarantined begin grace=${quarantine_grace}s"
+     tmp=$jstate/tmp/reclaim.tsv
+-    : > "$tmp"
++    qcopy=$jstate/tmp/quarantined.input.tsv
++    # The snapshot/rewrite is serialized by the global Janitor lock acquired above.
++    # Every in-tree qlog writer (quarantine and scratch-quarantine) is a mutating
++    # mode and takes that same lock; keep them out of the report/status exemptions.
++    qheader=$(printf 'ts\tsrc\tdest\tsize_kb\tquarantined_at')
++    if ! cp "$qlog" "$qcopy" 2>/dev/null; then
++        log_append "$jstate/actions.log" "$ts reclaim-quarantined deferred reason=qlog-copy-failed"
++        rm -f "$qcopy"
++        return 0
++    fi
++    if ! exec 3< "$qcopy"; then
++        log_append "$jstate/actions.log" "$ts reclaim-quarantined deferred reason=qlog-open-failed"
++        rm -f "$qcopy" "$tmp"
++        return 1
++    fi
++    qheader_read=
++    if ! IFS= read -r qheader_read <&3 || [ "$qheader_read" != "$qheader" ]; then
++        exec 3<&-
++        log_append "$jstate/actions.log" "$ts reclaim-quarantined deferred reason=qlog-header-invalid"
++        rm -f "$qcopy" "$tmp"
++        return 0
++    fi
++    printf '%s\n' "$qheader" > "$tmp"
++    rejected=$jstate/quarantine-rejected.tsv
+     freed_kb=0
+-    tail -n +2 "$qlog" 2>/dev/null | while IFS="$(printf '\t')" read -r ts src dest size qat; do
+-        [ -n "$dest" ] || continue
++    while record=; IFS= read -r record <&3 || [ -n "$record" ]; do
++        [ -n "$record" ] || continue
++        # Read TSV columns with cut so empty fields remain empty; tab is IFS
++        # whitespace and `read` would collapse adjacent delimiters.
++        ts=$(printf '%s\n' "$record" | cut -s -f1)
++        src=$(printf '%s\n' "$record" | cut -s -f2)
++        dest=$(printf '%s\n' "$record" | cut -s -f3)
++        size=$(printf '%s\n' "$record" | cut -s -f4)
++        qat=$(printf '%s\n' "$record" | cut -s -f5)
++        [ -n "$dest" ] || {
++            log_append "$jstate/actions.log" "$ts action=reclaim refused=empty-quarantine-path"
++            if [ ! -f "$rejected" ]; then
++                printf 'ts\tsrc\tdest\tsize_kb\tquarantined_at\treason\n' > "$rejected"
++            fi
++            printf '%s\t%s\t%s\t%s\t%s\tempty-quarantine-path\n' \
++                "$ts" "$src" "$dest" "$size" "$qat" >> "$rejected"
++            rotate "$rejected"
++            continue
++        }
++        # A completed prior reclaim retires its queue row, so a future directory
++        # recreated at the same name cannot inherit the old expired timestamp.
++        if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
++            log_append "$jstate/actions.log" "$ts action=reclaim skip=already-absent dest=$dest"
++            continue
++        fi
+         if ! quarantine_path_ok "$dest"; then
+             log_append "$jstate/actions.log" "$ts action=reclaim refused=invalid-quarantine-path dest=$dest"
++            printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
++            continue
++        fi
++        if ! is_num "$qat"; then
++            log_append "$jstate/actions.log" "$ts action=reclaim refused=invalid-quarantine-timestamp dest=$dest quarantined_at=$qat"
++            printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
++            continue
++        fi
++        qat=$(normalize_decimal "$qat") || {
++            log_append "$jstate/actions.log" "$ts action=reclaim refused=invalid-quarantine-timestamp dest=$dest"
++            printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
++            continue
++        }
++        if decimal_greater "$qat" "$now"; then
++            log_append "$jstate/actions.log" "$ts action=reclaim refused=future-quarantine-timestamp dest=$dest quarantined_at=$qat now=$now"
++            printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
+             continue
+         fi
+         age=$((now - qat))
+-        [ "$age" -ge "$quarantine_grace" ] || continue
++        if [ "$age" -lt "$quarantine_grace" ]; then
++            printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
++            continue
++        fi
+         if path_in_use "$dest"; then
+-            log_append "$jstate/actions.log" "$ts action=reclaim deferred=live dest=$dest size_kb=$size"
++            log_append "$jstate/actions.log" "$ts action=reclaim deferred=live dest=$dest qlog_candidate_du_kb=$size"
++            printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
+             continue
+         fi
++        candidate_kb=$(du_kb "$dest")
++        is_num "$candidate_kb" || candidate_kb=0
+         if [ "$dry_run" -eq 1 ]; then
+-            log_append "$jstate/actions.log" "$ts action=reclaim dry-run src=$dest candidate_du_kb=$size why=expired-quarantine recoverability=quarantine-copy liveness=clear owner=janitor-quarantine"
++            log_append "$jstate/actions.log" "$ts action=reclaim dry-run src=$src dest=$dest candidate_du_kb=$candidate_kb why=expired-quarantine recoverability=quarantine-copy liveness=clear owner=janitor-quarantine"
++            printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
+         else
+             before=$(available_kb 2>/dev/null || printf '')
+             if [ -z "$before" ] || ! quarantine_path_ok "$dest" || path_in_use "$dest"; then
+                 log_append "$jstate/actions.log" "$ts action=reclaim deferred=measurement-or-liveness dest=$dest"
++                printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
+                 continue
+             fi
++            candidate_kb=$(du_kb "$dest")
++            is_num "$candidate_kb" || candidate_kb=0
+             if rm -rf "$dest" 2>/dev/null; then
+                 after=$(available_kb 2>/dev/null || printf '')
+                 if [ -n "$after" ]; then
+                     delta=$((after - before))
+-                    log_append "$jstate/actions.log" "$ts action=reclaim executed dest=$dest candidate_du_kb=$size device_avail_before_kb=$before device_avail_after_kb=$after measured_device_delta_kb=$delta why=expired-quarantine recoverability=quarantine-copy liveness=clear owner=janitor-quarantine"
++                    log_append "$jstate/actions.log" "$ts action=reclaim executed src=$src dest=$dest candidate_du_kb=$candidate_kb device_avail_before_kb=$before device_avail_after_kb=$after measured_device_delta_kb=$delta why=expired-quarantine recoverability=quarantine-copy liveness=clear owner=janitor-quarantine"
+                 else
+-                    log_append "$jstate/actions.log" "$ts action=reclaim executed dest=$dest candidate_du_kb=$size device_measurement=unavailable"
++                    log_append "$jstate/actions.log" "$ts action=reclaim executed src=$src dest=$dest candidate_du_kb=$candidate_kb device_measurement=unavailable"
+                 fi
++            else
++                log_append "$jstate/actions.log" "$ts action=reclaim failed src=$src dest=$dest candidate_du_kb=$candidate_kb"
++                printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
+             fi
+         fi
+     done
++    exec 3<&-
++    rm -f "$qcopy"
++    mv "$tmp" "$qlog"
+     log_append "$jstate/actions.log" "$ts reclaim-quarantined end"
+     printf 'janitor: reclaim-quarantined complete\n'
+     return 0
+@@ -849,7 +947,7 @@ reclaim_idle_caches() {
+     : > "$acc"
+     tail -n +2 "$inv" 2>/dev/null | while IFS="$(printf '\t')" read -r _ts _host path _size _mtime _age _is_git _uncommitted _unpushed _class; do
+         case "$path" in */.lake) : ;; *) continue ;; esac
+-        [ -d "$path" ] || continue
++        [ -d "$path" ] && [ ! -L "$path" ] || continue
+         parent=${path%/.lake}
+         m=$(stat -c %Y "$path" 2>/dev/null || printf '0')
+         is_num "$m" || m=0
+@@ -879,9 +977,12 @@ reclaim_idle_caches() {
+             log_append "$jstate/actions.log" "$ts idle-cache skip path=$path reason=unpushed commits=$up"
+             continue
+         fi
+-        dirty=$(git -C "$parent" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+-        is_num "$dirty" || dirty=0
+-        if [ "$dirty" -gt 0 ]; then
++        dirty_status=$(git -C "$parent" status --porcelain 2>/dev/null) || {
++            log_append "$jstate/actions.log" "$ts idle-cache skip path=$path reason=git-status-unavailable"
++            continue
++        }
++        if [ -n "$dirty_status" ]; then
++            dirty=$(printf '%s\n' "$dirty_status" | wc -l | tr -d ' ')
+             log_append "$jstate/actions.log" "$ts idle-cache skip path=$path reason=dirty files=$dirty"
+             continue
+         fi
+@@ -897,10 +998,16 @@ reclaim_idle_caches() {
+             m=$(stat -c %Y "$path" 2>/dev/null || printf '0')
+             is_num "$m" || m=0
+             idle=$((now - m))
+-            dirty=$(git -C "$parent" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+-            is_num "$dirty" || dirty=1
++            remotes=$(git -C "$parent" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null) || remotes=
++            if [ -n "$remotes" ]; then
++                unpushed=$(timeout 15 git -C "$parent" log --oneline --not --remotes 2>/dev/null) || unpushed=unverified
++            else
++                unpushed=unverified
++            fi
++            dirty_status=$(git -C "$parent" status --porcelain 2>/dev/null) || dirty_status=unverified
+             if [ -z "$before" ] || [ "$idle" -lt "$idle_cache_seconds" ] \
+-               || path_in_use "$path" || path_in_use "$parent" || [ "$dirty" -gt 0 ]; then
++               || path_in_use "$path" || path_in_use "$parent" \
++               || [ -n "$unpushed" ] || [ -n "$dirty_status" ]; then
+                 log_append "$jstate/actions.log" "$ts idle-cache skip path=$path reason=final-evidence-recheck"
+                 continue
+             fi
+@@ -913,6 +1020,8 @@ reclaim_idle_caches() {
+                     log_append "$jstate/actions.log" "$ts idle-cache executed path=$path candidate_du_kb=$sz device_measurement=unavailable"
+                 fi
+                 printf '%s\t%s\n' "$path" "$sz" >> "$acc"
++            else
++                log_append "$jstate/actions.log" "$ts idle-cache failed path=$path candidate_du_kb=$sz"
+             fi
+         fi
+     done
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+index 25b81697..29558d0d 100644
+--- a/tests/janitor-smoke.sh
++++ b/tests/janitor-smoke.sh
+@@ -83,27 +83,51 @@ grep -q 'level=critical' "$state/janitor/status"
+ # 6. reclaim-quarantined removes only items past the grace window (when enabled);
+ #    the quarantine dir is state-relative, so the live quarantine is untouched.
+ q=$state/quarantine
+-mkdir -p "$q/old-item" "$q/new-item" "$d/outside-item"
++mkdir -p "$q/old-item" "$q/new-item" "$q/bad-time-item" "$q/huge-time-item" "$d/outside-item"
+ printf 'x\n' > "$q/old-item/f"
+ printf 'x\n' > "$q/new-item/f"
++printf 'x\n' > "$q/bad-time-item/f"
++printf 'x\n' > "$q/huge-time-item/f"
++ln -s "$d/outside-item" "$q/symlink-item"
+ now=$(date -u +%s)
+ grace=$(sed -n 's/^quarantine_grace_seconds=//p' "$town/government/janitor.conf" | tail -n 1)
+ [ -n "$grace" ] || grace=604800
+-old_stamp=$((now - grace - 1))
+-young_stamp=$((now - grace + 1))
++old_stamp=$((now - grace - 30))
++young_stamp=$((now - grace + 30))
+ {
+     printf 'ts\tsrc\tdest\tsize_kb\tquarantined_at\n'
+     printf '2026-01-01T00:00:00Z\t/old\t%s/old-item\t1\t%s\n' "$q" "$old_stamp"
+     printf '2026-01-01T00:00:00Z\t/new\t%s/new-item\t1\t%s\n' "$q" "$young_stamp"
++    printf '2026-01-01T00:00:00Z\t/bad-time\t%s/bad-time-item\t1\tnot-a-timestamp\n' "$q"
++    printf '2026-01-01T00:00:00Z\t/huge-time\t%s/huge-time-item\t1\t999999999999999999999999\n' "$q"
++    printf '2026-01-01T00:00:00Z\t/symlink\t%s/symlink-item\t1\t%s\n' "$q" "$old_stamp"
++    printf '\t/blank-source\t\t1\t%s\n' "$old_stamp"
+     printf '2026-01-01T00:00:00Z\t/outside\t%s/outside-item\t1\t1\n' "$d"
+ } > "$state/janitor/quarantined.tsv"
+ printf 'safe_reclaim_enabled=1\nreclaim_enabled=1\n' >> "$town/government/janitor.conf"
+ /bin/sh "$town/government/janitor.sh" reclaim-quarantined
+ [ ! -d "$q/old-item" ]
+ [ -d "$q/new-item" ]
++[ -d "$q/bad-time-item" ]
++[ -d "$q/huge-time-item" ]
++[ -L "$q/symlink-item" ]
+ [ -d "$d/outside-item" ]
+ grep -q "device_avail_before_kb=.*device_avail_after_kb=.*measured_device_delta_kb=" "$state/janitor/actions.log"
+ grep -q 'candidate_du_kb=' "$state/janitor/actions.log"
++grep -q 'refused=invalid-quarantine-timestamp' "$state/janitor/actions.log"
++grep -q 'refused=future-quarantine-timestamp' "$state/janitor/actions.log"
++grep -q 'refused=invalid-quarantine-path' "$state/janitor/actions.log"
++grep -q 'refused=empty-quarantine-path' "$state/janitor/actions.log"
++grep -q '/blank-source' "$state/janitor/quarantine-rejected.tsv"
++
++# Successful reclaim retires the old queue row: a later object recreated with the
++# same path and a fresh grace timestamp is retained rather than deleted by history.
++mkdir -p "$q/old-item"
++printf 'new generation\n' > "$q/old-item/f"
++now=$(date -u +%s)
++printf '2026-01-01T00:00:00Z\t/recreated\t%s/old-item\t1\t%s\n' "$q" "$now" >> "$state/janitor/quarantined.tsv"
++/bin/sh "$town/government/janitor.sh" reclaim-quarantined
++[ -d "$q/old-item" ]
+ 
+ # A deterministic device probe proves the audit reports the measured available-KB
+ # delta independently from candidate du size (the second df sample gains 7 KB).
+@@ -117,22 +141,18 @@ cat > "$d/bin/df" <<'MOCK'
+ case "$*" in
+     *-i*) printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n/dev/fake 1000 100 900 10%% /\n' ;;
+     *)
+-        n=0
+-        [ ! -f "$DF_COUNTER" ] || n=$(cat "$DF_COUNTER")
+-        n=$((n + 1))
+-        printf '%s\n' "$n" > "$DF_COUNTER"
+-        if [ "$n" -eq 1 ]; then avail=100; else avail=107; fi
++        if [ -d "$DF_TARGET" ]; then avail=100; else avail=107; fi
+         printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/fake 1000 900 %s 90%% /\n' "$avail"
+         ;;
+ esac
+ MOCK
+ chmod +x "$d/bin/df"
+-export DF_COUNTER=$d/df-counter
+-/bin/sh "$town/government/janitor.sh" observe >/dev/null
++export DF_TARGET=$q/measured-item
+ /bin/sh "$town/government/janitor.sh" reclaim-quarantined
+ [ ! -d "$q/measured-item" ]
+-grep -q 'candidate_du_kb=999999.*device_avail_before_kb=100.*device_avail_after_kb=107.*measured_device_delta_kb=7' \
++grep -q 'candidate_du_kb=[1-9][0-9]* device_avail_before_kb=100 device_avail_after_kb=107 measured_device_delta_kb=7' \
+     "$state/janitor/actions.log"
++! grep -q 'candidate_du_kb=999999' "$state/janitor/actions.log"
+ # Restore the critical-capacity df fixture for later integration coverage.
+ cat > "$d/bin/df" <<'MOCK'
+ #!/bin/sh
+@@ -146,7 +166,7 @@ else
+     printf '/dev/fake 1000000 990000 10000 99%% /\n'
+ fi
+ MOCK
+-unset DF_COUNTER
++unset DF_TARGET
+ 
+ # 7. build-cache (.lake) classification: a live/recent cache is only monitored;
+ #    an aged cache whose parent worktree is also aged is a quarantine candidate.
+@@ -344,7 +364,9 @@ touch -d '2 days ago' "$wt2/.lake"
+ /bin/sh "$town/government/janitor.sh" reclaim-idle-caches
+ [ ! -d "$wt1/.lake" ] || { echo "idle clean cache not reclaimed"; exit 1; }
+ [ -d "$wt2/.lake" ] || { echo "unpushed-worktree cache wrongly reclaimed"; exit 1; }
+-grep -q 'idle-cache reclaimed' "$state/janitor/actions.log"
++grep -q 'idle-cache executed' "$state/janitor/actions.log"
++grep -q 'idle-cache executed.*device_avail_before_kb=.*device_avail_after_kb=.*measured_device_delta_kb=' "$state/janitor/actions.log"
++! grep -q 'idle-cache executed.*freed_kb=' "$state/janitor/actions.log"
+ grep -q 'idle-cache skip.*reason=unpushed' "$state/janitor/actions.log"
+ 
+ # 16. cycle auto-triggers idle-cache reclamation under disk pressure
+@@ -371,6 +393,7 @@ touch -d '2 days ago' "$wt3/.lake"
+ date +%s > "$state/janitor/last-inventory"
+ /bin/sh "$town/government/janitor.sh" cycle
+ [ ! -d "$wt3/.lake" ] || { echo "cycle did not reclaim an idle cache under pressure"; exit 1; }
+-grep -q 'idle-cache reclaimed' "$state/janitor/actions.log"
++grep -q 'idle-cache executed' "$state/janitor/actions.log"
++grep -q 'idle-cache executed.*device_avail_before_kb=.*device_avail_after_kb=.*measured_device_delta_kb=' "$state/janitor/actions.log"
+ 
+ printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, responds to critical capacity, reclaims only quarantined items past grace, classifies build caches by liveness, retains live build toolchains, gates quarantine on a recorded Act 12.4(d) liveness check, and reclaims idle regenerable build caches under pressure\n'

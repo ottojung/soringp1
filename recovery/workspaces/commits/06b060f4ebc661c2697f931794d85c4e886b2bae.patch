@@ -1,0 +1,329 @@
+commit 06b060f4ebc661c2697f931794d85c4e886b2bae
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Wed Nov 25 01:33:22 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Wed Nov 25 01:33:22 2026 +0000
+
+    Recovery-steward: repair Executive dispatch E2BIG via private --prompt-file
+    
+    The assembled Executive prompt (~134 KB) exceeded Linux's 131072-byte
+    per-argument ceiling, so every dispatch died at executive-cycle.sh:284 and
+    the officer was reported unhealthy with prompts=0. Pass the identical prompt
+    through Antonina's --prompt-file from an absolute 0600 temp file and remove it
+    on exit. Add a hermetic regression that rejects inline --prompt and verifies
+    the private file's bytes, mode, cleanup and bookkeeping; adapt existing mocks
+    to read the prompt from the file.
+
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 5a32e0c2..a4a92405 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -281,7 +281,26 @@ if [ -f "$town/government/handover.sh" ]; then
+   prompt=$(printf '%s\n%s\n' "$prompt" "$(/bin/sh "$town/government/handover.sh" show executive "$id" || :)")
+ fi
+ prompt=$(printf '%s\n\n%s\n' "$prompt" "$(cat "$policy_file")")
+-antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach
++# The assembled prompt embeds every active mission mandate, mission diagnostic,
++# handoff and the Founder reporting policy. It now regularly exceeds the
++# kernel's per-argument ceiling (131072 bytes), so passing it as one --prompt
++# argument makes every dispatch fail with E2BIG. The officer is then reported
++# unhealthy and cannot dispatch the very work that would repair it. Antonina's
++# --prompt-file reads the identical prompt from a private regular file and never
++# puts it in argv or the environment: only the transport changes, not the
++# prompt, the gate or the dispatch authority.
++prompt_dir=$state/branches
++mkdir -p "$prompt_dir"
++previous_umask=$(umask)
++umask 077
++prompt_file=$(mktemp "$prompt_dir/executive-prompt.XXXXXX")
++trap 'rm -f "$prompt_file"' EXIT HUP INT TERM
++printf '%s\n' "$prompt" > "$prompt_file"
++umask "$previous_umask"
++# antonina requires an absolute path, a regular file owned by this user and no
++# group/world access bits. mktemp supplies a 0600 file; normalise the path.
++prompt_file=$(cd "${prompt_file%/*}" && pwd -P)/${prompt_file##*/}
++antonina agent run --id "$id" --cwd "$cwd" --prompt-file "$prompt_file" --detach
+ [ ! -f "$town/government/dispatch-gate.sh" ] || /bin/sh "$town/government/dispatch-gate.sh" commit executive
+ mkdir -p "$state/branches"
+ date +%s > "$state/branches/executive-last-dispatch"
+diff --git a/records/investigations/recovery-steward-executive-prompt-file-e2big-20261125T0124Z.md b/records/investigations/recovery-steward-executive-prompt-file-e2big-20261125T0124Z.md
+new file mode 100644
+index 00000000..d60ac971
+--- /dev/null
++++ b/records/investigations/recovery-steward-executive-prompt-file-e2big-20261125T0124Z.md
+@@ -0,0 +1,101 @@
++# Recovery-steward investigation — Executive dispatch E2BIG (2026-11-25)
++
++Office: recovery-steward. Fresh empty Antonina session; assignment re-derived
++from the authoritative Founder Constitution, `government/RECOVERY-STEWARD.md`,
++canonical policy, durable state, board and Git. No predecessor conversation was
++carried forward. No law, ballot, vote, case state, mailbox entry, Founder-owned
++file or canonical checkout edit was made.
++
++## Trigger
++
++At the 01:18Z assessment the sole active corrective case was
++`executive_unhealthy:1795567958` (owner Executive), with `last_seen` 01:19:14Z
++and **0 clear observations** — still firing, not self-clearing as the 00:57Z
++assessment had tentatively expected. `branches/observations.tsv` showed a new
++unhealthy run beginning at 01:07:28Z. `branches/executive.json` read
++`readiness: unhealthy`, `agent_state: idle`, `cycle_accepted: false`,
++`model: unknown`, `variant: unknown`.
++
++## Root cause (independently established)
++
++`/var/lib/lubko/wd/viche-state/branches/executive-cycle.log` contained verbatim:
++
++```
++/var/lib/lubko/wd/viche/government/executive-cycle.sh: 284: antonina: Argument list too long
++```
++
++Line 284 was `antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach`.
++The assembled prompt inlines every active mission mandate (37,356 bytes),
++mission diagnostics (21,636 bytes), delivery inventory (20,557 bytes), open
++handoffs (17,941 bytes), the Founder reporting policy (18,912 bytes), the
++charter, eligible issues and the Post brief — approximately 134 KB total,
++against Linux's 131,072-byte per-argument ceiling (E2BIG). This is persistent,
++not a transient rotation flap: every dispatch that reaches line 284 fails, so
++the officer cannot dispatch the work that could repair it. The appointed agent
++`dtI9NW0CKOI5Tsy5pAscEC-spokesmen` was created at 01:03:53Z with `prompts: 0`,
++`native_session_id: null`, `steers_pending: 0` and an empty `last_error`: no
++turn ever started, so there is no failed side effect to replay or reconcile.
++`liveness/unsafe-holds/` was empty; no competing writer on the Executive
++worktree was observed.
++
++This is a recurrence of a known architectural class, not a new incident type:
++the Judiciary audit dispatch had the identical E2BIG defect on 2026-11-21 and a
++recovery-steward repair was independently determined effective
++(`records/JUDICIARY-FACTUAL-DETERMINATION-2026-11-21-act32-e2big-repair.md`).
++No existing watchdog covers the Executive transport, so one more narrow
++monitor would not be a repair.
++
++## Authority and repair
++
++Operational repair to existing machinery, not a legal change: no audit
++criterion, voting rule, summons, law, case state or Founder-owned file was
++touched. The Founder directive of 2026-11-24 ("if you notice a defect in the
++Town's own machinery while doing this, it is yours to fix") and the recovery
++charter's authority to deploy and verify operational repairs, including when
++an officer cannot repair itself, govern this action.
++
++`government/executive-cycle.sh`: the byte-identical assembled prompt is now
++written to an absolute, private `mktemp` file (mode 0600, owned by the running
++user) and passed with Antonina's supported `--prompt-file`; it is removed by a
++trap on exit or signal. Only the transport changed. The dispatch gate, the
++success-only `last-dispatch` write, agent identity and authority are unchanged.
++
++Supporting tests:
++- **New** `tests/executive-prompt-file-smoke.sh`: hermetic fixture with a
++  200 KB charter marker; a mock `antonina` rejects any inline `--prompt`,
++  requires an absolute 0600 `--prompt-file`, verifies the full prompt bytes and
++  marker survive, and checks cleanup and success bookkeeping.
++- Adapted mocks in `tests/executive-cycle-smoke.sh`,
++  `tests/appointment-recovery-integration-smoke.sh` and
++  `tests/act19-office-continuity-smoke.sh` to read the prompt from the private
++  file rather than argv. No assertion was weakened or removed.
++
++All four affected smoke tests pass through the canonical `suite-env.sh`.
++
++## Verification status (at writing, 01:33Z)
++
++- Code fix and tests are authored on the recovery-steward branch and pass
++  targeted checks. They are **not yet on `main`**; Act 31 delivery is next.
++- A one-off restoration dispatch using the fixed cycle from this worktree was
++  started against canonical state at ~01:27Z and was still in
++  `eligible-work.py` at 01:33Z (that probe alone measured 52 s under current
++  load). The Executive agent still showed `prompts: 0` at that moment, so no
++  success is claimed. The outcome is to be recorded in an addendum with the
++  agent's prompt count and the readiness observation.
++- The full source suite failed at `tests/act22-act24-due-resolution-smoke.sh`
++  on this branch; the same test passes on canonical `main`. The difference is
++  this branch being 16 commits behind `main` (stale prediction ledger), not the
++  code change. `main` will be merged before the delivery is proposed and the
++  integrator runs the exact merged candidate in any case.
++- The corrective case stays open and owned by the Executive. This office does
++  not close it; automatic closure is the collector's rule only after the
++  signal is absent for the configured run, and any Judiciary disposition is
++  independent.
++
++## What was deliberately not done
++
++No unsafe hold cleared, no failed turn replayed, no agent stopped or steered,
++no duplicate incident or mailbox report filed (the Act 21/31 delivery review
++covers this repair, as in the 2026-11-21 precedent), no Judiciary criterion
++implemented, no law enacted, no Founder attention requested for a repair that
++is already within existing authority.
+diff --git a/tests/act19-office-continuity-smoke.sh b/tests/act19-office-continuity-smoke.sh
+index ec1994ac..98c71d3c 100644
+--- a/tests/act19-office-continuity-smoke.sh
++++ b/tests/act19-office-continuity-smoke.sh
+@@ -35,7 +35,14 @@ case "$1 $2" in
+   'agent status')
+     printf '{"state":"%s","model":"%s","variant":"low"}\n' "$MODE" "$MODEL" ;;
+   'agent run')
+-    printf '%s\n' "$*" > "$PROMPT_FILE"
++    # The real cycle now passes a private prompt file; capture its bytes.
++    pfile= prev=
++    for arg in "$@"; do
++      [ "$prev" != '--prompt-file' ] || pfile=$arg
++      prev=$arg
++    done
++    [ -n "$pfile" ] && [ -f "$pfile" ] || { echo 'missing --prompt-file' >&2; exit 7; }
++    cat "$pfile" > "$PROMPT_FILE"
+     printf 'accepted\n' >> "$OUTPUT" ;;
+   *) echo "Unexpected: $*" >&2; exit 10 ;;
+ esac
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index 4d36b40a..dab020f9 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -48,7 +48,16 @@ case "$1 $2" in
+     if [ "${MOCK_STOP_FAIL:-}" = yes ]; then exit 3; fi
+     jq '.state="stopped"' "$MOCK_ROOT/$id.json" > "$MOCK_ROOT/$id.next"
+     mv "$MOCK_ROOT/$id.next" "$MOCK_ROOT/$id.json" ;;
+-  'agent run') printf 'run\n' >> "$MOCK_ROOT/runs"; printf '%s\n' "$*" >> "$MOCK_ROOT/run-args" ;;
++  'agent run')
++    printf 'run\n' >> "$MOCK_ROOT/runs"
++    # The prompt travels in a private file, not in argv; record its bytes.
++    pfile= prev=
++    for arg in "$@"; do
++      [ "$prev" != '--prompt-file' ] || pfile=$arg
++      prev=$arg
++    done
++    [ -n "$pfile" ] && [ -f "$pfile" ] || { echo 'missing --prompt-file' >&2; exit 7; }
++    cat "$pfile" >> "$MOCK_ROOT/run-args" ;;
+   # An empty board: the ordinary eligible-issue inventory now always runs
+   # beside open handoffs (Founder directive 2026-11-16).
+   'board list') printf '[]\n' ;;
+diff --git a/tests/executive-cycle-smoke.sh b/tests/executive-cycle-smoke.sh
+index c7168e66..ee45b60c 100755
+--- a/tests/executive-cycle-smoke.sh
++++ b/tests/executive-cycle-smoke.sh
+@@ -35,9 +35,18 @@ case "$1 $2" in
+         printf '{"state":"%s","model":"%s","variant":"low"}\n' "$MODE" "$MODEL"
+     fi ;;
+   "agent run")
+-    case "$*" in *"Founder charter fixture"*"401"*) : ;; *) exit 8 ;; esac
+-    case "$*" in *"No work is authorized on SoringP1"*) : ;; *) exit 8 ;; esac
+-    case "$*" in *"research-plan.md"*|*"depleted_after_empty_curation"*) exit 8 ;; esac
++    # The private prompt travels in a file, not in argv; read the same bytes
++    # the real agent receives before asserting its contents.
++    pfile= prev=
++    for arg in "$@"; do
++      [ "$prev" != '--prompt-file' ] || pfile=$arg
++      prev=$arg
++    done
++    [ -n "$pfile" ] && [ -f "$pfile" ] || { echo 'missing --prompt-file' >&2; exit 7; }
++    prompt=$(cat "$pfile")
++    case "$prompt" in *"Founder charter fixture"*"401"*) : ;; *) exit 8 ;; esac
++    case "$prompt" in *"No work is authorized on SoringP1"*) : ;; *) exit 8 ;; esac
++    case "$prompt" in *"research-plan.md"*|*"depleted_after_empty_curation"*) exit 8 ;; esac
+     printf 'accepted\n' >> "$OUTPUT" ;;
+   *) echo "Unexpected: $*" >&2; exit 10 ;;
+ esac
+diff --git a/tests/executive-prompt-file-smoke.sh b/tests/executive-prompt-file-smoke.sh
+new file mode 100644
+index 00000000..69a616a6
+--- /dev/null
++++ b/tests/executive-prompt-file-smoke.sh
+@@ -0,0 +1,100 @@
++#!/bin/sh
++# Executive dispatch must stay under the kernel per-argument ceiling even when
++# the assembled prompt is very large. The prompt is preserved byte-for-byte in
++# a private file passed with --prompt-file; it must not be inlined into argv.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/town/government" "$scratch/town/records" \
++  "$scratch/town/missions/soringp1" "$scratch/seats/branches/executive" "$scratch/state"
++
++# A charter with a distinctive 200 KB marker: the whole charter is embedded in
++# the Executive prompt, so the assembled prompt exceeds any realistic argv cap.
++python3 - "$scratch/charter" <<'PY'
++import sys
++marker = 'EXECUTIVE_PROMPT_FILE_MARKER_7c41'
++with open(sys.argv[1], 'w') as f:
++    f.write('Founder charter fixture\n' + marker + '\n')
++    f.write('z' * 200000 + '\n')
++PY
++printf 'c1a00001\tClerk\tintake\nc1a00002\tMember\tvoting\n' > "$scratch/town/government/seats.tsv"
++printf '%s\n' c1a00002 > "$scratch/town/records/SUMMONED.txt"
++cp "$repo/government/eligible-work.py" "$scratch/town/government/eligible-work.py"
++cp "$repo/missions/soringp1/mandate.md" "$scratch/town/missions/soringp1/mandate.md"
++cp "$repo/government/handoff-queue.sh" "$scratch/town/government/handoff-queue.sh"
++cp "$repo/government/predict-scorer.py" "$scratch/town/government/predict-scorer.py"
++cp "$repo/government/AGENT-REPORTING-POLICY.md" "$scratch/town/government/AGENT-REPORTING-POLICY.md"
++cp "$repo/government/delivery-candidates.py" "$scratch/town/government/delivery-candidates.py"
++cp "$repo/tests/appointment-id-stub.sh" "$scratch/town/government/appointments.sh"
++
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  "board list")
++    echo '[{"number":"401","title":"Ordinary assigned task"}]' ;;
++  "board show")
++    echo '{"body":"All agent execution and development work must happen on billy-dev.","messages":[]}' ;;
++  "agent status")
++    printf '{"state":"idle","model":"test-provider/example","variant":"low"}\n' ;;
++  "agent run")
++    prompt= pfile= prev=
++    for arg in "$@"; do
++      [ "$prev" != '--prompt' ] || prompt=$arg
++      [ "$prev" != '--prompt-file' ] || pfile=$arg
++      prev=$arg
++    done
++    if [ -n "$prompt" ]; then
++      echo "FAIL: inline --prompt length ${#prompt} would exceed argv budget" >&2
++      exit 6
++    fi
++    [ -n "$pfile" ] || { echo 'FAIL: no --prompt-file' >&2; exit 7; }
++    case "$pfile" in /*) : ;; *) echo 'FAIL: prompt file path is not absolute' >&2; exit 8 ;; esac
++    [ -f "$pfile" ] || { echo 'FAIL: prompt file is missing' >&2; exit 9; }
++    mode=$(stat -c '%a' "$pfile" 2>/dev/null || printf 'unknown\n')
++    [ "$mode" = 600 ] || { echo "FAIL: prompt file mode is $mode" >&2; exit 10; }
++    size=$(wc -c < "$pfile")
++    [ "$size" -gt 120000 ] || { echo "FAIL: prompt truncated to $size bytes" >&2; exit 11; }
++    grep -q 'EXECUTIVE_PROMPT_FILE_MARKER_7c41' "$pfile" ||
++      { echo 'FAIL: durable prompt lost the charter marker' >&2; exit 12; }
++    cat "$pfile" > "$PROMPT_DUMP"
++    printf 'run\n' >> "$OUTPUT" ;;
++  *) echo "Unexpected Antonina: $*" >&2; exit 10 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++
++PATH=$scratch/bin:$PATH
++VICHE_TOWN_ROOT=$scratch/town
++VICHE_SEATS_ROOT=$scratch/seats
++VICHE_STATE_ROOT=$scratch/state
++VICHE_CONSTITUTION=$scratch/charter
++OUTPUT=$scratch/dispatched
++PROMPT_DUMP=$scratch/prompt.txt
++export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION
++export OUTPUT PROMPT_DUMP
++
++# The delivery inventory reads a real repository; give the fixture one.
++git -C "$scratch/town" init -q -b main
++git -C "$scratch/town" config user.name Fixture
++git -C "$scratch/town" config user.email fixture@example.invalid
++git -C "$scratch/town" config commit.gpgsign false
++git -C "$scratch/town" add -A
++git -C "$scratch/town" commit -qm 'Executive prompt-file fixture baseline'
++git -C "$scratch/town" update-ref refs/remotes/origin/main HEAD
++
++touch "$scratch/state/inaugurated"
++sh "$repo/government/executive-cycle.sh"
++
++test "$(wc -l < "$OUTPUT")" -eq 1 || { echo 'FAIL: dispatch did not launch' >&2; exit 1; }
++grep -q 'EXECUTIVE_PROMPT_FILE_MARKER_7c41' "$PROMPT_DUMP" ||
++  { echo 'FAIL: agent did not receive the full prompt' >&2; exit 1; }
++# The private prompt file is removed after the dispatch, including on failure.
++set -- "$scratch"/state/branches/executive-prompt.*
++[ ! -e "$1" ] || { echo 'FAIL: private prompt file was left behind' >&2; exit 1; }
++# The success-only bookkeeping still ran.
++test -s "$scratch/state/branches/executive-last-dispatch" ||
++  { echo 'FAIL: last-dispatch not written after accepted dispatch' >&2; exit 1; }
++
++echo 'Executive private --prompt-file dispatch budget smoke passed'

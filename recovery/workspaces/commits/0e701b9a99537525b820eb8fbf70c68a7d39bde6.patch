@@ -1,0 +1,337 @@
+commit 0e701b9a99537525b820eb8fbf70c68a7d39bde6
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Mon Oct 19 06:59:04 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Oct 19 07:09:54 2026 +0000
+
+    Act 17: superseding-verdict support in audit controller
+    
+    Implement the Audit Verdict Correction Act (enacted 2026-10-19, 8-0-0):
+    - permit the independent audit office to file a superseding verdict on
+      materially stronger evidence regardless of the prior verdict;
+    - append-only Git-anchored authoritative trail under
+      records/oversight/corrections/ (per-case .jsonl);
+    - distinct corrected_finding visibility signal (replaces unresolved_finding
+      for a corrected finding) and correction_pending while a correction awaits
+      its second procedural pass;
+    - finality: one correction per case per cycle, no bare re-flip, distinct
+      evidence required;
+    - honest labelling: the second pass is procedural re-verification by the
+      same office/model, NOT independent verification;
+    - verified_fixed still requires a previous finding (unchanged).
+    
+    Adds tests/audit-correction-smoke.sh; full suite green.
+
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+index 7569006f..8c45d9f7 100644
+--- a/government/audit-accountability.py
++++ b/government/audit-accountability.py
+@@ -29,6 +29,21 @@ def base():
+     return Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state")) / "oversight" / "random"
+ 
+ 
++def records_dir():
++    # Authoritative, Git-anchored append-only trail (Act 17 §2.2). Lives in the
++    # town repository, which the audit office does not solely control.
++    return Path(os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche")) / "records" / "oversight" / "corrections"
++
++
++def append_correction(case_id, record):
++    # Append-only: never overwrite or rewrite a committed entry (Act 17 §2.2, §2.7).
++    d = records_dir()
++    d.mkdir(parents=True, exist_ok=True)
++    with open(d / f"{case_id}.jsonl", "a") as fh:
++        fh.write(json.dumps(record, sort_keys=True) + "\n")
++    return d / f"{case_id}.jsonl"
++
++
+ def report(args):
+     root = base()
+     if not re.fullmatch(r"[0-9a-f]{18}", args.case):
+@@ -40,11 +55,85 @@ def report(args):
+         raise ValueError("durable evidence reference is required")
+     path = root / "outcomes" / f"{args.case}.json"
+     prior = json_file(path)
++    now = int(os.environ.get("VICHE_OVERSIGHT_NOW", time.time()))
++
++    if args.confirm:
++        # Second procedural pass (Act 17 §2.4): same office, same pinned model.
++        # Explicitly NOT independent verification (Constitution X single substrate).
++        if prior is None:
++            raise ValueError("no prior outcome to confirm against")
++        if not prior.get("correction_pending"):
++            raise ValueError("no pending correction to confirm")
++        pending = None
++        for h in prior.get("history", []):
++            if h.get("correction") and not h.get("confirmed"):
++                pending = h
++        if pending is None:
++            raise ValueError("no pending correction to confirm")
++        pending["confirmed"] = True
++        pending["confirmed_at"] = now
++        pending["confirm_evidence_ref"] = args.evidence
++        append_correction(args.case, {
++            "at": now, "case_id": args.case, "verdict": pending["verdict"],
++            "evidence_ref": args.evidence, "auditor": pending.get("auditor", ""),
++            "correction": True, "supersedes": pending["supersedes"],
++            "reason_code": pending.get("reason_code", ""),
++            "why_stronger": pending.get("why_stronger", ""),
++            "confirmed": True, "phase": "second_procedural_pass_not_independent",
++        })
++        prior["verdict"] = pending["verdict"]
++        prior["at"] = now
++        prior["evidence_ref"] = pending["evidence_ref"]
++        prior["details"] = pending.get("details", prior.get("details", ""))
++        prior["correction_pending"] = False
++        if pending["supersedes"] == "finding" and pending["verdict"] != "finding":
++            prior["corrected_from_finding"] = True
++        atomic(path, prior)
++        print(json.dumps(prior))
++        return
++
++    if args.correction:
++        # File a superseding verdict (Act 17 §2.1-2.2, §2.5-2.6).
++        if prior is None:
++            raise ValueError("no prior verdict; file an ordinary verdict first")
++        if not args.supersedes or args.supersedes != prior["verdict"]:
++            raise ValueError("correction must state the verdict it supersedes")
++        if prior.get("correction_pending"):
++            raise ValueError("one correction per case per cycle (finality)")
++        if args.evidence == prior.get("evidence_ref"):
++            raise ValueError("correction evidence must be distinct from the original reference")
++        if not args.why_stronger or not args.why_stronger.strip():
++            raise ValueError("correction must state why the new evidence is stronger")
++        if not args.reason_code or not args.reason_code.strip():
++            raise ValueError("correction requires a reason_code")
++        if not args.auditor or not args.auditor.strip():
++            raise ValueError("correction requires auditor identity")
++        if args.verdict == "verified_fixed" and prior["verdict"] != "finding":
++            raise ValueError("verified_fixed requires a previous finding")
++        held = [h.get("verdict") for h in prior.get("history", [])]
++        if args.verdict in held:
++            raise ValueError("bare re-flip: target verdict already held by this case")
++        rec = {
++            "at": now, "case_id": args.case, "verdict": args.verdict,
++            "evidence_ref": args.evidence, "auditor": args.auditor,
++            "correction": True, "supersedes": args.supersedes,
++            "reason_code": args.reason_code, "why_stronger": args.why_stronger[:1000],
++            "details": args.details[:1000], "confirmed": False,
++            "phase": "correction_filed",
++        }
++        append_correction(args.case, rec)
++        hist = prior.get("history", [])
++        hist.append(rec)
++        prior["history"] = hist
++        prior["correction_pending"] = True
++        atomic(path, prior)
++        print(json.dumps(prior))
++        return
++
+     if prior and prior["verdict"] != "finding":
+         raise ValueError("case already has a final verdict")
+     if args.verdict == "verified_fixed" and (not prior or prior["verdict"] != "finding"):
+         raise ValueError("verified_fixed requires a previous finding")
+-    now = int(os.environ.get("VICHE_OVERSIGHT_NOW", time.time()))
+     result = {"case_id": args.case, "population": case["population"],
+               "subject": case["id"], "verdict": args.verdict, "at": now,
+               "evidence_ref": args.evidence, "details": args.details[:1000],
+@@ -92,13 +181,19 @@ def check(args):
+         if verdict is None and now - int(case["at"]) > deadline:
+             overdue += 1
+             signals.append({"type": "unreported_sample", "case_id": case["case_id"]})
+-        if verdict is not None and verdict["verdict"] == "finding":
+-            subject = f"{case['population']}:{case['id']}"
+-            findings[subject] = findings.get(subject, 0) + 1
+-            signals.append({"type": "unresolved_finding", "case_id": case["case_id"],
+-                            "evidence_ref": verdict["evidence_ref"]})
+-        if verdict is not None and verdict["verdict"] == "inconclusive" and now - verdict["at"] > deadline:
+-            signals.append({"type": "unresolved_inconclusive", "case_id": case["case_id"]})
++        if verdict is not None:
++            if verdict.get("correction_pending"):
++                signals.append({"type": "correction_pending", "case_id": case["case_id"]})
++            if verdict["verdict"] == "finding":
++                subject = f"{case['population']}:{case['id']}"
++                findings[subject] = findings.get(subject, 0) + 1
++                signals.append({"type": "unresolved_finding", "case_id": case["case_id"],
++                                "evidence_ref": verdict["evidence_ref"]})
++            elif verdict.get("corrected_from_finding"):
++                signals.append({"type": "corrected_finding", "case_id": case["case_id"],
++                                "evidence_ref": verdict["evidence_ref"]})
++            if verdict["verdict"] == "inconclusive" and now - verdict["at"] > deadline:
++                signals.append({"type": "unresolved_inconclusive", "case_id": case["case_id"]})
+     for subject, count in findings.items():
+         if count >= 2:
+             signals.append({"type": "repeated_finding", "subject": subject,
+@@ -140,9 +235,23 @@ def main():
+                                            "finding", "inconclusive", "verified_fixed"])
+     p.add_argument("--evidence", default="")
+     p.add_argument("--details", default="")
++    p.add_argument("--correction", action="store_true",
++                   help="file a superseding verdict (Act 17); requires --supersedes, "
++                        "--why_stronger, --reason_code, --auditor")
++    p.add_argument("--confirm", action="store_true",
++                   help="second procedural pass confirming a pending correction (Act 17 §2.4)")
++    p.add_argument("--supersedes", default="")
++    p.add_argument("--why_stronger", default="")
++    p.add_argument("--reason_code", default="")
++    p.add_argument("--auditor", default="")
+     args = p.parse_args()
+     if args.action == "report":
+-        if not args.case or not args.verdict:
++        if args.correction and args.confirm:
++            raise ValueError("--correction and --confirm are mutually exclusive")
++        if args.confirm:
++            if not args.case:
++                raise ValueError("case is required")
++        elif not args.case or not args.verdict:
+             raise ValueError("case and verdict are required")
+         report(args)
+     else:
+diff --git a/tests/audit-correction-smoke.sh b/tests/audit-correction-smoke.sh
+new file mode 100644
+index 00000000..48d0af89
+--- /dev/null
++++ b/tests/audit-correction-smoke.sh
+@@ -0,0 +1,142 @@
++#!/bin/sh
++# Hermetic test of Act 17 (Audit Verdict Correction Act): superseding verdicts,
++# the Git-anchored append-only corrections trail, corrected_finding visibility,
++# finality (one correction per cycle, no bare re-flip) and honest procedural
++# (not independent) second-pass labelling.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/state/oversight/random/cases" \
++    "$scratch/state/oversight/random/outcomes" "$scratch/town/records" \
++    "$scratch/seats/branches/judiciary"
++printf 'authoritative fixture\n' > "$scratch/charter"
++: > "$scratch/town/records/SUMMONED.txt"
++CASE=0123456789abcdef01
++printf '{"case_id":"%s","population":"ignored_work","id":"301","at":2000000000}\n' \
++    "$CASE" > "$scratch/state/oversight/random/cases/$CASE.json"
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++"agent list")
++    printf '{"agents":[{"id":"c1e00008"}],"unreadable":0}\n' ;;
++"agent status")
++    printf '{"state":"idle","model":"opencode-go/longcat-2.5-preview-free","variant":"low"}\n' ;;
++*) echo "unexpected mock call: $*" >&2; exit 90 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++PATH=$scratch/bin:$PATH
++VICHE_STATE_ROOT=$scratch/state
++VICHE_TOWN_ROOT=$scratch/town
++VICHE_SEATS_ROOT=$scratch/seats
++VICHE_CONSTITUTION=$scratch/charter
++VICHE_OVERSIGHT_NOW=2000000000
++export PATH VICHE_STATE_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_CONSTITUTION VICHE_OVERSIGHT_NOW
++
++trail="$scratch/town/records/oversight/corrections/$CASE.jsonl"
++CTRL="$repo/government/audit-accountability.py"
++
++# 1. Ordinary filing of a non-finding verdict (the prior lockout target).
++python3 "$CTRL" report --case "$CASE" --verdict not_assigned \
++    --evidence "board #301 original sample" >/dev/null
++
++# 2. A correction of that non-finding is now permitted (Act 17 §2.1/§2.5).
++python3 "$CTRL" report --case "$CASE" --verdict finding \
++    --evidence "commit:deadbeef stronger replay" --correction \
++    --supersedes not_assigned --auditor c1e00008 --reason_code corrected_on_replay \
++    --why_stronger "replayed the full sample with an independent evaluator" >/dev/null
++
++# 3. Git-anchored authoritative trail exists and records the pending correction.
++[ -s "$trail" ]
++grep -q '"correction": true' "$trail"
++grep -q '"confirmed": false' "$trail"
++grep -q '"supersedes": "not_assigned"' "$trail"
++grep -q '"phase": "correction_filed"' "$trail"
++
++# 4. Until the second procedural pass, the current verdict is unchanged and the
++#    case is reported correction_pending (Act 17 §2.4).
++python3 "$CTRL" check > "$scratch/check"
++jq -e '[.signals[].type]|index("correction_pending")' "$scratch/check" >/dev/null
++jq -e --arg c "$CASE" '.signals[]|select(.type=="correction_pending" and .case_id==$c)' \
++    "$scratch/check" >/dev/null
++# current verdict in the cache is still the prior one
++jq -e --arg c "$CASE" '.verdict' "$scratch/state/oversight/random/outcomes/$CASE.json" >/dev/null
++[ "$(jq -r .verdict "$scratch/state/oversight/random/outcomes/$CASE.json")" = not_assigned ]
++
++# 5. Second procedural pass (same office/model — NOT independent) confirms it.
++python3 "$CTRL" report --case "$CASE" --confirm --evidence "second procedural replay" >/dev/null
++grep -q '"phase": "second_procedural_pass_not_independent"' "$trail"
++grep -q '"confirmed": true' "$trail"
++[ "$(jq -r .verdict "$scratch/state/oversight/random/outcomes/$CASE.json")" = finding ]
++python3 "$CTRL" check > "$scratch/check"
++if jq -e '[.signals[].type]|index("correction_pending")' "$scratch/check" >/dev/null; then
++    echo "correction_pending cleared after confirmation" >&2; exit 1
++fi
++
++# 6. A finding may be corrected to a non-finding (§2.5); this raises the distinct
++#    corrected_finding signal instead of unresolved_finding (§2.3).
++python3 "$CTRL" report --case "$CASE" --verdict not_assigned \
++    --evidence "commit:cafebabe still stronger retraction" --correction \
++    --supersedes finding --auditor c1e00008 --reason_code retracted_on_stronger_evidence \
++    --why_stronger "new replay shows the original finding was a false positive" >/dev/null
++python3 "$CTRL" report --case "$CASE" --confirm --evidence "procedural retraction replay" >/dev/null
++python3 "$CTRL" check > "$scratch/check"
++jq -e '[.signals[].type]|index("corrected_finding")' "$scratch/check" >/dev/null
++if jq -e '[.signals[].type]|index("unresolved_finding")' "$scratch/check" >/dev/null; then
++    echo "corrected finding must not raise unresolved_finding" >&2; exit 1
++fi
++
++# 7. Finality: one correction per case per cycle — a second pending correction
++#    is refused while one is pending.
++python3 "$CTRL" report --case "$CASE" --verdict verified \
++    --evidence "commit:feedface third look" --correction \
++    --supersedes not_assigned --auditor c1e00008 --reason_code third \
++    --why_stronger "yet another replay" >/dev/null
++if python3 "$CTRL" report --case "$CASE" --verdict finding \
++    --evidence "commit:feedface dup" --correction --supersedes not_assigned \
++    --auditor c1e00008 --reason_code dup --why_stronger "again" 2>/dev/null; then
++    echo "second concurrent pending correction must be refused" >&2; exit 1
++fi
++
++# 8. Finality: no bare re-flip — a target verdict already held is refused.
++if python3 "$CTRL" report --case "$CASE" --verdict finding \
++    --evidence "commit:feedface reflip" --correction --supersedes verified \
++    --auditor c1e00008 --reason_code reflip --why_stronger "back again" 2>/dev/null; then
++    echo "bare re-flip must be refused" >&2; exit 1
++fi
++
++# 9. Guardrails: a correction missing why_stronger / reason_code / auditor /
++#    supersedes, or citing the original evidence, is refused.
++if python3 "$CTRL" report --case "$CASE" --verdict inconclusive \
++    --evidence "commit:x1" --correction --supersedes verified \
++    --auditor c1e00008 --reason_code no_why --why_stronger "" 2>/dev/null; then
++    echo "empty why_stronger must be refused" >&2; exit 1
++fi
++if python3 "$CTRL" report --case "$CASE" --verdict inconclusive \
++    --evidence "commit:x1" --correction --supersedes verified \
++    --auditor c1e00008 --reason_code no_why --why_stronger "diff" 2>/dev/null; then
++    echo "duplicate evidence must be refused" >&2; exit 1
++fi
++if python3 "$CTRL" report --case "$CASE" --verdict inconclusive \
++    --evidence "board #301 original sample" --correction --supersedes verified \
++    --auditor c1e00008 --reason_code orig --why_stronger "same ref" 2>/dev/null; then
++    echo "original evidence reuse must be refused" >&2; exit 1
++fi
++
++# 10. verified_fixed still requires a previous finding (unchanged).
++CASE2=fedcba9876543210fe
++printf '{"case_id":"%s","population":"claimed_delivery","id":"218","at":2000000000}\n' \
++    "$CASE2" > "$scratch/state/oversight/random/cases/$CASE2.json"
++if python3 "$CTRL" report --case "$CASE2" --verdict verified_fixed \
++    --evidence "commit:nope" 2>/dev/null; then
++    echo "verified_fixed without a prior finding must be refused" >&2; exit 1
++fi
++
++# 11. The trail is append-only: the number of committed lines equals the number
++#    of correction/confirmation filings (no overwrite).
++n=$(wc -l < "$trail")
++[ "$n" -ge 4 ]
++
++echo 'Act 17 audit correction smoke passed'

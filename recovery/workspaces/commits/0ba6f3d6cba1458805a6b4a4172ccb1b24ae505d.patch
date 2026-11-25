@@ -1,0 +1,95 @@
+commit 0ba6f3d6cba1458805a6b4a4172ccb1b24ae505d
+Author:     Founder (via Claude) <founder@viche.local>
+AuthorDate: Wed Nov 25 06:39:06 2026 +0000
+Commit:     Founder (via Claude) <founder@viche.local>
+CommitDate: Wed Nov 25 06:39:06 2026 +0000
+
+    pnp fast lane: never cycle with an unknown worker roster; keep the 120 s null backoff; tests
+    
+    tests/pnp-allocator.py: 28 tests OK. test_missing_workers_do_not_release_leases now uses young
+    leases (a missing worker alone never releases); new test_fastlane_cycles_oldest_research_lease.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01BbLKVJCr1wULmJfnFKd1Ju
+
+diff --git a/missions/pnp/allocator.py b/missions/pnp/allocator.py
+index 96de96b1..15b9eb42 100644
+--- a/missions/pnp/allocator.py
++++ b/missions/pnp/allocator.py
+@@ -10,7 +10,7 @@ from types import SimpleNamespace
+ from . import assignment, cli, config, desk, fastlane, frontier, focus, state, status, portfolio
+ 
+ POLL_SECONDS = 30
+-NULL_RETRY_SECONDS = 60   # new concrete batches are taken within minutes
++NULL_RETRY_SECONDS = 120  # the fast lane clears this backoff whenever it frees a slot
+ 
+ 
+ def memory_path():
+@@ -147,7 +147,7 @@ def tick(d=None, now=None):
+             print("allocator frontier unavailable:", exc, flush=True)
+         # Fast lane: submit ready certificates, settle false twins, keep two slots cycling.
+         try:
+-            lane = fastlane.tick(d, mem, now)
++            lane = fastlane.tick(d, mem, now, roster_known=roster is not None)
+             if any(lane.values()):
+                 print("fastlane", json.dumps(lane), flush=True)
+                 released = list(released) + lane["released"]
+diff --git a/missions/pnp/fastlane.py b/missions/pnp/fastlane.py
+index 5c80b70d..c69c67b2 100644
+--- a/missions/pnp/fastlane.py
++++ b/missions/pnp/fastlane.py
+@@ -87,7 +87,7 @@ def release(d, mem, gap, reason, evidence):
+         os.close(fd)
+ 
+ 
+-def tick(d, mem, now):
++def tick(d, mem, now, roster_known=True):
+     out = {"submitted": [], "twin_published": [], "released": []}
+     twins, desk = _read("twins.json", {}), _read("desk.json", {})
+     held = cli.held_records()
+@@ -129,7 +129,8 @@ def tick(d, mem, now):
+     chosen = focus.current()
+     research = [r for r in held if support.active(r, now) and not concrete(r) and not r.get("queued_lease")
+                 and not r.get("candidate_digest") and not r.get("pr_number")]
+-    if len(held) >= config.MAX_LEASES and len(research) > RESEARCH_SLOTS:
++    # An incomplete worker roster means we cannot see who is working; never cycle then.
++    if roster_known and len(held) >= config.MAX_LEASES and len(research) > RESEARCH_SLOTS:
+         old = sorted((r for r in research if not (chosen and focus.key(chosen) == focus.key(r))
+                       and now - (r.get("lease_obtained_at") or now) >= RESEARCH_MIN_AGE),
+                      key=lambda r: r.get("lease_obtained_at") or now)
+diff --git a/tests/pnp-allocator.py b/tests/pnp-allocator.py
+index 3c0e5265..8854449f 100644
+--- a/tests/pnp-allocator.py
++++ b/tests/pnp-allocator.py
+@@ -92,8 +92,9 @@ class Tests(unittest.TestCase):
+ 
+     def test_missing_workers_do_not_release_leases(self):
+         now=time.time()
++        # Young leases (< the desk's 20 minutes): a missing worker alone never releases.
+         for i in range(1,6):
+-            self.add("L-meta-"+str(i),lease_expires_at=now+1200)
++            self.add("L-meta-"+str(i),lease_expires_at=now+1200,lease_obtained_at=now-600)
+         d=Desk()
+         with patch.object(allocator,"bound_roster",return_value=(set(),set())), \
+              patch.object(allocator.frontier,"refresh",return_value={}):
+@@ -102,6 +103,20 @@ class Tests(unittest.TestCase):
+         self.assertEqual(result["released"],[])
+         self.assertFalse(d.releases)
+ 
++    def test_fastlane_cycles_oldest_research_lease(self):
++        # Fast lane rule 3: research may hold at most MAX-2 slots; release the oldest one past
++        # twenty minutes, one per tick, never with an unknown worker roster.
++        from missions.pnp import fastlane
++        now=time.time()
++        for i in range(1,6):
++            self.add("L-meta-"+str(i),lease_expires_at=now+1200,lease_obtained_at=now-3600+i*60)
++        d=Desk()
++        self.assertEqual(fastlane.tick(d,{},now,roster_known=False)["released"],[])
++        chosen=focus.current()["gap_id"]
++        oldest=[g for g in ["L-meta-"+str(i) for i in range(1,6)] if g!=chosen][0]
++        self.assertEqual(fastlane.tick(d,{},now,roster_known=True)["released"],[oldest])  # focus is protected
++        self.assertEqual(len(cli.held_records()),4)
++
+     def test_single_stable_focus_and_rotation(self):
+         hard = self.add(acquisition_hard=True)
+         ordinary = self.add("L-meta-2",acquisition_hard=False)
