@@ -1,0 +1,461 @@
+commit 58a75007da1f1897ae13ea1e1422c85f3f80de31
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Mon Oct 19 12:15:35 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Oct 19 12:27:11 2026 +0000
+
+    Act 18 §7: generated board-trail index (curated mapping, not prose)
+    
+    Generate records/board-trail/index.json from the curated
+    records/board-trail/originating.tsv mapping (the Act 18 §5 lens input) plus
+    the board's terminal-update check — NOT from parsing bill/LAWS prose, which
+    mis-maps issues that bills cite as examples (e.g. board-reporting-act.md
+    cites #303/#307/#308).
+    
+    One entry per originating issue: issue, title (board), work, owning_office,
+    stage, terminal_status, git_only_gap. git_only_gap is true when work is
+    enacted/completed in Git but the originating issue lacks a terminal board
+    update (the Act 18 §2 defect class). index.json is generated, so it is
+    gitignored and untracked.
+    
+    Adds tests/board-trail-index-smoke.sh (mock board).
+
+diff --git a/.gitignore b/.gitignore
+index ff0b5ee6..fca1f57b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,3 +9,6 @@ node_modules/
+ .cache/
+ *.log
+ .DS_Store
++
++# Act 18 §7: the board-trail index is GENERATED, never hand-maintained in Git.
++records/board-trail/index.json
+diff --git a/government/board-trail-index.py b/government/board-trail-index.py
+index a1a93a32..a4cf7d3c 100644
+--- a/government/board-trail-index.py
++++ b/government/board-trail-index.py
+@@ -1,19 +1,21 @@
+ #!/usr/bin/env python3
+ """Act 18 (Board Reporting Act) §7 — generate records/board-trail/index.json.
+ 
+-The index is GENERATED, never hand-maintained. It scans Git (records/bills,
+-records/ballots, government/LAWS.md) and the Antonina board, and emits one
+-entry per originating issue with: issue, title, work, owning office, stage,
+-terminal status, and a git_only_gap flag.
+-
+-git_only_gap is true when the underlying work is enacted or completed in Git
+-(a law in LAWS.md, or a task merged/closed) while the originating issue lacks
+-a terminal board update — the defect class Act 18 §2 names, decidable from
+-Git and the board alone.
++The index is GENERATED, never hand-maintained. The issue->work mapping comes
++from the curated cross-check file records/board-trail/originating.tsv (the
++Act 18 §5 lens input), NOT from parsing bill/LAWS prose (which mis-maps: bills
++cite other issues as examples). For each originating issue the generator emits
++one entry — issue, title, work, owning_office, stage, terminal_status,
++git_only_gap — using that mapping plus the Antonina board's terminal-update
++check.
++
++git_only_gap is true when the underlying work is enacted/completed in Git while
++the originating issue lacks a terminal board update — the defect class Act 18 §2
++names, decidable from Git and the board alone.
+ 
+ The board scan is best-effort: if the board is unreachable the index is still
+-produced from Git, with git_only_gap computed from Git-only evidence and the
+-title left blank. POSIX-friendly; no third-party deps.
++produced from the curated mapping, with git_only_gap computed from Git-only
++evidence and the title left blank. POSIX-friendly; no third-party deps.
+ """
+ import json
+ import os
+@@ -26,7 +28,7 @@ from pathlib import Path
+ TOWN = Path(os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche"))
+ STATE = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state"))
+ INDEX = TOWN / "records" / "board-trail" / "index.json"
+-TOWN_HALL = 302  # cross-cutting layer, not an originating issue
++ORIGINATING = TOWN / "records" / "board-trail" / "originating.tsv"
+ 
+ STAGE_MARKERS = ("proposal", "enactment", "deployment", "verification")
+ TERMINAL_STATES = (
+@@ -68,153 +70,103 @@ def board_has_terminal_update(num):
+     except Exception:
+         return False
+     for msg in issue.get("messages") or []:
+-        body = (msg.get("body") or "")
++        body = msg.get("body") or ""
+         low = body.lower()
+         if "[scheduler-turn]" in low or "[terminal-handoff]" in low:
+             continue
+         has_marker = any(m in low for m in STAGE_MARKERS)
+         has_terminal = any(t in low for t in TERMINAL_STATES)
+         has_evidence = ("records/" in body or "commit" in low or "ballot" in low
+-                        or "tally" in low or "#" in body)
++                        or "tally" in low)
+         if has_marker and (has_terminal or has_evidence):
+             return True
+     return False
+ 
+ 
+-def parse_laws():
+-    """Return {bill_id: {act, title, ballot, issues:[...]}} from LAWS.md."""
+-    text = read(TOWN / "government" / "LAWS.md")
+-    laws = {}
+-    # Split on Act headers; capture each Act's header paragraph.
+-    parts = re.split(r"(?m)^## (Act [0-9]+(?:\.[0-9]+)?) — ", text)
+-    # parts[0] is preamble; then alternating act-label, body
+-    for i in range(1, len(parts), 2):
+-        label = parts[i]
+-        body = parts[i + 1] if i + 1 < len(parts) else ""
+-        m = re.match(r"Act ([0-9]+(?:\.[0-9]+)?)", label)
+-        if not m:
++def parse_originating():
++    """Return list of {issue, work_id, act, enacted_epoch, type} from the
++    curated mapping file. Skips comments/blank/header rows."""
++    rows = []
++    for line in read(ORIGINATING).splitlines():
++        line = line.rstrip("\n")
++        if not line.strip() or line.lstrip().startswith("#"):
++            continue
++        cols = line.split("\t")
++        if len(cols) < 5 or cols[0].strip() == "issue":
+             continue
+-        act = m.group(1)
+-        title = label[len(m.group(0)):].strip()
+-        bill = ""
+-        bm = re.search(r"bill `?([a-z0-9-]+)`?", body)
+-        if bm:
+-            bill = bm.group(1)
+-        ballot = ""
+-        vm = re.search(r"records/ballots/([a-z0-9-]+)\.tsv", body)
+-        if vm:
+-            ballot = vm.group(1)
+-        issues = set()
+-        for im in re.finditer(r"board \*?#(\d+)|board issue #(\d+)", body):
+-            n = int(im.group(1) or im.group(2))
+-            if n != TOWN_HALL:
+-                issues.add(n)
+-        laws[bill or act] = {"act": act, "title": title, "bill": bill,
+-                             "ballot": ballot, "issues": sorted(issues),
+-                             "enacted": True}
+-    return laws
+-
+-
+-def parse_bills():
+-    """Return {bill_id: {title, issues:[...]}} from records/bills/*.md."""
+-    bills = {}
+-    bdir = TOWN / "records" / "bills"
+-    if not bdir.is_dir():
+-        return bills
+-    for f in sorted(bdir.glob("*.md")):
+-        bid = f.stem
+-        text = read(f)
+-        title = ""
+-        hm = re.search(r"(?m)^# (.+)$", text)
+-        if hm:
+-            title = hm.group(1).strip()
+-        issues = set()
+-        for im in re.finditer(r"board \*?#(\d+)|board issue #(\d+)", text):
+-            n = int(im.group(1) or im.group(2))
+-            if n != TOWN_HALL:
+-                issues.add(n)
+-        bills[bid] = {"title": title, "issues": sorted(issues), "enacted": False}
+-    return bills
+-
+-
+-def parse_ballots():
+-    """Return {bill_id: {yes,no,abstain,passed}} from records/ballots/*.tsv."""
+-    ballots = {}
+-    bdir = TOWN / "records" / "ballots"
+-    if not bdir.is_dir():
+-        return ballots
+-    for f in sorted(bdir.glob("*.tsv")):
+-        bid = f.stem
+-        yes = no = abstain = 0
+-        for line in read(f).splitlines():
+-            cols = line.split("\t")
+-            if len(cols) < 2:
+-                continue
+-            v = cols[1].strip().lower()
+-            if v == "yes":
+-                yes += 1
+-            elif v == "no":
+-                no += 1
+-            elif v == "abstain":
+-                abstain += 1
+-        ballots[bid] = {"yes": yes, "no": no, "abstain": abstain,
+-                        "passed": yes > 0 and no == 0}
+-    return ballots
+-
+-
+-def owning_office(work_kind):
+-    # Act 18 §3.2: Clerk owns legislative items (bills, mandates, proceedings);
+-    # Executive owns task items.
+-    return "Clerk" if work_kind == "legislative" else "Executive"
++        try:
++            issue = int(cols[0])
++        except ValueError:
++            continue
++        rows.append({
++            "issue": issue,
++            "work_id": cols[1].strip(),
++            "act": cols[2].strip(),
++            "enacted_epoch": int(cols[3]) if cols[3].strip().isdigit() else 0,
++            "type": cols[4].strip(),
++        })
++    return rows
++
++
++def work_title(row):
++    """Human-readable work description: the bill's title if available, else id."""
++    bid = row["work_id"]
++    if row["act"] not in ("-", ""):
++        law = re.search(
++            r"(?m)^## Act " + re.escape(row["act"]) + r" — (.+)$",
++            read(TOWN / "government" / "LAWS.md"))
++        if law:
++            title = law.group(1).strip()
++            title = re.sub(r"\s*\(enacted.*$", "", title)
++            return f"Act {row['act']} — {title}"
++    hm = re.search(r"(?m)^# (.+)$", read(TOWN / "records" / "bills" / f"{bid}.md"))
++    if hm:
++        return hm.group(1).strip()
++    return bid
++
++
++def owning_office(row):
++    # Act 18 §3.2: Clerk owns legislative items (bills, drafts, mandates,
++    # proceedings); Executive owns task items.
++    return "Executive" if row["type"] == "task" else "Clerk"
+ 
+ 
+ def build_index():
+-    laws = parse_laws()
+-    bills = parse_bills()
+-    ballots = parse_ballots()
+-
+-    # issue -> list of work items (laws then bills)
+-    issues = {}
+-    for bid, law in laws.items():
+-        for n in law["issues"]:
+-            issues.setdefault(n, []).append(
+-                {"kind": "legislative", "ref": bid, "work": law["title"],
+-                 "stage": "enactment", "enacted": True,
+-                 "evidence": f"records/ballots/{law['ballot']}.tsv" if law["ballot"] else f"records/bills/{bid}.md"})
+-    for bid, bill in bills.items():
+-        for n in bill["issues"]:
+-            issues.setdefault(n, []).append(
+-                {"kind": "legislative", "ref": bid, "work": bill["title"],
+-                 "stage": "proposal", "enacted": False,
+-                 "evidence": f"records/bills/{bid}.md"})
++    rows = parse_originating()
++    by_issue = {}
++    for row in rows:
++        by_issue.setdefault(row["issue"], []).append(row)
+ 
+     entries = []
+-    for num in sorted(issues):
+-        work_list = issues[num]
+-        enacted = any(w["enacted"] for w in work_list)
++    for num in sorted(by_issue):
++        work_list = by_issue[num]
++        enacted = any(w["type"] == "law" and w["enacted_epoch"] > 0 for w in work_list)
+         title = board_title(num)
+         has_terminal = board_has_terminal_update(num)
+         # git_only_gap: work enacted/completed in Git but no terminal board update.
+         git_only_gap = enacted and not has_terminal
+-        # stage: furthest reached across work items
+-        stage = "proposal"
+-        for w in work_list:
+-            if w["enacted"]:
+-                stage = "enactment"
+-        terminal = "verification:confirmed" if (enacted and has_terminal) else (
+-            "enactment:not_enacted" if not enacted else None)
++        stage = "enactment" if enacted else "proposal"
++        if enacted and has_terminal:
++            terminal = "verification:confirmed"
++        elif enacted:
++            terminal = None  # enacted but not yet a terminal board update
++        elif any(w["type"] == "draft" for w in work_list):
++            terminal = "enactment:not_enacted"
++        else:
++            terminal = None
+         entries.append({
+             "issue": num,
+             "title": title,
+-            "work": "; ".join(w["work"] for w in work_list),
+-            "owning_office": owning_office("legislative"),
++            "work": "; ".join(work_title(w) for w in work_list),
++            "owning_office": owning_office(work_list[0]),
+             "stage": stage,
+             "terminal_status": terminal,
+             "git_only_gap": git_only_gap,
+             "transition_history": [
+-                {"transition": "enacted" if w["enacted"] else "proposed",
+-                 "stage": w["stage"], "timestamp": "",
+-                 "evidence_link": w["evidence"]}
++                {"transition": "enacted" if (w["type"] == "law" and w["enacted_epoch"] > 0) else "proposed",
++                 "stage": "enactment" if (w["type"] == "law" and w["enacted_epoch"] > 0) else "proposal",
++                 "timestamp": w["enacted_epoch"],
++                 "evidence_link": f"records/bills/{w['work_id']}.md"}
+                 for w in work_list
+             ],
+         })
+@@ -222,7 +174,7 @@ def build_index():
+     return {
+         "generated_at": int(os.environ.get("VICHE_BOARD_TRAIL_NOW", time.time())),
+         "generator": "government/board-trail-index.py",
+-        "town_hall": TOWN_HALL,
++        "mapping_source": "records/board-trail/originating.tsv",
+         "issues": entries,
+     }
+ 
+diff --git a/records/board-trail/index.json b/records/board-trail/index.json
+deleted file mode 100644
+index 5f41c71f..00000000
+--- a/records/board-trail/index.json
++++ /dev/null
+@@ -1,81 +0,0 @@
+-{
+-  "generated_at": 1792409694,
+-  "generator": "government/board-trail-index.py",
+-  "issues": [
+-    {
+-      "git_only_gap": false,
+-      "issue": 303,
+-      "owning_office": "Clerk",
+-      "stage": "proposal",
+-      "terminal_status": "enactment:not_enacted",
+-      "title": "Viche Legislature: ratify an independent non-voting Judiciary",
+-      "transition_history": [
+-        {
+-          "evidence_link": "records/bills/board-reporting-act.md",
+-          "stage": "proposal",
+-          "timestamp": "",
+-          "transition": "proposed"
+-        }
+-      ],
+-      "work": "DRAFT \u2014 Board Reporting Act (NOT ENACTED)"
+-    },
+-    {
+-      "git_only_gap": false,
+-      "issue": 308,
+-      "owning_office": "Clerk",
+-      "stage": "enactment",
+-      "terminal_status": "verification:confirmed",
+-      "title": "Viche Innovation proposal: Epistemic Adversarialism Act \u2014 enforced red-team review + falsifiability registry for a single-model polity",
+-      "transition_history": [
+-        {
+-          "evidence_link": "records/ballots/epistemic-adversarialism-act.tsv",
+-          "stage": "enactment",
+-          "timestamp": "",
+-          "transition": "enacted"
+-        },
+-        {
+-          "evidence_link": "records/bills/board-reporting-act.md",
+-          "stage": "proposal",
+-          "timestamp": "",
+-          "transition": "proposed"
+-        }
+-      ],
+-      "work": "; DRAFT \u2014 Board Reporting Act (NOT ENACTED)"
+-    },
+-    {
+-      "git_only_gap": false,
+-      "issue": 310,
+-      "owning_office": "Clerk",
+-      "stage": "proposal",
+-      "terminal_status": "enactment:not_enacted",
+-      "title": "Viche Innovation proposal: Detector Calibration Act \u2014 known-answer replay to measure whether Viche's oversight instruments actually work",
+-      "transition_history": [
+-        {
+-          "evidence_link": "records/bills/board-reporting-act.md",
+-          "stage": "proposal",
+-          "timestamp": "",
+-          "transition": "proposed"
+-        }
+-      ],
+-      "work": "DRAFT \u2014 Board Reporting Act (NOT ENACTED)"
+-    },
+-    {
+-      "git_only_gap": false,
+-      "issue": 312,
+-      "owning_office": "Clerk",
+-      "stage": "proposal",
+-      "terminal_status": "enactment:not_enacted",
+-      "title": "Viche Innovation proposal: Board Reporting Act \u2014 Antonina board as the Founder-facing accountability/observability trail",
+-      "transition_history": [
+-        {
+-          "evidence_link": "records/bills/board-reporting-act.md",
+-          "stage": "proposal",
+-          "timestamp": "",
+-          "transition": "proposed"
+-        }
+-      ],
+-      "work": "DRAFT \u2014 Board Reporting Act (NOT ENACTED)"
+-    }
+-  ],
+-  "town_hall": 302
+-}
+diff --git a/tests/board-trail-index-smoke.sh b/tests/board-trail-index-smoke.sh
+new file mode 100644
+index 00000000..e34dadf7
+--- /dev/null
++++ b/tests/board-trail-index-smoke.sh
+@@ -0,0 +1,57 @@
++#!/bin/sh
++# Act 18 (Board Reporting Act) §7 — the board-trail index is GENERATED from the
++# curated records/board-trail/originating.tsv mapping (NOT parsed from bill/LAWS
++# prose, which mis-maps issues that bills cite as examples) plus the board's
++# terminal-update check. Hermetic: mock board, scratch town.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++town=$scratch/town
++mkdir -p "$town/government" "$town/records/board-trail" "$town/records/bills" "$scratch/bin"
++cp "$repo/government/board-trail-index.py" "$town/government/"
++cp "$repo/records/board-trail/originating.tsv" "$town/records/board-trail/"
++cp "$repo/government/LAWS.md" "$town/government/"
++cp "$repo"/records/bills/judiciary-independence.md "$repo"/records/bills/board-reporting-act.md "$town/records/bills/"
++
++# Mock board: titles per issue; #312 has a terminal verification update, others do not.
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++"board show")
++  case "$*" in
++    *"303"*) printf '{"title":"Three-branch legislation","messages":[]}' ;;
++    *"307"*) printf '{"title":"Innovation Centre","messages":[]}' ;;
++    *"308"*) printf '{"title":"Epistemic Adversarialism","messages":[]}' ;;
++    *"310"*) printf '{"title":"Detector Calibration Act","messages":[]}' ;;
++    *"312"*) printf '{"title":"Board Reporting Act","messages":[{"author":"c1e00002","body":"Stage marker: verification. Terminal state verification:confirmed. Evidence records/ballots/board-reporting-act.tsv"}]}' ;;
++    *) printf '{"title":"unknown","messages":[]}' ;;
++  esac ;;
++*) echo "unexpected mock: $*" >&2; exit 90 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++PATH="$scratch/bin:$PATH"
++VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$scratch/state" python3 "$town/government/board-trail-index.py" >/dev/null
++
++idx="$town/records/board-trail/index.json"
++[ -s "$idx" ]
++
++# Mapping comes from originating.tsv, not prose: #303 -> Act 15, #312 -> Act 18.
++jq -e '.issues[] | select(.issue==303) | .work | test("Act 15")' "$idx" >/dev/null
++jq -e '.issues[] | select(.issue==312) | .work | test("Act 18")' "$idx" >/dev/null
++jq -e '.issues[] | select(.issue==308) | .work | test("Act 16")' "$idx" >/dev/null
++# #310 is a draft: not enacted, terminal not_enacted, no git_only_gap.
++jq -e '.issues[] | select(.issue==310) | .terminal_status=="enactment:not_enacted" and .git_only_gap==false' "$idx" >/dev/null
++# Enacted laws without a terminal board update are git_only_gap (303/307/308).
++jq -e '.issues[] | select(.issue==303) | .git_only_gap==true and .stage=="enactment"' "$idx" >/dev/null
++jq -e '.issues[] | select(.issue==307) | .git_only_gap==true' "$idx" >/dev/null
++# #312 has a terminal verification update -> not a gap, terminal confirmed.
++jq -e '.issues[] | select(.issue==312) | .git_only_gap==false and .terminal_status=="verification:confirmed"' "$idx" >/dev/null
++# Owning office: legislative items are Clerk-owned.
++jq -e '.issues[] | select(.issue==303) | .owning_office=="Clerk"' "$idx" >/dev/null
++# Titles come from the board.
++jq -e '.issues[] | select(.issue==303) | .title=="Three-branch legislation"' "$idx" >/dev/null
++
++echo 'Act 18 board-trail index smoke passed'

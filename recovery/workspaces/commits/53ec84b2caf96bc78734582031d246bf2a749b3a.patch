@@ -1,0 +1,95 @@
+commit 53ec84b2caf96bc78734582031d246bf2a749b3a
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Thu Nov 12 16:57:18 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Thu Nov 12 16:57:18 2026 +0000
+
+    Mailbox answers require an explicit marker, not a filename substring
+    
+    Rebuild of dbdfbb7 onto current main 297233f. A report is pending unless an
+    explicit empty sibling marker '<report>.md.answered' (or '.disposition')
+    exists; the filename substring no longer suppresses the signal.
+
+diff --git a/government/AGENT-REPORTING-POLICY.md b/government/AGENT-REPORTING-POLICY.md
+index 82b380d6..cccdba78 100644
+--- a/government/AGENT-REPORTING-POLICY.md
++++ b/government/AGENT-REPORTING-POLICY.md
+@@ -28,6 +28,13 @@ Every Town agent receives this instruction at startup and resumption:
+   misconduct or of a particular cause. Never convert "unknown", successful
+   agent exits or readiness into verified completion. Verify the monitoring
+   system itself.
++- An answer to a mailbox report is recorded by an explicit, empty sibling
++  marker beside the report: `<report>.md.answered` (or `<report>.md.disposition`).
++  A report is counted as pending unless that marker exists. A bare
++  `addendum` or `disposition` substring in a report's own filename no longer
++  suppresses the pending signal, so a genuine blocker cannot be hidden by
++  choosing such a name. Writing an addendum file in addition to the marker is
++  encouraged, but the marker is the machine-readable answer.
+ 
+ For Judiciary reviewers: reporting is NOT review. A disposition may say
+ "independently verified" only after identifying the evidence inspected
+diff --git a/government/branch-health.sh b/government/branch-health.sh
+index fec8231e..0ceba888 100755
+--- a/government/branch-health.sh
++++ b/government/branch-health.sh
+@@ -85,19 +85,19 @@ for observation in "outcomes:$state/institutional-outcomes/latest.json" "institu
+   fi
+ done
+ # Unreviewed agent impediments are unresolved adverse evidence. A reviewer's
+-# own disposition or addendum is an answer, not a pending question, and must
+-# not hold the signal red forever. This is a deterministic filename convention
+-# because the mailbox has no metadata sidecar; it does not remove or rewrite
+-# any preserved report.
++# answer is recorded by an explicit marker file beside the report, never by a
++# substring of the report's own filename: a reporter must not be able to
++# suppress a genuine blocker by choosing a name that happens to contain
++# "addendum" or "disposition". The marker is empty and additive; it does not
++# remove or rewrite any preserved report.
+ mailbox_dir="$state/oversight/judiciary-mailbox/inbox"
+ pending_mailbox=no
+ if [ -d "$mailbox_dir" ]; then
+   for mailbox_file in "$mailbox_dir"/*.md; do
+     [ -f "$mailbox_file" ] || continue
+-    mailbox_name=$(basename "$mailbox_file")
+-    case "$mailbox_name" in
+-      *disposition*|*addendum*) continue ;;
+-    esac
++    if [ -f "$mailbox_file.answered" ] || [ -f "$mailbox_file.disposition" ]; then
++      continue
++    fi
+     pending_mailbox=yes
+     break
+   done
+diff --git a/tests/branch-health-smoke.sh b/tests/branch-health-smoke.sh
+index 0b21be92..883b21a3 100755
+--- a/tests/branch-health-smoke.sh
++++ b/tests/branch-health-smoke.sh
+@@ -25,17 +25,22 @@ jq -e '.signals|index("judiciary_mailbox_pending")' "$scratch/branches/incident.
+ VICHE_CASE_NOW=1000 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.owner=="judiciary" and .state=="open"' "$scratch/institutional-cases/judiciary_mailbox_pending.json" >/dev/null
+ rm "$scratch/oversight/judiciary-mailbox/inbox/test.md"
+-# A mailbox holding only the reviewer's own disposition is not a pending
+-# impediment and must not hold the signal red indefinitely.
+-printf 'resolved\n' > "$scratch/oversight/judiciary-mailbox/inbox/20261109T000000Z-judiciary-disposition-test.md"
++# An answer is recorded by an explicit marker beside the report. A filename
++# that merely contains "disposition" is still a pending report: the report's
++# own name must not be able to suppress the signal.
++printf 'blocked\n' > "$scratch/oversight/judiciary-mailbox/inbox/20261109T000000Z-judiciary-disposition-test.md"
++sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1
++jq -e '.signals|index("judiciary_mailbox_pending")' "$scratch/branches/incident.json" >/dev/null
++printf '' > "$scratch/oversight/judiciary-mailbox/inbox/20261109T000000Z-judiciary-disposition-test.md.answered"
+ sh "$repo/government/branch-health.sh"
+ [ ! -e "$scratch/branches/incident.json" ]
+-# An undisposed impediment report still raises the signal.
+-printf 'blocked\n' > "$scratch/oversight/judiciary-mailbox/inbox/20261109T000001Z-report-test.md"
++# A new blocker whose filename merely contains "addendum" must not be hidden.
++printf 'blocked\n' > "$scratch/oversight/judiciary-mailbox/inbox/20261109T000001Z-genuine-blocker-addendum.md"
+ sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1
+ jq -e '.signals|index("judiciary_mailbox_pending")' "$scratch/branches/incident.json" >/dev/null
+ rm "$scratch/oversight/judiciary-mailbox/inbox/20261109T000000Z-judiciary-disposition-test.md" \
+-   "$scratch/oversight/judiciary-mailbox/inbox/20261109T000001Z-report-test.md"
++   "$scratch/oversight/judiciary-mailbox/inbox/20261109T000000Z-judiciary-disposition-test.md.answered" \
++   "$scratch/oversight/judiciary-mailbox/inbox/20261109T000001Z-genuine-blocker-addendum.md"
+ sh "$repo/government/branch-health.sh"
+ # Remove the outcome evidence without changing agent readiness: fail closed.
+ rm "$scratch/institutional-outcomes/latest.json"

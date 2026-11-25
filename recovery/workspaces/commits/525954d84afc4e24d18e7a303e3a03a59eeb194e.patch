@@ -1,0 +1,165 @@
+commit 525954d84afc4e24d18e7a303e3a03a59eeb194e
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Fri Nov 20 06:45:48 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Fri Nov 20 06:45:48 2026 +0000
+
+    Prevent independent office outages from blocking parliamentary sittings
+
+diff --git a/government/boot.sh b/government/boot.sh
+index 341f749d..563a50b4 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -99,24 +99,37 @@ if grep -Eq '^## Act [0-9]+ — Integration Queue Act ' "$town/government/LAWS.m
+     ) 9>"$integration_state/run.lock" >> "$integration_state/run.log" 2>&1 < /dev/null &
+ fi
+ 
++# Non-parliamentary work must not be on the constitutional sitting critical
++# path. A failed/hung Executive, Judiciary, Innovation, Economy or collector
++# must not keep summoned voting seats from receiving their prompts.
++# Each task has a separate nonblocking lock, deadline and isolated log.
++nonblocking_office() {
++    key=$1
++    deadline=$2
++    shift 2
++    dir=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/boot-independent
++    mkdir -p "$dir" || { echo "Viche: cannot create independent task state for $key" >&2; return 0; }
++    (
++        flock -n 9 || exit 0
++        timeout "$deadline" "$@" || echo "Viche: independent $key task failed or timed out (deadline $deadline seconds)" >&2
++    ) 9>"$dir/$key.lock" >>"$dir/$key.log" 2>&1 < /dev/null &
++}
++
+ # Independent Executive: no parliamentary summons required.
+ if [ -f "$town/government/branch-liveness.sh" ]; then
+-    /bin/sh "$town/government/branch-liveness.sh" executive ||
+-        echo "Viche: Executive liveness investigation required" >&2
++    nonblocking_office executive 300 /bin/sh "$town/government/branch-liveness.sh" executive
+ fi
+ 
+ # The innovation office is an Executive unit ONLY after parliamentary enactment.
+ if grep -Eq '^## Act [0-9]+ — Executive Innovation Office Act \((re-)?enacted ' "$town/government/LAWS.md"; then
+-    /bin/sh "$town/government/executive-innovation-cycle.sh" ||
+-        echo "Viche: Executive Innovation Office needs recovery" >&2
++    nonblocking_office executive-innovation 300 /bin/sh "$town/government/executive-innovation-cycle.sh"
+ fi
+ 
+ # The Ministry of Economy is an Executive unit ONLY after enactment of Act 29. Its
+ # funding refresh is deterministic and backgrounded; its agent is gated.
+ if grep -Eq '^## Act [0-9]+ — Ministry of Economy Act ' "$town/government/LAWS.md"; then
+     if [ -f "$town/government/executive-economy-cycle.sh" ]; then
+-        /bin/sh "$town/government/executive-economy-cycle.sh" ||
+-            echo "Viche: Ministry of Economy needs recovery" >&2
++        nonblocking_office economy 300 /bin/sh "$town/government/executive-economy-cycle.sh"
+     fi
+ fi
+ 
+@@ -162,8 +175,7 @@ fi
+ # Deterministic oversight continues even when every AI session is unavailable.
+ # Failure of telemetry/auditing must not prevent unrelated reconciliation.
+ if [ -f "$town/government/oversight-watch.sh" ]; then
+-    /bin/sh "$town/government/oversight-watch.sh" ||
+-        echo "Viche: watchdog cycle failed; investigate monitoring coverage" >&2
++    nonblocking_office oversight 180 /bin/sh "$town/government/oversight-watch.sh"
+ fi
+ # Independent feedback never holds up legislature, executive, or judiciary.
+ # Serialize collectors, bound their runtime, and timestamp their evidence.
+@@ -180,35 +192,29 @@ fi
+ # Independent Judiciary: evidence and adjudication, not executive delivery,
+ # proposing bills, or modifying its own measurement rules.
+ if [ -f "$town/government/branch-liveness.sh" ]; then
+-    /bin/sh "$town/government/branch-liveness.sh" judiciary ||
+-        echo "Viche: Judiciary liveness investigation required" >&2
++    nonblocking_office judiciary 300 /bin/sh "$town/government/branch-liveness.sh" judiciary
+ fi
+ # Run the historic legislative Centre ONLY until lawful transfer.
+ if ! grep -Eq '^## Act [0-9]+ — Executive Innovation Office Act \((re-)?enacted ' "$town/government/LAWS.md"; then
+     if [ -f "$town/government/innovation-centre-cycle.sh" ]; then
+-        /bin/sh "$town/government/innovation-centre-cycle.sh" ||
+-            echo "Viche: legislative Innovation Centre failed; investigate" >&2
++        nonblocking_office innovation-centre 300 /bin/sh "$town/government/innovation-centre-cycle.sh"
+     fi
+ fi
+ if [ -f "$town/government/branch-health.sh" ]; then
+-    /bin/sh "$town/government/branch-health.sh" ||
+-        echo "Viche: independent branch readiness incident recorded" >&2
++    nonblocking_office branch-health 180 /bin/sh "$town/government/branch-health.sh"
+ fi
+ # Durable independent case routing persists even if every branch model fails.
+ if [ -f "$town/government/institutional-cases.py" ]; then
+-    python3 "$town/government/institutional-cases.py" reconcile ||
+-        echo "Viche: corrective-case recording failed; investigate" >&2
++    nonblocking_office institutional-cases 180 python3 "$town/government/institutional-cases.py" reconcile
+ fi
+ # Act 18 §7: the Executive maintains the generated board-trail index; refresh it
+ # each measurement window (throttled, non-fatal) so the Founder-visible status
+ # map cannot silently go stale. Runs before the §5 lens that consumes it.
+ if [ -f "$town/government/board-trail-refresh.sh" ]; then
+-    /bin/sh "$town/government/board-trail-refresh.sh" ||
+-        echo "Viche: board-trail refresh failed" >&2
++    nonblocking_office board-trail 180 /bin/sh "$town/government/board-trail-refresh.sh"
+ fi
+ if [ -f "$town/government/judiciary-measurements.py" ]; then
+-    python3 "$town/government/judiciary-measurements.py" ||
+-        echo "Viche: Judiciary self-measurement unavailable" >&2
++    nonblocking_office judiciary-measurements 180 python3 "$town/government/judiciary-measurements.py"
+ fi
+ 
+ # Founder directive 2026-11-16: ten-line daily digest on Town Hall, once per
+diff --git a/tests/boot-independent-smoke.sh b/tests/boot-independent-smoke.sh
+new file mode 100644
+index 00000000..b3974282
+--- /dev/null
++++ b/tests/boot-independent-smoke.sh
+@@ -0,0 +1,51 @@
++#!/bin/sh
++# A stalled Executive/Judiciary must not delay the constitutional seat dispatcher.
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++python3 - "$(pwd -P)" <<'PY'
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import time
++
++project=Path(sys.argv[1])
++with tempfile.TemporaryDirectory() as td:
++    root=Path(td)
++    town=root/"town"
++    government=town/"government"
++    seats=root/"seats"
++    state=root/"state"
++    government.mkdir(parents=True)
++    (seats/"c1a00001").mkdir(parents=True)
++    (seats/"c1a00001"/".git").touch()
++    (state/"inaugurated").touch() if state.exists() else state.mkdir()
++    (town/"government/LAWS.md").write_text("Not an enactment: fixture\n")
++    (town/"government/seats.tsv").write_text("c1a00001\tClerk\tFounding seat\n")
++    (government/"boot.sh").write_bytes((project/"government/boot.sh").read_bytes())
++    (government/"branch-liveness.sh").write_text(
++        "#!/bin/sh\n"
++        "if [ \"$1\" = legislature ]; then exit 0; fi\n"
++        "sleep 8\nexit 7\n")
++    (government/"oversight-watch.sh").write_text("#!/bin/sh\nsleep 8\nexit 9\n")
++    subprocess.run(["git","init","-q",str(town)],check=True)
++    env=dict(os.environ,VICHE_TOWN_ROOT=str(town),
++             VICHE_SEATS_ROOT=str(seats),VICHE_STATE_ROOT=str(state))
++    start=time.monotonic()
++    run=subprocess.run(["/bin/sh",str(government/"boot.sh")],
++        env=env,capture_output=True,text=True,timeout=4)
++    elapsed=time.monotonic()-start
++    assert run.returncode==0,(run.returncode,run.stderr)
++    assert elapsed<3,(elapsed,run.stderr)
++    assert (state/"health/government-setup.last").exists(),run.stderr
++    # Child processes are no longer on boot's critical path. The expected
++    # per-office lock names also prevent duplicate supervisor invocations.
++    for name in ("executive","judiciary","oversight"):
++        for _ in range(30):
++            if (state/"boot-independent"/(name+".lock")).exists():
++                break
++            time.sleep(.01)
++        assert (state/"boot-independent"/(name+".lock")).exists(),name
++    print(f"non-parliamentary hangs do not block seats: boot returned in {elapsed:.3f}s")
++PY

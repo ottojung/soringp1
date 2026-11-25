@@ -1,0 +1,73 @@
+commit 57b7a9b84841ddf12a9df76178ab14261092a648
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 21:53:04 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 21:53:04 2026 +0000
+
+    Filter Founder intake pages before spawning per-message processes
+    
+    Preserve exact opaque and legacy numeric cursor boundaries, including non-Founder anchors and missing-anchor refusal. Isolated intake regression including the 502-entry page case passed in nine seconds under current host load.
+
+diff --git a/government/founder-intake.sh b/government/founder-intake.sh
+index 1ec20eb4..5e1d603a 100644
+--- a/government/founder-intake.sh
++++ b/government/founder-intake.sh
+@@ -19,7 +19,12 @@ while :; do
+   [ "$count" -gt 0 ] || break
+   [ -n "$latest" ] || latest=$(jq -r '.messages[-1].id // empty' "$d/page")
+   [ -n "$latest" ] || exit 1
+-  jq -c '.messages|reverse|.[]' "$d/page" > "$d/items"
++  # Scan the whole page in jq, but pass only Founder messages, the exact
++  # saved anchor, and malformed IDs to the shell. Never skip an anchor just
++  # because its author is not the Founder.
++  jq -c --arg old "$old" '.messages|reverse|.[] |
++    select(.author == "Vitalik" or ((.id // "")|tostring) == $old
++           or ((.id // "")|tostring) == "")' "$d/page" > "$d/items"
+   while IFS= read -r line; do
+     id=$(printf '%s\n' "$line" | jq -r '.id // empty')
+     [ -n "$id" ] || exit 1
+@@ -59,7 +64,16 @@ while :; do
+   [ "$count" -gt 0 ] || break
+   [ -n "$first" ] || first=$(jq -r '.entries[0].id // empty' "$d/feed")
+   stop=0
+-  jq -c '.entries[]' "$d/feed" > "$d/items"
++  # Select relevant messages AND the stopping boundary before launching
++  # per-item subprocesses. The original loop still decides where to stop;
++  # a missing opaque anchor must still fail closed after all pages.
++  jq -c --arg last "$last" --arg kind "$last_kind" '
++    .entries[] | select(.author == "Vitalik" or
++      ($last != "" and (if $kind == "id" then
++        ((.id // "")|tostring) == $last
++      else
++        ((.position // 0)|tonumber) <= ($last|tonumber)
++      end)))' "$d/feed" > "$d/items"
+   while IFS= read -r line; do
+     pos=$(printf '%s\n' "$line" | jq -r '.position // 0')
+     entry_id=$(printf '%s\n' "$line" | jq -r '.id // empty')
+diff --git a/tests/intake-smoke.sh b/tests/intake-smoke.sh
+index 35c8e2e9..0c8cfb95 100644
+--- a/tests/intake-smoke.sh
++++ b/tests/intake-smoke.sh
+@@ -115,6 +115,22 @@ printf '%s\n' 'sha256:message-501' > "$d/state/founder-inbox/feed-cursor"
+ /bin/sh "$repo/government/founder-intake.sh"
+ [ "$(cat "$d/state/founder-inbox/feed-cursor")" = 'sha256:message-0' ]
+ [ "$(wc -l < "$d/mock/calls")" -eq 5 ]
++# A non-Founder opaque anchor must stop the scan even if a Founder message
++# appears later on the same page. No old message may enter the queue.
++jq -n '{entries:[
++  {id:"new-other",position:1002,author:"other",issueNumber:"303"},
++  {id:"sha256:message-0",position:1000,author:"other",issueNumber:"303"},
++  {id:"older-founder",position:999,author:"Vitalik",issueNumber:"303",body:"must not dispatch"}]}' > "$d/mock/feed"
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(cat "$d/state/founder-inbox/feed-cursor")" = 'new-other' ]
++[ "$(wc -l < "$d/mock/calls")" -eq 5 ]
++# Preserve the legacy numeric cursor boundary, including non-Founder entries.
++printf '%s\n' '1000' > "$d/state/founder-inbox/feed-cursor"
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(cat "$d/state/founder-inbox/feed-cursor")" = 'new-other' ]
++[ "$(wc -l < "$d/mock/calls")" -eq 5 ]
++# Keep the current anchor present for the repeated-observation regression.
++
+ /bin/sh "$repo/government/founder-intake.sh"
+ [ "$(wc -l < "$d/mock/calls")" -eq 5 ]
+ # An unknown prior anchor must never be silently skipped during a cutover.

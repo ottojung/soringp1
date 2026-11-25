@@ -1,0 +1,667 @@
+commit 5c6c60c27f7d6bd65342c96454af0e413cf276d2
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 18:19:35 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 18:19:35 2026 +0000
+
+    Preserve institutional authority across session rotation; decouple zero-cost dispatch from discovery and boot
+
+diff --git a/government/boot.sh b/government/boot.sh
+index 3c517c8b..6281c48d 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -143,23 +143,14 @@ fi
+ # locks so they cannot block Parliament or Judiciary or each other.
+ if grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \(enacted ' "$town/government/LAWS.md" &&
+    [ -s "$town/government/knowledge-office-cycle.sh" ]; then
+-    # Act 32 H: after a crash or box restart, reconcile in-flight reservations
+-    # before any new dispatch. Deterministic, bounded and fail-closed.
++    # The office cycle validates its own permit and reconciles/guards the
++    # budget before dispatch. Do not perform any board read or metering on
++    # the shared boot path. Each office owns its bounded independent task.
+     if [ -s "$town/government/knowledge-budget.sh" ]; then
+-        /bin/sh "$town/government/knowledge-budget.sh" reconcile ||
+-            echo "Viche: knowledge budget reconciliation failed" >&2
++        nonblocking_office knowledge-budget 300 /bin/sh "$town/government/knowledge-budget.sh" reconcile
+     fi
+-    knowledge_root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/knowledge/offices
+     for office in statistics foresight strategy spying; do
+-        # Same fail-closed verifier as appointments and the office cycle: a
+-        # forged, wrong-Act, wrong-office or expired activation dispatches nothing.
+-        /bin/sh "$town/government/knowledge-activation-verify.sh" "$office" || continue
+-        mkdir -p "$knowledge_root/$office"
+-        (
+-            flock -n 9 || exit 0
+-            timeout 900 /bin/sh "$town/government/knowledge-office-cycle.sh" "$office" ||
+-                echo "Viche: $office knowledge office failed; see its log" >&2
+-        ) 9>"$knowledge_root/$office/cycle.lock" >> "$knowledge_root/$office/cycle.log" 2>&1 < /dev/null &
++        nonblocking_office "knowledge-$office" 900 /bin/sh "$town/government/knowledge-office-cycle.sh" "$office"
+     done
+ fi
+ 
+diff --git a/government/knowledge-act34-gate.py b/government/knowledge-act34-gate.py
+index 9c871e03..8c797a73 100644
+--- a/government/knowledge-act34-gate.py
++++ b/government/knowledge-act34-gate.py
+@@ -80,7 +80,7 @@ def institutionally_attested(root, role, officer, ref, commit, digest,
+     spec.loader.exec_module(vmod)
+     errors = vmod.Verifier(str(root)).validate_attestation(
+         attestation, gate_id=gate_id, officer_id=officer,
+-        role=role, artifact_commit=commit)
++        role=role, artifact_commit=commit, historical=True)
+     if errors:
+         raise ValueError("unverified " + role + " action: " + "; ".join(errors)[:320])
+ 
+@@ -99,18 +99,27 @@ def require_audited_free_tier(root, record, permit):
+     evidence = record.get("economy_free_tier_evidence")
+     if not isinstance(evidence, dict):
+         raise ValueError("independent Economy model-source control missing")
+-    report_ref = "records/economy/2026-11-24-act34-zero-billed-verification.md"
++    report_ref = evidence.get("report_ref", "records/economy/2026-11-24-act34-zero-billed-verification.md")
++    if not isinstance(report_ref, str) or not re.fullmatch(
++            r"records/economy/[A-Za-z0-9_.-]+[.]md", report_ref):
++        raise ValueError("invalid Economy attestation report reference")
+     institutionally_attested(
+         root, "economy", "c1e00012", report_ref,
+         evidence.get("artifact_commit"), evidence.get("report_sha256"),
+         evidence.get("attestation"), "act34-economy-free-provider-control")
++    billing_path = root / "government/knowledge-zero-billed-policy.json"
++    billing = load(billing_path)
++    snapshot_ref = billing.get("snapshot_ref")
++    if not isinstance(snapshot_ref, str) or not re.fullmatch(
++            r"records/economy/evidence/[A-Za-z0-9_.-]+[.]json", snapshot_ref):
++        raise ValueError("zero-billed provider snapshot ref invalid")
+     controls = (
+         ("wrapper_sha256", "government/knowledge-free-dispatch.sh"),
+         ("negative_test_sha256", "tests/knowledge-free-dispatch-smoke.sh"),
+         ("bounds_sha256", "government/knowledge-practical-bounds.py"),
+         ("zero_billed_policy_sha256", "government/knowledge-zero-billed-policy.json"),
+         ("zero_billed_verifier_sha256", "government/knowledge-zero-billed.py"),
+-        ("provider_snapshot_sha256", "records/economy/evidence/2026-11-24-provider-models.json"),
++        ("provider_snapshot_sha256", snapshot_ref),
+         ("gate_sha256", "government/knowledge-act34-gate.py"),
+         ("cycle_sha256", "government/knowledge-office-cycle.sh"))
+     for key, rel in controls:
+@@ -128,18 +137,10 @@ def require_audited_free_tier(root, record, permit):
+         raise ValueError("zero-billed policy verifier unavailable")
+     zmod = importlib.util.module_from_spec(spec)
+     spec.loader.exec_module(zmod)
+-    state = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state"))
+-    policy = load(state / "economy/model-policy.json")
+-    cat = load(state / "economy/catalogue.json")
+-    models = cat.get("models") if isinstance(cat, dict) else None
+-    allowed = policy.get("prefer") if isinstance(policy, dict) else None
+-    if not isinstance(models, dict) or not isinstance(allowed, list) or not allowed:
+-        raise ValueError("free-tier policy/catalogue unavailable")
+-    billing_path = root / "government/knowledge-zero-billed-policy.json"
+-    billing = load(billing_path)
+-    snapshot_ref = billing.get("snapshot_ref")
+-    if not isinstance(snapshot_ref, str) or not re.fullmatch(r"records/economy/evidence/[A-Za-z0-9_.-]+[.]json", snapshot_ref):
+-        raise ValueError("zero-billed provider snapshot ref invalid")
++    # Economy discovery and optimization are not funding authorization.
++    # Intersect independently reviewed zero-price models with the durable
++    # configured ladder, never a volatile catalogue or preference subset.
++    allowed = zmod.authorized_models(zmod.global_config_path())
+     go = billing.get("go_source")
+     if go is not None:
+         go_ref = go.get("snapshot_ref") if isinstance(go, dict) else None
+@@ -147,7 +148,7 @@ def require_audited_free_tier(root, record, permit):
+             raise ValueError("zero-billed Go snapshot ref invalid")
+         if on_main(root, root / go_ref) != go.get("sha256"):
+             raise ValueError("unverified Go snapshot bytes")
+-    zmod.verified_subset(billing_path, allowed, models, root / snapshot_ref)
++    zmod.verified_subset(billing_path, allowed, snapshot_path=root / snapshot_ref)
+     expected_digest = zmod.negative_acceptance_digest({
+         "wrapper": root / "government/knowledge-free-dispatch.sh",
+         "zero_billed_policy": root / "government/knowledge-zero-billed-policy.json",
+@@ -156,7 +157,7 @@ def require_audited_free_tier(root, record, permit):
+         "verifier": root / "government/knowledge-zero-billed.py",
+         "gate": root / "government/knowledge-act34-gate.py",
+         "cycle": root / "government/knowledge-office-cycle.sh",
+-        "provider_snapshot": root / "records/economy/evidence/2026-11-24-provider-models.json"})
++        "provider_snapshot": root / snapshot_ref})
+     if evidence.get("negative_acceptance_digest") != expected_digest:
+         raise ValueError("negative-acceptance digest differs from exact controls")
+ 
+diff --git a/government/knowledge-free-dispatch.sh b/government/knowledge-free-dispatch.sh
+index fc0dd9bb..86879cb6 100755
+--- a/government/knowledge-free-dispatch.sh
++++ b/government/knowledge-free-dispatch.sh
+@@ -27,36 +27,34 @@
+ set -eu
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+-policy="$state/economy/model-policy.json"
+-catalogue="$state/economy/catalogue.json"
+ billing="$town/government/knowledge-zero-billed-policy.json"
+ billing_module="$town/government/knowledge-zero-billed.py"
+-billing_snapshot="$town/records/economy/evidence/${VICHE_ZERO_BILLED_SNAPSHOT:-2026-11-24-provider-models.json}"
+ allow_dir="$state/knowledge/free-allowlist"
+ allow_cfg="$allow_dir/antonina/config.json"
+ 
+ log() { printf 'knowledge-free-dispatch: %s\n' "$*" >&2; }
+ die() { log "$*"; exit 1; }
+ 
+-[ -s "$policy" ] || die "Economy model policy missing"
+-[ -s "$catalogue" ] || die "Economy provider catalogue missing; no paid fallback"
+ [ -s "$billing" ] || die "Economy exact-ID zero-cost policy missing; no paid fallback"
+-[ -s "$billing_snapshot" ] || die "Economy provider-cost snapshot missing; no paid fallback"
+ [ -f "$billing_module" ] || die "zero-cost policy verifier missing"
+ [ -f "$town/government/knowledge-practical-bounds.py" ] || die "practical-bounds module missing"
+ 
+ # Build the allowlist from exact provider/model IDs with reviewed zero-cost
+ # metadata. A -free name is necessary for the rotation but NEVER billing proof.
+-python3 - "$billing_module" "$billing" "$policy" "$catalogue" "$allow_cfg" "$billing_snapshot" <<'PY'
+-import importlib.util, sys
++python3 - "$billing_module" "$billing" "$allow_cfg" "$town" <<'PY'
++import importlib.util, json, re, sys
++from pathlib import Path
+ sys.dont_write_bytecode = True
+-module, billing, policy, catalogue, output, snapshot = sys.argv[1:7]
++module, billing, output, town = sys.argv[1:5]
+ spec = importlib.util.spec_from_file_location("zero_billed", module)
+ if spec is None or spec.loader is None:
+     raise SystemExit("zero-cost policy verifier unavailable")
+ mod = importlib.util.module_from_spec(spec)
+ spec.loader.exec_module(mod)
+-mod.build_allowlist(billing, policy, catalogue, output, snapshot)
++ref = json.loads(Path(billing).read_text()).get("snapshot_ref")
++if not isinstance(ref, str) or not re.fullmatch(r"records/economy/evidence/[A-Za-z0-9_.-]+[.]json", ref):
++    raise SystemExit("invalid reviewed provider snapshot reference")
++mod.build_allowlist(billing, mod.global_config_path(), output, Path(town) / ref)
+ PY
+ [ -s "$allow_cfg" ] || die "failed to build allowlist config"
+ 
+diff --git a/government/knowledge-phase-verifier.py b/government/knowledge-phase-verifier.py
+index 5bb6c797..d4e32234 100644
+--- a/government/knowledge-phase-verifier.py
++++ b/government/knowledge-phase-verifier.py
+@@ -40,6 +40,7 @@ does not itself enact, sign, authorize, or enable any office.
+ from __future__ import annotations
+ 
+ import argparse
++from datetime import datetime
+ import hashlib
+ import json
+ import os
+@@ -379,8 +380,52 @@ class Verifier:
+                     return reg
+         raise GateError("no authoritative appointment registry available")
+ 
++    def _appointment_at(self, role, timestamp, current):
++        """Resolve the officer at the board action, not at a later dispatch.
++
++        The appointment log records only after successful managed-agent
++        creation and registry installation. A later agent rotation or GC
++        cannot revoke the previous officer's already-recorded act.
++        """
++        try:
++            t = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
++            if t.tzinfo is None or t.timestamp() > self.at + 5:
++                return None
++            root = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state"))
++            rows = []
++            for line in (root / "appointments/appointments.log").read_text().splitlines():
++                cols = line.split("\t")
++                if len(cols) != 4 or cols[1] != role:
++                    continue
++                at = datetime.fromisoformat(cols[0].replace("Z", "+00:00"))
++                if at.tzinfo is None:
++                    return None
++                rows.append((at, cols[2], cols[3]))
++            # A crash between registry swap and append cannot establish a
++            # new appointment's authority. Earlier verified intervals remain.
++            if not rows:
++                return None
++            if any(a[0] > b[0] for a,b in zip(rows,rows[1:])):
++                return None
++            eligible = [i for i,row in enumerate(rows) if row[0] <= t]
++            if not eligible:
++                return None
++            i = eligible[-1]
++            at, old, appointed = rows[i]
++            # Refuse attribution in an interval whose successor does not
++            # identify its predecessor (missing transition/registry reset).
++            if i + 1 < len(rows):
++                if rows[i+1][1] != appointed:
++                    return None
++            elif current.get(role) != appointed:
++                return None
++            return appointed
++        except (AttributeError, TypeError, ValueError, OSError):
++            return None
++
+     def validate_attestation(self, attestation: dict, *, gate_id: str,
+-                             officer_id: str, role: str, artifact_commit: str) -> list:
++                             officer_id: str, role: str, artifact_commit: str,
++                             historical: bool = False) -> list:
+         """Multi-channel corroboration that a real officer action produced the review.
+ 
+         A Git blob with a Judiciary id in it is NOT a signature on a shared UID.
+@@ -433,7 +478,11 @@ class Verifier:
+             try:
+                 issue = self._antonina_json("board", "show", "--id", issue_id,
+                                             "--page", "1", "--json")
+-                agent = self._antonina_json("agent", "status", "--id", agent_id, "--json")
++                # Act34 permits are durable officer acts, not leases on a
++                # particular conversation. Registry history is the third
++                # institutional channel and survives disposable sessions.
++                agent = None if historical else self._antonina_json(
++                    "agent", "status", "--id", agent_id, "--json")
+             except GateError as exc:
+                 return errors + [str(exc)]
+             try:
+@@ -475,18 +524,25 @@ class Verifier:
+             body = str(c.get("body", c.get("text", "")))
+             attributable = (token in author or role.lower() in author.lower())
+             if attributable and gate_id in body and prefix in body:
++                if historical and self._appointment_at(role, c.get("createdAt"), appointments) != agent_id:
++                    continue
+                 found = True
+                 break
+         if not found:
+             errors.append("no officer-authored board comment citing gate id and review commit")
+ 
+         # (3) Appointment + attributable managed-agent session.
+-        if appointments.get(role) != agent_id:
+-            errors.append("officer agent id does not match the authoritative appointment registry")
+-        if not isinstance(agent, dict) or str(agent.get("id", "")) != agent_id:
+-            errors.append("managed-agent session is not attributable to the officer agent id")
+-        elif agent.get("state") not in ("idle", "running", "clearexit", "exited"):
+-            errors.append("officer agent has no usable attributable session state")
++        if historical:
++            if not isinstance(review, dict) or self._appointment_at(
++                    role, review.get("recordedAt"), appointments) != agent_id:
++                errors.append("officer agent was not the appointed officer at the board review")
++        else:
++            if appointments.get(role) != agent_id:
++                errors.append("officer agent id does not match the authoritative appointment registry")
++            if not isinstance(agent, dict) or str(agent.get("id", "")) != agent_id:
++                errors.append("managed-agent session is not attributable to the officer agent id")
++            elif agent.get("state") not in ("idle", "running", "clearexit", "exited"):
++                errors.append("officer agent has no usable attributable session state")
+         return errors
+ 
+     # ---- gate verification ----------------------------------------------
+diff --git a/government/knowledge-zero-billed-policy.json b/government/knowledge-zero-billed-policy.json
+index f9fb94d9..bffa7ecf 100644
+--- a/government/knowledge-zero-billed-policy.json
++++ b/government/knowledge-zero-billed-policy.json
+@@ -91,15 +91,6 @@
+         "cache_read": 0
+       }
+     },
+-    "opencode-go/beam-free": {
+-      "provider": "opencode-go",
+-      "provider_model": "beam-free",
+-      "cost": {
+-        "input": 0,
+-        "output": 0,
+-        "cache_read": 0
+-      }
+-    },
+     "opencode-go/hy4-flash-free": {
+       "provider": "opencode-go",
+       "provider_model": "hy4-flash-free",
+@@ -117,15 +108,6 @@
+         "output": 0,
+         "cache_read": 0
+       }
+-    },
+-    "opencode-go/iceman-contributor-free": {
+-      "provider": "opencode-go",
+-      "provider_model": "iceman-contributor-free",
+-      "cost": {
+-        "input": 0,
+-        "output": 0,
+-        "cache_read": 0
+-      }
+     }
+   },
+   "go_source": {
+@@ -133,6 +115,6 @@
+     "retrieved_at": "2026-11-24T17:56:06Z",
+     "sha256": "cf7019172f53d12c175f499934678c51bf161f66a93362a124e24b750d538767",
+     "snapshot_ref": "records/economy/evidence/2026-11-24-go-provider-models.json",
+-    "note": "First-party Go route; the provider payload identifies the model owner as opencode. Go identity is bound by the specific Go endpoint, not inferred from the model name."
++    "note": "First-party Go route; the provider payload identifies the model owner as opencode. Go identity is bound by the specific Go endpoint, not inferred from the model name. Shared knowledge-office scope admits only non-training, ZDR, non-region-restricted Go routes; Beam and Iceman excluded by Economy data-handling finding."
+   }
+ }
+diff --git a/government/knowledge-zero-billed.py b/government/knowledge-zero-billed.py
+index d124c280..ab2e70f9 100644
+--- a/government/knowledge-zero-billed.py
++++ b/government/knowledge-zero-billed.py
+@@ -130,6 +130,16 @@ def load_verified(path, now=None, snapshot_path=None):
+             raise ValueError("provider snapshot shows nonzero cost: " + mid)
+         if "write" in cache and not _zero(cache.get("write")):
+             raise ValueError("provider snapshot shows nonzero cache-write cost: " + mid)
++        if provider == "opencode-go":
++            # Economy's common four-office scope may include internal
++            # institutional context. Do not admit training, non-ZDR or
++            # region-restricted Go models without a distinct reviewed scope.
++            privacy = rec.get("go")
++            if (not isinstance(privacy, dict)
++                    or privacy.get("training") is not False
++                    or privacy.get("zdr") is not True
++                    or privacy.get("limited_regions") is not False):
++                raise ValueError("Go data-handling scope not approved: " + mid)
+     return data
+ 
+ 
+@@ -172,7 +182,9 @@ def negative_acceptance_digest(paths):
+         "opencode/hy4-flash-free:nonzero-cost",
+         "opencode/hy4-flash-free:expired-evidence",
+         "opencode/hy4-flash-free:unknown-billing-dimension",
+-        "opencode-go/hy4-flash-free:missing-or-wrong-go-source")
++        "opencode-go/hy4-flash-free:missing-or-wrong-go-source",
++        "opencode-go/iceman-contributor-free:training-enabled",
++        "opencode-go/beam-free:non-zdr-or-region-restricted")
+     payload = {"rejected_ids": names,
+                "controls": {name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                             for name, path in sorted(paths.items())}}
+@@ -180,13 +192,35 @@ def negative_acceptance_digest(paths):
+                                      separators=(",", ":")).encode()).hexdigest()
+ 
+ 
+-def build_allowlist(policy_path, prefer_path, catalogue_path, output_path, snapshot_path=None):
+-    """Build Antonina's per-invocation config from exact verified IDs."""
+-    policy = json.loads(Path(prefer_path).read_text(encoding="utf-8"))
+-    catalogue = json.loads(Path(catalogue_path).read_text(encoding="utf-8"))
+-    if not isinstance(catalogue, dict) or not isinstance(catalogue.get("models"), dict):
+-        raise ValueError("Economy catalogue missing/invalid")
+-    ids = verified_subset(policy_path, policy.get("prefer"), catalogue.get("models"), snapshot_path)
++def global_config_path(env=None):
++    """Same host/config resolution as Antonina model-config.js."""
++    env = os.environ if env is None else env
++    service = env.get("ANTONINA_OPENCODE_XDG_CONFIG_HOME")
++    host = env.get("ANTONINA_HOST_XDG_CONFIG_HOME")
++    xdg = env.get("XDG_CONFIG_HOME")
++    base = host if service and xdg == service and host else xdg
++    return Path(base or (Path(env.get("HOME", str(Path.home()))) / ".config")) / "antonina/config.json"
++
++
++def authorized_models(path):
++    """Read the durable authorized ladder, with no catalogue dependency."""
++    config = json.loads(Path(path).read_text(encoding="utf-8"))
++    if not isinstance(config, dict) or not isinstance(config.get("models"), list):
++        raise ValueError("authorized Antonina config is malformed")
++    ids = []
++    for entry in config["models"]:
++        if not isinstance(entry, dict) or not isinstance(entry.get("comment"), str):
++            raise ValueError("authorized Antonina model entry is malformed")
++        mid = entry.get("model")
++        if not isinstance(mid, str) or not MODEL_ID.fullmatch(mid) or mid in ids:
++            raise ValueError("authorized Antonina model identity is malformed")
++        ids.append(mid)
++    return ids
++
++
++def build_allowlist(policy_path, global_path, output_path, snapshot_path=None):
++    """Intersect the reviewed exact-ID policy and durable authorization."""
++    ids = verified_subset(policy_path, authorized_models(global_path), snapshot_path=snapshot_path)
+     entries = [{"model": mid, "variant": "low",
+                 "comment": "Economy exact-ID zero-cost policy; source-attested provider metadata"}
+                for mid in ids]
+diff --git a/tests/boot-independent-smoke.sh b/tests/boot-independent-smoke.sh
+index 1b7b2aa5..3b281a6e 100644
+--- a/tests/boot-independent-smoke.sh
++++ b/tests/boot-independent-smoke.sh
+@@ -28,7 +28,8 @@ with tempfile.TemporaryDirectory() as td:
+     (seats/"c1a00001").mkdir(parents=True)
+     (seats/"c1a00001"/".git").touch()
+     (state/"inaugurated").touch() if state.exists() else state.mkdir()
+-    (town/"government/LAWS.md").write_text("Not an enactment: fixture\n")
++    (town/"government/LAWS.md").write_text(
++        "## Act 32 — Institutional Knowledge and Communications Act (enacted fixture)\n")
+     (town/"government/seats.tsv").write_text("c1a00001\tClerk\tFounding seat\n")
+     (government/"boot.sh").write_bytes((project/"government/boot.sh").read_bytes())
+     (government/"branch-liveness.sh").write_text(
+@@ -36,6 +37,11 @@ with tempfile.TemporaryDirectory() as td:
+         "if [ \"$1\" = legislature ]; then exit 0; fi\n"
+         "sleep 8\nexit 7\n")
+     (government/"oversight-watch.sh").write_text("#!/bin/sh\nsleep 8\nexit 9\n")
++    # Both budget and activation/dispatch can hang; none may delay the
++    # constitutional seat dispatcher or another office.
++    (government/"knowledge-budget.sh").write_text("#!/bin/sh\nsleep 8\nexit 7\n")
++    (government/"knowledge-office-cycle.sh").write_text("#!/bin/sh\nsleep 8\nexit 8\n")
++    (government/"knowledge-activation-verify.sh").write_text("#!/bin/sh\nsleep 8\nexit 9\n")
+     subprocess.run(["git","init","-q",str(town)],check=True)
+     env=dict(os.environ,VICHE_TOWN_ROOT=str(town),
+              VICHE_SEATS_ROOT=str(seats),VICHE_STATE_ROOT=str(state),
+@@ -49,11 +55,12 @@ with tempfile.TemporaryDirectory() as td:
+     assert (state/"health/government-setup.last").exists(),run.stderr
+     # Child processes are no longer on boot's critical path. The expected
+     # per-office lock names also prevent duplicate supervisor invocations.
+-    for name in ("executive","judiciary","oversight"):
++    for name in ("executive","judiciary","oversight","knowledge-budget",
++                 "knowledge-statistics","knowledge-foresight","knowledge-strategy","knowledge-spying"):
+         for _ in range(30):
+             if (state/"boot-independent"/(name+".lock")).exists():
+                 break
+             time.sleep(.01)
+         assert (state/"boot-independent"/(name+".lock")).exists(),name
+-    print(f"non-parliamentary hangs do not block seats: boot returned in {elapsed:.3f}s")
++    print(f"non-parliamentary and knowledge-office hangs do not block seats: boot returned in {elapsed:.3f}s")
+ PY
+diff --git a/tests/knowledge-act34-adaptive-smoke.sh b/tests/knowledge-act34-adaptive-smoke.sh
+index 3c2c6c8e..779218f9 100644
+--- a/tests/knowledge-act34-adaptive-smoke.sh
++++ b/tests/knowledge-act34-adaptive-smoke.sh
+@@ -8,7 +8,7 @@ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ d=$(mktemp -d)
+ trap 'rm -rf "$d"' EXIT HUP INT TERM
+ town="$d/town"; state="$d/state"
+-mkdir -p "$town/government" "$town/records/economy/evidence" "$town/records/knowledge/permits" \
++mkdir -p "$d/global/antonina" "$town/government" "$town/records/economy/evidence" "$town/records/knowledge/permits" \
+   "$town/records/knowledge/pilot-reviews" "$state/economy" \
+   "$state/appointments" "$state/board" "$d/bin"
+ for f in knowledge-act34-gate.py knowledge-phase-verifier.py \
+@@ -40,6 +40,14 @@ EOF
+ cat > "$state/economy/model-policy.json" <<'EOF'
+ {"prefer":["opencode-go/hy4-flash-free","opencode/hy4-flash-free"]}
+ EOF
++cat > "$d/global/antonina/config.json" <<'EOF'
++{"models":[{"model":"opencode-go/hy4-flash-free","comment":"fixture","variant":"low"},{"model":"opencode/hy4-flash-free","comment":"fixture","variant":"low"}]}
++EOF
++cat > "$state/appointments/appointments.log" <<'EOF'
++2026-11-22T00:00:00Z	executive	-	exec-agent
++2026-11-22T00:00:00Z	economy	-	econ-agent
++2026-11-22T00:00:00Z	judiciary	-	jud-agent
++EOF
+ cat > "$state/economy/catalogue.json" <<'EOF'
+ {"models":{"opencode-go/hy4-flash-free":{"tier":"free"},"opencode/hy4-flash-free":{"tier":"free"},
+  "provider/paid-free":{"tier":"free"}}}
+@@ -64,7 +72,7 @@ case "$1 $2" in
+ esac
+ EOF
+ chmod +x "$d/bin/antonina"
+-cat > "$town/records/economy/2026-11-24-act34-zero-billed-verification.md" <<'EOF'
++cat > "$town/records/economy/2026-11-24-act34-fresh-verification.md" <<'EOF'
+ Economy exact-path zero-cost control verification fixture.
+ EOF
+ python3 - "$town" <<'PY'
+@@ -141,8 +149,9 @@ def att(role,agent,issue):
+  return {"issue_id":issue,"expected_reviewer":role,"officer_agent_id":agent}
+ permit=json.loads((root/"records/knowledge/permits/statistics.json").read_text())
+ evidence={"artifact_commit":commit,
++ "report_ref":"records/economy/2026-11-24-act34-fresh-verification.md",
+  "report_sha256":hashlib.sha256(
+-  (root/"records/economy/2026-11-24-act34-zero-billed-verification.md").read_bytes()).hexdigest(),
++  (root/"records/economy/2026-11-24-act34-fresh-verification.md").read_bytes()).hexdigest(),
+  **permit["enforcement_evidence"],
+  "attestation":att("c1e00012","econ-agent","economy-test-issue")}
+ data["economy_free_tier_evidence"]=evidence
+@@ -154,7 +163,8 @@ act.write_text(json.dumps(data))
+ def issue(reviewer, gate_ids):
+  return {"review":{"commit":commit,"verdict":"approve","reviewer":reviewer,
+   "recordedAt":"2026-11-23T08:00:00Z"},
+-  "messages":[{"author":reviewer,"body":g+" "+commit[:12]+" reviewed"}
++  "messages":[{"author":reviewer,"body":g+" "+commit[:12]+" reviewed",
++               "createdAt":"2026-11-23T08:00:01Z"}
+               for g in gate_ids]}
+ (state/"board/executive-test-issue.json").write_text(json.dumps(
+  issue("c1e00002",["act34-executive-"+x for x in offices])))
+@@ -164,10 +174,39 @@ PY
+ git -C "$town" add .
+ git -C "$town" commit -qm 'Second commitment: independently corroborated officer actions'
+ export VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$state" PATH="$d/bin:$PATH"
++export XDG_CONFIG_HOME="$d/global"
+ for office in statistics foresight strategy spying; do
+  /bin/sh "$town/government/knowledge-activation-verify.sh" "$office"
+ done
+ echo 'PASS: FOUR broad adaptive offices, independent Exec+Economy board review/comment, Git source and agent appointment proof'
++# The signing officers rotate and old agents may disappear. Board approvals
++# remain attributable to the officer at their action times.
++printf '%s\n' '2026-11-23T09:00:00Z	executive	exec-agent	exec-successor' \
++ '2026-11-23T09:00:00Z	economy	econ-agent	econ-successor' >> "$state/appointments/appointments.log"
++printf 'executive\texec-successor\neconomy\tecon-successor\njudiciary\tjud-agent\n' > "$state/appointments/appointments.tsv"
++rm "$state/economy/catalogue.json" "$state/economy/model-policy.json"
++for office in statistics foresight strategy spying; do
++ /bin/sh "$town/government/knowledge-activation-verify.sh" "$office"
++done
++echo 'PASS: rotation and unavailable discovery cannot revoke recorded authorization'
++# A later appointee cannot appropriate an earlier agent's approval.
++cp "$town/records/knowledge/activation.json" "$d/original-activation.json"
++python3 - "$town/records/knowledge/activation.json" <<'PYROTATE'
++from pathlib import Path
++import json,sys
++p=Path(sys.argv[1]);d=json.loads(p.read_text())
++d["offices"]["statistics"]["permit_attestation"]["officer_agent_id"]="exec-successor"
++p.write_text(json.dumps(d))
++PYROTATE
++git -C "$town" add records/knowledge/activation.json
++git -C "$town" commit -qm 'Negative fixture: later appointee claims earlier approval'
++if /bin/sh "$town/government/knowledge-activation-verify.sh" statistics >/dev/null 2>&1; then
++ echo 'FAIL: wrong historical appointee accepted' >&2;exit 1
++fi
++cp "$d/original-activation.json" "$town/records/knowledge/activation.json"
++git -C "$town" add records/knowledge/activation.json
++git -C "$town" commit -qm 'Restore real historical attribution'
++
+ # Act34 requires enforcement evidence and the digest on EACH permit. Remove
+ # them from a source-committed permit and update its activation hash; the gate
+ # must still refuse before the institutional-attestation stage.
+@@ -203,12 +242,12 @@ if /bin/sh "$town/government/knowledge-activation-verify.sh" statistics >/dev/nu
+ fi
+ cp "$d/review-good.json" "$state/board/executive-test-issue.json"
+ # A bogus paid provider whose model id ENDS in -free is NEVER free.
+-cp "$state/economy/model-policy.json" "$d/policy-good.json"
+-echo '{"prefer":["provider/paid-free"]}' > "$state/economy/model-policy.json"
++cp "$d/global/antonina/config.json" "$d/policy-good.json"
++echo '{"models":[{"model":"provider/paid-free","comment":"fixture","variant":"low"}]}' > "$d/global/antonina/config.json"
+ if /bin/sh "$town/government/knowledge-activation-verify.sh" statistics >/dev/null 2>&1; then
+  echo 'FAIL: billable provider with -free-looking id accepted' >&2;exit 1
+ fi
+-cp "$d/policy-good.json" "$state/economy/model-policy.json"
++cp "$d/policy-good.json" "$d/global/antonina/config.json"
+ # Mutated uncommitted activation cannot grant authority.
+ python3 - "$town/records/knowledge/activation.json" <<'PY'
+ from pathlib import Path
+diff --git a/tests/knowledge-free-dispatch-smoke.sh b/tests/knowledge-free-dispatch-smoke.sh
+index f934996b..72ba0c9b 100755
+--- a/tests/knowledge-free-dispatch-smoke.sh
++++ b/tests/knowledge-free-dispatch-smoke.sh
+@@ -45,12 +45,22 @@ printf '%s\n' '{"models":[{"model":"global-sentinel"}]}' > "$d/global/antonina/c
+ cp "$d/global/antonina/config.json" "$d/global-before.json"
+ XDG_CONFIG_HOME="$d/global"
+ export XDG_CONFIG_HOME
+-export VICHE_ZERO_BILLED_SNAPSHOT=provider-snapshot.json
++# The fixture's explicit global authorization is independent of the volatile
++# discovery preference. Only tests translate each desired authorized set.
++authorize_fixture() {
++ python3 - "$d/state/economy/model-policy.json" "$d/global/antonina/config.json" <<'PYAUTH'
++import json,sys
++ids=json.load(open(sys.argv[1]))["prefer"]
++json.dump({"models":[{"model":mid,"comment":"fixture","variant":"low"} for mid in ids]},open(sys.argv[2],"w"))
++PYAUTH
++ cp "$d/global/antonina/config.json" "$d/global-before.json"
++}
+ 
+ python3 - "$d/state/economy/model-policy.json" <<'PY'
+ import json,sys
+ json.dump({"prefer":["opencode/tidepool-alpha-free","opencode/hy4-flash-free"],"exclude":[]},open(sys.argv[1],"w"))
+ PY
++authorize_fixture
+ # Stub antonina records the env and args instead of dispatching.
+ cat > "$d/bin/antonina" <<'EOF'
+ #!/bin/sh
+@@ -75,11 +85,20 @@ PY
+ cmp -s "$d/global/antonina/config.json" "$d/global-before.json" ||
+   { echo 'FAIL: global config changed' >&2; fail=1; }
+ 
++# Destroy discovery metadata while retaining the durable authorization.
++printf '%s\n' 'invalid-json' > "$d/state/economy/catalogue.json"
++rm "$d/state/economy/model-policy.json"
++CAPTURE="$d/capture-no-discovery" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
++  PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach
++cmp "$d/global/antonina/config.json" "$d/global-before.json"
++test -s "$d/capture-no-discovery"
++
+ # A disguised paid id containing -free mid-string must be refused.
+ python3 - "$d/state/economy/model-policy.json" <<'PYMASK'
+ import json,sys
+ json.dump({"prefer":["provider/paid-free-trial"],"exclude":[]},open(sys.argv[1],"w"))
+ PYMASK
++authorize_fixture
+ if CAPTURE="$d/capture3" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
+    PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach >/dev/null 2>&1; then
+  echo 'FAIL: disguised paid id admitted' >&2; fail=1
+@@ -92,6 +111,7 @@ python3 - "$d/state/economy/model-policy.json" <<'PYPRETEND'
+ import json,sys
+ json.dump({"prefer":["provider/paid-free"],"exclude":[]},open(sys.argv[1],"w"))
+ PYPRETEND
++authorize_fixture
+ if CAPTURE="$d/capture4" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
+   PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach >/dev/null 2>&1; then
+   echo 'FAIL: deceptive paid-free provider was admitted as free' >&2; fail=1
+@@ -102,6 +122,7 @@ python3 - "$d/state/economy/model-policy.json" <<'PY'
+ import json,sys
+ json.dump({"prefer":["openai/gpt-6-luna"],"exclude":[]},open(sys.argv[1],"w"))
+ PY
++authorize_fixture
+ if CAPTURE="$d/capture2" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
+   PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach >/dev/null 2>&1; then
+   echo 'FAIL: non-free id admitted' >&2; fail=1
+@@ -113,6 +134,7 @@ python3 - "$d/state/economy/model-policy.json" <<'PYSECONDARY'
+ import json,sys
+ json.dump({"prefer":["opencode/hy4-flash-free","opencode-go/hy4-flash-free","opencode-go/hungerg-free"]},open(sys.argv[1],"w"))
+ PYSECONDARY
++authorize_fixture
+ CAPTURE="$d/capture7" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
+   PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach
+ python3 - "$d/state/knowledge/free-allowlist/antonina/config.json" <<'PYOMIT'
+@@ -130,6 +152,7 @@ b["models"]["opencode/hy4-flash-free"]["cost"]["output"]=0.1
+ json.dump(b,open(billing,"w"))
+ json.dump({"prefer":["opencode/hy4-flash-free"]},open(policy,"w"))
+ PYCOST
++authorize_fixture
+ if CAPTURE="$d/capture5" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
+    PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach >/dev/null 2>&1; then
+   echo 'FAIL: nonzero provider cost admitted' >&2; fail=1
+@@ -189,7 +212,9 @@ spec=importlib.util.spec_from_file_location("zb",sys.argv[1]);m=importlib.util.m
+ # real clock and the fixture above separately proves expiry fails closed.
+ data=m.load_verified(sys.argv[3],now=datetime.datetime(2026,11,24,18,0,tzinfo=datetime.timezone.utc),snapshot_path=sys.argv[8])
+ import json,pathlib,tempfile,hashlib
+-expected={"opencode-go/"+mid for mid in ("beam-free","hy4-flash-free","hungerg-free","iceman-contributor-free")}
++expected={"opencode-go/"+mid for mid in ("hy4-flash-free","hungerg-free")}
++unsafe={"opencode-go/beam-free","opencode-go/iceman-contributor-free"}
++assert not (unsafe & set(data["models"]))
+ assert expected <= set(data["models"])
+ assert set(m.verified_subset(sys.argv[3],sorted(expected),snapshot_path=sys.argv[8])) == expected
+ # Route mismatch and corrupted Go bytes cannot authorize a Go model.
+@@ -204,6 +229,15 @@ with tempfile.TemporaryDirectory() as td:
+     try:m.load_verified(policy,now=datetime.datetime(2026,11,24,18,0,tzinfo=datetime.timezone.utc),snapshot_path=primary)
+     except ValueError:pass
+     else:raise AssertionError("wrong Go route admitted")
++    # Exact zero price is insufficient for restricted data-handling routes.
++    for mid in unsafe:
++        bad=json.loads(json.dumps(data))
++        bad["models"][mid]={"provider":"opencode-go","provider_model":mid.split("/")[1],
++                           "cost":{"input":0,"output":0,"cache_read":0}}
++        policy.write_text(json.dumps(bad))
++        try:m.load_verified(policy,now=datetime.datetime(2026,11,24,18,0,tzinfo=datetime.timezone.utc),snapshot_path=primary)
++        except ValueError as exc:assert "data-handling scope" in str(exc)
++        else:raise AssertionError("unsafe Go data scope admitted")
+     policy.write_text(json.dumps(data));go.write_bytes(b"{}")
+     try:m.load_verified(policy,now=datetime.datetime(2026,11,24,18,0,tzinfo=datetime.timezone.utc),snapshot_path=primary)
+     except ValueError:pass

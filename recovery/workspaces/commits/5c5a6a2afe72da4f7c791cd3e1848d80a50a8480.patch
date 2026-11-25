@@ -1,0 +1,506 @@
+commit 5c5a6a2afe72da4f7c791cd3e1848d80a50a8480
+Author:     Viche operator <operator@viche>
+AuthorDate: Tue Nov 24 22:18:40 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 22:18:40 2026 +0000
+
+    PnP: remote-protocol follow-up
+
+diff --git a/missions/pnp/remote/README.md b/missions/pnp/remote/README.md
+new file mode 100644
+index 00000000..519114f2
+--- /dev/null
++++ b/missions/pnp/remote/README.md
+@@ -0,0 +1,29 @@
++# Remote build protocol (offline prototype)
++
++Do not send these bundles over a public channel. A job contains the unpublished
++Lean source, exact gap statement, allowed imports, base SHA, toolchain, hashed
++attempt identity, and bounded resource requests. Its content hash detects
++accidental mismatch but provides **no authentication** or confidentiality.
++No raw lease or credentials are included.
++
++The local-only command is:
++
++    PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.remote pack FILE.lean
++
++It checks the immutable assignment, exact source, pinned workspace HEAD and
++toolchain and stores a private mode-0700 spool. It returns a job digest,
++not a successful compile. `poll DIGEST` and `cancel DIGEST` apply to the current
++bound assignment only. No public refs, network requests, or external execution
++are performed.
++
++The spool accepts a trusted runner callback for tests and future deployment.
++The runner must enforce a verified pinned checkout, a clean immutable library
++cache, strict resource controls and cancellation, and run Lean without
++network access or inherited credentials. The spool serializes jobs conservatively
++and checks memory headroom, but is not itself an execution sandbox. Transport
++must authenticate both endpoints, encrypt private blobs, and protect against
++replay and retention leakage. Host provisioning remains an operator task.
++
++The output status `elaborated` is diagnostic evidence only: it cannot set a
++gap to ACCEPTED, substitute for the upstream checker, or bypass the existing
++publication state machine. Infrastructure/resource errors remain retryable.
+diff --git a/missions/pnp/remote/__init__.py b/missions/pnp/remote/__init__.py
+new file mode 100644
+index 00000000..dd89bd52
+--- /dev/null
++++ b/missions/pnp/remote/__init__.py
+@@ -0,0 +1 @@
++"""Private remote-build protocol; no network transport enabled."""
+diff --git a/missions/pnp/remote/__main__.py b/missions/pnp/remote/__main__.py
+new file mode 100644
+index 00000000..4d611117
+--- /dev/null
++++ b/missions/pnp/remote/__main__.py
+@@ -0,0 +1,86 @@
++"""Prepare/inspect an offline remote-build bundle from a bound research lease.
++
++There is no network transport or compiler worker enabled by this command.
++"""
++import argparse
++import json
++import os
++from pathlib import Path
++import subprocess
++
++from .. import assignment, config, focus, state, support
++from . import protocol
++from .spool import Spool
++
++
++def live_binding(cwd):
++    bound = assignment.binding(cwd)
++    if not bound:
++        raise ValueError("use the bound research workspace")
++    rec = state.load(bound[0])
++    if not rec or rec["lease"] != bound[1] or not focus.eligible(rec):
++        raise ValueError("obsolete assignment")
++    return rec
++
++
++def prepare(cwd, file, wall, memory):
++    rec = live_binding(cwd)
++    work = assignment.workspace(cwd)[1].resolve()
++    path = (cwd / file).resolve()
++    if not path.is_relative_to(work) or not path.is_file():
++        raise ValueError("source must be an existing file inside this workspace")
++    with path.open("rb") as f:
++        source = f.read(config.MAX_FILE_BYTES + 1)
++    if len(source) > config.MAX_FILE_BYTES:
++        raise ValueError("source too large")
++    base = subprocess.check_output(["git","-C",str(work),"rev-parse","HEAD"],
++                                   text=True, timeout=10).strip()
++    toolchain = (work/"lean"/"lean-toolchain").read_text().strip()
++    gap = {"id":rec["gap_id"],"file":rec["path"],"module":rec["module"],
++           "statement":rec["statement"],"imports":rec.get("imports") or []}
++    job = protocol.make(gap,source,base,toolchain,support.attempt(rec),wall,memory)
++    latest = live_binding(cwd)
++    if support.attempt(latest) != job["attempt"]:
++        raise ValueError("assignment changed during packaging")
++    return job
++
++
++def main():
++    p = argparse.ArgumentParser(description=__doc__)
++    sub = p.add_subparsers(dest="cmd", required=True)
++    pack = sub.add_parser("pack",help="Stage validated private bundle; does not send or run")
++    pack.add_argument("file",type=Path)
++    pack.add_argument("--wall",type=int,default=600)
++    pack.add_argument("--rss-mib",type=int,default=8192)
++    inspect = sub.add_parser("poll",help="Read local result only, bound to current assignment")
++    inspect.add_argument("job")
++    cancel = sub.add_parser("cancel",help="Cancel local spool job for current assignment")
++    cancel.add_argument("job")
++    args = p.parse_args()
++    try:
++        cwd = Path.cwd()
++        root = Path(config.STATE_ROOT)/"remote-build-private"
++        spool = Spool(root)
++        if args.cmd == "pack":
++            job = prepare(cwd,args.file,args.wall,args.rss_mib)
++            ident = spool.submit(protocol.canonical(job))
++            print(json.dumps({"job":ident,"state":"staged_local_only",
++                              "transport_available":False}))
++        else:
++            rec = live_binding(cwd)
++            raw = spool.read(args.job,"request")
++            if raw is None:
++                raise ValueError("unknown job")
++            job,_ = protocol.request(raw,{"attempt":support.attempt(rec)})
++            if job["job"] != args.job or job["gap"]["id"] != rec["gap_id"]:
++                raise ValueError("job not bound to current assignment")
++            if args.cmd == "cancel":
++                spool.cancel(args.job)
++                print(json.dumps({"job":args.job,"cancelled_local":True}))
++            else:
++                print(json.dumps(spool.poll(args.job),ensure_ascii=False))
++    except (ValueError, OSError, subprocess.SubprocessError) as exc:
++        p.error(str(exc))
++
++if __name__ == "__main__":
++    main()
+diff --git a/missions/pnp/remote/protocol.py b/missions/pnp/remote/protocol.py
+new file mode 100644
+index 00000000..706ec846
+--- /dev/null
++++ b/missions/pnp/remote/protocol.py
+@@ -0,0 +1,125 @@
++"""Deterministic content-addressed single-proof build request.
++
++This is an integrity format, not an authenticated transport. Callers MUST
++authenticate both endpoints outside this module and keep all blobs private.
++No requests contain shell commands, credentials, or raw lease tokens.
++"""
++import base64
++import binascii
++import hashlib
++import json
++import re
++
++from .. import config, validate
++
++VERSION = 1
++MAX_JSON_BYTES = 2 * 1024 * 1024
++MAX_LOG_BYTES = 64 * 1024
++MAX_WALL = 900
++MAX_RSS_MIB = 12288
++
++
++def require(ok, reason):
++    if not ok:
++        raise ValueError(reason)
++
++
++def canonical(obj):
++    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
++                      allow_nan=False).encode("utf-8")
++
++
++def digest(data):
++    return hashlib.sha256(data).hexdigest()
++
++
++def hexstr(value, length):
++    return isinstance(value, str) and re.fullmatch("[0-9a-f]{%d}" % length, value) is not None
++
++
++def uint(value, low, high):
++    return type(value) is int and low <= value <= high
++
++
++def strict_load(raw):
++    require(isinstance(raw, bytes) and len(raw) <= MAX_JSON_BYTES, "oversized message")
++    def unique(items):
++        d = {}
++        for k, v in items:
++            require(k not in d, "duplicate key")
++            d[k] = v
++        return d
++    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
++                      parse_constant=lambda s: (_ for _ in ()).throw(ValueError("non-finite number")))
++
++
++def make(gap, source, base, toolchain, attempt, wall=600, rss_mib=8192):
++    meta = {k: gap[k] for k in ("id", "file", "module", "statement", "imports")}
++    obj = {"version": VERSION, "base": base, "toolchain": toolchain,
++           "attempt": attempt, "gap": meta, "mode": "elaborate",
++           "wall_seconds": wall, "rss_mib": rss_mib,
++           "source_sha256": digest(source),
++           "source_b64": base64.b64encode(source).decode("ascii")}
++    obj["job"] = digest(canonical(obj))
++    request(canonical(obj))
++    return obj
++
++
++def request(raw, expected=None):
++    obj = strict_load(raw)
++    require(isinstance(obj, dict) and set(obj) == {
++        "version", "base", "toolchain", "attempt", "gap", "mode",
++        "wall_seconds", "rss_mib", "source_sha256", "source_b64", "job"}, "request schema")
++    require(type(obj["version"]) is int and obj["version"] == VERSION, "protocol version")
++    require(hexstr(obj["base"], 40), "base revision")
++    require(obj["toolchain"] == config.LEAN_TOOLCHAIN, "unapproved toolchain")
++    require(isinstance(obj["attempt"], str) and re.fullmatch("[0-9a-f]{24}-[0-9a-f]{16}", obj["attempt"]), "attempt identifier")
++    require(obj["mode"] == "elaborate", "unapproved build mode")
++    require(uint(obj["wall_seconds"], 1, MAX_WALL), "wall budget")
++    require(uint(obj["rss_mib"], 256, MAX_RSS_MIB), "memory budget")
++    require(hexstr(obj["job"], 64) and obj["job"] == digest(canonical({k:v for k,v in obj.items() if k != "job"})), "job digest")
++    gap = obj["gap"]
++    require(isinstance(gap, dict) and set(gap) == {"id", "file", "module", "statement", "imports"}, "gap schema")
++    require(isinstance(gap["imports"], list), "imports schema")
++    require(isinstance(gap["file"], str) and isinstance(gap["module"], str)
++            and gap["file"] == "lean/" + gap["module"].replace(".", "/") + ".lean", "module/path disagreement")
++    try:
++        source = base64.b64decode(obj["source_b64"], validate=True)
++    except (TypeError, ValueError, binascii.Error):
++        raise ValueError("invalid source encoding")
++    require(hexstr(obj["source_sha256"], 64) and digest(source) == obj["source_sha256"], "source digest")
++    try:
++        validate.validate(gap, source)
++    except validate.InvalidCandidate as exc:
++        raise ValueError("candidate: " + str(exc)) from exc
++    if expected is not None:
++        require(all(obj[k] == v for k,v in expected.items()), "stale or mismatched request")
++    return obj, source
++
++
++def make_result(job, status, elapsed_ms, peak_rss_kib, diagnostic="", exit_code=None):
++    require(isinstance(diagnostic, str), "diagnostic must be text")
++    diag = diagnostic.encode("utf-8")[:MAX_LOG_BYTES].decode("utf-8", errors="ignore")
++    obj = {"version": VERSION, "job": job["job"], "base": job["base"],
++           "toolchain": job["toolchain"], "source_sha256": job["source_sha256"],
++           "attempt": job["attempt"], "status": status, "elapsed_ms": elapsed_ms,
++           "peak_rss_kib": peak_rss_kib, "diagnostic": diag, "exit_code": exit_code}
++    result(canonical(obj), job)
++    return obj
++
++
++def result(raw, job):
++    obj = strict_load(raw)
++    require(isinstance(obj, dict) and set(obj) == {
++        "version", "job", "base", "toolchain", "source_sha256", "attempt",
++        "status", "elapsed_ms", "peak_rss_kib", "diagnostic", "exit_code"}, "result schema")
++    require(type(obj["version"]) is int and obj["version"] == VERSION, "protocol version")
++    require(all(obj[k] == job[k] for k in ("job", "base", "toolchain", "source_sha256", "attempt")), "result identity mismatch")
++    require(obj["status"] in ("elaborated", "rejected", "resource", "obsolete", "infrastructure"), "result status")
++    require(uint(obj["elapsed_ms"], 0, (job["wall_seconds"] + 60) * 1000), "elapsed budget")
++    require(obj["peak_rss_kib"] is None or uint(obj["peak_rss_kib"], 0, 2**40), "peak memory")
++    require(obj["exit_code"] is None or uint(obj["exit_code"], -255, 255), "exit code")
++    require(isinstance(obj["diagnostic"], str) and len(obj["diagnostic"].encode("utf-8")) <= MAX_LOG_BYTES, "diagnostic size")
++    require(obj["status"] != "elaborated" or obj["exit_code"] == 0, "successful exit required")
++    require(obj["status"] != "rejected" or obj["exit_code"] not in (None, 0), "failure exit required")
++    return obj
+diff --git a/missions/pnp/remote/spool.py b/missions/pnp/remote/spool.py
+new file mode 100644
+index 00000000..0dfcf911
+--- /dev/null
++++ b/missions/pnp/remote/spool.py
+@@ -0,0 +1,132 @@
++"""Private single-host spool, also usable behind a future authenticated relay.
++
++The directory is an operator-owned boundary, not a security sandbox. No Lean
++execution occurs here. A trusted runner must enforce isolated pinned checkout,
++toolchain, memory, timeout, no network/credentials and cancellation.
++"""
++import contextlib
++import fcntl
++import os
++from pathlib import Path
++import stat
++import tempfile
++
++from . import protocol
++from .. import build_control
++
++
++class Spool:
++    def __init__(self, root):
++        self.root = Path(root)
++        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
++        info = self.root.lstat()
++        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
++            raise ValueError("spool must be a private directory owned by this user")
++
++    def path(self, job, kind):
++        if not protocol.hexstr(job, 64) or kind not in ("request", "result", "cancel", "lock"):
++            raise ValueError("invalid spool object name")
++        return self.root / (job + "." + kind)
++
++    def read(self, job, kind):
++        p = self.path(job, kind)
++        try:
++            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++        except FileNotFoundError:
++            return None
++        with os.fdopen(fd, "rb") as f:
++            info = os.fstat(f.fileno())
++            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
++                raise ValueError("invalid spool file")
++            raw = f.read(protocol.MAX_JSON_BYTES + 1)
++            if len(raw) > protocol.MAX_JSON_BYTES:
++                raise ValueError("oversized spool file")
++            return raw
++
++    def write(self, job, kind, data):
++        p = self.path(job, kind)
++        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".incoming-")
++        try:
++            with os.fdopen(fd, "wb") as f:
++                f.write(data)
++                f.flush()
++                os.fsync(f.fileno())
++            os.replace(tmp, p)
++            fd = os.open(self.root, os.O_RDONLY)
++            try:
++                os.fsync(fd)
++            finally:
++                os.close(fd)
++        finally:
++            if os.path.exists(tmp):
++                os.unlink(tmp)
++
++    @contextlib.contextmanager
++    def locked(self, job):
++        fd = os.open(self.path(job, "lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
++        try:
++            if not stat.S_ISREG(os.fstat(fd).st_mode):
++                raise ValueError("invalid lock object")
++            try:
++                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            except BlockingIOError:
++                yield False
++                return
++            yield True
++        finally:
++            os.close(fd)
++
++    def submit(self, raw):
++        job, _ = protocol.request(raw)
++        # Equivalent submissions converge on the same content-addressed object.
++        self.write(job["job"], "request", protocol.canonical(job))
++        return job["job"]
++
++    def cancel(self, job):
++        self.write(job, "cancel", b"cancelled\n")
++
++    def poll(self, job):
++        raw = self.read(job, "request")
++        if raw is None:
++            return None
++        req, _ = protocol.request(raw)
++        if req["job"] != job:
++            raise ValueError("request filename disagrees with job identity")
++        raw = self.read(job, "result")
++        if raw is None:
++            return None
++        return protocol.result(raw, req)
++
++    def run_one(self, job, runner, headroom=build_control.headroom):
++        """Call a trusted isolated runner(req, source, cancelled) once.
++
++        Admission is serialized across this spool. Other host workloads still
++        need host-enforced resource controls. Unknown headroom defers.
++        Resource/infrastructure results are retryable, never cached as final.
++        """
++        with self.locked("0"*64) as acquired:
++            if not acquired:
++                return "busy"
++            raw = self.read(job, "request")
++            if raw is None:
++                return "missing"
++            req, source = protocol.request(raw)
++            if req["job"] != job:
++                raise ValueError("request filename disagrees with job identity")
++            def cancelled():
++                return self.read(job, "cancel") is not None
++            if cancelled():
++                out = protocol.make_result(req, "obsolete", 0, None)
++            else:
++                old = self.poll(job)
++                if old and old["status"] in ("elaborated", "rejected", "obsolete"):
++                    return "cached"
++                free = headroom()
++                if free is None or free < build_control.RESERVE + req["rss_mib"] * 1024**2:
++                    return "deferred"
++                out = runner(req, source, cancelled)
++                protocol.result(protocol.canonical(out), req)
++                if cancelled():
++                    out = protocol.make_result(req, "obsolete", 0, None)
++            self.write(job, "result", protocol.canonical(out))
++            return out["status"]
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index 8b077e3c..a89a848b 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -18,3 +18,5 @@ python3 tests/pnp-allocator.py
+ python3 tests/pnp-continuity.py
+ 
+ python3 tests/pnp-brief.py
++
++python3 tests/pnp-remote-protocol.py
+diff --git a/tests/pnp-remote-protocol.py b/tests/pnp-remote-protocol.py
+new file mode 100644
+index 00000000..12509290
+--- /dev/null
++++ b/tests/pnp-remote-protocol.py
+@@ -0,0 +1,79 @@
++#!/usr/bin/env python3
++import copy
++import json
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from missions.pnp import config
++from missions.pnp.remote import protocol as p
++from missions.pnp.remote.spool import Spool
++
++GAP = {"id":"L-meta-1", "file":"lean/PEqualNP/Meta/T.lean",
++       "module":"PEqualNP.Meta.T","statement":"True","imports":[]}
++SOURCE = b"import Mathlib\n\ntheorem PEqualNP.Meta.T : True := by trivial\n"
++ATTEMPT = "a"*24+"-"+"b"*16
++
++def job():
++    return p.make(GAP,SOURCE,"c"*40,config.LEAN_TOOLCHAIN,ATTEMPT)
++
++def rehash(obj):
++    obj["job"]=p.digest(p.canonical({k:v for k,v in obj.items() if k!="job"}))
++    return p.canonical(obj)
++
++class Tests(unittest.TestCase):
++    def test_determinism_and_binding(self):
++        j=job()
++        self.assertEqual(j,job())
++        self.assertEqual(p.request(p.canonical(j))[1],SOURCE)
++        with self.assertRaises(ValueError):
++            p.request(p.canonical(j),{"attempt":"other"})
++        for key,value in [("base","HEAD"),("wall_seconds",0),("rss_mib",999999),
++                          ("mode","shell"),("attempt","secret"),("toolchain","nightly"),
++                          ("source_sha256","f"*64)]:
++            bad=dict(j,**{key:value})
++            with self.assertRaises(ValueError):
++                p.request(rehash(bad))
++        bad=copy.deepcopy(j);bad["gap"]["file"]="../../bad.lean"
++        with self.assertRaises(ValueError):
++            p.request(rehash(bad))
++        with self.assertRaises(ValueError):
++            p.request(b'{"a":1,"a":2}')
++    def test_result_binding(self):
++        j=job()
++        r=p.make_result(j,"elaborated",10,5000,exit_code=0)
++        self.assertEqual(p.result(p.canonical(r),j),r)
++        with self.assertRaises(ValueError):
++            p.result(p.canonical(dict(r,source_sha256="e"*64)),j)
++        with self.assertRaises(ValueError):
++            p.make_result(j,"elaborated",10,None,exit_code=1)
++    def test_spool_admission_cache_cancellation(self):
++        with tempfile.TemporaryDirectory() as d:
++            s=Spool(Path(d)/"private");j=job();ident=s.submit(p.canonical(j))
++            called=[]
++            def runner(req,source,cancelled):
++                called.append(req["job"])
++                self.assertEqual(source,SOURCE)
++                return p.make_result(req,"elaborated",5,5000,exit_code=0)
++            self.assertEqual(s.run_one(ident,runner,lambda:0),"deferred")
++            self.assertEqual(s.run_one(ident,runner,lambda:16*1024**3),"elaborated")
++            self.assertEqual(s.submit(p.canonical(j)),ident)
++            self.assertEqual(s.run_one(ident,runner,lambda:16*1024**3),"cached")
++            self.assertEqual(len(called),1)
++            self.assertEqual(s.poll(ident)["status"],"elaborated")
++            s.cancel(ident)
++            self.assertEqual(s.run_one(ident,runner,lambda:0),"obsolete")
++            self.assertEqual(s.poll(ident)["status"],"obsolete")
++    def test_retryable_and_private(self):
++        with tempfile.TemporaryDirectory() as d:
++            s=Spool(Path(d)/"private");j=job();ident=s.submit(p.canonical(j))
++            def runner(req,source,cancelled):
++                return p.make_result(req,"resource",50,1000,exit_code=137)
++            for i in range(2):
++                self.assertEqual(s.run_one(ident,runner,lambda:16*1024**3),"resource")
++            (Path(d)/"private").chmod(0o755)
++            with self.assertRaises(ValueError):
++                Spool(Path(d)/"private")
++if __name__=="__main__":
++    unittest.main()

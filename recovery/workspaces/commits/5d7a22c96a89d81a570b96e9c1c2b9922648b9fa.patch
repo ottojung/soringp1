@@ -1,0 +1,78 @@
+commit 5d7a22c96a89d81a570b96e9c1c2b9922648b9fa
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Fri Nov 20 07:09:57 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Fri Nov 20 07:09:57 2026 +0000
+
+    Test asynchronous office results without blocking Parliament
+
+diff --git a/tests/boot-smoke.sh b/tests/boot-smoke.sh
+index 61bea28c..6c5a39ae 100644
+--- a/tests/boot-smoke.sh
++++ b/tests/boot-smoke.sh
+@@ -107,6 +107,27 @@ VICHE_TOWNHALL_ID=999
+ export MOCK_STATE PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT
+ export VICHE_STATE_ROOT VICHE_SENTINEL_STATE VICHE_TEST_NO_SYNC VICHE_TOWNHALL_ID
+ 
++# Independent offices are now deliberately asynchronous. Await their
++# observable mock results rather than asserting a synchronous side effect of
++# the constitutional boot. This test still checks that the actual work runs.
++wait_count() {
++    path=$1
++    expected=$2
++    tries=0
++    while [ "$tries" -lt 200 ]; do
++        if [ -s "$path" ]; then
++            observed=$(wc -l < "$path")
++            if [ "$observed" -ge "$expected" ]; then
++                return 0
++            fi
++        fi
++        tries=$((tries+1))
++        sleep .05
++    done
++    echo "Boot smoke timed out waiting for $expected events in $path" >&2
++    return 1
++}
++
+ # Periodic broad audit is separately tested. Suppress its timer in bootstrap smoke.
+ mkdir -p "$scratch/state/oversight"
+ date +%s > "$scratch/state/oversight/last-audit-dispatch"
+@@ -126,11 +147,12 @@ printf '{"observed_at":%s}\n' "$now" > "$scratch/state/branches/judiciary-measur
+ seat_count=$(wc -l < "$town/government/seats.tsv")
+ [ "$seat_count" -ge 1 ]
+ /bin/sh "$town/constitution/boot.sh" --once
+-[ "$(wc -l < "$scratch/mock/created")" -ge $((seat_count+2)) ]
++wait_count "$scratch/mock/created" $((seat_count+2))
+ # Act 24 is enacted, so boot also runs the Executive Innovation Office cycle,
+ # which legitimately dispatches once in addition to the seats.
+ # Act 29 is enacted as well, so boot also runs the Ministry of Economy cycle: one more
+ # dispatch, with its own Executive-office health record.
++wait_count "$scratch/mock/ran" $((seat_count+2))
+ [ "$(wc -l < "$scratch/mock/ran")" -eq $((seat_count+2)) ]
+ jq -e '.office == "economy" and .executive_office == true and .voting_seat == false' \
+   "$scratch/state/executive/economy/health.json" >/dev/null
+@@ -156,17 +178,19 @@ else:
+     assert len(detail_data['changes_reaching_main_red'])==block['red_change_count']
+ PY
+ /bin/sh "$town/constitution/boot.sh" --once
+-[ "$(wc -l < "$scratch/mock/created")" -ge $((seat_count+2)) ]
++wait_count "$scratch/mock/created" $((seat_count+2))
+ centre=$(awk -F '\t' '$1=="innovation-centre" {print $2}' "$scratch/state/appointments/appointments.tsv")
+ [ -n "$centre" ] && [ -f "$scratch/mock/$centre" ]
+-[ "$(wc -l < "$scratch/mock/ran")" -ge $((seat_count+2)) ]
++wait_count "$scratch/mock/ran" $((seat_count+2))
++wait_count "$scratch/mock/executive-ran" 1
+ [ "$(wc -l < "$scratch/mock/executive-ran")" -eq 1 ]
+ # A summons wakes legislative seats and must NOT suppress the independent Executive.
+ summoned=$(sed -n '2p' "$town/government/seats.tsv" | cut -f1)
+ printf '%s\n' "$summoned" > "$town/records/SUMMONED.txt"
+ /bin/sh "$town/constitution/boot.sh" --once
+-[ "$(wc -l < "$scratch/mock/created")" -ge $((seat_count+2)) ]
+-[ "$(wc -l < "$scratch/mock/ran")" -ge $((seat_count+3)) ]
++wait_count "$scratch/mock/created" $((seat_count+2))
++wait_count "$scratch/mock/ran" $((seat_count+3))
++wait_count "$scratch/mock/executive-ran" 2
+ [ "$(wc -l < "$scratch/mock/executive-ran")" -eq 2 ]
+ # A stray ballot checkout must not strand the government. Preserve its commit
+ # and recover even if fetching origin also fails transiently.

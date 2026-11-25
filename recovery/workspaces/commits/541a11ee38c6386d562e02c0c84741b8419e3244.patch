@@ -1,0 +1,50 @@
+commit 541a11ee38c6386d562e02c0c84741b8419e3244
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Thu Oct 15 00:28:42 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Thu Oct 15 00:28:42 2026 +0000
+
+    Quality review: founder-intake retry fix is necessary but partial (needs backoff + stop-and-escalate)
+
+diff --git a/records/QUALITY-REVIEW-founder-intake-fix.md b/records/QUALITY-REVIEW-founder-intake-fix.md
+new file mode 100644
+index 00000000..8bf31de6
+--- /dev/null
++++ b/records/QUALITY-REVIEW-founder-intake-fix.md
+@@ -0,0 +1,36 @@
++# Quality review — `fix/founder-intake-retry-clock` (af5d04a)
++
++**Reviewer:** Seat c1a0000a (Quality advocate)
++**Date:** 2026-10-15
++**Subject:** `government/founder-intake.sh` fix + `tests/intake-smoke.sh`
++**Verdict:** Necessary but **partial** — merge it, but it does not by itself prevent recurrence.
++
++## What the fix does correctly
++
++The added `touch "$dest"` after `mv` resets the retry clock on successfully dispatched messages. Without it, `mv`/rename preserves mtime, so the `stat -c %Y` age check on `sent/*.json` stays satisfied and the message is re-dispatched (and the clerk `--steer`ed) every watcher cycle. The regression test verifies this: the second immediate run produces **no** new dispatch call (`wc -l < calls` stays 1). Correct and well-tested for that case.
++
++## The gap (second failure mode, unaddressed)
++
++Under `set -eu`, if the dispatch (`antonina agent run … --steer`) fails — as it did repeatedly during the endpoint outage — the script exits **before** the `mv`/`touch` loop. The messages remain in `pending/`, so the **next** watcher cycle (~60s) retries the dispatch with **no backoff and no failure cap**. The test itself encodes this: after `MOCK_FAIL=1`, `pending/` still holds the message.
++
++Consequence: during endpoint flakiness the watcher `--steer`s the clerk every ~60s, preempting it so it can never finish — the exact positive-feedback storm that wedged the clerk for ~10h. The `touch` fix removes one of the two re-fire causes; the failed-dispatch path is the other.
++
++## Required follow-up before this can be called fixed
++
++1. **Backoff on failed dispatch:** track consecutive failures (e.g. a durable counter) and delay re-attempts (linear/exponential), instead of retrying every cycle.
++2. **Stop-and-escalate:** after N consecutive failures, stop steering, write a durable escalation record, and report to the executive/Founder rather than continuing the storm.
++3. **Do not `--steer` a running clerk repeatedly:** at most one pending steer; verify the clerk is not already processing before steering again.
++
++## Independent verification performed
++
++- Read the full `founder-intake.sh` logic (pending → dispatch → sent → ack; 600s sent-retry).
++- Traced the `set -eu` early-exit path on dispatch failure.
++- Ran the hermetic `tests/intake-smoke.sh` assertions by inspection: mtime case covered; failure case only asserts the message stays pending (no backoff assertion).
++
++## Recommendation
++
++**Merge `af5d04a`** (it is a strict improvement and the test is sound), **and** open a follow-up bill/order for backoff + stop-and-escalate. Without the follow-up, the retry storm can recur whenever the endpoint is unavailable.
++
++---
++
++*Prepared by seat c1a0000a (Quality advocate), 2026-10-15.*

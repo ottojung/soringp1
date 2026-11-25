@@ -1,0 +1,464 @@
+commit 5020e2c8d240398388c628abbbba020cbc663a1a
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 08:06:20 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 08:06:20 2026 +0000
+
+    Prevent competing lease claims and batch Executive research dispatch
+
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index 41031320..38b52964 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -9,13 +9,13 @@ authenticated GitHub mutation commands directly.
+ ## Commands (stable interface)
+ 
+     python3 missions/pnp/cli.py status
+-    python3 missions/pnp/cli.py acquire [--hard] [--another]
++    python3 -m missions.pnp.staff GAP --worker LABEL=APPROACH
+     python3 missions/pnp/cli.py beat <gap-id>
+     python3 missions/pnp/cli.py release <gap-id> <reason>
+     python3 missions/pnp/cli.py submit <gap-id> <candidate-file>
+     python3 missions/pnp/cli.py reconcile
+ 
+-`status` is read-only. `acquire` claims at most five desk leases and records
++`status` is read-only. The automatic allocator claims at most five desk leases and records
+ the exact statement, module, path and imports as data. `beat` renews a lease;
+ `release` returns it honestly. `submit` snapshots and immediately starts the
+ deterministic publisher; it survives the researcher exiting or a tool timeout.
+@@ -73,3 +73,5 @@ last verified snapshot through outages. Only checked steps credited to
+ ottojung count. Source and observations persist under Viche state, never
+ under government. The status.sh adapter reports leaderboard movement plus
+ actual Antonina P vs NP worker visibility; only Executive dispatches them.
++
++The Executive invokes the staff batch helper for distinct approaches on the selected focus. Manual acquisition is reserved for maintenance while the allocator is stopped. Raw desk next calls mutate state and are not diagnostics.
+diff --git a/missions/pnp/assignment.py b/missions/pnp/assignment.py
+index af256230..8d218501 100644
+--- a/missions/pnp/assignment.py
++++ b/missions/pnp/assignment.py
+@@ -62,7 +62,7 @@ def first_attempt(gap):
+         return False
+ 
+ 
+-def prepare(gap, checkout=True, worker=None):
++def prepare(gap, checkout=True, worker=None, base=None):
+     """Executive calls once per assignment. Never relabel an old checkout."""
+     from . import gitctl
+     if not isinstance(gap, str) or not config.GAP_ID_RE.fullmatch(gap):
+@@ -102,7 +102,7 @@ def prepare(gap, checkout=True, worker=None):
+         try:
+             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+             if not (path / ".git").exists():
+-                base = gitctl.ensure_mirror()
++                base = base or gitctl.ensure_mirror()
+                 gitctl.run(["git", "--git-dir=" + gitctl.MIRROR, "worktree", "add",
+                             "--detach", str(path), base])
+             gitctl.prepare_build_cache(str(path))
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index 810d28f7..24864a9f 100755
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -80,8 +80,21 @@ def held_records():
+ 
+ 
+ def cmd_acquire(args):
+-    with acquisition_lock():
+-        return acquire(args, desk_mod.Desk())
++    # Manual maintenance is supported only when the allocator is absent.
++    # Do not let a stale Executive instruction compete with the live broker.
++    os.makedirs(config.STATE_ROOT, exist_ok=True)
++    fd = os.open(os.path.join(config.STATE_ROOT, "allocator-loop.lock"),
++                 os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        try:
++            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            print("allocator running; use status and staff research_focus", file=sys.stderr)
++            return 2
++        with acquisition_lock():
++            return acquire(args, desk_mod.Desk())
++    finally:
++        os.close(fd)
+ 
+ 
+ def acquire(args, d, report=True):
+@@ -92,7 +105,7 @@ def acquire(args, d, report=True):
+         print("refusing to exceed the desk's %d active leases" %
+               config.MAX_LEASES, file=sys.stderr)
+         return 2
+-    answer = d.next_gap(hard=args.hard, another=args.another)
++    answer = d._next_gap(hard=args.hard, another=args.another)
+     if answer is None:
+         print("no claimable gap right now; retry later", file=sys.stderr)
+         return 1
+@@ -136,6 +149,11 @@ def acquire(args, d, report=True):
+                           "module": rec["module"], "lease": lease,
+                           "reacquired": True, "headline": config.HEADER})
+             return 0
++        if prior.get("lease") == lease:
++            # At capacity the desk may return an existing lease rather than
++            # null. This is idempotent, not a spare lease or a new assignment.
++            print("desk returned already recorded lease for " + gid, file=sys.stderr)
++            return 1
+         # Genuine duplicate: an active lease/PR already exists.  Never
+         # release the spare lease with 'other'/'out_of_time': that triggers
+         # the cooldown and rate limit.  Let the spare lease expire on its own.
+diff --git a/missions/pnp/desk.py b/missions/pnp/desk.py
+index 0ffe0478..a02fb07f 100644
+--- a/missions/pnp/desk.py
++++ b/missions/pnp/desk.py
+@@ -104,6 +104,11 @@ class Desk:
+         return data
+ 
+     def next_gap(self, hard=False, another=False):
++        raise DeskError("next is a mutating acquisition, not a diagnostic. "
++                        "Use status; the automatic allocator records every claim.")
++
++    def _next_gap(self, hard=False, another=False):
++        """Private wire operation; only the locked, recording broker calls it."""
+         params = {"handle": config.GH_USER}
+         if hard:
+             params["hard"] = "1"
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 39670fb3..d2b48eae 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -1,3 +1,19 @@
++## Immediate operational rule (Founder priority)
++
++The running allocator exclusively claims leases. Never call Desk.next_gap,
++the private wire operation, curl /desk/next, upstream pnp.sh next, or manual
++CLI acquire while the allocator runs. All of these are mutations, not
++diagnostics. Use mission status. If research_focus lacks useful parallel
++workers, the Executive's first substantive action is dispatching them.
++Choose independent mathematical approaches using focus_details and invoke
++the one-command batch helper:
++`python3 -m missions.pnp.staff GAP --worker 'LABEL=APPROACH' --worker 'LABEL2=APPROACH2'`
++from the canonical Viche checkout. Add as many distinct useful approaches as
++resources permit; the helper handles independent bound workspaces, existing
++agents and detached starts. No separate model turn, per-worker setup routine,
++or administrative review. Only the Executive invokes this dispatch helper.
++If no focus exists, do not acquire manually.
++
+ ## Standing Founder priority — autonomous P vs NP contributions (2026-11-23)
+ 
+ The Founder authorized an INDEFINITE external research mission on billy-dev,
+diff --git a/missions/pnp/staff.py b/missions/pnp/staff.py
+new file mode 100644
+index 00000000..7262d1fe
+--- /dev/null
++++ b/missions/pnp/staff.py
+@@ -0,0 +1,138 @@
++"""Executive-invoked batch dispatch of independent approaches to ONE focus.
++
++Not an autonomous agent scheduler. The Executive supplies the mathematical
++approaches and invokes this helper. Existing workers are adopted by exact
++workspace, not mutable titles; uncertainty never authorizes duplicate starts.
++"""
++import argparse
++import fcntl
++import json
++import os
++from pathlib import Path
++import re
++import subprocess
++import sys
++
++from . import assignment, config, focus, gitctl, state
++
++
++def antonina(*args):
++    result = subprocess.run(["antonina", "agent", *args], capture_output=True,
++                            text=True, timeout=30, check=True)
++    return result.stdout.strip()
++
++
++def roster():
++    rows = {}
++    page = 1
++    while True:
++        data = json.loads(antonina("list", "--page", str(page), "--limit", "100", "--json"))
++        agents = data.get("agents")
++        if not isinstance(agents, list) or data.get("unreadable"):
++            raise ValueError("agent roster unavailable")
++        for agent in agents:
++            if not isinstance(agent.get("id"), str) or agent["id"] in rows:
++                raise ValueError("inconsistent agent roster")
++            rows[agent["id"]] = agent
++        if len(agents) < 100:
++            return list(rows.values())
++        page += 1
++
++
++def prompt(rec, approach):
++    return (
++        "Work on the exact current P vs NP assignment below, using the independent "
++        "workspace already prepared for you. Pursue this distinct mathematical "
++        "approach; communicate useful sublemmas and artifacts to the other researchers "
++        "on this same gap. No unrelated gap acquisition, no direct desk or GitHub "
++        "mutation, no agent launches. Use the local managed compiler and guard from "
++        "your bound cwd. Use the checked proof corpus where applicable. Preserve "
++        "work when the lease ends. When a complete exact proof exists, immediately "
++        "invoke python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py submit GAP FILE "
++        "with actual gap and file; never wait for an extra review. If the guard "
++        "says publication owns the candidate or stop, do not compete with it.\n"
++        f"Gap: {rec['gap_id']}\nStatement: {rec['statement']}\n"
++        f"Imports: {json.dumps(rec.get('imports', []))}\n"
++        f"Context: {rec.get('context') or ''}\n"
++        f"Assigned approach: {approach}"
++    )
++
++
++def current_matches(rec):
++    selected = focus.current()
++    return selected is not None and focus.key(selected) == focus.key(rec)
++
++
++def dispatch(gap, plans):
++    rec = focus.current()
++    if not rec or rec["gap_id"] != gap or rec["state"] not in ("LEASED", "RESEARCHING"):
++        raise ValueError("not the active leased research focus")
++    if not plans or len({label for label, _ in plans}) != len(plans):
++        raise ValueError("distinct nonempty approach labels required")
++    for label, approach in plans:
++        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", label) or not approach.strip():
++            raise ValueError("invalid worker label or empty approach")
++    os.makedirs(config.STATE_ROOT, exist_ok=True)
++    fd = os.open(os.path.join(config.STATE_ROOT, "staff.lock"), os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        agents = roster()
++        base = None
++        results = []
++        for label, approach in plans:
++            if not current_matches(rec):
++                break
++            try:
++                # A single upstream fetch per batch, rather than per worker.
++                path = Path(assignment.prepare(gap, checkout=False, worker=label)["cwd"])
++                existing = [a for a in agents if a.get("cwd") and
++                            Path(a["cwd"]).resolve() == path.resolve()]
++                running = [a for a in existing if a.get("state") == "running"]
++                if running:
++                    results.append({"worker": label, "status": "already running", "id": running[0]["id"]})
++                    continue
++                if existing and any(a.get("state") not in ("idle", "clearexit", "stopped", "killed", "failed") for a in existing):
++                    raise ValueError("uncertain worker state")
++                if not (path / ".git").exists() and base is None:
++                    base = gitctl.ensure_mirror()
++                assignment.prepare(gap, worker=label, base=base)
++                if not current_matches(rec):
++                    break
++                reusable = next((a for a in existing if a.get("state") in ("idle", "clearexit")), None)
++                if reusable:
++                    agent_id = reusable["id"]
++                else:
++                    agent_id = antonina("new", "--cwd", str(path), "--title",
++                                        f"Viche P vs NP research: {gap} {label}")
++                    if not re.fullmatch(r"[a-zA-Z0-9_-]+", agent_id):
++                        raise ValueError("unreadable new agent id")
++                if not current_matches(rec):
++                    break
++                answer = json.loads(antonina("run", "--id", agent_id, "--cwd", str(path),
++                                            "--prompt", prompt(rec, approach), "--detach", "--json"))
++                if answer.get("state") != "running":
++                    raise ValueError("agent launch not confirmed")
++                results.append({"worker": label, "status": "started", "id": agent_id})
++            except (OSError, ValueError, subprocess.SubprocessError, gitctl.GitError) as exc:
++                results.append({"worker": label, "status": "deferred", "detail": str(exc)[:300]})
++        return results
++    finally:
++        os.close(fd)
++
++
++def main():
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument("gap")
++    p.add_argument("--worker", action="append", required=True, metavar="LABEL=APPROACH")
++    args = p.parse_args()
++    try:
++        plans = [tuple(item.split("=", 1)) for item in args.worker]
++        if any(len(plan) != 2 for plan in plans):
++            raise ValueError("use LABEL=APPROACH")
++        print(json.dumps(dispatch(args.gap, plans), indent=2))
++    except (OSError, ValueError, subprocess.SubprocessError) as exc:
++        p.error(str(exc))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index 4dbee985..d76f2c53 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -100,11 +100,11 @@ def snapshot():
+               and r["lease_expires_at"] > time.time() and isinstance(r["gap"], str)]
+     selected = focus.current()
+     focus_gap = selected["gap_id"] if selected else None
+-    staffed = {a["gap"] for a in w["agents"] if a["lease_current"] is not False}
++    staffed = {a["gap"] for a in w["agents"] if a["lease_current"] is True}
+     reserves = sorted(r["gap"] for r in rows if r["gap"] in active and r["gap"] != focus_gap
+                       and r["state"] in ("LEASED", "RESEARCHING"))
+     focus_workers = [a["id"] for a in w["agents"] if focus_gap and a["gap"] == focus_gap
+-                     and a["lease_current"] is not False]
++                     and a["lease_current"] is True]
+     unstaffed = [focus_gap] if focus_gap and focus_gap not in staffed and w["coverage"] == "complete" else []
+     off_focus = sorted(a["id"] for a in w["agents"] if focus_gap and a["gap"] and a["gap"] != focus_gap and (a["gap_state"] in ("LEASED", "RESEARCHING") or a["gap"] in corrections))
+     ordinary = observed.get("ordinary")
+@@ -149,6 +149,10 @@ def snapshot():
+         "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
+         "frontier_fresh": bool(observed), "active_lease_gaps": active,
+         "research_focus": focus_gap, "focus_workers": focus_workers, "reserve_gaps": reserves,
++        "focus_details": ({k: selected.get(k) for k in ("gap_title", "statement", "imports", "context")}
++                          if selected else None),
++        "staff_command": ("python3 -m missions.pnp.staff " + focus_gap + " --worker LABEL=APPROACH"
++                          if focus_gap else None),
+         "off_focus_workers": off_focus,
+         "unstaffed_active_gaps": unstaffed, "active_lease_age_minutes": age,
+         "potential_fronts": related[:12],
+diff --git a/tests/pnp-allocator.py b/tests/pnp-allocator.py
+index 7a01c60a..b1249657 100644
+--- a/tests/pnp-allocator.py
++++ b/tests/pnp-allocator.py
+@@ -1,6 +1,10 @@
+ #!/usr/bin/env python3
+ """Offline lease allocation policy, no external mutations."""
+ import os
++import fcntl
++import json
++import time
++from types import SimpleNamespace
+ from pathlib import Path
+ import sys
+ import tempfile
+@@ -8,7 +12,7 @@ import unittest
+ from unittest.mock import patch
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+-from missions.pnp import allocator, assignment, cli, config, focus, state
++from missions.pnp import allocator, assignment, cli, config, desk, focus, staff, state
+ 
+ NOW = 10000
+ 
+@@ -22,7 +26,7 @@ class Desk:
+     def docs(self):
+         return "fixture"
+ 
+-    def next_gap(self, hard=False, another=False):
++    def _next_gap(self, hard=False, another=False):
+         self.calls.append((hard, another))
+         if not self.offers:
+             return None
+@@ -169,6 +173,59 @@ class Tests(unittest.TestCase):
+         self.assertEqual(d.calls[-1],(False,False))
+         self.assertEqual(len(d.calls),3)
+ 
++    def test_raw_next_is_not_a_diagnostic(self):
++        d = desk.Desk()
++        with patch.object(d, "_call") as wire:
++            with self.assertRaises(desk.DeskError):
++                d.next_gap()
++            wire.assert_not_called()
++
++    def test_manual_acquisition_excluded_by_live_allocator(self):
++        fd = os.open(os.path.join(config.STATE_ROOT, "allocator-loop.lock"),
++                     os.O_CREAT | os.O_RDWR, 0o600)
++        try:
++            fcntl.flock(fd, fcntl.LOCK_EX)
++            with patch.object(cli.desk_mod, "Desk") as factory:
++                self.assertEqual(cli.cmd_acquire(SimpleNamespace(hard=False, another=True)),2)
++                factory.assert_not_called()
++        finally:
++            os.close(fd)
++
++    def test_staff_batch_adopts_running_and_starts_new_once(self):
++        rec = self.add(lease_expires_at=time.time()+1200)
++        a = Path(assignment.prepare(rec["gap_id"],checkout=False,worker="existing")["cwd"])
++        calls = []
++        def fake_antonina(*args):
++            calls.append(args)
++            if args[0] == "new":
++                return "new-agent-id"
++            if args[0] == "run":
++                return json.dumps({"state":"running"})
++            raise AssertionError(args)
++        with patch.object(staff,"roster",return_value=[{"id":"running-id","cwd":str(a),"state":"running"}]), \
++             patch.object(staff,"antonina",side_effect=fake_antonina), \
++             patch.object(staff.gitctl,"ensure_mirror",return_value="base") as fetch, \
++             patch.object(staff.assignment,"prepare",wraps=assignment.prepare) as original:
++            def prepare(gap, checkout=True, worker=None, base=None):
++                return original._mock_wraps(gap,checkout=False,worker=worker)
++            original.side_effect=prepare
++            result=staff.dispatch(rec["gap_id"],[("existing","reuse"),("fresh","new proof")])
++        self.assertEqual([r["status"] for r in result],["already running","started"])
++        self.assertEqual([c[0] for c in calls],["new","run"])
++        fetch.assert_called_once()
++        self.assertIn(rec["statement"], calls[1][calls[1].index("--prompt")+1])
++
++    def test_staff_rejects_reserve_and_unknown_roster(self):
++        a=self.add(acquisition_hard=False,lease_expires_at=time.time()+1200)
++        b=self.add("L-meta-2",acquisition_hard=True,lease_expires_at=time.time()+1200)
++        with patch.object(staff,"antonina") as run:
++            with self.assertRaises(ValueError):
++                staff.dispatch(b["gap_id"],[("x","prove")])
++            with patch.object(staff,"roster",side_effect=ValueError("unknown")):
++                with self.assertRaises(ValueError):
++                    staff.dispatch(a["gap_id"],[("x","prove")])
++            run.assert_not_called()
++
+     def test_duplicate_never_churns(self):
+         self.add()
+         d=Desk([(False,"L-meta-1"),(True,None)])
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index e99e6d90..5a43c6a5 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -502,7 +502,7 @@ class TestCli(unittest.TestCase):
+                           pr_number=7, pr_url="https://old/pr/7",
+                           external_verdict="REJECTED")
+                 fake = FakeDesk()
+-                fake.next_gap = lambda **kw: answer
++                fake._next_gap = lambda **kw: answer
+                 with mock.patch.object(cli.desk_mod, "Desk",
+                                        return_value=fake):
+                     self.assertEqual(cli.cmd_acquire(args), 0)
+@@ -525,7 +525,7 @@ class TestCli(unittest.TestCase):
+         fresh()
+         new_state("RESEARCHING", lease="active-lease")
+         fake = FakeDesk()
+-        fake.next_gap = lambda **kw: {"gap": gap_meta(),
++        fake._next_gap = lambda **kw: {"gap": gap_meta(),
+                                       "lease": "spare-lease"}
+         args = type("Args", (), {"hard": False, "another": False})()
+         with mock.patch.object(cli.desk_mod, "Desk", return_value=fake):
+@@ -649,7 +649,7 @@ class TestDeskNextGap(unittest.TestCase):
+ 
+     def call(self, data):
+         with mock.patch.object(self.d, "_call", return_value=(200, data)):
+-            return self.d.next_gap()
++            return self.d._next_gap()
+ 
+     def test_documented_empty_frontier_without_lease_key_is_no_gap(self):
+         self.assertIsNone(self.call({
+@@ -665,7 +665,7 @@ class TestDeskNextGap(unittest.TestCase):
+         for flags in ({"hard": True}, {"another": True}):
+             with self.subTest(flags=flags):
+                 with mock.patch.object(self.d, "_call", return_value=(200, {"gap": None})) as call:
+-                    self.assertIsNone(self.d.next_gap(**flags))
++                    self.assertIsNone(self.d._next_gap(**flags))
+                 self.assertEqual(call.call_args[0][1], "/next")
+                 expected = {"handle": config.GH_USER}
+                 expected.update({k: "1" for k in flags})
+diff --git a/tests/pnp-real-smoke.py b/tests/pnp-real-smoke.py
+index 7a6125a9..f93d54fd 100644
+--- a/tests/pnp-real-smoke.py
++++ b/tests/pnp-real-smoke.py
+@@ -42,7 +42,7 @@ class FullPathSmoke(unittest.TestCase):
+         gap = "L-meta-93285"
+         fake = SimpleNamespace(
+             docs=lambda refresh=False: "current",
+-            next_gap=lambda hard=False, another=False: {
++            _next_gap=lambda hard=False, another=False: {
+                 "gap": {"id": gap, "statement": "True",
+                         "module": "PEqualNP.Outside.L_meta_93285",
+                         "file": "lean/PEqualNP/Outside/L_meta_93285.lean",

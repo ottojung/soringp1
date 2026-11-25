@@ -1,0 +1,782 @@
+commit 57782e3f37d6d83b2ae4ffce35f4be7e6de3f219
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 05:43:09 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 05:43:09 2026 +0000
+
+    PnP: correct memory admission, bind workspaces to leases and expedite allocation
+
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 79a7a9b4..ba3ec5b5 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -141,6 +141,7 @@ fi
+ # wired into the Executive itself. They are advisory, bounded and read-only.
+ mission_diagnostics=
+ mission_dispatch_signature=
++mission_coordination_due=no
+ for diagnostic in "$town"/missions/*/status.sh; do
+   [ -f "$diagnostic" ] || continue
+   label=${diagnostic%/status.sh}
+@@ -149,6 +150,9 @@ for diagnostic in "$town"/missions/*/status.sh; do
+     line='{"status":"unavailable","action":"investigate diagnostic failure"}'
+   mission_diagnostics="$mission_diagnostics
+ $label: $line"
++  if printf '%s\n' "$line" | jq -e '.coordination_due == true' >/dev/null 2>&1; then
++    mission_coordination_due=yes
++  fi
+   # Compact stable signal: a change in staffing, checked output or mission
+   # state causes an Executive pass. Timestamps and full notes do not.
+   signal=$(printf '%s\n' "$line" | jq -cS '
+@@ -164,6 +168,8 @@ $prompt
+ === MISSION READ-ONLY DIAGNOSTICS ===
+ $mission_diagnostics
+ === END MISSION DIAGNOSTICS ===
++Reconcile actionable allocation gaps first. Delegate lengthy investigations
++and finish this coordination pass without waiting for worker completion.
+ Do not infer successful mission outcomes from a diagnostic, agent exit, or
+ depleted queue. Check live assignments and pursue new useful work when any
+ Founder's standing objective is still open.
+@@ -243,11 +249,18 @@ if [ -f "$town/government/dispatch-gate.sh" ]; then
+     board_sig="board-unavailable-$(date +%s)"
+   fi
+   mkdir -p "$state/branches"
++  gate_age=${VICHE_EXECUTIVE_GATE_MAX_AGE:-7200}
++  # Actionable unresolved coordination gets a bounded retry even when the
++  # diagnostic is unchanged. This does not preempt a running Executive.
++  if [ "$mission_coordination_due" = yes ]; then
++    case "$gate_age" in ''|*[!0-9]*) gate_age=7200 ;; esac
++    [ "$gate_age" -le 120 ] || gate_age=120
++  fi
+   if { printf '%s\n' "$eligible" "$delivery" "$handoffs" "$recovery" "$board_sig" "$proceed"
+        git -C "$town" rev-parse HEAD 2>/dev/null || :
+        printf '%s\n' "$cases" | jq -cS '[.open_cases[]? | {id,signal,state,owner}]' 2>/dev/null || printf '%s\n' "$cases"
+        printf '%s\n' "$mission_dispatch_signature" "$economy_signature"; } |
+-     /bin/sh "$town/government/dispatch-gate.sh" check executive "${VICHE_EXECUTIVE_GATE_MAX_AGE:-7200}" > "$state/branches/executive-gate.log"; then
++     /bin/sh "$town/government/dispatch-gate.sh" check executive "$gate_age" > "$state/branches/executive-gate.log"; then
+     :
+   else
+     echo "Viche: executive dispatch skipped, nothing it reads has changed since the last pass" >&2
+diff --git a/missions/pnp/assignment.py b/missions/pnp/assignment.py
+new file mode 100644
+index 00000000..3901fe06
+--- /dev/null
++++ b/missions/pnp/assignment.py
+@@ -0,0 +1,120 @@
++"""Immutable workspace-to-lease bindings. Researchers never type lease IDs."""
++import hashlib
++import json
++from pathlib import Path
++
++from . import config, state
++
++
++def attempt_id(lease):
++    return hashlib.sha256(lease.encode()).hexdigest()[:24]
++
++
++def workspace(cwd):
++    try:
++        parts = cwd.resolve().relative_to(Path(config.GAPS_DIR).resolve()).parts
++    except ValueError:
++        return None
++    if not parts or not config.GAP_ID_RE.fullmatch(parts[0]):
++        return None
++    root = Path(state.gap_dir(parts[0]))
++    if len(parts) >= 2 and parts[1] == "path":
++        return parts[0], root / "path", root / "research-assignment.json"
++    if len(parts) >= 4 and parts[1] == "attempts" and parts[3] == "path":
++        if len(parts[2]) != 24 or any(c not in "0123456789abcdef" for c in parts[2]):
++            return None
++        parent = root / "attempts" / parts[2]
++        return parts[0], parent / "path", parent / "assignment.json"
++    return None
++
++
++def binding(cwd=None):
++    found = workspace(cwd or Path.cwd())
++    if not found:
++        return None
++    gap, path, marker = found
++    try:
++        obj = json.loads(marker.read_text())
++        if obj.get("gap") != gap or not isinstance(obj.get("lease"), str):
++            return None
++        if marker.name == "assignment.json" and marker.parent.name != attempt_id(obj["lease"]):
++            return None
++        return gap, obj["lease"]
++    except (OSError, ValueError, AttributeError):
++        return None
++
++
++def first_attempt(gap):
++    try:
++        with open(state.events_path(gap), encoding="utf-8") as f:
++            events = [json.loads(line) for line in f]
++        return sum(e.get("kind") == "acquired" for e in events) == 1 and not any(
++            e.get("kind") == "reacquired" for e in events)
++    except (OSError, ValueError, AttributeError):
++        return False
++
++
++def prepare(gap, checkout=True):
++    """Executive calls once per assignment. Never relabel an old checkout."""
++    from . import gitctl
++    if not isinstance(gap, str) or not config.GAP_ID_RE.fullmatch(gap):
++        raise ValueError("invalid gap")
++    with state.lock(gap):
++        rec = state.load(gap)
++        if not rec or rec.get("state") not in ("LEASED", "RESEARCHING") or not rec.get("lease"):
++            raise ValueError("no live research assignment")
++        lease = rec["lease"]
++        root = Path(state.gap_dir(gap))
++        old = root / "path"
++        legacy = root / "research-assignment.json"
++        if old.is_dir() and first_attempt(gap) and not legacy.exists():
++            path, marker = old, legacy
++        elif binding(old) == (gap, lease):
++            path, marker = old, legacy
++        else:
++            parent = root / "attempts" / attempt_id(lease)
++            path, marker = parent / "path", parent / "assignment.json"
++        marker.parent.mkdir(parents=True, exist_ok=True)
++        if marker.exists():
++            if binding(path) != (gap, lease):
++                raise ValueError("workspace binding conflicts; never overwrite")
++        else:
++            state.atomic_write(str(marker), json.dumps({"gap": gap, "lease": lease}) + "\n")
++    if checkout:
++        # Keep network/Git work outside the gap state lock. Do not create a
++        # second worktree if the Executive retries preparation concurrently.
++        import fcntl
++        import os
++        fd = os.open(str(marker) + ".prepare.lock", os.O_CREAT | os.O_RDWR, 0o600)
++        try:
++            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            if not (path / ".git").exists():
++                base = gitctl.ensure_mirror()
++                gitctl.run(["git", "--git-dir=" + gitctl.MIRROR, "worktree", "add",
++                            "--detach", str(path), base])
++            gitctl.prepare_build_cache(str(path))
++        except gitctl.GitError as exc:
++            raise ValueError(str(exc)) from exc
++        finally:
++            os.close(fd)
++        latest = state.load(gap)
++        if not latest or latest.get("lease") != lease or latest.get("state") not in ("LEASED", "RESEARCHING"):
++            raise ValueError("assignment ended during checkout preparation")
++    return {"gap": gap, "cwd": str(path), "guard": "python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py guard",
++            "compile": "PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile"}
++
++
++def resolve(gap=None, lease=None, cwd=None):
++    """Prefer immutable workspace identity; never adopt a new lease silently."""
++    local = workspace(cwd or Path.cwd())
++    bound = binding(cwd or Path.cwd())
++    if local:
++        if not bound or (gap and gap != bound[0]):
++            raise ValueError("workspace assignment unavailable or wrong gap")
++        # A copied example or the gap itself is not an assignment identifier.
++        if lease and lease not in (gap, bound[0], "LEASE") and lease != bound[1]:
++            raise ValueError("explicit lease conflicts with workspace assignment")
++        return bound
++    if not gap or not config.GAP_ID_RE.fullmatch(gap) or not lease or lease in (gap, "LEASE"):
++        raise ValueError("use the bound research workspace or exact assignment")
++    return gap, lease
+diff --git a/missions/pnp/build_control.py b/missions/pnp/build_control.py
+index 70737953..4e8e17ed 100644
+--- a/missions/pnp/build_control.py
++++ b/missions/pnp/build_control.py
+@@ -166,17 +166,32 @@ def busy():
+     return False
+ 
+ 
+-def headroom(root=Path("/sys/fs/cgroup")):
+-    """Conservative cgroup headroom, including reclaimable inactive cache."""
++def headroom(root=Path("/sys/fs/cgroup"), meminfo=Path("/proc/meminfo")):
++    """Budget clean, reclaimable cache with a haircut and host-availability cap."""
+     try:
+         maximum = (root / "memory.max").read_text().strip()
+         if maximum == "max":
+             return None
+         limit = int(maximum)
+         current = int((root / "memory.current").read_text())
+-        stats = dict(line.split() for line in
+-                     (root / "memory.stat").read_text().splitlines())
+-        return max(0, limit - current + int(stats.get("inactive_file", "0")))
++        stats = {k: int(v) for k, v in (line.split() for line in
++                 (root / "memory.stat").read_text().splitlines())}
++        if "file" in stats:
++            clean = max(0, stats["file"] - sum(stats.get(k, 0) for k in
++                         ("shmem", "file_dirty", "file_writeback", "unevictable")))
++            reclaimable = clean * 9 // 10 + stats.get("slab_reclaimable", 0) // 2
++        else:
++            reclaimable = stats.get("inactive_file", 0)
++        result = max(0, min(limit, limit - current + reclaimable))
++        # Root cgroup cannot reclaim more memory than the host can supply.
++        try:
++            available = next(int(line.split()[1]) * 1024 for line in
++                             meminfo.read_text().splitlines()
++                             if line.startswith("MemAvailable:"))
++            result = min(result, available)
++        except (OSError, ValueError, StopIteration):
++            pass
++        return result
+     except (OSError, ValueError, TypeError):
+         return None
+ 
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index 8d42591a..8d04861b 100755
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -11,6 +11,7 @@
+ import argparse
+ import json
+ import os
++from pathlib import Path
+ import sys
+ import time
+ 
+@@ -20,9 +21,9 @@ if __package__ in (None, ""):
+     sys.path.insert(0, os.path.abspath(os.path.join(
+         os.path.dirname(__file__), "..", "..")))
+     from missions.pnp import (config, desk as desk_mod, publish,
+-                                reconcile, state, jobs, frontier)
++                                reconcile, state, jobs, frontier, assignment)
+ else:
+-    from . import config, desk as desk_mod, publish, reconcile, state, jobs, frontier
++    from . import config, desk as desk_mod, publish, reconcile, state, jobs, frontier, assignment
+ 
+ 
+ def _printer(data):
+@@ -153,8 +154,15 @@ def cmd_release(args):
+ 
+ def cmd_submit(args):
+     try:
+-        _printer(jobs.submit(args.gap, args.candidate))
+-    except (publish.StopPublish, jobs.validate.InvalidCandidate, OSError) as exc:
++        expected = None
++        for path in (Path.cwd(), Path(args.candidate).resolve().parent):
++            if assignment.workspace(path):
++                gap, lease = assignment.resolve(args.gap, cwd=path)
++                if expected is not None and expected != lease:
++                    raise ValueError("candidate belongs to a different assignment")
++                expected = lease
++        _printer(jobs.submit(args.gap, args.candidate, expected_lease=expected))
++    except (publish.StopPublish, jobs.validate.InvalidCandidate, OSError, ValueError) as exc:
+         print("PUBLISH STOPPED: " + str(exc), file=sys.stderr)
+         return 1
+     return 0
+@@ -165,6 +173,25 @@ def cmd_reconcile(args):
+     return 0
+ 
+ 
++def cmd_guard(args):
++    try:
++        gap, lease = assignment.resolve(args.gap, args.lease)
++        result = frontier.checkpoint(gap, lease)
++    except (OSError, ValueError) as exc:
++        result = {"decision": "wait", "reason": str(exc)}
++    _printer(result)
++    return 0
++
++
++def cmd_assignment(args):
++    try:
++        _printer(assignment.prepare(args.gap))
++        return 0
++    except (OSError, ValueError, RuntimeError) as exc:
++        print("assignment unavailable: " + str(exc), file=sys.stderr)
++        return 1
++
++
+ def main(argv=None):
+     parser = argparse.ArgumentParser(prog="pnp")
+     sub = parser.add_subparsers(dest="cmd", required=True)
+@@ -185,9 +212,12 @@ def main(argv=None):
+     subp.add_argument("candidate")
+     subp.set_defaults(fn=cmd_submit)
+     guard = sub.add_parser("guard")
+-    guard.add_argument("gap")
++    guard.add_argument("gap", nargs="?")
+     guard.add_argument("--lease")
+-    guard.set_defaults(fn=lambda args: (_printer(frontier.checkpoint(args.gap, args.lease)) or 0))
++    guard.set_defaults(fn=cmd_guard)
++    bind = sub.add_parser("assignment")
++    bind.add_argument("gap")
++    bind.set_defaults(fn=cmd_assignment)
+     sub.add_parser("reconcile").set_defaults(fn=cmd_reconcile)
+     args = parser.parse_args(argv)
+     return args.fn(args)
+diff --git a/missions/pnp/compile.py b/missions/pnp/compile.py
+index 41d835fd..6e571645 100644
+--- a/missions/pnp/compile.py
++++ b/missions/pnp/compile.py
+@@ -7,7 +7,7 @@ import subprocess
+ import sys
+ import time
+ 
+-from . import build_control as control, watchdog, state
++from . import build_control as control, watchdog, state, assignment
+ 
+ 
+ def command(args):
+@@ -80,23 +80,18 @@ def main(argv=None):
+     p.add_argument("--timeout", type=int, default=600)
+     p.add_argument("args", nargs=argparse.REMAINDER)
+     ns = p.parse_args(argv)
+-    local_gap = watchdog.assignment(Path.cwd().resolve())
+-    if local_gap or ns.gap or ns.lease:
+-        if (local_gap and ns.gap != local_gap) or not ns.gap or not ns.lease or not state.config.GAP_ID_RE.fullmatch(ns.gap):
+-            print("RESOURCE DEFERRED: gap-local compilation requires its exact lease", file=sys.stderr)
+-            return 75
++    local = assignment.workspace(Path.cwd())
++    if local or ns.gap or ns.lease:
+         try:
+-            rec = state.load(ns.gap)
+-            if not isinstance(rec, dict) or rec.get("lease") != ns.lease:
+-                print("RESOURCE DEFERRED: assignment unavailable or superseded", file=sys.stderr)
+-                return 75
+-        except (OSError, ValueError):
+-            print("RESOURCE DEFERRED: assignment unavailable", file=sys.stderr)
++            gap, lease = assignment.resolve(ns.gap, ns.lease)
++            rec = state.load(gap)
++            if not isinstance(rec, dict) or rec.get("lease") != lease:
++                raise ValueError("assignment unavailable or superseded")
++            os.environ["PNP_PUBLISH_GAP"] = gap
++            os.environ["PNP_PUBLISH_LEASE"] = lease
++        except (OSError, ValueError) as exc:
++            print("RESOURCE DEFERRED:", exc, file=sys.stderr)
+             return 75
+-    if ns.gap:
+-        os.environ["PNP_PUBLISH_GAP"] = ns.gap
+-    if ns.lease:
+-        os.environ["PNP_PUBLISH_LEASE"] = ns.lease
+     args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
+     def interrupted(signum, frame):
+         raise KeyboardInterrupt
+diff --git a/missions/pnp/frontier.py b/missions/pnp/frontier.py
+index 8e6fab9e..cb458db1 100644
+--- a/missions/pnp/frontier.py
++++ b/missions/pnp/frontier.py
+@@ -38,7 +38,8 @@ def normalize(raw, now):
+         if gid in rows:
+             raise ValueError("duplicate gap")
+         rows[gid] = {"held": count(item.get("held")),
+-                     "parallel": count(item.get("parallel"))}
++                     "parallel": count(item.get("parallel")),
++                     "title": item.get("title", "")[:300] if isinstance(item.get("title"), str) else ""}
+     total = count(raw.get("open_gaps"))
+     return {"observed": now, "complete": total == len(rows),
+             "open_gaps": total, "offerable": count(raw.get("offerable_now")),
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index 3ddab1e7..50c78d0d 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -136,6 +136,8 @@ def prepare_build_cache(worktree):
+     dest = os.path.join(local, "packages")
+     if not os.path.lexists(dest):
+         os.symlink(packages, dest)
++    elif not os.path.isdir(dest):
++        raise GitError("invalid local package cache")
+ 
+ 
+ def build(worktree, module, statement, runner=None):
+diff --git a/missions/pnp/jobs.py b/missions/pnp/jobs.py
+index c50b7f0e..b398ee1a 100644
+--- a/missions/pnp/jobs.py
++++ b/missions/pnp/jobs.py
+@@ -36,8 +36,10 @@ def launch(gap, fd):
+                          pass_fds=(fd,), start_new_session=True)
+ 
+ 
+-def submit(gap, source):
++def submit(gap, source, expected_lease=None):
+     rec = state.load(gap)
++    if expected_lease and (not rec or rec.get("lease") != expected_lease):
++        raise publish.StopPublish("assignment superseded")
+     if not rec:
+         raise publish.StopPublish("no acquired gap")
+     if rec["state"] == "PR_OPEN":
+@@ -46,33 +48,33 @@ def submit(gap, source):
+     if fd is None:
+         return {"gap": gap, "status": "publishing"}
+     try:
+-        rec = state.load(gap)
+-        if rec["state"] not in ("LEASED", "RESEARCHING") + READY:
+-            raise publish.StopPublish("gap not publishable: " + rec["state"])
+         with open(source, "rb") as f:
+             data = f.read(config.MAX_FILE_BYTES + 1)
+-        meta = {"id": gap, "file": rec["path"], "module": rec["module"],
+-                "statement": rec["statement"], "imports": rec["imports"]}
+-        digest = validate.validate(meta, data)
+-        if rec["state"] in ("SIGNED", "PUSHED") and digest != rec["candidate_digest"]:
+-            raise publish.StopPublish("signed proof is immutable")
+-        if digest == rec.get("candidate_digest") and not build_control.resource_ready(rec):
+-            return {"gap": gap, "status": "resource-deferred",
+-                    "required_headroom": rec["publisher_memory_required"]}
+-        # Snapshot before acknowledging; never depend on a researcher file
+-        # that may change or vanish on agent exit.
+-        state.atomic_write(candidate_path(gap), data.decode("utf-8"))
+-        if rec["state"] == "LEASED":
+-            state.transition(gap, "RESEARCHING")
++        with state.lock(gap):
+             rec = state.load(gap)
+-        if rec["state"] == "RESEARCHING":
+-            state.transition(gap, "CANDIDATE_READY", candidate_digest=digest,
+-                             failure_reason=None)
+-        elif rec["state"] == "CANDIDATE_READY":
+-            state.update(gap, candidate_digest=digest, failure_reason=None)
+-        state.update(gap, queued_lease=rec["lease"],
+-                     publisher_retry_at=None, publisher_failures=0,
+-                     publisher_memory_required=None)
++            if not rec or (expected_lease and rec.get("lease") != expected_lease):
++                raise publish.StopPublish("assignment superseded")
++            if rec["state"] not in ("LEASED", "RESEARCHING") + READY:
++                raise publish.StopPublish("gap not publishable: " + rec["state"])
++            meta = {"id": gap, "file": rec["path"], "module": rec["module"],
++                    "statement": rec["statement"], "imports": rec["imports"]}
++            digest = validate.validate(meta, data)
++            if rec["state"] in ("SIGNED", "PUSHED") and digest != rec["candidate_digest"]:
++                raise publish.StopPublish("signed proof is immutable")
++            if digest == rec.get("candidate_digest") and not build_control.resource_ready(rec):
++                return {"gap": gap, "status": "resource-deferred",
++                        "required_headroom": rec["publisher_memory_required"]}
++            state.atomic_write(candidate_path(gap), data.decode("utf-8"))
++            before = rec["state"]
++            if before in ("LEASED", "RESEARCHING", "CANDIDATE_READY"):
++                rec.update(state="CANDIDATE_READY", candidate_digest=digest,
++                           failure_reason=None)
++            rec.update(queued_lease=rec["lease"], publisher_retry_at=None,
++                       publisher_failures=0, publisher_memory_required=None)
++            state.save(rec)
++            if before != rec["state"]:
++                state.event(gap, "state", {"to": rec["state"], "fields": {"candidate_digest": digest}})
++            state.event(gap, "update", {"fields": {"queued_lease": rec["lease"]}})
+         launch(gap, fd)
+         return {"gap": gap, "status": "publishing", "digest": digest}
+     finally:
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 82c601f4..d313a5ed 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -103,8 +103,8 @@ and claimable alternatives, not a fixed timer or agent headcount.
+ 
+ Before lengthy work, and between bounded computation or proof-development
+ steps, each worker runs the cheap local command:
+-  python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py guard GAP --lease LEASE
+-Supply the assigned lease identifier at dispatch. A stop decision means finish
++  python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py guard
++Run from the immutable assignment workspace returned by the preparation command below. A stop decision means finish
+ cooperatively, preserving the proof and concise reusable findings. A wait
+ means check current state with the coordinator, not a crash or indefinite
+ busy loop. Never start another expensive search on a terminal lease. An
+@@ -134,9 +134,9 @@ preserves the proof and retries; do not start a competing full build.
+ 
+ All P vs NP local Lean computation uses the shared queue, including research.
+ From the Lean directory run:
+-  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile --gap GAP --lease LEASE -- lake build +MODULE
++  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile -- lake build +MODULE
+ For small scratch files with narrow imports:
+-  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile --light --gap GAP --lease LEASE -- lake env lean Scratch.lean
++  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile --light -- lake env lean Scratch.lean
+ Use heavy (the default) for any full Mathlib import or unknown memory demand.
+ Do not invoke raw lean/lake/checklemma for research or start competing full
+ builds. Up to two light compilations may overlap when memory permits; heavy builds
+@@ -161,8 +161,36 @@ gap worktrees whose durable assignment has ended (STALE, RELEASED, ACCEPTED,
+ PR_OPEN). It never terminates or launches agent sessions, touches unrelated
+ worktrees, or acts on missing/unreadable state. Exact gap state and process
+ identity are checked under the assignment lock; a fresh reacquisition is
+-not cancelled on old evidence. Research commands must use their own exact
+-gap and lease with the shared compiler entry point. The Executive remains
++not cancelled on old evidence. Research commands use their immutable workspace binding with the shared compiler entry point. The Executive remains
+ sole authority for researcher reassignment and must do it early, before
+ lengthy deliberation. Preserve proof files; no repeated compilation of a
+ settled gap. Computational cancellation is not a mathematical verdict.
++
++## Work-conserving research allocation
++
++Executive: after a successful acquire (or when adopting a live assignment),
++run `python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py assignment GAP`.
++Use its returned absolute cwd for Antonina new/run. It prepares an isolated
++pinned checkout and shares only pinned package dependencies. Never relabel
++a previous attempt after reacquisition. The guard and compiler infer the
++immutable assignment from cwd; do not type or expose lease IDs. Use the
++same workspace for submit and preserve earlier attempts for reuse.
++
++Prefer incremental formalization and explicit reductions to known theorems.
++Before investing in an open-ended lower bound, identify a concrete proof
++route, its nearest checked lemma, and the missing inference or certificate.
++Reuse the previous research notes for the same or related problem rather
++than repeating failed SAT encodings. If no ordinary lease is available,
++prepare independent small derivations for published open problems or
++identify a concrete hard-gap route; do not burn hours on an unpromising
++hard lease just to occupy capacity. The desk alone chooses claimable gaps.
++Do not churn leases or release on a speculative difficulty judgment.
++Reassess work at natural evidence checkpoints, not arbitrary deadlines:
++a successful sublemma, a failed reduction, new rival evidence, a search
++budget exhausted, or a candidate. Keep the highest-yield route moving.
++
++The Executive first addresses unstaffed active gaps, obsolete assignments,
++and newly claimable ordinary work. After these allocation decisions,
++delegate substantive investigations rather than waiting in the coordinator
++session; finish the pass promptly so the next state change can trigger it.
++No polling sleep inside Executive reasoning. No new review or reporting gate.
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index 1bbc6ddb..6df4ad05 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -12,9 +12,9 @@ import sys
+ 
+ if __package__ in (None, ""):
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from missions.pnp import leaderboard, frontier
++    from missions.pnp import leaderboard, frontier, assignment
+ else:
+-    from . import leaderboard, frontier
++    from . import leaderboard, frontier, assignment
+ 
+ STATE = Path(os.environ.get("VICHE_STATE_ROOT",
+                             "/var/lib/lubko/wd/viche-state"))
+@@ -36,7 +36,7 @@ def workers():
+                     else "complete")
+         return {"count": len(filtered), "coverage": coverage,
+                 "agents": [{"id": a.get("id"), "title": a.get("title"),
+-                            "state": a.get("state")}
++                            "state": a.get("state"), "cwd": a.get("cwd")}
+                            for a in filtered]}
+     except (OSError, ValueError, subprocess.SubprocessError):
+         return {"count": None, "coverage": "unavailable", "agents": []}
+@@ -53,6 +53,7 @@ def snapshot():
+                      "state": item.get("state"),
+                      "pr_url": item.get("pr_url"),
+                      "lease_expires_at": item.get("lease_expires_at"),
++                     "lease_obtained_at": item.get("lease_obtained_at"),
+                      "resource_deferred": bool(item.get("publisher_memory_required") and not frontier.build_control.resource_ready(item)) if item.get("state") in ("CANDIDATE_READY", "LOCAL_CHECKED") else False,
+                      "failure_reason": item.get("failure_reason")})
+     lb = leaderboard.load()
+@@ -70,15 +71,40 @@ def snapshot():
+     by_gap = {r["gap"]: r for r in rows}
+     for worker in w["agents"]:
+         match = re.search(r"\bL-[a-z0-9]+(?:-[a-z0-9]+)+\b", worker.get("title") or "")
+-        gid = match.group(0) if match else None
++        bound = assignment.binding(Path(worker["cwd"])) if worker.get("cwd") else None
++        gid = bound[0] if bound else match.group(0) if match else None
+         worker["gap"] = gid
++        worker["bound"] = bool(bound)
++        worker["lease_current"] = None
++        if bound:
++            try:
++                rec = frontier.state.load(gid)
++                if isinstance(rec, dict) and rec.get("lease"):
++                    worker["lease_current"] = rec["lease"] == bound[1]
++            except (OSError, ValueError):
++                pass
+         worker["gap_state"] = by_gap.get(gid, {}).get("state")
+         worker["competition"] = observed.get("gaps", {}).get(gid)
+     stale_workers = [a["id"] for a in w["agents"]
+-                     if a["gap_state"] in frontier.STOPPED]
++                     if a["gap_state"] in frontier.STOPPED or a["lease_current"] is False]
+     active = [r["gap"] for r in rows if r["state"] in frontier.ACTIVE
+               and type(r["lease_expires_at"]) in (int, float)
+               and r["lease_expires_at"] > time.time() and isinstance(r["gap"], str)]
++    staffed = {a["gap"] for a in w["agents"] if a["lease_current"] is not False}
++    unstaffed = sorted(set(active) - staffed) if w["coverage"] == "complete" else []
++    ordinary = observed.get("ordinary")
++    # These are useful opportunities, not automatic staffing instructions.
++    # Desk status only exposes title/competition, not individually offerable IDs.
++    related = []
++    for gid, item in observed.get("gaps", {}).items():
++        held, parallel = item.get("held"), item.get("parallel")
++        if type(held) is int and type(parallel) is int and held < parallel:
++            related.append({"gap": gid, "title": item.get("title"), "held": held, "parallel": parallel})
++    related.sort(key=lambda x: (x["held"], x["gap"]))
++    coordination_due = bool(w["coverage"] == "complete" and (
++        stale_workers or unstaffed or (ordinary is not None and ordinary > 0)))
++    age = {r["gap"]: max(0, round((time.time()-r["lease_obtained_at"])/60))
++           for r in rows if r["gap"] in active and type(r["lease_obtained_at"]) in (int,float)}
+     score = {k: lb.get(k) for k in ("rank", "our_steps", "leader",
+                                    "runner_up", "lead_over_second",
+                                    "our_margin_vs_best_competitor",
+@@ -93,6 +119,9 @@ def snapshot():
+         "leaderboard": score, "workers": w,
+         "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
+         "frontier_fresh": bool(observed), "active_lease_gaps": active,
++        "unstaffed_active_gaps": unstaffed, "active_lease_age_minutes": age,
++        "potential_fronts": related[:12],
++        "coordination_due": coordination_due,
+         "publisher_build_busy": frontier.build_control.busy(),
+         "legacy_lean_compiler_pids": frontier.build_control.legacy_compilers(),
+         "lean_headroom_bytes": frontier.build_control.headroom(),
+@@ -124,7 +153,10 @@ def snapshot():
+             "workers": w["count"], "coverage": w["coverage"],
+             "gaps": by_state, "active": sorted(active),
+             "assignments": sorted((str(a["id"]), a["gap"] or "", a["gap_state"] or "") for a in w["agents"]),
+-            "ordinary_available": (observed.get("ordinary") or 0) > 0 if observed else None},
++            "ordinary_available": (observed.get("ordinary") or 0) > 0 if observed else None,
++            "hard_available": (observed.get("offerable") or 0) > (observed.get("ordinary") or 0) if observed else None,
++            "unstaffed": unstaffed, "obsolete_workers": sorted(stale_workers),
++            "unbound": sorted(str(a["id"]) for a in w["agents"] if not a["bound"])},
+         "caveat": "Only public checked steps count; local activity is not proof."}
+ 
+ 
+diff --git a/missions/pnp/watchdog.py b/missions/pnp/watchdog.py
+index 383eafd7..a80f34e6 100644
+--- a/missions/pnp/watchdog.py
++++ b/missions/pnp/watchdog.py
+@@ -13,6 +13,7 @@ import sys
+ import time
+ 
+ from . import config, state
++from . import assignment as bindings
+ 
+ COMPILERS = {"lean", "lake", "checklemma"}
+ TERMINAL = {"STALE", "RELEASED", "ACCEPTED", "PR_OPEN"}
+@@ -49,7 +50,10 @@ def send(fd, sig):
+ 
+ def assignment(cwd):
+     """Only exact canonical gap worktrees; no loose process-title matching."""
+-    for root, research in ((config.GAPS_DIR, True), (config.WORKTREES_DIR, False)):
++    local = bindings.workspace(cwd)
++    if local:
++        return local[0]
++    for root, research in ((config.WORKTREES_DIR, False),):
+         try:
+             parts = cwd.relative_to(Path(root).resolve()).parts
+         except ValueError:
+@@ -114,6 +118,13 @@ def stop_if_terminal(entry, expected, pending, now):
+             if not isinstance(current, str) or not current:
+                 return None
+             previous = managed_lease(entry, gap)
++            if previous is None:
++                try:
++                    bound = bindings.binding((entry / "cwd").resolve(strict=True))
++                    if bound and bound[0] == gap:
++                        previous = bound[1]
++                except OSError:
++                    pass
+             superseded = previous is not None and previous != current
+             if rec.get("state") not in TERMINAL and not superseded:
+                 return None
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index b85ceed7..bf73a838 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -398,6 +398,16 @@ class TestCli(unittest.TestCase):
+             self.assertEqual(f.read(), GOOD)
+         self.assertEqual(state.load(GAP)["queued_lease"], "lease-1")
+ 
++    def test_superseded_workspace_cannot_queue_candidate(self):
++        from missions.pnp import jobs, publish
++        new_state("LEASED")
++        with mock.patch.object(jobs, "launch") as launch:
++            with self.assertRaises(publish.StopPublish):
++                jobs.submit(GAP, candidate_file(), expected_lease="old-lease")
++            launch.assert_not_called()
++        self.assertEqual(state.load(GAP)["state"], "LEASED")
++        self.assertIsNone(state.load(GAP).get("queued_lease"))
++
+     def test_publication_retry_backoff_preserves_candidate(self):
+         from missions.pnp import jobs
+         new_state("LEASED")
+diff --git a/tests/pnp-real-smoke.py b/tests/pnp-real-smoke.py
+index bbca2ff4..f2d30920 100644
+--- a/tests/pnp-real-smoke.py
++++ b/tests/pnp-real-smoke.py
+@@ -125,7 +125,8 @@ class FullPathSmoke(unittest.TestCase):
+             (root / "memory.max").write_text(str(14 * build_control.GIB))
+             (root / "memory.current").write_text(str(13 * build_control.GIB))
+             (root / "memory.stat").write_text("inactive_file 1073741824\n")
+-            self.assertEqual(build_control.headroom(root), 2 * build_control.GIB)
++            (root / "meminfo").write_text("MemAvailable: 12582912 kB\n")
++            self.assertEqual(build_control.headroom(root, root / "meminfo"), 2 * build_control.GIB)
+             (root / "memory.max").write_text("max")
+             self.assertIsNone(build_control.headroom(root))
+         with patch.object(build_control, "headroom", return_value=build_control.GIB):
+@@ -138,6 +139,20 @@ class FullPathSmoke(unittest.TestCase):
+                 build_control, "group_rss", return_value=0):
+             self.assertIsNone(build_control.memory_reason(1))
+ 
++    def test_clean_cache_budget_and_physical_cap(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = pathlib.Path(tmp)
++            gib = build_control.GIB
++            (root / "memory.max").write_text(str(14 * gib))
++            (root / "memory.current").write_text(str(14 * gib))
++            (root / "memory.stat").write_text(
++                "file %d\nshmem %d\nfile_dirty %d\nfile_writeback %d\nslab_reclaimable %d\ninactive_file %d\n" %
++                (10*gib, gib, gib, 0, 2*gib, gib))
++            (root / "meminfo").write_text("MemAvailable: 12582912 kB\n")
++            self.assertEqual(build_control.headroom(root, root / "meminfo"), 8*gib*9//10+gib)
++            (root / "meminfo").write_text("MemAvailable: 4194304 kB\n")
++            self.assertEqual(build_control.headroom(root, root / "meminfo"), 4*gib)
++
+     def test_light_shared_heavy_exclusive(self):
+         with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=12 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]):
+             with build_control.slot(timeout=0, heavy=False, publication=False):
+diff --git a/tests/pnp-watchdog-smoke.py b/tests/pnp-watchdog-smoke.py
+index ea4c4531..000521a5 100644
+--- a/tests/pnp-watchdog-smoke.py
++++ b/tests/pnp-watchdog-smoke.py
+@@ -13,7 +13,7 @@ import unittest
+ from unittest.mock import patch
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+-from missions.pnp import config, state, watchdog, compile as compiler
++from missions.pnp import config, state, watchdog, compile as compiler, assignment, frontier
+ 
+ GAP = "L-meta-1662"
+ LIVE = "L-meta-1665"
+@@ -34,7 +34,9 @@ class WatchdogTests(unittest.TestCase):
+         self.unrelated = self.root / "unrelated"
+         self.unrelated.mkdir()
+         self.binary = self.root / "checklemma"
+-        shutil.copyfile(shutil.which("sleep"), self.binary)
++        # GNU coreutils can be a multicall binary on CI; renaming sleep
++        # then fails before the watchdog test has a live process.
++        shutil.copyfile(sys.executable, self.binary)
+         self.binary.chmod(0o700)
+ 
+     def worktree(self, gap, status):
+@@ -44,7 +46,10 @@ class WatchdogTests(unittest.TestCase):
+         return cwd
+ 
+     def spawn(self, cwd, executable=None, env=None):
+-        p = subprocess.Popen([str(executable or self.binary), "90"], cwd=cwd, env=env)
++        p = subprocess.Popen(
++            [str(executable), "90"] if executable else
++            [str(self.binary), "-c", "import time; time.sleep(90)"],
++            cwd=cwd, env=(env or os.environ) | {"PYTHONHOME": sys.base_prefix})
+         def cleanup():
+             if p.poll() is None:
+                 p.terminate()
+@@ -147,6 +152,29 @@ class WatchdogTests(unittest.TestCase):
+         finally:
+             os.chdir(original)
+ 
++    def test_binding_survives_reacquisition_without_adopting_new_lease(self):
++        state.event(LIVE, "acquired")
++        prepared = assignment.prepare(LIVE, checkout=False)
++        cwd = Path(prepared["cwd"])
++        self.assertEqual(cwd, self.live.parent)
++        self.assertEqual(assignment.resolve(cwd=cwd), (LIVE, "lease-" + LIVE))
++        self.assertEqual(assignment.resolve(LIVE, LIVE, cwd=cwd), (LIVE, "lease-" + LIVE))
++        state.transition(LIVE, "STALE")
++        state.reacquire(LIVE, lease="new-lease", lease_expires_at=time.time()+900)
++        new = Path(assignment.prepare(LIVE, checkout=False)["cwd"])
++        self.assertNotEqual(cwd, new)
++        self.assertEqual(assignment.resolve(cwd=cwd), (LIVE, "lease-" + LIVE))
++        self.assertEqual(assignment.resolve(cwd=new), (LIVE, "new-lease"))
++        self.assertEqual(frontier.checkpoint(*assignment.resolve(cwd=cwd))["decision"], "stop")
++        self.assertEqual(frontier.checkpoint(*assignment.resolve(cwd=new))["decision"], "continue")
++        self.assertEqual(watchdog.assignment(new), LIVE)
++
++    def test_missing_or_placeholder_identity_is_not_supersession(self):
++        with self.assertRaises(ValueError):
++            assignment.resolve(LIVE, LIVE, cwd=self.unrelated)
++        with self.assertRaises(ValueError):
++            assignment.resolve(cwd=self.live)
++
+     def test_singleton_ensure(self):
+         os.makedirs(config.CACHE_DIR, exist_ok=True)
+         lock = os.open(watchdog.lock_path(), os.O_CREAT | os.O_RDWR, 0o600)

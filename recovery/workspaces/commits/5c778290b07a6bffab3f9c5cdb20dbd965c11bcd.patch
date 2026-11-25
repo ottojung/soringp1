@@ -1,0 +1,59 @@
+commit 5c778290b07a6bffab3f9c5cdb20dbd965c11bcd
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Oct 27 08:27:57 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Oct 27 08:27:57 2026 +0000
+
+    Fix recovery steward profile startup ordering
+
+diff --git a/government/recovery-steward-service.sh b/government/recovery-steward-service.sh
+index c0104654..5ab018d7 100644
+--- a/government/recovery-steward-service.sh
++++ b/government/recovery-steward-service.sh
+@@ -1,8 +1,8 @@
+ #!/bin/sh
+ # Independent of Viche's parliamentary/executive/judicial cycle.
+ # This service only keeps a general-purpose AI recovery investigator available.
+-set -eu
+ . /home/lubko/.profile
++set -eu
+ export VICHE_TOWNHALL_ID=302
+ export VICHE_TOWN_ROOT=/var/lib/lubko/wd/viche
+ export VICHE_SEATS_ROOT=/var/lib/lubko/wd/viche-seats
+diff --git a/tests/recovery-steward-smoke.sh b/tests/recovery-steward-smoke.sh
+index 66d5bb16..6915428f 100644
+--- a/tests/recovery-steward-smoke.sh
++++ b/tests/recovery-steward-smoke.sh
+@@ -5,7 +5,7 @@ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ d=$(mktemp -d)
+ trap 'rm -rf "$d"' EXIT HUP INT TERM
+-mkdir -p "$d/bin" "$d/town/government" "$d/seats" "$d/state" "$d/mock"
++mkdir -p "$d/bin" "$d/home" "$d/town/government" "$d/seats" "$d/state" "$d/mock"
+ git init -q "$d/town"
+ git -C "$d/town" -c user.name=fixture -c user.email=fixture@example.com commit --allow-empty -qm start
+ cp "$repo/government/RECOVERY-STEWARD.md" "$d/town/government/"
+@@ -41,6 +41,23 @@ chmod +x "$d/bin/antonina" "$d/town/government/appointments.sh"
+ export PATH="$d/bin:$PATH" MOCK_ROOT="$d/mock"
+ export VICHE_TOWN_ROOT="$d/town" VICHE_SEATS_ROOT="$d/seats"
+ export VICHE_STATE_ROOT="$d/state" VICHE_CONSTITUTION="$d/charter"
++# Exercise the service's actual profile/strict-mode prefix. Both errexit and
++# nounset must remain disabled while the login profile initializes.
++export HOME="$d/home"
++awk '
++  /^export VICHE_TOWNHALL_ID=/ { exit }
++  /^\. \/home\/lubko\/\.profile$/ { print ". \"$HOME/.profile\""; next }
++  { print }
++' "$repo/government/recovery-steward-service.sh" > "$d/service-init.sh"
++# A profile may reference variables that are absent from the supervisor env.
++printf ': "$PROFILE_OPTIONAL"\nexport PROFILE_LOADED=yes\n' > "$HOME/.profile"
++unset PROFILE_OPTIONAL PROFILE_LOADED
++sh "$d/service-init.sh"
++# A non-final failed profile command must not abort before later setup runs.
++printf 'false\nexport PROFILE_LOADED=yes\n' > "$HOME/.profile"
++unset PROFILE_LOADED
++printf 'test "$PROFILE_LOADED" = yes\n' >> "$d/service-init.sh"
++sh "$d/service-init.sh"
+ sh "$repo/government/recovery-steward-cycle.sh"
+ test "$(cat "$d/mock/registry")" = new-agent
+ test "$(wc -l < "$d/mock/replacements")" -eq 1

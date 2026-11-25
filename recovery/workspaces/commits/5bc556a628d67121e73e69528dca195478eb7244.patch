@@ -1,0 +1,107 @@
+commit 5bc556a628d67121e73e69528dca195478eb7244
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Tue Nov 24 21:42:03 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Tue Nov 24 21:42:03 2026 +0000
+
+    Integrate delivery/post-wal-race-20261124 (operator): Retry transient SQLite WAL initialization contention in Post
+    
+    Landed by the integration queue (Act 31) as one candidate on main d7c2f84af080.
+    
+    Delivery-Branch: delivery/post-wal-race-20261124
+    Delivery-Head: 137c3a64f0cb78eed192a569ca32ca75298eed20
+    Proposed-By: operator
+    Reviewed-By: reviewer-1ot9lqym92yxfboqp9vivx-origins
+    Review-Reason: Correctly retries SQLITE_BUSY/LOCKED during cold DELETE-to-WAL initialization with a bounded 15s deadline and proper extended-code masking; imports are present and the new regression test genuinely discriminates (WAL conversion returns BUSY immediately even with busy_timeout, confirmed on this Pytho
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/post.py b/government/post.py
+index 4ad6ff35..c32c1d48 100644
+--- a/government/post.py
++++ b/government/post.py
+@@ -78,13 +78,33 @@ def connect():
+     path = location()
+     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+     db = sqlite3.connect(str(path), timeout=15)
+-    db.row_factory = sqlite3.Row
+-    db.execute("PRAGMA foreign_keys=ON")
+-    db.execute("PRAGMA busy_timeout=15000")
+-    db.execute("PRAGMA journal_mode=WAL")
+-    db.execute("PRAGMA synchronous=FULL")
+-    db.executescript(SCHEMA)
+-    return db
++    try:
++        db.row_factory = sqlite3.Row
++        db.execute("PRAGMA foreign_keys=ON")
++        db.execute("PRAGMA busy_timeout=15000")
++        # SQLite can return BUSY immediately during DELETE -> WAL transition,
++        # even with busy_timeout installed. Avoid unnecessary mode changes and
++        # retry only transient lock contention within a bounded startup window.
++        deadline = time.monotonic() + 15
++        while True:
++            try:
++                mode = db.execute("PRAGMA journal_mode").fetchone()[0]
++                if mode.lower() != "wal":
++                    mode = db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
++                if mode.lower() != "wal":
++                    raise RuntimeError("Post database did not enter WAL mode")
++                break
++            except sqlite3.OperationalError as exc:
++                code = getattr(exc, "sqlite_errorcode", 0) & 0xff
++                if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or time.monotonic() >= deadline:
++                    raise
++                time.sleep(0.05)
++        db.execute("PRAGMA synchronous=FULL")
++        db.executescript(SCHEMA)
++        return db
++    except BaseException:
++        db.close()
++        raise
+ 
+ def event(db, actor, action, message_id=None, **details):
+     db.execute("INSERT INTO events(at,actor,action,message_id,details) VALUES(?,?,?,?,?)",
+diff --git a/tests/test_post.py b/tests/test_post.py
+index d98d2403..cac0209b 100644
+--- a/tests/test_post.py
++++ b/tests/test_post.py
+@@ -5,6 +5,8 @@ import json
+ import os
+ from pathlib import Path
+ import subprocess
++import sqlite3
++import time
+ import tempfile
+ import unittest
+ 
+@@ -208,6 +210,31 @@ class PostTest(unittest.TestCase):
+         self.assertEqual(self.cli("inbox","--office",ident)[0]["alert"],1)
+         self.assertEqual(self.cli("wake","--office",ident)["urgent_unread"],0)
+ 
++    def test_wal_initialization_waits_for_transient_writer(self):
++        # A cold database in rollback-journal mode held by another writer.
++        # WAL conversion may return BUSY immediately, not after busy_timeout.
++        db=sqlite3.connect(self.env["VICHE_POST_DB"])
++        self.addCleanup(db.close)
++        db.execute("CREATE TABLE fixture (x INTEGER)")
++        db.commit()
++        db.execute("BEGIN IMMEDIATE")
++        proc=subprocess.Popen(["python3",str(POST),"inbox","--office","judiciary"],
++                              env=self.env,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
++        try:
++            time.sleep(0.5)
++            self.assertIsNone(proc.poll(), "initialization failed instead of waiting for writer")
++            db.commit()
++            out,err=proc.communicate(timeout=20)
++            self.assertEqual(proc.returncode,0,err)
++            self.assertEqual(json.loads(out),[])
++            with sqlite3.connect(self.env["VICHE_POST_DB"]) as fresh:
++                self.assertEqual(fresh.execute("PRAGMA journal_mode").fetchone()[0],"wal")
++        finally:
++            db.rollback()
++            if proc.poll() is None:
++                proc.kill()
++                proc.communicate()
++
+     def test_atomic_concurrent_idempotency(self):
+         def action(_):
+             return self.send("--key","same-concurrent")

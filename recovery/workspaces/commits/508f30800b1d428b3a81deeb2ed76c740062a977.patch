@@ -1,0 +1,265 @@
+commit 508f30800b1d428b3a81deeb2ed76c740062a977
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Wed Nov 25 10:33:27 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Wed Nov 25 10:33:27 2026 +0000
+
+    Integrate delivery/canonical-autoreconcile-20261125 (recovery-steward): Recovery-steward: repair recurring canonical/main integration deadlock at its source
+    
+    Landed by the integration queue (Act 31) as one candidate on main b98cf258abf5.
+    
+    Delivery-Branch: delivery/canonical-autoreconcile-20261125
+    Delivery-Head: 74908a01960994c4463082dcd50290a4838b2ea2
+    Proposed-By: recovery-steward
+    Reviewed-By: reviewer-jlkfasg7ie77ka1evpnshy-govern
+    Review-Reason: Correctly implements a guarded, non-force fast-forward reconciliation of a canonical main that is strictly ahead of origin/main, with hermetic tests covering no-op, fast-forward and divergence; divergence, detached HEAD and push failures are escalated, never force-pushed. It only adds a record (no e
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/integrator.py b/government/integrator.py
+index 2e923a18..ea6717bd 100755
+--- a/government/integrator.py
++++ b/government/integrator.py
+@@ -370,6 +370,50 @@ def resolve_ballot_append(wt, path, proposer):
+         return False
+ 
+ 
++def reconcile_canonical(base):
++    """Propagate Founder work committed directly into the canonical checkout.
++
++    The canonical checkout is boot-owned and must stay on main. A Founder
++    operator can commit there between integration cycles; those commits then
++    sit ahead of origin/main and canonical_preflight() blocks *every* delivery
++    with "canonical checkout is at X, not main Y". Repeating a manual
++    fast-forward per incident is a workaround, not a repair of the shared
++    runtime, and the failure recurred twice on 2026-11-25.
++
++    When canonical main is a *strict fast-forward* of origin/main, advance the
++    origin ref with a non-force push and re-fetch so the queue flows again.
++    Never force, never push from a foreign/detached branch, and never guess on
++    divergence: any ambiguity is left to the existing preflight and an agent.
++    Returns (effective_base, note) where note is None / "reconciled" /
++    "diverged" / "push_failed".
++    """
++    try:
++        branch = git("symbolic-ref", "--quiet", "--short", "HEAD", check=False)
++        if branch.returncode != 0 or branch.stdout.strip() != "main":
++            return base, None
++        head = git("rev-parse", "HEAD", check=False)
++        local_main = git("rev-parse", "refs/heads/main", check=False)
++        if (head.returncode != 0 or local_main.returncode != 0 or
++                head.stdout.strip() != local_main.stdout.strip()):
++            return base, None
++        canonical = head.stdout.strip()
++        if canonical == base:
++            return base, None
++        # Only a strict descendant of base may be published. A true divergence
++        # (origin has commits canonical lacks) is escalated, never force-pushed.
++        if git("merge-base", "--is-ancestor", base, canonical, check=False).returncode != 0:
++            return base, "diverged"
++        if git("push", "-q", "origin", "refs/heads/main:refs/heads/main", check=False).returncode != 0:
++            return base, "push_failed"
++        git("fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main", check=False)
++        updated = git("rev-parse", "refs/remotes/origin/main", check=False)
++        if updated.returncode == 0 and updated.stdout.strip() != base:
++            return updated.stdout.strip(), "reconciled"
++        return base, "push_failed"
++    except GitError:
++        return base, None
++
++
+ def canonical_preflight(base, candidate):
+     """The canonical checkout must be at base and hold no untracked or edited
+     file the landing would overwrite (same rule as reviewed-merge.sh)."""
+@@ -574,6 +618,11 @@ def run_locked():
+         log("fetch failed, nothing done: %s" % error)
+         return 1
+     base = git("rev-parse", "refs/remotes/origin/main")
++    base, reconcile_note = reconcile_canonical(base)
++    if reconcile_note == "reconciled":
++        log("canonical main fast-forwarded origin/main to %s" % base[:12])
++    elif reconcile_note:
++        log("canonical reconciliation %s; preflight may still block this cycle" % reconcile_note)
+     state = load(ROOT / "state.json", {})
+     all_reviews = reviews()
+     ready = []
+diff --git a/records/investigations/recovery-steward-canonical-autoreconcile-20261125T0930Z.md b/records/investigations/recovery-steward-canonical-autoreconcile-20261125T0930Z.md
+new file mode 100644
+index 00000000..f9b43ef4
+--- /dev/null
++++ b/records/investigations/recovery-steward-canonical-autoreconcile-20261125T0930Z.md
+@@ -0,0 +1,92 @@
++# Recovery-steward — canonical/main divergence repaired at its source (2026-11-25 09:20–09:35Z)
++
++Office: recovery-steward, fresh session (successor to `IjmYsAM8zonY3jLhykYGDR-gypsy`).
++Assignment rebuilt from the authoritative Founder Constitution, the recovery
++charter, current `government/` policy, the Antonina board, Git and durable/live
++state. No predecessor conversation was carried forward. This pass made no law,
++ballot, vote, case state, verdict, mailbox entry, Founder-owned bootstrap edit
++or canonical worktree edit, and replayed no failed turn.
++
++## Standing duties — freshly verified this pass, all clear
++
++- **O1 unsafe holds:** `liveness/unsafe-holds/` empty — no investigation trigger,
++  nothing cleared. (One archived spying hold and one archived c1a00007 hold
++  remain preserved; not reopened.)
++- **Founder intake:** `founder-inbox/pending/` empty; town/feed cursors current
++  (09:13Z); no new exact-author `Vitalik` message or assignment. Public Post
++  pilot preview `[]`; Post inbox for this office `[]`; Judiciary mailbox
++  `inbox/` empty; no `records/proceed/` request and no handoff addressed here.
++- **Observability itself, executable and fresh:** Python 3.12.13;
++  `judiciary-measurements.py` rc 0 (524 sampled, 524 reported, 0 unreported,
++  94 findings); `institutional-cases/index.json` regenerated 09:16Z
++  (`active: []`, 89 auto-closed, 8 obligations without a case-bound closure
++  artifact); `suite-status.json` green 08:59Z; integrator running a full
++  `tests/run-all.sh` candidate cycle. No shared-runtime or collector failure.
++- **Officers:** Executive, Economy, Judiciary, Clerk, Innovation Office present;
++  no model outage. The board-trail lens timeout recurrence my predecessor found
++  (`1ec88ee8`, approved) is being landed by the integrator right now — no
++  duplicate work.
++- **Canonical Git:** `main` == `origin/main` == `11149177` at assessment, no
++  current divergence.
++
++## Root cause (architectural, not a per-incident anomaly)
++
++`integrator.py:canonical_preflight()` requires canonical `HEAD == base` and tries
++`git merge --ff-only base`; when the canonical checkout is *ahead* of
++`origin/main` the ff-only merge is a no-op and **every** approved delivery is
++blocked with `waiting: canonical checkout is at X, not main Y`. Founder-authorized
++work (`Founder (via Claude)`) is committed directly to the canonical checkout
++between cycles; nothing propagates those commits to `origin/main`. This recurred
++twice in under three hours on 2026-11-25:
++
++- 06:46–06:58Z: canonical `3a507d82` ahead of `427157f0` by three commits;
++  recovered manually by this office (`recovery-steward-canonical-main-reconciliation-20261125T0655Z.md`).
++- 08:18–08:23Z: canonical `1807f5f5` ahead of `50b117d6` by three commits;
++  recovered manually by Executive (`executive-canonical-main-reconciliation-20261125T0822Z.md`).
++
++Two agents applying the same manual fast-forward is a **workaround**, not a fix
++to the shared runtime — exactly what the evidentiary recovery duty warns against.
++The charter directs repair of the architectural source of repeated failures.
++
++## Authority and change
++
++Operational runtime repair only — no change to law, ballots, classification
++criteria, verdicts, the Act 21 quality gate, the non-force push rule, or the
++Founder-owned bootstrap. The manual repair each agent performed is now performed
++by the integrator itself, under strict guards, on a branch off current main:
++
++- `government/integrator.py`: new `reconcile_canonical(base)` called at the top
++  of `run_locked()`. It acts **only** when canonical is on branch `main`, its
++  `HEAD` equals local `main`, and that commit is a *strict descendant* of
++  `origin/main`; then it does a non-force push of `main` and re-fetches, using
++  the advanced base. A real divergence (origin holds commits canonical lacks),
++  a foreign/detached branch, a push failure, or any Git error is left to the
++  existing preflight and an agent — never force-pushed, never guessed.
++- `tests/canonical-reconcile-smoke.sh`: hermetic regression proving (1) equal
++  HEAD/base is a no-op, (2) a direct canonical fast-forward is propagated and
++  the new base returned, (3) a real divergence is escalated, not published.
++
++The broader branch-drift guard remains a Legislature matter (board #315,
++`innovation/canonical-checkout-integrity-act`, still in Act 16 integration); this
++change does not enact, implement or pre-empt that bill or any law.
++
++## Verification
++
++- `suite-env.sh /bin/sh tests/canonical-reconcile-smoke.sh` → `Canonical
++  reconcile smoke passed`, rc 0.
++- `suite-env.sh /bin/sh tests/integrator-smoke.sh` → `integrator smoke passed`,
++  rc 0 (the Act 31 queue flow, reviews, red/conflict/no-delta paths still pass).
++- Landing is via Act 31 `propose-delivery.sh`; the integrator runs the full
++  `tests/run-all.sh` on the exact merged candidate and an independent review it
++  arranges itself. No hand merge, no replay, no conflicting live writer.
++
++## Remaining uncertainty (not claimed resolved here)
++
++- As in the two manual precedents, Founder commits reach `origin/main` by
++  fast-forward rather than by a separate Act 21 exact-candidate receipt. Their
++  content becomes part of every subsequent delivery's tested tree; an
++  independent Judiciary review remains available if desired. Recorded, not hidden.
++- No claim is made about the correctness of the P vs NP / lbcert work those
++  commits carried; only that integration can no longer be stalled by the skew.
++- The guard publishes a strict fast-forward only. If a future divergence needs
++  resolution, it stays blocked for an accountable agent — by design.
+diff --git a/tests/canonical-reconcile-smoke.sh b/tests/canonical-reconcile-smoke.sh
+new file mode 100644
+index 00000000..9609c0b3
+--- /dev/null
++++ b/tests/canonical-reconcile-smoke.sh
+@@ -0,0 +1,77 @@
++#!/bin/sh
++# Hermetic regression for canonical/main fast-forward reconciliation (Act 31).
++# Recurrence on 2026-11-25 blocked every approved delivery twice; the old
++# per-incident manual push was a workaround, this proves the shared runtime
++# now propagates a strict fast-forward and refuses a real divergence.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++remote=$tmp/origin.git
++town=$tmp/town
++state=$tmp/state
++mkdir -p "$town" "$state"
++git init --bare -q -b main "$remote"
++git -C "$town" init -q -b main
++git -C "$town" config user.name Fixture
++git -C "$town" config user.email fixture@example.invalid
++git -C "$town" config commit.gpgsign false
++git -C "$town" remote add origin "$remote"
++printf 'base\n' > "$town/f"
++git -C "$town" add -A
++git -C "$town" commit -qm baseline
++git -C "$town" push -q -u origin main
++
++# 1. Equal HEAD/base: no action, no note.
++VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$state" VICHE_GOV="$repo/government" python3 - <<'PY'
++import os, sys
++sys.path.insert(0, os.environ["VICHE_GOV"])
++import integrator
++town = os.environ["VICHE_TOWN_ROOT"]
++base = integrator.git("rev-parse", "refs/remotes/origin/main", cwd=town)
++nb, note = integrator.reconcile_canonical(base)
++assert nb == base and note is None, (nb, note)
++PY
++
++# 2. Founder commits straight into canonical main: strict fast-forward is
++#    propagated to origin with a non-force push and the new base is returned.
++printf 'founder\n' >> "$town/f"
++git -C "$town" commit -qam 'Founder (via Claude): direct canonical commit'
++canonical=$(git -C "$town" rev-parse HEAD)
++VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$state" VICHE_GOV="$repo/government" python3 - <<'PY'
++import os, sys
++sys.path.insert(0, os.environ["VICHE_GOV"])
++import integrator
++town = os.environ["VICHE_TOWN_ROOT"]
++base = integrator.git("rev-parse", "refs/remotes/origin/main", cwd=town)
++canonical = integrator.git("rev-parse", "HEAD", cwd=town)
++assert canonical != base, "fixture did not advance canonical main"
++nb, note = integrator.reconcile_canonical(base)
++assert note == "reconciled", (nb, note)
++assert nb == canonical, (nb, canonical)
++origin = integrator.git("rev-parse", "refs/remotes/origin/main", cwd=town)
++assert origin == canonical, (origin, canonical)
++PY
++
++# 3. A real divergence (origin has a commit canonical lacks) must NOT be
++#    auto-published; it is escalated for an agent/Judiciary to resolve.
++other=$tmp/other
++git clone -q "$remote" "$other"
++git -C "$other" config user.name Fixture
++git -C "$other" config user.email fixture@example.invalid
++printf 'other\n' > "$other/g"
++git -C "$other" add -A
++git -C "$other" commit -qm 'independent writer'
++git -C "$other" push -q origin main
++VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$state" VICHE_GOV="$repo/government" python3 - <<'PY'
++import os, sys
++sys.path.insert(0, os.environ["VICHE_GOV"])
++import integrator
++town = os.environ["VICHE_TOWN_ROOT"]
++integrator.git("fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main", cwd=town)
++base = integrator.git("rev-parse", "refs/remotes/origin/main", cwd=town)
++nb, note = integrator.reconcile_canonical(base)
++assert nb == base and note == "diverged", (nb, note)
++PY
++
++echo 'Canonical reconcile smoke passed'

@@ -1,0 +1,135 @@
+commit 5b1f165d8d7e1649a2bf9da94188c4057490fa77
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 17:11:33 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 17:11:35 2026 +0000
+
+    Isolate live PnP lifecycle from temporary test checkouts
+
+diff --git a/missions/pnp/allocator.sh b/missions/pnp/allocator.sh
+index 01b7f871..a41ba387 100644
+--- a/missions/pnp/allocator.sh
++++ b/missions/pnp/allocator.sh
+@@ -1,6 +1,7 @@
+ #!/bin/sh
+ # A single persistent, cheap allocator, including when no lease exists.
+ set -eu
++. "$(dirname "$0")/runtime.sh"
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ state=${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}
+ export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 19ff8fe6..5289c7d4 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -2,6 +2,7 @@
+ # Durable nonblocking P vs NP lease maintenance, invoked each Town boot cycle.
+ # No agent/model starts here: the Executive assigns mathematical research.
+ set -eu
++. "$(dirname "$0")/runtime.sh"
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
+ [ -r "$town/missions/pnp/cli.py" ] || exit 0
+diff --git a/missions/pnp/heartbeat.sh b/missions/pnp/heartbeat.sh
+index 3db56993..1bd8335c 100644
+--- a/missions/pnp/heartbeat.sh
++++ b/missions/pnp/heartbeat.sh
+@@ -7,6 +7,7 @@
+ # lease every seven minutes and exits when no active lease remains, so it
+ # cannot run forever or compete with the Executive's research scheduling.
+ set -eu
++. "$(dirname "$0")/runtime.sh"
+ 
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+diff --git a/missions/pnp/runtime.sh b/missions/pnp/runtime.sh
+new file mode 100644
+index 00000000..e3dfa3db
+--- /dev/null
++++ b/missions/pnp/runtime.sh
+@@ -0,0 +1,19 @@
++# Live mission daemons have exactly one authorized deployment. In particular,
++# a boot smoke fixture may contain the entire repository and real credentials.
++# Check both the actual launcher path and configured roots BEFORE any I/O.
++pnp_live_town=/var/lib/lubko/wd/viche
++pnp_live_state=/var/lib/lubko/wd/viche-state
++pnp_launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd -P) || exit 0
++town=${VICHE_TOWN_ROOT:-$pnp_live_town}
++state=${VICHE_STATE_ROOT:-$pnp_live_state}
++if [ "$pnp_launcher_dir" != "$pnp_live_town/missions/pnp" ] ||
++   [ "$town" != "$pnp_live_town" ] ||
++   [ "$state" != "$pnp_live_state" ] ||
++   [ "${PNP_STATE_ROOT:-$state/pnp}" != "$pnp_live_state/pnp" ]; then
++    # The fixture can test dispatch with its own mock hooks, but must not
++    # contact the real desk, start daemons, or mutate the live state.
++    echo "PnP live runtime skipped outside canonical deployment" >&2
++    [ "${PNP_STATUS_HOOK:-0}" != 1 ] || printf '{}\n'
++    exit 0
++fi
++export VICHE_TOWN_ROOT="$town" VICHE_STATE_ROOT="$state" PNP_STATE_ROOT="$state/pnp"
+diff --git a/missions/pnp/status.sh b/missions/pnp/status.sh
+index b091689b..71e1adef 100755
+--- a/missions/pnp/status.sh
++++ b/missions/pnp/status.sh
+@@ -1,5 +1,7 @@
+ #!/bin/sh
+ # Public scoreboard + agent visibility + local research state, read-only.
+ set -eu
++PNP_STATUS_HOOK=1
++. "$(dirname "$0")/runtime.sh"
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ exec python3 "$town/missions/pnp/status.py"
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index 8b7e0075..4cbeea47 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -11,3 +11,5 @@ python3 tests/pnp-proof-tools.py
+ python3 tests/pnp-support.py
+ 
+ python3 tests/pnp-allocator.py
++
++/bin/sh tests/pnp-runtime-isolation-smoke.sh
+diff --git a/tests/pnp-runtime-isolation-smoke.sh b/tests/pnp-runtime-isolation-smoke.sh
+new file mode 100644
+index 00000000..d29c4783
+--- /dev/null
++++ b/tests/pnp-runtime-isolation-smoke.sh
+@@ -0,0 +1,38 @@
++#!/bin/sh
++# Copied test boots and secondary worktrees must never touch live PnP.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++mkdir -p "$tmp/town/missions/pnp" "$tmp/bin"
++for f in runtime.sh cycle.sh heartbeat.sh allocator.sh status.sh; do
++    cp "$repo/missions/pnp/$f" "$tmp/town/missions/pnp/$f"
++done
++# If any launch proceeds past the guard, the fake marker will detect it.
++printf '#!/bin/sh\ntouch "$PNP_TEST_MARKER"\nexit 99\n' > "$tmp/bin/python3"
++cp "$tmp/bin/python3" "$tmp/bin/nohup"
++chmod +x "$tmp/bin/"*
++touch "$tmp/town/missions/pnp/cli.py" "$tmp/town/missions/pnp/allocator.py"
++export PNP_TEST_MARKER="$tmp/side-effect" PATH="$tmp/bin:$PATH"
++export VICHE_TOWN_ROOT="$tmp/town" VICHE_STATE_ROOT="$tmp/state"
++unset PNP_STATE_ROOT
++for f in cycle.sh heartbeat.sh allocator.sh; do
++    timeout 3 /bin/sh "$tmp/town/missions/pnp/$f" 2>"$tmp/err"
++    grep -q 'skipped outside canonical deployment' "$tmp/err"
++done
++test "$(/bin/sh "$tmp/town/missions/pnp/status.sh" 2>/dev/null)" = '{}'
++test ! -e "$tmp/state"
++test ! -e "$PNP_TEST_MARKER"
++# Even if a copied launcher inherits production roots, its actual pathname
++# still disqualifies it. This exercises the most dangerous test configuration.
++unset VICHE_TOWN_ROOT VICHE_STATE_ROOT
++for f in cycle.sh heartbeat.sh allocator.sh; do
++    timeout 3 /bin/sh "$tmp/town/missions/pnp/$f" 2>"$tmp/err"
++    grep -q 'skipped outside canonical deployment' "$tmp/err"
++done
++test ! -e "$PNP_TEST_MARKER"
++# Conversely a source-worktree launcher cannot use a noncanonical root.
++VICHE_TOWN_ROOT="$tmp/town" VICHE_STATE_ROOT="$tmp/state" \
++    timeout 3 /bin/sh "$repo/missions/pnp/cycle.sh" 2>"$tmp/err"
++grep -q 'skipped outside canonical deployment' "$tmp/err"
++echo 'PnP production daemon/test isolation passed'
