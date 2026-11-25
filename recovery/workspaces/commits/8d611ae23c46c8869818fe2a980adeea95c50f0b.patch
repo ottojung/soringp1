@@ -1,0 +1,292 @@
+commit 8d611ae23c46c8869818fe2a980adeea95c50f0b
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Mon Nov 23 03:34:53 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Mon Nov 23 03:34:53 2026 +0000
+
+    Integrate delivery/economy-cumulative-office-cap-revised-20261122 (operator): Reconcile historical Economy 399k finding and enforce its regression in full suite
+    
+    Landed by the integration queue (Act 31) as one candidate on main 0d473cf1d8cf.
+    
+    Delivery-Branch: delivery/economy-cumulative-office-cap-revised-20261122
+    Delivery-Head: 9271c946d4a629f6da6951f548cb320c73498183
+    Proposed-By: operator
+    Reviewed-By: reviewer-nmblmasmyyds6lnyxwqzsz-desultory
+    Review-Reason: Cumulative per-office admission is enforced fail-closed with by_office accounting; full suite and targeted Economy tests pass; no protected files or evidence are removed.
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/knowledge-budget-tool.py b/government/knowledge-budget-tool.py
+index d3a10180..1bbad9f7 100644
+--- a/government/knowledge-budget-tool.py
++++ b/government/knowledge-budget-tool.py
+@@ -316,14 +316,36 @@ def charges(reservations, now, window):
+ 
+ 
+ def admit(cfg, agg, office):
++    """Reserve both per-office AND shared remaining liability, fail closed.
++
++    A per-run cap is not a lifetime spend limit. At 399k tokens already spent,
++    reserving another 400k would exceed the Statistics 400k allowance even
++    though the global allowance of 1.6M remains. The reservation ledger
++    counts held and active full liabilities, not optimistic observed usage.
++    """
+     office_caps = cfg["offices"][office]["caps"]
+     total_caps = cfg["aggregate"]["caps"]
++    by_office = agg.get("by_office")
++    previous = by_office.get(office) if isinstance(by_office, dict) else None
++    if not isinstance(previous, dict):
++        return {"admit": False, "reason": "missing per-office liability"}
+     reasons = []
+     for key in CAP_KEYS:
+-        projected = agg.get(key, 0) + office_caps[key]
+-        if projected > total_caps[key]:
++        global_used = agg.get(key)
++        office_used = previous.get(key)
++        if (any(isinstance(v, bool) or not isinstance(v, (int, float))
++                or not math.isfinite(v) or v < 0
++                for v in (global_used, office_used))):
++            reasons.append("%s accounting is missing or invalid" % key)
++            continue
++        projected_global = global_used + office_caps[key]
++        projected_office = office_used + office_caps[key]
++        if projected_global > total_caps[key]:
+             reasons.append("%s projected %s exceeds aggregate cap %s" %
+-                           (key, projected, total_caps[key]))
++                           (key, projected_global, total_caps[key]))
++        if projected_office > office_caps[key]:
++            reasons.append("%s projected %s exceeds %s office cap %s" %
++                           (key, projected_office, office, office_caps[key]))
+     return {"admit": not reasons, "reason": "; ".join(reasons) or "within caps"}
+ 
+ 
+diff --git a/records/knowledge/2026-11-22-economy-per-request-admission-feasibility.md b/records/knowledge/2026-11-22-economy-per-request-admission-feasibility.md
+index 58b281e8..3e83a4f2 100644
+--- a/records/knowledge/2026-11-22-economy-per-request-admission-feasibility.md
++++ b/records/knowledge/2026-11-22-economy-per-request-admission-feasibility.md
+@@ -1,5 +1,7 @@
+ # Economy — per-request admission/billing-bound feasibility (Act 32/33 Statistics trial)
+ 
++**This is a historical November 22 finding. The office-admission subdefect was subsequently corrected; see the dated correction below. The separate provider-level hard billing HOLD remains.**
++
+ **Office:** Ministry of Economy (Act 29). **Date:** 2026-11-22T18:4xZ. **Type:** source-level +
+ empirical technical evidence answering the Founder's 18:20Z assignment. **NOT** a law, ballot,
+ gate approval, office enablement, Judiciary finding, or claim of a verified strict cap.
+@@ -61,15 +63,15 @@ prompt "Count from 1 to 200, one number per line, then say DONE."; run with `--f
+   `retryAfterMs≈22,902,000` (~6.4 h) — an account-level time quota, not a token cap. (Separate
+   availability fact; `opencode-go` still served the test.)
+ 
+-## 3. Required negative test — 399,000 existing used tokens
++## 3. Required negative test — 399,000 existing used tokens (historical behavior before cumulative office-cap correction)
+ Ran the engine's own deterministic `admit` with an isolated aggregate (no live state):
+ ```
+ admit 399000 -> {"admit": true, "reason": "within caps"}
+ admit 400000 -> {"admit": true}   admit 1200000 -> {"admit": true}
+ ```
+-At 399,000 used tokens the current gate **authorizes another Statistics reservation** (399k +
++At 399,000 used tokens the gate *at the time of this investigation* **authorized another Statistics reservation** (399k +
+ 400k = 799k < 1.6M aggregate). The office's own 400k cap is not checked at admission at all —
+-only the aggregate. **Falsifier of "strict hard cap": achieved.** The next call is unbounded by
++only the aggregate. **Falsifier of the then-current office admission cap: achieved.** The next call was unbounded by
+ anything the engine enforces before launch.
+ 
+ ## 4. Quantitative maximum overrun (current implementation)
+@@ -123,7 +125,7 @@ A genuine strict bound needs a provider/billing control outside this interface:
+ None is available under my authority; I did not create accounts, hold credentials, or spend.
+ 
+ ## 7. Disposition and role boundaries
+-- **HOLD** the Act 32/33 Statistics first trial. The cap is **stop-on-detection, not a strict hard
++- **HOLD** the model-driven Act 32/33 Statistics first trial. The cap is **stop-on-detection, not a strict hard
+   cap**; the 399k negative test and the measured continuation bypass refute a strict-cap claim.
+ - No fix is submitted to Act 31 because no production-enforceable strict bound was demonstrated;
+   a partial gate would be unverifiable and would violate "do not fake proof".
+@@ -138,3 +140,20 @@ None is available under my authority; I did not create accounts, hold credential
+   bundled binary strings.
+ - Empirical: session `ses_dfb743e6affeOBILCRkWVdQDJB` in the read-only Antonina `session_v2`
+   meter; `admit` outputs in §3. Reproducible negative test: `tests/knowledge-budget-admit-negative-20261122.sh`.
++
++## Dated correction — November 22, 2026 (after original measurement)
++
++The preceding negative result and source snapshot remain HISTORICAL
++evidence of the original Economy admission defect. Subsequent fix
++fix/economy-cumulative-office-cap-20261122 at 40545a71
++enforces BOTH cumulative per-office and aggregate caps with fail-closed
++by_office accounting. The updated negative test now rejects another full
++Statistics reservation after 399,000 tokens already charged to Statistics.
++The test executes the CURRENT repository rather than an old worktree.
++Thus section 3's original admit:true must not be described as the live state.
++The source provenance of that earlier measured result remains visible.
++This correction does NOT solve the independent OpenCode per-request
++continuation, post-kill billing, retries, or input token overspending risks
++(sections 2, 4-5). HOLD remains for model-using knowledge offices until
++a provable per-provider-request admission bound is demonstrated.
++The model-free Statistics trial is a separate zero-provider alternative.
+diff --git a/tests/knowledge-budget-admit-negative-20261122.sh b/tests/knowledge-budget-admit-negative-20261122.sh
+index 771f490b..81f247e3 100644
+--- a/tests/knowledge-budget-admit-negative-20261122.sh
++++ b/tests/knowledge-budget-admit-negative-20261122.sh
+@@ -1,35 +1,33 @@
+ #!/bin/sh
+-# Characterization test (POSIX /bin/sh) for the Economy 2026-11-22 per-request
+-# admission finding. Reproduces the exact negative case with the engine's own
+-# deterministic `admit` command, on an isolated in-memory aggregate. Touches no
+-# live state, config, meter, credential or record.
+-#
+-# PASS means the DOCUMENTED GAP IS PRESENT: at 399,000 used tokens the engine
+-# still admits another Statistics reservation. If a fix later makes admit false
+-# here, this test FAILS by design and the finding record must be updated.
++# Regression for the November 22 Economy finding, updated after the
++# cumulative per-office admission bug is fixed. The original empirical
++# result is preserved in records/knowledge; THIS test exercises current
++# source, not an obsolete pinned developer worktree.
++# PASS does not establish strict per-provider-request billing limits:
++# OpenCode continuations can exceed a configured per-step output limit.
+ set -eu
+-TOWN=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche-seats/branches/economy-perrequest-cap-20261122}
+-TOOL="$TOWN/government/knowledge-budget-tool.py"
+-CFG="$TOWN/government/knowledge-budget.conf"
+-[ -f "$TOOL" ] && [ -f "$CFG" ] || { echo "FATAL: tool/config missing" >&2; exit 2; }
+-
+-admit_at() {
+-  _used=$1
+-  _agg=$(printf '{"tokens_total":%s,"cpu_seconds":0,"wall_seconds":0,"counted":[],"skipped":[]}' "$_used")
+-  python3 "$TOOL" admit "$CFG" "$_agg" statistics
+-}
+-
+-t1=$(admit_at 0)
+-t2=$(admit_at 399000)
+-t3=$(admit_at 1200000)
+-printf 'used=0        -> %s\n' "$t1"
+-printf 'used=399000   -> %s\n' "$t2"
+-printf 'used=1200000  -> %s\n' "$t3"
+-
+-v1=$(printf '%s\n' "$t1" | jq -r '.admit')
+-v2=$(printf '%s\n' "$t2" | jq -r '.admit')
+-v3=$(printf '%s\n' "$t3" | jq -r '.admit')
+-[ "$v1" = true ] || { echo "FAIL: sanity admit(0) not true" >&2; exit 1; }
+-[ "$v2" = true ] || { echo "FAIL: documented gap closed at 399000 (update finding)" >&2; exit 1; }
+-[ "$v3" = true ] || { echo "FAIL: documented gap closed at 1200000 (update finding)" >&2; exit 1; }
+-echo "PASS: engine admits a new Statistics reservation at 399000 and 1200000 used tokens (strict-cap claim refuted)."
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++python3 - "$repo" <<'PYTEST'
++import importlib.util, json, sys
++from pathlib import Path
++root=Path(sys.argv[1])
++spec=importlib.util.spec_from_file_location("viche_budget", root/"government/knowledge-budget-tool.py")
++module=importlib.util.module_from_spec(spec)
++spec.loader.exec_module(module)
++cfg=json.loads((root/"government/knowledge-budget.conf").read_text())
++by={office:{k:0 for k in module.CAP_KEYS} for office in module.OFFICES}
++agg={k:0 for k in module.CAP_KEYS}
++agg["by_office"]=by
++assert module.admit(cfg,agg,"statistics")["admit"] is True
++for used in (399000, 400000, 1200000):
++    agg["tokens_total"]=used
++    by["statistics"]["tokens_total"]=used
++    r=module.admit(cfg,agg,"statistics")
++    assert r["admit"] is False, (used,r)
++    assert "statistics office cap" in r["reason"],(used,r)
++for malformed in (None, {}, {"statistics":{}},
++                  {"statistics":{"tokens_total":-1}}):
++    assert module.admit(cfg,{**agg,"by_office":malformed},"statistics")["admit"] is False
++print("PASS: 399000 / 400000 / 1200000 used office tokens refuse another full 400000 reservation")
++print("NOTE: remaining in-flight OpenCode provider billing risk is NOT solved")
++PYTEST
+diff --git a/tests/knowledge-host-cpu-lifecycle-smoke.sh b/tests/knowledge-host-cpu-lifecycle-smoke.sh
+index 687c8924..5cee7fd5 100644
+--- a/tests/knowledge-host-cpu-lifecycle-smoke.sh
++++ b/tests/knowledge-host-cpu-lifecycle-smoke.sh
+@@ -69,6 +69,18 @@ jq -e '.state=="closed" and .meter.cpu_upper_bound==true and
+   "$tmp/state/knowledge/budget/reservations/$r.json" >/dev/null || {
+   echo 'Measured token overrun was not durably accounted' >&2; exit 1;
+ }
++# The first agent exceeded its per-office 150-token allowance. Even though
++# the aggregate budget still has room, repeat office reservations in this
++# SAME accounting window MUST now be refused (cumulative office liability).
++if /bin/sh "$engine" reserve statistics too-many >/dev/null 2>&1; then
++  echo 'FAIL: spent office quota was silently reset by a new reservation' >&2
++  exit 1
++fi
++# Test the separate kill-failure outcome under a FRESH isolated budget
++# fixture. Do not delete or reset the first fixture's source-attested debit.
++# An ordinary production office must not restart until Economy allocates more.
++export VICHE_STATE_ROOT="$tmp/state-second"
++mkdir -p "$VICHE_STATE_ROOT"
+ # A kill command that exits nonzero or leaves the backend running must
+ # NEVER release the cap. Stop verification is independent of kill invocation.
+ export TEST_KILL_FAIL=yes
+@@ -79,14 +91,14 @@ r2=$(/bin/sh "$engine" reserve statistics test-agent-2)
+ /bin/sh "$engine" start "$r2" test-agent-2 >/dev/null
+ held=no
+ for attempt in 1 2 3 4 5 6 7 8; do
+-  state=$(jq -r '.state' "$tmp/state/knowledge/budget/reservations/$r2.json")
++  state=$(jq -r '.state' "$VICHE_STATE_ROOT/knowledge/budget/reservations/$r2.json")
+   if [ "$state" = held ]; then held=yes; break; fi
+   sleep 1
+ done
+ [ "$held" = yes ] || { echo 'Failed termination released or stranded reservation' >&2; exit 1; }
+ jq -e '.state=="held" and .charge.tokens_total==150 and
+         .held_reason=="agent_still_active_or_unknown_after_stop"' \
+-        "$tmp/state/knowledge/budget/reservations/$r2.json" >/dev/null || {
++        "$VICHE_STATE_ROOT/knowledge/budget/reservations/$r2.json" >/dev/null || {
+   echo 'Failed stop did not retain full reservation' >&2; exit 1;
+ }
+ if /bin/sh "$engine" reserve statistics agent-3 >/dev/null 2>&1; then
+diff --git a/tests/knowledge-office-cumulative-admission-smoke.sh b/tests/knowledge-office-cumulative-admission-smoke.sh
+new file mode 100644
+index 00000000..6cc4b142
+--- /dev/null
++++ b/tests/knowledge-office-cumulative-admission-smoke.sh
+@@ -0,0 +1,37 @@
++#!/bin/sh
++# A 400k per-Statistics-accounting-window budget is NOT a 400k per-run cap
++# that can be reset by repeating a reservation inside the same window.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++python3 - "$repo" <<'PY'
++import sys,importlib.util,json
++from pathlib import Path
++root=Path(sys.argv[1])
++spec=importlib.util.spec_from_file_location("budget",root/"government/knowledge-budget-tool.py")
++m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
++cfg=json.loads((root/"government/knowledge-budget.conf").read_text())
++by={key:{k:0 for k in m.CAP_KEYS} for key in m.OFFICES}
++agg={k:0 for k in m.CAP_KEYS}
++agg["by_office"]=by
++assert m.admit(cfg,agg,"statistics")["admit"] is True
++agg["tokens_total"]=399000
++by["statistics"]["tokens_total"]=399000
++r=m.admit(cfg,agg,"statistics")
++assert not r["admit"] and "statistics office cap" in r["reason"],r
++# Using a different office does not inherit Statistics' private usage.
++r=m.admit(cfg,agg,"foresight")
++assert r["admit"] is True,r
++# But the shared Economy ceiling still counts both offices.
++agg["tokens_total"]=1300000
++r=m.admit(cfg,agg,"foresight")
++assert not r["admit"] and "aggregate cap" in r["reason"],r
++agg["tokens_total"]=0
++by["statistics"]["tokens_total"]=0
++by["statistics"]["cpu_seconds"]=1799
++r=m.admit(cfg,agg,"statistics")
++assert not r["admit"] and "statistics office cap" in r["reason"],r
++# A missing or negative ledger is uncertainty, not zero.
++for bad in (None, {}, {"statistics":{}}, {"statistics":{"tokens_total":-1}}):
++ assert not m.admit(cfg,{**agg,"by_office":bad},"statistics")["admit"]
++print("Economy cumulative per-office + global guard denies 399000+400000, missing and corrupt counts")
++PY
+diff --git a/tests/run-all.sh b/tests/run-all.sh
+index 2f642aed..de4ad1fb 100644
+--- a/tests/run-all.sh
++++ b/tests/run-all.sh
+@@ -23,6 +23,11 @@ python3 tests/audit-act27-legacy-smoke.py
+ printf '\nRunning tests/test_spying_source_allowlist.py\n'
+ python3 tests/test_spying_source_allowlist.py
+ 
++# Preserve the formerly excluded Economy 399k token regression in every
++# exact-candidate suite, not just as a separately run characterization test.
++printf '\nRunning tests/knowledge-budget-admit-negative-20261122.sh\n'
++dash tests/knowledge-budget-admit-negative-20261122.sh
++
+ for script in tests/*-smoke.sh tests/ballot-integrity.sh; do
+     printf '\nRunning %s\n' "$script"
+     dash "$script"

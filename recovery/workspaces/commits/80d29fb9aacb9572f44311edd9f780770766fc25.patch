@@ -1,0 +1,343 @@
+commit 80d29fb9aacb9572f44311edd9f780770766fc25
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 22:23:40 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 22:23:40 2026 +0000
+
+    Prepare fail-closed Act34 parity v3 certified verifier
+
+diff --git a/government/knowledge-act34-certified-gate.py b/government/knowledge-act34-certified-gate.py
+new file mode 100755
+index 00000000..f4a0aa2b
+--- /dev/null
++++ b/government/knowledge-act34-certified-gate.py
+@@ -0,0 +1,180 @@
++#!/usr/bin/env python3
++"""Opt-in Act34 v3 certified control verifier; never a replacement for legacy."""
++import hashlib
++import importlib.util
++import json
++from pathlib import Path
++import re
++import subprocess
++import sys
++
++sys.dont_write_bytecode = True
++OFFICES = ("statistics", "foresight", "strategy", "spying")
++ID = "act34-common-zero-billed-controls-v1"
++CONTROL_SET = "act34-free-dispatch-controls-v1"
++GATE_ID = "act34-economy-free-provider-control"
++BILL_SHA = "5aed6101425568af6111b0bc6a85a85ce5733cae29254f30ccb90db240a109e9"
++CONTROLS = {
++    "wrapper_sha256": "government/knowledge-free-dispatch.sh",
++    "negative_test_sha256": "tests/knowledge-free-dispatch-smoke.sh",
++    "bounds_sha256": "government/knowledge-practical-bounds.py",
++    "zero_billed_policy_sha256": "government/knowledge-zero-billed-policy.json",
++    "zero_billed_verifier_sha256": "government/knowledge-zero-billed.py",
++    "gate_sha256": "government/knowledge-act34-gate.py",
++    "cycle_sha256": "government/knowledge-office-cycle.sh",
++    "provider_snapshot_sha256": "records/economy/evidence/2026-11-24-provider-models.json",
++}
++
++
++def fail(reason):
++    print("Act34 certified HOLD: " + str(reason)[:300], file=sys.stderr)
++    return 1
++
++
++def digest(data):
++    return hashlib.sha256(data).hexdigest()
++
++
++def committed(root, rel):
++    path = root / rel
++    raw = path.read_bytes()
++    git = subprocess.run(["git", "-C", str(root), "show", "HEAD:" + rel],
++                         check=True, capture_output=True, timeout=8).stdout
++    if raw != git:
++        raise ValueError("working bytes differ from HEAD: " + rel)
++    return digest(raw)
++
++
++def json_file(root, rel):
++    return json.loads((root / rel).read_text(encoding="utf-8"))
++
++
++def check(office, root):
++    if office not in OFFICES:
++        raise ValueError("unknown office")
++    laws = (root / "government/LAWS.md").read_text(encoding="utf-8")
++    headings = [line for line in laws.splitlines() if line.startswith("## Act 35 — Knowledge Offices Ordinary Funding and Operations Parity Act 2026")]
++    if len(headings) != 1 or "(enacted " not in headings[0]:
++        raise ValueError("Act34 parity v3 is not genuinely enacted on this source")
++    committed(root, "government/LAWS.md")
++    bill = root / "records/bills/act34-ordinary-funding-operations-parity-v3.md"
++    if committed(root, "records/bills/act34-ordinary-funding-operations-parity-v3.md") != BILL_SHA:
++        raise ValueError("filed v3 bill bytes/digest mismatch")
++    # Require the actual incorporated bill text in LAWS, not just an asserted heading.
++    enacted = laws.split(headings[0], 1)[1]
++    if BILL_SHA not in enacted or bill.read_text(encoding="utf-8") not in enacted:
++        raise ValueError("exact v3 bill text not incorporated into enacted LAWS")
++
++    # These legacy files are shared implementations. Certify their exact current
++    # committed bytes independently; gate byte is deliberately not self-hashed.
++    for rel in ("government/knowledge-act34-gate.py", "government/knowledge-phase-verifier.py",
++                "government/knowledge-zero-billed.py"):
++        committed(root, rel)
++
++    activation_rel = "records/knowledge/activation.json"
++    committed(root, activation_rel)
++    activation = json_file(root, activation_rel)
++    act_num = int(re.match(r"^## Act ([0-9]+)", headings[0]).group(1))
++    a = activation.get("offices", {}).get(office, {})
++    permit_rel = "records/knowledge/permits/" + office + ".json"
++    permit_sha = committed(root, permit_rel)
++    permit = json_file(root, permit_rel)
++    now = __import__("time").time()
++    start, expires = a.get("not_before"), a.get("expires_at")
++    if (activation.get("schema") != "viche-knowledge-activation-v1" or
++            a.get("enabled") is not True or a.get("authorized_by") != "act:%d:%s" % (act_num, office) or
++            type(start) is not int or type(expires) is not int or
++            not start <= now < expires or not 0 < expires-start <= 45*86400 or
++            a.get("permit_ref") != permit_rel or a.get("permit_sha256") != permit_sha):
++        raise ValueError("missing, expired, or wrong-identity activation")
++    budget_rel = "government/knowledge-budget.conf"
++    budget_sha = committed(root, budget_rel)
++    cfg = json_file(root, budget_rel)
++    caps = cfg.get("offices", {}).get(office, {})
++    if (caps.get("enabled") is not True or permit.get("schema") != "viche-act34-operating-permit-v1" or
++            permit.get("office") != office or permit.get("signer") != "c1e00002" or
++            permit.get("authorized_by") != "act:%d:%s" % (act_num, office) or
++            permit.get("not_before") != start or permit.get("expires_at") != expires or
++            permit.get("budget_sha256") != budget_sha or permit.get("caps") != caps.get("caps") or
++            permit.get("signature_status") != "signed" or
++            permit.get("provider_budget_mode") != "zero-billed-runtime-allowlist" or
++            permit.get("provider_tier") != "free_only" or
++            permit.get("inflight_overrun_risk_disclosed") is not True or
++            permit.get("cancellation") != "stop-agent-and-hold-budget" or
++            permit.get("reboot_recovery") != "reconcile-held-liability"):
++        raise ValueError("Executive permit/budget controls invalid")
++    v3 = permit.get("control_certification")
++    if v3 != {"certification_id": ID, "control_set": CONTROL_SET,
++              "ref": "records/economy/act34-control-certification.json", "gate_id": GATE_ID}:
++        raise ValueError("permit did not explicitly select exact certified route")
++
++    certification_rel = "records/economy/act34-control-certification.json"
++    cert_sha = committed(root, certification_rel)
++    cert = json_file(root, certification_rel)
++    if (cert.get("certification_id") != ID or cert.get("control_set") != CONTROL_SET or
++            cert.get("gate_id") != GATE_ID or type(cert.get("not_before")) is not int or
++            type(cert.get("expires_at")) is not int or
++            not cert["not_before"] <= now < cert["expires_at"]):
++        raise ValueError("certification identity or validity window invalid")
++    actual = {key: committed(root, rel) for key, rel in CONTROLS.items()}
++    if cert.get("controls") != actual:
++        raise ValueError("certified control bytes mismatch")
++    combined = digest(json.dumps(actual, sort_keys=True, separators=(",", ":")).encode())
++    if cert.get("control_digest") != combined:
++        raise ValueError("control-set digest mismatch")
++
++    # The stable policy digest binds exact parsed content and exact rejection vector.
++    policy = json_file(root, "government/knowledge-zero-billed-policy.json")
++    spec = importlib.util.spec_from_file_location("act34_certified_zero", root / "government/knowledge-zero-billed.py")
++    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
++    snapshot = policy.get("snapshot_ref")
++    if not isinstance(snapshot, str) or not re.fullmatch(r"records/economy/evidence/[A-Za-z0-9_.-]+[.]json", snapshot):
++        raise ValueError("provider snapshot reference invalid")
++    paths = {"wrapper": root / CONTROLS["wrapper_sha256"],
++             "zero_billed_policy": root / CONTROLS["zero_billed_policy_sha256"],
++             "bounds": root / CONTROLS["bounds_sha256"],
++             "negative_test": root / CONTROLS["negative_test_sha256"],
++             "verifier": root / CONTROLS["zero_billed_verifier_sha256"],
++             "gate": root / CONTROLS["gate_sha256"],
++             "cycle": root / CONTROLS["cycle_sha256"],
++             "provider_snapshot": root / CONTROLS["provider_snapshot_sha256"]}
++    expected = mod.negative_acceptance_digest(paths)
++    if cert.get("policy_digest") != expected or permit.get("negative_acceptance_digest") != expected:
++        raise ValueError("stable policy digest differs from exact current policy/control binding")
++    mod.load_verified(root / "government/knowledge-zero-billed-policy.json", snapshot_path=root / snapshot)
++    allow = mod.authorized_models(mod.global_config_path())
++    mod.verified_subset(root / "government/knowledge-zero-billed-policy.json", allow,
++                        snapshot_path=root / snapshot)
++    # Ensure every record control and exact policy input are on current committed bytes.
++    for rel in ("government/knowledge-zero-billed-policy.json", snapshot):
++        committed(root, rel)
++
++    evidence = activation.get("economy_free_tier_evidence", {})
++    cert_origin = evidence.get("certification_origin_commit")
++    if evidence.get("certification_ref") != certification_rel or evidence.get("certification_sha256") != cert_sha:
++        raise ValueError("activation certification evidence missing/stale")
++    # Outside-record evidence avoids a self-referential digest. It commits to
++    # the exact certification blob and is independently corroborated by Economy.
++    helper_path = root / "government/knowledge-act34-certified-helpers.py"
++    committed(root, "government/knowledge-act34-certified-helpers.py")
++    spec = importlib.util.spec_from_file_location("act34_certified_helpers", helper_path)
++    helpers = importlib.util.module_from_spec(spec); spec.loader.exec_module(helpers)
++    attest = helpers.attest
++    attest(root, "economy", "c1e00012", certification_rel, cert_origin,
++           cert_sha, evidence.get("attestation"), GATE_ID)
++
++    # Keep pre-existing Executive and Judiciary gates; the certified path does not bypass them.
++    helpers.legacy_checks(root, office, a, permit, permit_sha, start, now)
++
++
++def main():
++    if len(sys.argv) != 3:
++        return fail("usage: knowledge-act34-certified-gate.py OFFICE TOWN_ROOT")
++    try:
++        check(sys.argv[1], Path(sys.argv[2]).resolve()); return 0
++    except Exception as exc:
++        return fail(exc)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/government/knowledge-act34-certified-helpers.py b/government/knowledge-act34-certified-helpers.py
+new file mode 100755
+index 00000000..d6837233
+--- /dev/null
++++ b/government/knowledge-act34-certified-helpers.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python3
++"""Reviewed shared routines for Act34 certification (separate from legacy gate)."""
++import hashlib
++import importlib.util
++import json
++from pathlib import Path
++import re
++import subprocess
++
++
++def committed(root, rel):
++    path = root / rel
++    raw = path.read_bytes()
++    head = subprocess.run(["git", "-C", str(root), "show", "HEAD:" + rel],
++                          check=True, capture_output=True, timeout=8).stdout
++    if raw != head:
++        raise ValueError("unreviewed bytes: " + rel)
++    return hashlib.sha256(raw).hexdigest()
++
++
++def attest(root, role, officer, ref, commit, digest, attestation, gate_id):
++    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{7,40}", commit):
++        raise ValueError("origin commit missing")
++    if committed(root, ref) != digest:
++        raise ValueError("artifact digest mismatch")
++    raw = subprocess.run(["git", "-C", str(root), "show", commit + ":" + ref],
++                         check=True, capture_output=True, timeout=8).stdout
++    if hashlib.sha256(raw).hexdigest() != digest:
++        raise ValueError("origin commit does not contain exact artifact")
++    module = root / "government/knowledge-phase-verifier.py"
++    committed(root, "government/knowledge-phase-verifier.py")
++    spec = importlib.util.spec_from_file_location("act34_cert_phase", module)
++    verifier = importlib.util.module_from_spec(spec); spec.loader.exec_module(verifier)
++    errors = verifier.Verifier(str(root)).validate_attestation(
++        attestation, gate_id=gate_id, officer_id=officer, role=role,
++        artifact_commit=commit, historical=True)
++    if errors:
++        raise ValueError("unverified %s certification: %s" % (role, "; ".join(errors)[:250]))
++
++
++def legacy_checks(root, office, activation, permit, permit_sha, start, now):
++    # Reuse the exact old permit and Judiciary checks without invoking old
++    # zero-cost byte-hash checks that v3 intentionally replaces.
++    attestation = activation.get("permit_attestation")
++    attest(root, "executive", "c1e00002",
++           "records/knowledge/permits/%s.json" % office,
++           activation.get("permit_origin_commit"), permit_sha, attestation,
++           "act34-executive-" + office)
++    review_rel = "records/knowledge/pilot-reviews/%s.json" % office
++    review_path = root / review_rel
++    if review_path.exists():
++        review_sha = committed(root, review_rel)
++        rev = json.loads(review_path.read_text(encoding="utf-8"))
++        reviewed = rev.get("reviewed_at")
++        if (rev.get("schema") != "viche-act34-judiciary-review-v1" or
++                rev.get("office") != office or rev.get("reviewer") != "c1e00008" or
++                rev.get("permit_sha256") != permit_sha or type(reviewed) is not int or
++                not start <= reviewed < start + 48*3600 or reviewed > now):
++            raise ValueError("uncorroborated or stale Judiciary disposition")
++        auth_rel = "records/knowledge/pilot-reviews/%s-attestation.json" % office
++        committed(root, auth_rel)
++        auth = json.loads((root / auth_rel).read_text(encoding="utf-8"))
++        attest(root, "judiciary", "c1e00008", review_rel,
++               auth.get("artifact_commit"), review_sha, auth.get("attestation"),
++               "act34-judiciary-" + office)
++        if rev.get("decision") != "proceed":
++            raise ValueError("Judiciary HOLD/STOP")
++    elif now >= start + 48*3600:
++        raise ValueError("Judiciary review missing after original permit start")
++    if office == "spying" and not (root / "records/knowledge/spying-source-scope.json").is_file():
++        raise ValueError("Spying permitted source-scope bundle absent")
+diff --git a/government/knowledge-activation-verify.sh b/government/knowledge-activation-verify.sh
+index c7b34c3d..48f44d40 100644
+--- a/government/knowledge-activation-verify.sh
++++ b/government/knowledge-activation-verify.sh
+@@ -31,6 +31,22 @@ laws=$town/government/LAWS.md
+ # Judiciary stop, with exact office/hash/term matching.
+ if grep -Eq '^## Act 34 — Rapid Full Institutional Activation and Continuous Improvement Act \(enacted ' "$laws"; then
+     [ -s "$town/government/knowledge-act34-gate.py" ] || exit 1
++    activation=$town/records/knowledge/activation.json
++    permit_ref=$(jq -er --arg office "$office" '
++      .offices[$office].permit_ref | select(type == "string")
++    ' "$activation") || exit 1
++    permit=$town/$permit_ref
++    [ -s "$permit" ] || exit 1
++    # The v3 verifier is opt-in per durable Executive permit and is unavailable
++    # until the exact Act 35 text is genuinely enacted. Legacy bytes/path stay intact.
++    if jq -e '.control_certification != null' "$permit" >/dev/null 2>&1; then
++      if grep -Eq '^## Act 35 — Knowledge Offices Ordinary Funding and Operations Parity Act 2026 \(enacted ' "$laws"; then
++        [ -s "$town/government/knowledge-act34-certified-gate.py" ] || exit 1
++        timeout 30 python3 "$town/government/knowledge-act34-certified-gate.py" "$office" "$town"
++        exit $?
++      fi
++      exit 1
++    fi
+     timeout 20 python3 "$town/government/knowledge-act34-gate.py" "$office" "$town"
+     exit $?
+ fi
+diff --git a/tests/knowledge-act34-parity-v3-refusal-smoke.sh b/tests/knowledge-act34-parity-v3-refusal-smoke.sh
+new file mode 100755
+index 00000000..f3ae8736
+--- /dev/null
++++ b/tests/knowledge-act34-parity-v3-refusal-smoke.sh
+@@ -0,0 +1,39 @@
++#!/bin/sh
++# Pre-enactment certified permits must fail closed; legacy permits still use
++# the unchanged Act34 gate. This fixture never creates approval or certification.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++town=$d/town
++mkdir -p "$town/government" "$town/records/knowledge/permits"
++cp "$repo/government/knowledge-activation-verify.sh" "$town/government/"
++cp "$repo/government/knowledge-act34-gate.py" "$town/government/"
++cp "$repo/government/knowledge-act34-certified-gate.py" "$town/government/"
++cat > "$town/government/LAWS.md" <<'EOF'
++## Act 34 — Rapid Full Institutional Activation and Continuous Improvement Act (enacted 2026-11-23)
++EOF
++cat > "$town/records/knowledge/activation.json" <<'EOF'
++{"offices":{"statistics":{"permit_ref":"records/knowledge/permits/statistics.json"}}}
++EOF
++cat > "$town/records/knowledge/permits/statistics.json" <<'EOF'
++{"control_certification":{"certification_id":"act34-common-zero-billed-controls-v1"}}
++EOF
++if VICHE_TOWN_ROOT="$town" /bin/sh "$town/government/knowledge-activation-verify.sh" statistics >/dev/null 2>&1; then
++  echo 'FAIL: certified path accepted before Act 35 enactment' >&2; exit 1
++fi
++echo 'PASS: certified permit refused before enactment'
++# A permit without the opt-in key reaches precisely the old verifier invocation.
++cat > "$town/records/knowledge/permits/statistics.json" <<'EOF'
++{}
++EOF
++cat > "$town/government/knowledge-act34-gate.py" <<'EOF'
++import sys
++assert sys.argv[1] == 'statistics'
++assert sys.argv[2].endswith('/town')
++EOF
++chmod +x "$town/government/knowledge-act34-gate.py"
++if ! VICHE_TOWN_ROOT="$town" /bin/sh "$town/government/knowledge-activation-verify.sh" statistics >/dev/null 2>&1; then
++  echo 'FAIL: legacy route changed' >&2; exit 1
++fi
++echo 'PASS: legacy permit remains on prior gate route'

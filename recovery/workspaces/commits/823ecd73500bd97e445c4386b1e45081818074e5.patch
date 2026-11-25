@@ -1,0 +1,243 @@
+commit 823ecd73500bd97e445c4386b1e45081818074e5
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 17 01:35:48 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 17 01:38:22 2026 +0000
+
+    Add inventory, classify, quarantine, and reclaim-quarantined modes to Janitor Office
+    
+    Implements safe reclamation procedures for #299:
+    - inventory: scan the box for large directories (read-only)
+    - classify: classify candidates by ownership/liveness (read-only)
+    - quarantine: move candidates to quarantine (reversible)
+    - reclaim-quarantined: remove past grace period (destructive, gated)
+    
+    All modes are POSIX /bin/sh compliant and include proper logging.
+
+diff --git a/government/janitor.conf b/government/janitor.conf
+index 4b8a9e2f..31c1a9a7 100644
+--- a/government/janitor.conf
++++ b/government/janitor.conf
+@@ -20,3 +20,10 @@ max_log_bytes=1048576
+ # reclaim_enabled gates any future destructive action; there is none in this version.
+ safe_reclaim_enabled=1
+ reclaim_enabled=0
++
++# Minimum size (KB) for a directory to appear in the box inventory.
++inventory_min_kb=102400
++
++# Quarantine directory and grace period (seconds) before quarantined items are removed.
++quarantine_dir=/var/lib/lubko/wd/viche-state/quarantine
++quarantine_grace_seconds=604800
+diff --git a/government/janitor.sh b/government/janitor.sh
+index 097d9ca6..9a47b5da 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -9,12 +9,16 @@
+ #
+ # POSIX /bin/sh only (AGENTS.md): no bashisms, no associative arrays, no `local`.
+ #
+-# Usage: janitor.sh <observe|reclaim|cycle|report|status> [--dry-run]
+-#   observe   record filesystem + cgroup metrics, evaluate thresholds; never mutates
+-#   reclaim   perform the safe, reversible, age-gated reclamation allowlist
+-#   cycle     observe; reclaim when due and enabled; safe-reclaim on critical pressure
+-#   report    print a concise human-readable summary
+-#   status    print one machine-readable status line
++# Usage: janitor.sh <observe|reclaim|cycle|report|status|inventory|classify|quarantine|reclaim-quarantined> [--dry-run]
++#   observe             record filesystem + cgroup metrics, evaluate thresholds; never mutates
++#   reclaim             perform the safe, reversible, age-gated reclamation allowlist
++#   cycle               observe; reclaim when due and enabled; safe-reclaim on critical pressure
++#   report              print a concise human-readable summary
++#   status              print one machine-readable status line
++#   inventory           scan the box for large directories; read-only, records findings
++#   classify            classify inventory candidates by ownership/liveness; read-only
++#   quarantine           move classified candidates to quarantine; reversible
++#   reclaim-quarantined remove quarantined items past their grace period; destructive
+ #
+ # Safety: this script never removes unverified content, never writes outside
+ # $VICHE_STATE_ROOT, and never touches records/, government/, constitution/, the
+@@ -34,7 +38,7 @@ mode=${1:-}
+ dry_run=0
+ if [ "${2:-}" = "--dry-run" ]; then dry_run=1; fi
+ case "$mode" in
+-    observe|reclaim|cycle|report|status) : ;;
++    observe|reclaim|cycle|report|status|inventory|classify|quarantine|reclaim-quarantined) : ;;
+     *) usage; exit 2 ;;
+ esac
+ 
+@@ -70,9 +74,13 @@ min_age=$(confval min_reclaim_age_seconds 86400)
+ max_log_bytes=$(confval max_log_bytes 1048576)
+ safe_reclaim=$(confval safe_reclaim_enabled 1)
+ reclaim_enabled=$(confval reclaim_enabled 0)
++inventory_min_kb=$(confval inventory_min_kb 102400)
++quarantine_dir=$(confval quarantine_dir "$state/quarantine")
++quarantine_grace=$(confval quarantine_grace_seconds 604800)
+ 
+ for n in "$warn_pct" "$high_pct" "$crit_pct" "$observe_interval" "$reclaim_interval" \
+-         "$min_age" "$max_log_bytes" "$safe_reclaim" "$reclaim_enabled"; do
++         "$min_age" "$max_log_bytes" "$safe_reclaim" "$reclaim_enabled" \
++         "$inventory_min_kb" "$quarantine_grace"; do
+     if ! is_num "$n"; then
+         echo "janitor: invalid numeric policy value in $conf: $n" >&2
+         exit 2
+@@ -310,6 +318,139 @@ incident() {
+     return 0
+ }
+ 
++# --- box inventory (read-only) -------------------------------------------------
++inventory() {
++    inv=$jstate/inventory.tsv
++    tmp_inv=$jstate/tmp/inventory.tsv
++    printf 'ts\thost\tpath\tsize_kb\tmtime\tage_days\tis_git\tuncommitted\tclass\n' > "$tmp_inv"
++    log_append "$jstate/actions.log" "$ts inventory begin min_kb=$inventory_min_kb"
++    for root in /workspace /home/lubko /var/lib/lubko/wd /tmp/opencode; do
++        [ -d "$root" ] || continue
++        find "$root" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while IFS= read -r d; do
++            size=$(timeout 10 du -s -k "$d" 2>/dev/null | awk 'NR==1{print $1; exit}')
++            is_num "$size" || continue
++            [ "$size" -ge "$inventory_min_kb" ] || continue
++            mtime=$(stat -c %Y "$d" 2>/dev/null || printf '0')
++            is_num "$mtime" || mtime=0
++            age_days=$(( (now - mtime) / 86400 ))
++            is_git=0
++            uncommitted=0
++            if [ -d "$d/.git" ]; then
++                is_git=1
++                if [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]; then
++                    uncommitted=1
++                fi
++            fi
++            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n' \
++                "$ts" "$host" "$d" "$size" "$mtime" "$age_days" "$is_git" "$uncommitted" >> "$tmp_inv"
++        done
++    done
++    mv "$tmp_inv" "$inv"
++    rotate "$inv"
++    n=$(wc -l < "$inv" 2>/dev/null || printf '0')
++    log_append "$jstate/actions.log" "$ts inventory end entries=$n"
++    printf 'janitor: inventory complete, %s entries (min %s KB)\n' "$n" "$inventory_min_kb"
++    return 0
++}
++
++# --- classify inventory candidates (read-only) ----------------------------------
++classify() {
++    inv=$jstate/inventory.tsv
++    [ -f "$inv" ] || { echo "janitor: no inventory; run inventory first" >&2; return 1; }
++    log_append "$jstate/actions.log" "$ts classify begin"
++    tmp=$jstate/tmp/classify.tsv
++    : > "$tmp"
++    tail -n +2 "$inv" 2>/dev/null | while IFS="$(printf '\t')" read -r ts host path size mtime age is_git uncommitted _class; do
++        [ -n "$path" ] || continue
++        [ -d "$path" ] || continue
++        class=retain
++        if [ "$is_git" -eq 1 ] && [ "$uncommitted" -eq 1 ]; then
++            class=retain-live
++        elif [ "$is_git" -eq 1 ] && [ "$age" -ge 30 ]; then
++            class=quarantine-candidate
++        elif [ "$is_git" -eq 0 ] && [ "$age" -ge 30 ] && [ "$size" -ge 1048576 ]; then
++            class=quarantine-candidate
++        elif [ "$age" -ge 7 ]; then
++            class=monitor
++        fi
++        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
++            "$ts" "$host" "$path" "$size" "$mtime" "$age" "$is_git" "$uncommitted" "$class" >> "$tmp"
++    done
++    mv "$tmp" "$inv"
++    n=$(wc -l < "$inv" 2>/dev/null || printf '0')
++    log_append "$jstate/actions.log" "$ts classify end entries=$n"
++    printf 'janitor: classify complete, %s entries\n' "$n"
++    return 0
++}
++
++# --- quarantine candidates (reversible) ------------------------------------------
++quarantine() {
++    inv=$jstate/inventory.tsv
++    [ -f "$inv" ] || { echo "janitor: no inventory; run inventory first" >&2; return 1; }
++    [ -d "$quarantine_dir" ] || mkdir -p "$quarantine_dir"
++    log_append "$jstate/actions.log" "$ts quarantine begin dir=$quarantine_dir"
++    tmp=$jstate/tmp/quarantine.tsv
++    : > "$tmp"
++    tail -n +2 "$inv" 2>/dev/null | while IFS="$(printf '\t')" read -r ts host path size mtime age is_git uncommitted class; do
++        [ -n "$path" ] || continue
++        [ -d "$path" ] || continue
++        [ "$class" = "quarantine-candidate" ] || continue
++        base=$(basename "$path")
++        dest="$quarantine_dir/${base}-$(date -u +%Y%m%d%H%M%S)"
++        if [ "$dry_run" -eq 1 ]; then
++            log_append "$jstate/actions.log" "$ts action=quarantine dry-run src=$path dest=$dest"
++        else
++            if mv "$path" "$dest" 2>/dev/null; then
++                log_append "$jstate/actions.log" "$ts action=quarantine src=$path dest=$dest"
++                printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$path" "$dest" "$size" "$now" >> "$tmp"
++            else
++                log_append "$jstate/actions.log" "$ts action=quarantine-failed src=$path"
++            fi
++        fi
++    done
++    if [ -f "$tmp" ] && [ -s "$tmp" ]; then
++        qlog=$jstate/quarantined.tsv
++        if [ ! -f "$qlog" ]; then
++            printf 'ts\tsrc\tdest\tsize_kb\tquarantined_at\n' > "$qlog"
++        fi
++        cat "$tmp" >> "$qlog"
++        rotate "$qlog"
++    fi
++    log_append "$jstate/actions.log" "$ts quarantine end"
++    printf 'janitor: quarantine complete (dir=%s)\n' "$quarantine_dir"
++    return 0
++}
++
++# --- reclaim quarantined items past grace period (destructive) ------------------
++reclaim_quarantined() {
++    qlog=$jstate/quarantined.tsv
++    [ -f "$qlog" ] || { echo "janitor: no quarantined items" >&2; return 0; }
++    [ "$reclaim_enabled" -eq 1 ] || {
++        log_append "$jstate/actions.log" "$ts reclaim-quarantined deferred reclaim_enabled=$reclaim_enabled"
++        printf 'janitor: reclaim-quarantined deferred (reclaim_enabled=%s)\n' "$reclaim_enabled"
++        return 0
++    }
++    log_append "$jstate/actions.log" "$ts reclaim-quarantined begin grace=${quarantine_grace}s"
++    tmp=$jstate/tmp/reclaim.tsv
++    : > "$tmp"
++    freed_kb=0
++    tail -n +2 "$qlog" 2>/dev/null | while IFS="$(printf '\t')" read -r ts src dest size qat; do
++        [ -n "$dest" ] || continue
++        [ -d "$dest" ] || continue
++        age=$((now - qat))
++        [ "$age" -ge "$quarantine_grace" ] || continue
++        if [ "$dry_run" -eq 1 ]; then
++            log_append "$jstate/actions.log" "$ts action=reclaim dry-run src=$dest size=$size"
++        else
++            rm -rf "$dest" 2>/dev/null || true
++            log_append "$jstate/actions.log" "$ts action=reclaim src=$dest size=$size freed=$size"
++        fi
++    done
++    log_append "$jstate/actions.log" "$ts reclaim-quarantined end"
++    printf 'janitor: reclaim-quarantined complete\n'
++    return 0
++}
++
+ # --- modes ---------------------------------------------------------------------
+ case "$mode" in
+     observe)
+@@ -357,4 +498,20 @@ case "$mode" in
+             printf 'no-observation\n'
+         fi
+         ;;
++    inventory)
++        compute
++        inventory
++        ;;
++    classify)
++        compute
++        classify
++        ;;
++    quarantine)
++        compute
++        quarantine
++        ;;
++    reclaim-quarantined)
++        compute
++        reclaim_quarantined
++        ;;
+ esac

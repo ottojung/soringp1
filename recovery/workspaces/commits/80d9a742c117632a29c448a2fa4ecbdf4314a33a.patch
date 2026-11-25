@@ -1,0 +1,295 @@
+commit 80d9a742c117632a29c448a2fa4ecbdf4314a33a
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 23:36:54 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 23:36:54 2026 +0000
+
+    Bind prediction timestamps and verify run histories
+
+diff --git a/government/predict-ledger.py b/government/predict-ledger.py
+index d10f8d18..ba5c972f 100644
+--- a/government/predict-ledger.py
++++ b/government/predict-ledger.py
+@@ -96,14 +96,16 @@ def content_hash(entry: dict) -> str:
+     if entry.get("kind") == "rejection":
+         canon = {"kind": "rejection", "bill_id": entry.get("bill_id", ""),
+                  "proposition": entry.get("proposition", ""),
+-                 "author": entry.get("author", ""), "reason": entry.get("reason", "")}
++                 "author": entry.get("author", ""), "reason": entry.get("reason", ""),
++                 "registered_at": entry.get("registered_at")}
+     else:
+         canon = {"bill_id": entry.get("bill_id", ""),
+                  "proposition": entry.get("proposition", ""),
+-                 "probability": entry.get("probability"),
+-                 "resolution_date": entry.get("resolution_date", ""),
+-                 "evidence_source": entry.get("evidence_source", ""),
+-                 "author": entry.get("author", "")}
++                  "probability": entry.get("probability"),
++                  "resolution_date": entry.get("resolution_date", ""),
++                  "evidence_source": entry.get("evidence_source", ""),
++                 "author": entry.get("author", ""),
++                 "registered_at": entry.get("registered_at")}
+     blob = json.dumps(canon, sort_keys=True, separators=(",", ":")).encode()
+     return "sha256:" + hashlib.sha256(blob).hexdigest()
+ 
+@@ -123,7 +125,8 @@ def cmd_register(a) -> int:
+         entry = {"id": next_id(data, a.bill, "rejection"), "kind": "rejection",
+                  "bill_id": a.bill, "proposition": a.proposition, "author": a.author,
+                  "reason": "no named evidence source", "status": "rejected",
+-                 "registered_at": now_epoch(), "registered_iso": iso(now_epoch())}
++                 "registered_at": now_epoch()}
++        entry["registered_iso"] = iso(entry["registered_at"])
+         entry["content_hash"] = content_hash(entry)
+         data["entries"].append(entry)
+         save(path, data)
+@@ -206,8 +209,8 @@ def cmd_resolve(a) -> int:
+             print("predict-ledger: scored resolution requires --evidence-at EPOCH",
+                   file=sys.stderr)
+             return 2
+-        if evidence_at < int(target.get("registered_at", 0)):
+-            print("predict-ledger: outcome evidence predates registration",
++        if evidence_at <= int(target.get("registered_at", 0)):
++            print("predict-ledger: outcome evidence must follow registration",
+                   file=sys.stderr)
+             return 2
+         if evidence_at > resolved_at:
+@@ -271,8 +274,8 @@ def cmd_verify(a) -> int:
+             if r.get("outcome") in ("true", "false"):
+                 try:
+                     evidence_at = int(r.get("evidence_at"))
+-                    if evidence_at < int(target.get("registered_at", 0)):
+-                        defects.append({"id": r.get("id"), "defect": "outcome_evidence_precedes_registration"})
++                    if evidence_at <= int(target.get("registered_at", 0)):
++                        defects.append({"id": r.get("id"), "defect": "outcome_evidence_not_after_registration"})
+                     if evidence_at > int(r.get("resolved_at", 0)):
+                         defects.append({"id": r.get("id"), "defect": "outcome_evidence_after_resolution"})
+                 except (TypeError, ValueError):
+diff --git a/government/predict-scorer.py b/government/predict-scorer.py
+index 8bcfb199..5661e7ea 100644
+--- a/government/predict-scorer.py
++++ b/government/predict-scorer.py
+@@ -42,14 +42,16 @@ def content_hash(entry: dict) -> str:
+     if entry.get("kind") == "rejection":
+         canon = {"kind": "rejection", "bill_id": entry.get("bill_id", ""),
+                  "proposition": entry.get("proposition", ""),
+-                 "author": entry.get("author", ""), "reason": entry.get("reason", "")}
++                 "author": entry.get("author", ""), "reason": entry.get("reason", ""),
++                 "registered_at": entry.get("registered_at")}
+     else:
+         canon = {"bill_id": entry.get("bill_id", ""),
+                  "proposition": entry.get("proposition", ""),
+-                 "probability": entry.get("probability"),
+-                 "resolution_date": entry.get("resolution_date", ""),
+-                 "evidence_source": entry.get("evidence_source", ""),
+-                 "author": entry.get("author", "")}
++                  "probability": entry.get("probability"),
++                  "resolution_date": entry.get("resolution_date", ""),
++                  "evidence_source": entry.get("evidence_source", ""),
++                 "author": entry.get("author", ""),
++                 "registered_at": entry.get("registered_at")}
+     blob = json.dumps(canon, sort_keys=True, separators=(",", ":")).encode()
+     return "sha256:" + hashlib.sha256(blob).hexdigest()
+ 
+@@ -84,15 +86,20 @@ def main() -> int:
+ 
+     defects = []
+     seen = set()
++    invalid_entry_ids = set()
+     for e in entries:
+         if e.get("id") in seen:
+             defects.append({"id": e.get("id"), "defect": "duplicate_entry_id"})
++            invalid_entry_ids.add(e.get("id"))
+         seen.add(e.get("id"))
+         if e.get("content_hash") != content_hash(e):
+             defects.append({"id": e.get("id"), "defect": "content_hash_mismatch"})
++            invalid_entry_ids.add(e.get("id"))
++    duplicate_resolution_ids = set()
+     for eid in set(r.get("id") for r in resolutions):
+         if sum(r.get("id") == eid for r in resolutions) > 1:
+             defects.append({"id": eid, "defect": "duplicate_resolution"})
++            duplicate_resolution_ids.add(eid)
+ 
+     registered = [e for e in entries if e.get("kind") == "registration" and e.get("status") == "registered"]
+     rejected = [e for e in entries if e.get("kind") == "rejection"]
+@@ -100,6 +107,8 @@ def main() -> int:
+     scored, unresolved, due, due_unresolved = [], [], [], []
+     scored_ids, unresolved_ids = set(), set()
+     for e in registered:
++        if e.get("id") in invalid_entry_ids or e.get("id") in duplicate_resolution_ids:
++            continue
+         r = res_by_id.get(e.get("id"))
+         rd = str(e.get("resolution_date", ""))
+         try:
+@@ -135,8 +144,8 @@ def main() -> int:
+         elif r.get("outcome") in ("true", "false"):
+             try:
+                 evidence_at = int(r.get("evidence_at"))
+-                if evidence_at < int(e.get("registered_at", 0)):
+-                    raise ValueError("outcome_evidence_precedes_registration")
++                if evidence_at <= int(e.get("registered_at", 0)):
++                    raise ValueError("outcome_evidence_not_after_registration")
+                 if evidence_at > resolved_at:
+                     raise ValueError("outcome_evidence_after_resolution")
+                 scored.append((e, r))
+diff --git a/government/suite-compliance-check.sh b/government/suite-compliance-check.sh
+index 908ceb32..81bc0c6f 100644
+--- a/government/suite-compliance-check.sh
++++ b/government/suite-compliance-check.sh
+@@ -26,20 +26,22 @@ def recorded_result(data, expected_suite):
+     runs=data.get('runs')
+     if not isinstance(runs,list):
+         return None
++    if any(not isinstance(run,dict) or run.get('run')!=i+1
++           or not isinstance(run.get('exit'),int)
++           for i,run in enumerate(runs)):
++        return None
+     if data.get('result')=='green':
+-        return ('green' if any(isinstance(run,dict)
+-                              and run.get('result')=='green'
+-                              and run.get('exit')==0 for run in runs) else None)
+-    if data.get('result')=='red':
+-        consecutive=0
+-        for run in runs:
+-            if (isinstance(run,dict) and run.get('result')=='red'
+-                    and isinstance(run.get('exit'),int) and run['exit']!=0):
+-                consecutive+=1
+-                if consecutive>=2:
+-                    return 'red'
+-            else:
+-                consecutive=0
++        if (len(runs)==1 and runs[0].get('result')=='green'
++                and runs[0].get('exit')==0):
++            return 'green'
++        if (len(runs)==2 and runs[0].get('result')=='red'
++                and runs[0].get('exit')!=0 and runs[1].get('result')=='green'
++                and runs[1].get('exit')==0):
++            return 'green'
++    if (data.get('result')=='red' and len(runs)==2
++            and all(run.get('result')=='red' and run.get('exit')!=0
++                    for run in runs)):
++        return 'red'
+     return None
+ try:
+     main=git('rev-parse','--verify','main')
+diff --git a/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md b/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
+index f625de68..54c689db 100644
+--- a/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
++++ b/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
+@@ -298,3 +298,28 @@ reconciled tree, including the new audit-cycle-identity test and the Act 22/21
+ tests. The previously proposed rev6 candidate predates this upstream merge and
+ is superseded for review; a new exact candidate is required. No merge or
+ deployment of the Act 22/21 implementation is claimed.
++
++## Follow-up review findings and corrective response — 2026-10-23
++
++The second review of rev6 (`c03ac1b`) withheld approval and reproduced a
++registration-timestamp bypass, scorer use of hash-mismatched prediction data,
++equality accepted for evidence chronology, and malformed green/red run arrays
++being accepted. The implementation now includes `registered_at` in both
++registration and rejection content hashes; the existing gate integrity check
++therefore refuses timestamp edits. The scorer marks hash-mismatched or
++duplicate-entry/resolution IDs as invalid and excludes their outcomes from
++scores while reporting the defect. Resolution evidence must now be strictly
++later than registration (`evidence_at > registered_at`). The compliance checker
++accepts only the exact run histories emitted by `suite-status.sh`: one green,
++red then green, or two red runs, with sequential run numbers and integer exits.
++Hermetic tests now cover timestamp-only tampering, scorer exclusion, equal-time
++evidence, malformed run sequences, merge-commit deltas, and normal pilot tally
++behavior.
++
++The second review record is
++`/var/lib/lubko/wd/viche-seats/c1a0000b/records/INDEPENDENT-REVIEW-ACT22-ACT21-REV6-2026-10-23.md`.
++It reports changes required on rev6 and does not approve or authorize merge.
++After these additional corrections, focused prediction/compliance/tally tests
++and `dash tests/run-all.sh` pass on the current-main-reconciled working tree.
++The rev8 delivery predates these last corrections; independent review and fresh
++CI must cover the next exact candidate.
+diff --git a/tests/predict-smoke.sh b/tests/predict-smoke.sh
+index 28dc33bb..bbd0fdcb 100644
+--- a/tests/predict-smoke.sh
++++ b/tests/predict-smoke.sh
+@@ -63,6 +63,11 @@ if VICHE_PREDICT_NOW=90000 python3 "$root/government/predict-ledger.py" \
+     --evidence fixture#early --evidence-at 80 >/dev/null 2>&1; then
+     echo 'outcome evidence dated before registration was accepted' >&2; exit 1
+ fi
++if VICHE_PREDICT_NOW=90000 python3 "$root/government/predict-ledger.py" \
++    resolve --id bill-registration-1 --outcome true --resolver clerk \
++    --evidence fixture#same-time --evidence-at 90 >/dev/null 2>&1; then
++    echo 'outcome evidence at registration time was treated as later' >&2; exit 1
++fi
+ if VICHE_PREDICT_NOW=90000 python3 "$root/government/predict-ledger.py" \
+     resolve --id bill-registration-1 --outcome unresolved --resolver clerk \
+     --reason 'source unavailable' >/dev/null 2>&1; then
+@@ -102,6 +107,40 @@ assert x['counts']['unresolved']==1
+ assert x['counts']['resolved_scored']==2
+ PY
+ python3 "$root/government/predict-ledger.py" verify >/dev/null
++# The registration time is hash-bound; changing only it cannot make a late
++# prediction appear pre-registered to the ballot gate.
++timestamp_tamper=$tmp/timestamp-tamper.json
++cp "$tmp/ledger.json" "$timestamp_tamper"
++python3 - "$timestamp_tamper" <<'PY'
++import json,sys
++p=sys.argv[1]; x=json.load(open(p)); x['entries'][0]['registered_at']=99
++open(p,'w').write(json.dumps(x))
++PY
++if VICHE_PREDICT_LEDGER=$timestamp_tamper python3 "$root/government/predict-ledger.py" verify >/dev/null 2>&1; then
++    echo 'registration timestamp tamper escaped integrity verification' >&2; exit 1
++fi
++if VICHE_PREDICT_LEDGER=$timestamp_tamper /bin/sh "$root/government/predict-gate.sh" --all --at 100 bill >/dev/null 2>&1; then
++    echo 'gate accepted tampered registration timestamps' >&2; exit 1
++fi
++# A scorer detects tampering and excludes the compromised prediction.
++scorer_tamper=$tmp/scorer-tamper.json
++cp "$tmp/ledger.json" "$scorer_tamper"
++python3 - "$scorer_tamper" <<'PY'
++import json,sys
++p=sys.argv[1]; x=json.load(open(p))
++next(e for e in x['entries'] if e.get('kind')=='registration')['probability']=.01
++open(p,'w').write(json.dumps(x))
++PY
++VICHE_PREDICT_LEDGER=$scorer_tamper \
++VICHE_PREDICT_CALIBRATION=$tmp/tampered-calibration.json \
++    python3 "$root/government/predict-scorer.py" --now 90001 >/dev/null
++python3 - "$tmp/tampered-calibration.json" <<'PY'
++import json,sys
++x=json.load(open(sys.argv[1]))
++assert not x['integrity']['clean']
++assert x['counts']['resolved_scored']==1
++assert [r['id'] for r in x['brier']['per_prediction']]==['bill-registration-2']
++PY
+ python3 - "$tmp/ledger.json" <<'PY'
+ import json,sys
+ p=sys.argv[1]; x=json.load(open(p)); x['entries'][0]['proposition']='tampered'; open(p,'w').write(json.dumps(x))
+diff --git a/tests/suite-compliance-smoke.sh b/tests/suite-compliance-smoke.sh
+index 97b2eddd..43b223dd 100644
+--- a/tests/suite-compliance-smoke.sh
++++ b/tests/suite-compliance-smoke.sh
+@@ -35,7 +35,7 @@ git -C "$tmp" merge --ff-only -q merge-candidate
+ out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
+ printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["compliant"]==0; assert x["unreadable"]>0'
+ # Matching identity fields without a generated successful run are not evidence.
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000}\n' \
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000,"runs":[{"run":1,"result":"green","exit":0},{"run":2,"result":"red","exit":1}]}\n' \
+     "$green_change" "$green_tree" > "$VICHE_STATE_ROOT/delivery/verified-malformed.json"
+ out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
+ printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["compliant"]==0; assert x["unreadable"]>0'
+@@ -52,10 +52,16 @@ git -C "$tmp" checkout -qb red-merge main
+ git -C "$tmp" merge --no-ff -q -m 'merge red candidate' red-code
+ red_commit=$(git -C "$tmp" rev-parse HEAD)
+ red_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
+-printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","recorded_at":1001,"runs":[{"run":1,"result":"red","exit":1},{"run":2,"result":"red","exit":1}]}\n' \
+-    "$red_commit" "$red_tree" > "$VICHE_STATE_ROOT/delivery/verified-red-$red_commit.json"
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","recorded_at":1001,"runs":[{"run":1,"result":"red","exit":1},{"run":2,"result":"red","exit":1},{"run":3,"result":"green","exit":0}]}\n' \
++    "$red_commit" "$red_tree" > "$VICHE_STATE_ROOT/delivery/verified-malformed-red.json"
+ git -C "$tmp" checkout -q main
+ git -C "$tmp" merge --ff-only -q red-merge
++# A red/red/green sequence is neither a valid flaky-red resolution nor a
++# red-main receipt, and cannot create a violation.
++out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
++printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["violations"]==0; assert x["main_red_episodes"]==0'
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","recorded_at":1002,"runs":[{"run":1,"result":"red","exit":1},{"run":2,"result":"red","exit":1}]}\n' \
++    "$red_commit" "$red_tree" > "$VICHE_STATE_ROOT/delivery/verified-red-$red_commit.json"
+ printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"red","commit":"%s","tree":"%s","runs":[{"run":1,"result":"red","exit":1},{"run":2,"result":"red","exit":1}]}\n' \
+     "$red_commit" "$red_tree" > "$tmp/records/suite-status.json"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm red-record

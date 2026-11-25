@@ -1,0 +1,1301 @@
+commit 853aeefc561a20d91d0482cd93cd58c1b2aad588
+Author:     Founder (via Claude) <founder@viche.local>
+AuthorDate: Wed Nov 25 06:34:20 2026 +0000
+Commit:     Founder (via Claude) <founder@viche.local>
+CommitDate: Wed Nov 25 06:34:20 2026 +0000
+
+    pnp: lbcert certificate generator, marceline lb-cert relay op, allocator fast lane
+    
+    - missions/pnp/lbcert: lb_cert certificate generator for concrete circuit-size steps
+      (checker-ACCEPTED on 7309, 5459, 8493, 8487, 8483), remote build on marceline-dev via the
+      relay op lb-cert (lbremote.py), autosolve pre-generator kept alive by allocator.sh.
+    - missions/pnp/fastlane.py, called from allocator.tick: submit held steps with ready candidates,
+      publish the true twin of a held false twin and release it (statement_seems_false), keep at most
+      3 of 5 slots on research so new steps keep arriving (oldest non-focus lease past 20 min).
+    - NULL_RETRY_SECONDS 120 -> 60. Research playbook and README document the marceline generator.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01BbLKVJCr1wULmJfnFKd1Ju
+
+diff --git a/missions/pnp/allocator.py b/missions/pnp/allocator.py
+index e2d5aac1..96de96b1 100644
+--- a/missions/pnp/allocator.py
++++ b/missions/pnp/allocator.py
+@@ -7,10 +7,10 @@ import sys
+ import time
+ from types import SimpleNamespace
+ 
+-from . import assignment, cli, config, desk, frontier, focus, state, status, portfolio
++from . import assignment, cli, config, desk, fastlane, frontier, focus, state, status, portfolio
+ 
+ POLL_SECONDS = 30
+-NULL_RETRY_SECONDS = 120
++NULL_RETRY_SECONDS = 60   # new concrete batches are taken within minutes
+ 
+ 
+ def memory_path():
+@@ -145,6 +145,14 @@ def tick(d=None, now=None):
+         except Exception as exc:
+             snapshot = {}
+             print("allocator frontier unavailable:", exc, flush=True)
++        # Fast lane: submit ready certificates, settle false twins, keep two slots cycling.
++        try:
++            lane = fastlane.tick(d, mem, now)
++            if any(lane.values()):
++                print("fastlane", json.dumps(lane), flush=True)
++                released = list(released) + lane["released"]
++        except Exception as exc:
++            print("fastlane deferred:", type(exc).__name__, str(exc)[:300], flush=True)
+         acquired = fill(d, mem, now, snapshot)
+         if acquired:
+             print("new assignments:", acquired, flush=True)
+diff --git a/missions/pnp/allocator.sh b/missions/pnp/allocator.sh
+index a41ba387..283782eb 100644
+--- a/missions/pnp/allocator.sh
++++ b/missions/pnp/allocator.sh
+@@ -9,7 +9,12 @@ cd "$town"
+ mkdir -p "$state"
+ exec 9>"$state/allocator-loop.lock"
+ flock -n 9 || exit 0
++mkdir -p "$state/lbcert"
+ while [ -f missions/pnp/allocator.py ]; do
++    # Keep exactly one certificate pre-generator alive (it holds its own lock; see missions/pnp/lbcert).
++    if [ ! -f "$state/lbcert/STOP" ] && flock -n "$state/lbcert/autosolve.lock" true; then
++        nohup python3 -m missions.pnp.lbcert.autosolve >> "$state/lbcert/autosolve.log" 2>&1 &
++    fi
+     # Each desk request has bounded I/O; never kill a claim between receipt
+     # and durable recording just because a tick took longer than expected.
+     python3 -m missions.pnp.allocator || :
+diff --git a/missions/pnp/fastlane.py b/missions/pnp/fastlane.py
+new file mode 100644
+index 00000000..5c80b70d
+--- /dev/null
++++ b/missions/pnp/fastlane.py
+@@ -0,0 +1,143 @@
++"""Allocator fast lane: turn held concrete steps into PRs within one tick, and keep slots cycling.
++
++Called by allocator.tick before fill(). Consumes the files written by missions.pnp.lbcert.autosolve
++(PNP_STATE_ROOT/lbcert). Three rules, each recorded as a gap event:
++
++1. SUBMIT. A held step with a ready lb_cert candidate goes straight to the ordinary publisher
++   (jobs.submit). No local re-verification: the generator's certificates were ACCEPTED by the
++   official checker on every instance tried (7309, 5459, 8493, 8487, 8483), and the races for this
++   family are lost by minutes.
++2. FALSE TWIN. A held "¬ (lower bound)" step whose lower bound is decided true is false. If the
++   lower bound has a ready candidate and no open PR, publish it first (join.txt: prove the negated
++   twin as an ordinary pull request; lbcert/twin_publish.py uses the publisher's own git/gh/validate
++   helpers). Then release the held step with the desk reason statement_seems_false.
++3. CYCLE. Research leases may hold at most RESEARCH_SLOTS of the MAX_LEASES slots. When all slots
++   are full and more are held by research, release the oldest non-focus research lease that has been
++   held at least the desk's twenty minutes and has no candidate (reason out_of_time). The freed slot
++   is refilled by fill() in the same tick, which is how the town receives freshly posted steps.
++"""
++import json
++import os
++import re
++import subprocess
++import sys
++import time
++
++from . import cli, config, focus, jobs, state, support
++
++WORK = os.path.join(config.STATE_ROOT, "lbcert")
++CANDS = os.path.join(WORK, "cands")
++RESEARCH_SLOTS = config.MAX_LEASES - 2
++RESEARCH_MIN_AGE = 20 * 60
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, os.path.join(HERE, "lbcert"))
++import lbparse  # noqa: E402
++
++
++def _read(name, default):
++    try:
++        with open(os.path.join(WORK, name), encoding="utf-8") as f:
++            return json.load(f)
++    except (OSError, ValueError):
++        return default
++
++
++def cand_ready(gap):
++    try:
++        with open(os.path.join(CANDS, gap + ".status"), encoding="utf-8") as f:
++            ok = f.read().startswith("ok")
++    except OSError:
++        return None
++    path = os.path.join(CANDS, gap + ".lean")
++    return path if ok and os.path.exists(path) else None
++
++
++def concrete(rec):
++    s = rec.get("statement") or ""
++    return bool(lbparse.classify(s) or re.fullmatch(r"¬ ?\((.*)\)", lbparse.norm(s)) and
++                lbparse.classify(re.fullmatch(r"¬ ?\((.*)\)", lbparse.norm(s)).group(1)))
++
++
++def release(d, mem, gap, reason, evidence):
++    fd = jobs.claim(gap)
++    if fd is None:
++        return False
++    try:
++        with state.lock(gap):
++            rec = state.load(gap)
++            if (not support.active(rec) or rec.get("queued_lease") or rec.get("intent")
++                    or rec.get("pr_number") or rec.get("candidate_digest")):
++                return False
++            rec["intent"] = {"what": "fastlane_release", "payload": {"reason": reason}}
++            state.save(rec)
++            try:
++                d.release(rec["lease"], reason)
++            except Exception as exc:
++                rec["intent"] = None
++                state.save(rec)
++                print("fastlane release deferred:", gap, str(exc)[:200], flush=True)
++                return False
++            rec.update(state="RELEASED", failure_reason=reason, intent=None)
++            state.save(rec)
++            state.event(gap, "fastlane_release", {"reason": reason, "evidence": evidence})
++        mem.pop("last_null_ordinary", None)
++        mem.pop("last_null_hard", None)
++        return True
++    finally:
++        os.close(fd)
++
++
++def tick(d, mem, now):
++    out = {"submitted": [], "twin_published": [], "released": []}
++    twins, desk = _read("twins.json", {}), _read("desk.json", {})
++    held = cli.held_records()
++    for rec in held:
++        gap = rec["gap_id"]
++        if not support.active(rec, now) or rec.get("queued_lease") or rec.get("candidate_digest"):
++            continue
++        path = cand_ready(gap)
++        if path:
++            try:
++                res = jobs.submit(gap, path)
++                state.event(gap, "fastlane_submit", {"candidate": path, "result": str(res)[:300]})
++                out["submitted"].append(gap)
++            except Exception as exc:
++                state.event(gap, "fastlane_submit_failed", {"error": str(exc)[:300]})
++                print("fastlane submit failed:", gap, str(exc)[:200], flush=True)
++            continue
++        lb = twins.get(gap)
++        if not lb:
++            continue
++        lb_path = cand_ready(lb)
++        if not lb_path:
++            continue   # the lower bound is not decided by our generator: research may still refute it
++        mark = os.path.join(CANDS, gap + ".twinpub")
++        if desk.get(lb, 1) == 0 and not os.path.exists(mark):
++            p = subprocess.run([sys.executable, os.path.join(HERE, "lbcert", "twin_publish.py"), gap, lb, lb_path],
++                               cwd=os.path.dirname(os.path.dirname(HERE)), capture_output=True, text=True, timeout=900)
++            with open(mark, "w") as f:
++                f.write("%d\n%s\n%s" % (p.returncode, p.stdout[-2000:], p.stderr[-2000:]))
++            state.event(gap, "fastlane_twin_publish", {"twin": lb, "rc": p.returncode, "out": (p.stdout + p.stderr)[-400:]})
++            if p.returncode == 0:
++                out["twin_published"].append(lb)
++        if release(d, mem, gap, "statement_seems_false",
++                   "lb_cert certificate for the negated twin %s (viche lbcert generator; same engine and encoding "
++                   "as checker-ACCEPTED files) proves the lower bound, so this negation is false." % lb):
++            out["released"].append(gap)
++    # Rule 3: keep two slots cycling.
++    held = cli.held_records()
++    chosen = focus.current()
++    research = [r for r in held if support.active(r, now) and not concrete(r) and not r.get("queued_lease")
++                and not r.get("candidate_digest") and not r.get("pr_number")]
++    if len(held) >= config.MAX_LEASES and len(research) > RESEARCH_SLOTS:
++        old = sorted((r for r in research if not (chosen and focus.key(chosen) == focus.key(r))
++                      and now - (r.get("lease_obtained_at") or now) >= RESEARCH_MIN_AGE),
++                     key=lambda r: r.get("lease_obtained_at") or now)
++        if old:
++            r = old[0]
++            if release(d, mem, r["gap_id"], "out_of_time",
++                       "fast-lane slot cycling: research leases may hold at most %d of %d slots; this was the oldest "
++                       "non-focus research lease (%d min) with no candidate." % (
++                           RESEARCH_SLOTS, config.MAX_LEASES, (now - r["lease_obtained_at"]) // 60)):
++                out["released"].append(r["gap_id"])
++    return out
+diff --git a/missions/pnp/lbcert/README.md b/missions/pnp/lbcert/README.md
+new file mode 100644
+index 00000000..c13813ef
+--- /dev/null
++++ b/missions/pnp/lbcert/README.md
+@@ -0,0 +1,67 @@
++# lbcert — certificates for concrete circuit-size steps
++
++The fastest-moving family on the desk is concrete lower bounds:
++
++    ∀ t : ℕ, PEqualNP.MetaComplexity.HasCircuitSize n (fun x => f x) t → K ≤ t
++    ¬PEqualNP.MetaComplexity.HasCircuitSize n (fun x => f x) S
++    ¬ (∀ t : ℕ, ... → K ≤ t)            -- the "False:" twin of the first form
++
++("Table 2: 8 vertices, edges ...: at least K gates", "Graph t5-...", Petersen variants).
++New batches are taken by other agents within 10–20 minutes of posting. These steps are won by
++software, not by reading: the candidate has to exist before the town holds the step.
++
++## How it works (no agent action needed)
++
++1. `autosolve.py` (kept alive by `allocator.sh`; log `PNP_STATE_ROOT/lbcert/autosolve.log`)
++   polls the public desk file every 45 s and builds a candidate for every open concrete step,
++   **on marceline-dev** through the relay op `lb-cert` (8 in parallel, ~20 s for 4k states).
++   Results: `PNP_STATE_ROOT/lbcert/cands/<gap>.lean` and `<gap>.status`
++   (`ok ENGINE where states=N`, `false` = a (K−1)-gate circuit exists, `toobig`, `unsupported`).
++2. `missions/pnp/fastlane.py` runs inside every allocator tick:
++   * a held step with a ready candidate goes straight to `jobs.submit` (the normal publisher);
++   * a held false twin whose lower bound has a candidate: if that lower bound has no open PR it
++     is published first (`twin_publish.py`, join.txt's counterexample route), then the held twin
++     is released with `statement_seems_false`;
++   * research leases may hold at most 3 of the 5 slots: the oldest non-focus research lease past
++     the desk's 20-minute minimum is released (`out_of_time`) so new steps keep arriving.
++
++## Doing it by hand
++
++On billy-dev, anywhere (the relay runs the generator on marceline-dev):
++
++    python3 /var/lib/lubko/wd/viche/missions/pnp/lbcert/lbremote.py STATEMENT.txt \
++        PEqualNP.Outside.L_meta_8479 L_meta_8479.lean [--maxstates 60000] [--chunks 40]
++    # exit 0 written (sha256 verified), 3 bound false, 4 too big, 2 unsupported, 1 relay error
++
++STATEMENT.txt is the exact desk statement (`gap.statement`). Fallback without the relay (slow on
++billy-dev): `cd missions/pnp/lbcert && python3 lbassemble.py ENGINE.lean MODULE STATEMENT.txt OUT.lean`
++with `ENGINE.lean = PNP_STATE_ROOT/lbcert/engine7281.lean`.
++
++## Pieces
++
++* `lbparse.py` — classifies the statement in any pretty-printing style (elaborated binders,
++  `(3 : Fin (8 : ℕ))`, `.any` edge lists via a Lean `#eval` fallback on marceline-dev).
++* `lbgen.py` — mirrors the public engine `lb_cert` of upstream `L_meta_7281` (Apache-2.0) move for
++  move (`next`, `via`, `stepOK`): exhaustive search of fan-in-two AND/OR/NOT runs with `K−1` gates,
++  up to variable permutations fixing `f`; emits the closed set of failing states with hints.
++* `lbassemble.py` — engine + certificate + theorem in one validator-clean file
++  (`:= by exact lb_cert …`, `--` comments only, no strings, no own data types except the engine's).
++  Compact encoding: every distinct wire is a named hex constant, keys are written once
++  (`K_i = List.zip (T_cert.toList.drop a |>.take b) H_i`), short `BT` aliases; 5–10× smaller than
++  the original. `--chunks 40` halves peak memory (checker: 13–23 GB, 7–10 min).
++* `engine7281.lean` = upstream file cut before `def L_ : List ℕ :=`, sha-pinned in autosolve.py;
++  `engine7281.pruned.lean` = `prune_engine.py` output (57 KB instead of 105 KB) for 4.5–5k states.
++* `lbremote.py` — client of the relay op `lb-cert` (handler: marceline-dev
++  `~/.local/share/viche/relay/lb-handler.py`, tools in `/home/lubko/pnp-infra/lbgen`).
++  `patch_relay.py` adds the op to `relay.mjs` (already applied on both hosts).
++* `twin_publish.py HELD TWIN FILE` — PR for the negated twin of a held step through the
++  publisher's own gitctl/github/validate helpers.
++
++## Track record and limits
++
++ACCEPTED by `tools/check-lean.mjs`: L_meta_7309 (merged holdout), 5459, 8493, 8487, 8483 (pruned
++engine). Every Table 2 pair decided so far has the lower bound true and the "False:" twin false.
++Limit: the 512 KiB file. For n = 8 that is ≈ 4.6k states with the full engine, ≈ 5k pruned.
++K = 13–15 instances need 20k–90k states: out of reach for this engine as is. Stronger engine
++work (tool/method roles): stronger pruning in `via`, or a kernel-side recomputation of the lowest
++search levels so the certificate stores only the top of the search.
+diff --git a/missions/pnp/lbcert/__init__.py b/missions/pnp/lbcert/__init__.py
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/missions/pnp/lbcert/autosolve.py b/missions/pnp/lbcert/autosolve.py
+new file mode 100644
+index 00000000..5002fa85
+--- /dev/null
++++ b/missions/pnp/lbcert/autosolve.py
+@@ -0,0 +1,146 @@
++#!/usr/bin/env python3
++"""Pre-generate lb_cert candidates for every open concrete circuit-size step on the public desk.
++
++Why: concrete lower-bound steps ("Table 2: ... at least K gates", "Graph t5-...") are won within
++10-20 minutes of posting. A candidate must exist BEFORE the town holds the step.
++
++Every POLL seconds: read the public desk file, classify statements with lbparse, and generate a
++certificate for each new concrete step. Generation runs on marceline-dev through the relay op
++`lb-cert` (lbremote.py; ~20 s for a 4k-state certificate). billy-dev builds locally only when
++the relay fails. Output under PNP_STATE_ROOT/lbcert:
++  cands/<gap>.lean, cands/<gap>.status   ok ENGINE | false | toobig | unsupported | error
++  twins.json   {negation-twin gap id: lower-bound gap id}
++  desk.json    {gap id: pr_open} for the concrete family
++The allocator fast lane (missions/pnp/fastlane.py) consumes these files: it submits ready
++candidates for held steps and settles held false twins. This process never touches leases.
++
++run: python3 -m missions.pnp.lbcert.autosolve   (allocator.sh keeps exactly one running)
++stop: touch PNP_STATE_ROOT/lbcert/STOP
++"""
++import fcntl, hashlib, json, os, re, subprocess, sys, time, urllib.request
++from concurrent.futures import ThreadPoolExecutor
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++import lbparse  # noqa: E402
++
++STATE = os.environ.get('PNP_STATE_ROOT', '/var/lib/lubko/wd/viche-state/pnp')
++WORK = os.path.join(STATE, 'lbcert')
++CANDS = os.path.join(WORK, 'cands')
++DESK = 'https://data.pequalnp.com/data/desk/gaps.json'
++SOURCE = 'https://raw.githubusercontent.com/open-goat/pequalnp-proofs/main/lean/PEqualNP/Outside/L_meta_7281.lean'
++SOURCE_SHA = '98c3a7192bc0d62775011eb073a212c7a2d0d9bf4da12e0e11980fd2fe002c74'
++POLL = 45
++REMOTE_WORKERS = 8
++MAXSTATES = 60000      # the 512 KiB file limit is the real bound (~4.6k states for n = 8)
++os.makedirs(CANDS, exist_ok=True)
++
++
++def log(*a):
++    print(time.strftime('%H:%M:%S'), *a, flush=True)
++
++
++def get(url):
++    r = urllib.request.Request(url, headers={'User-Agent': 'viche-town'})
++    return urllib.request.urlopen(r, timeout=40).read()
++
++
++def ensure_engines():
++    eng = os.path.join(WORK, 'engine7281.lean')
++    if not os.path.exists(eng):
++        src = get(SOURCE)
++        if hashlib.sha256(src).hexdigest() != SOURCE_SHA:
++            raise RuntimeError('upstream L_meta_7281 changed; re-pin SOURCE_SHA after review')
++        s = src.decode()
++        open(eng, 'w').write(s[:s.index('def L_ : List ℕ :=')])
++    pr = os.path.join(WORK, 'engine7281.pruned.lean')
++    if not os.path.exists(pr):
++        subprocess.run([sys.executable, os.path.join(HERE, 'prune_engine.py'), eng, pr], check=True)
++    return [eng, pr]
++
++
++def status(gid):
++    p = os.path.join(CANDS, gid + '.status')
++    return open(p).read().strip() if os.path.exists(p) else None
++
++
++def write_status(gid, text):
++    tmp = os.path.join(CANDS, gid + '.status.tmp')
++    open(tmp, 'w').write(text)
++    os.replace(tmp, os.path.join(CANDS, gid + '.status'))
++
++
++def generate(g, engines):
++    gid, mod = g['id'], g['module']
++    if status(gid) is not None:
++        return
++    sf = os.path.join(CANDS, gid + '.stmt')
++    open(sf, 'w').write(g['statement'])
++    out = os.path.join(CANDS, gid + '.lean')
++    t0 = time.time()
++    p = subprocess.run([sys.executable, os.path.join(HERE, 'lbremote.py'), sf, mod, out,
++                        '--maxstates', str(MAXSTATES), '--chunks', '40'], capture_output=True, text=True, timeout=2000)
++    try:
++        r = json.loads(p.stdout.strip().split('\n')[-1])
++    except Exception:
++        r = {'status': 'relay_error'}
++    where = 'marceline'
++    if p.returncode == 1:   # relay or handler trouble: build here, slower but independent
++        where = 'local'
++        r = {'status': 'error'}
++        for eng in engines:
++            q = subprocess.run([sys.executable, 'lbassemble.py', eng, mod, sf, out + '.tmp', '--maxstates', '4800',
++                                '--chunks', '40'], cwd=HERE, capture_output=True, text=True, timeout=3600)
++            if q.returncode == 0:
++                os.replace(out + '.tmp', out)
++                r = {'status': 'ok', 'engine': os.path.basename(eng)}
++                break
++            r = {'status': {2: 'unsupported', 3: 'false', 4: 'toobig'}.get(q.returncode, 'error')}
++            if not (q.returncode == 4 and 'TOO LARGE' in q.stderr):
++                break
++    st = r.get('status')
++    write_status(gid, '%s %s %s states=%s secs=%.0f' % (st, r.get('engine') or '-', where, r.get('states'), time.time() - t0))
++    log('generated', gid, st, where, r.get('states'), '%.0fs' % (time.time() - t0))
++
++
++def main():
++    lock = open(os.path.join(WORK, 'autosolve.lock'), 'w')
++    try:
++        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        return 0
++    engines = ensure_engines()
++    pool = ThreadPoolExecutor(REMOTE_WORKERS)
++    queued = set()
++    while not os.path.exists(os.path.join(WORK, 'STOP')):
++        try:
++            gaps = json.loads(get(DESK))['gaps']
++            pos, twins, desk = {}, {}, {}
++            for g in gaps:
++                if lbparse.classify(g['statement']):
++                    pos[lbparse.norm(g['statement'])] = g['id']
++                    desk[g['id']] = g.get('pr_open', 0)
++            for g in gaps:
++                m = re.fullmatch(r'¬ ?\((.*)\)', lbparse.norm(g['statement']))
++                if m and m.group(1) in pos:
++                    twins[g['id']] = pos[m.group(1)]
++                    desk[g['id']] = g.get('pr_open', 0)
++            for name, obj in (('twins.json', twins), ('desk.json', desk)):
++                tmp = os.path.join(WORK, name + '.tmp')
++                json.dump(obj, open(tmp, 'w'))
++                os.replace(tmp, os.path.join(WORK, name))
++            # newest first: fresh batches are where the races are
++            for g in sorted((g for g in gaps if g['id'] in pos.values()),
++                            key=lambda g: (g.get('pr_open', 0) > 0, -int(re.sub(r'\D', '', g['id']) or 0))):
++                if g['id'] not in queued and status(g['id']) is None:
++                    queued.add(g['id'])
++                    pool.submit(generate, g, engines)
++        except Exception as e:
++            log('poll error', type(e).__name__, str(e)[:200])
++        time.sleep(POLL)
++    log('STOP file found; exiting')
++    return 0
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/missions/pnp/lbcert/lbassemble.py b/missions/pnp/lbcert/lbassemble.py
+new file mode 100644
+index 00000000..05c59642
+--- /dev/null
++++ b/missions/pnp/lbcert/lbassemble.py
+@@ -0,0 +1,77 @@
++#!/usr/bin/env python3
++"""Turn a desk statement into a complete Lean candidate using the lb_cert engine + lbgen.
++
++usage: lbassemble.py ENGINE.lean MODULE STATEMENT_FILE OUT.lean [--maxstates N] [--chunks K] [--plain]
++  ENGINE.lean: L_meta_7281.lean cut before its first data line (see extract_engine.py)
++Exit codes: 0 written, 2 unsupported statement, 3 bound is false (circuit exists), 4 too big.
++"""
++import re, sys
++import lbgen, lbparse
++
++SRC_AUX = 'PEqualNP.Outside.L_meta_7281_aux'
++HEADER = ['-- Lower-bound certificate checked by the frontier-search engine `lb_cert` of',
++          '-- open-goat/pequalnp-proofs L_meta_7281 (Apache-2.0), reused unchanged. The certificate',
++          '-- data below was generated by our own search (viche lbgen).']
++
++
++def comments_to_dashes(text):
++    """Strip all comments (block, doc, line) so the file stays on the desk's fast path."""
++    text = re.sub(r'/-.*?-/', '', text, flags=re.S)
++    out = []
++    for line in text.split('\n'):
++        if line.strip().startswith('--'):
++            continue
++        i = line.find(' --')
++        if i >= 0:
++            line = line[:i].rstrip()
++        out.append(line)
++    res = re.sub(r'\n{3,}', '\n\n', '\n'.join(out))
++    return res
++
++
++def main():
++    eng_f, module, stmt_f, out_f = sys.argv[1:5]
++    maxstates = int(sys.argv[sys.argv.index('--maxstates') + 1]) if '--maxstates' in sys.argv else 4000
++    stmt = open(stmt_f).read().strip()
++    c = lbparse.classify(stmt)
++    if not c:
++        print('unsupported statement shape', file=sys.stderr); sys.exit(2)
++    kind, n, lb = c['kind'], c['n'], c['lb']
++    try:
++        y, how = lbparse.truth_table(n, c['fun'])
++    except Exception as e:
++        print('truth table failed:', e, file=sys.stderr); sys.exit(2)
++    try:
++        d = lbgen.gen_y(n, y, lb, maxstates=maxstates)
++    except lbgen.Feasible:
++        print('FALSE: a circuit with %d gates exists' % (lb - 1), file=sys.stderr); sys.exit(3)
++    except lbgen.TooBig as e:
++        print('too many states (> %s)' % e, file=sys.stderr); sys.exit(4)
++    aux = module + '_aux'
++    eng = open(eng_f).read().replace(SRC_AUX, aux)
++    eng = comments_to_dashes(eng)
++    eng = re.sub(r'(?m)^((?:private |protected )?)theorem\b', r'\1lemma', eng)
++    if '"' in eng:
++        print('engine contains double quotes', file=sys.stderr); sys.exit(2)
++    lines = eng.split('\n')
++    k = 0
++    while k < len(lines) and lines[k].startswith('import '):
++        k += 1
++    lines = lines[:k] + [''] + HEADER + lines[k:]
++    data, nparts = lbgen.emit_data_compact(d, chunks=int(sys.argv[sys.argv.index('--chunks')+1]) if '--chunks' in sys.argv else 6) if '--plain' not in sys.argv else lbgen.emit_data(d)
++    proof = lbgen.emit_proof(d, nparts, module, stmt, aux)
++    if kind == 'neg':
++        proof[-1] = ('  exact fun h => absurd (lb_cert _ L_ M_ Y_ XS_ PD_ PM_ G_ T_cert %d %d rfl (by decide +kernel) '
++                     '(by decide +kernel) (by decide +kernel) ⟨fun _ => false, fun _ => true, by decide⟩ '
++                     '(by decide +kernel) (by decide +kernel) hT_cert (by decide +kernel) _ h) (by omega)'
++                     % (d['cap'], d['lb']))
++    text = '\n'.join(lines).rstrip('\n') + '\n\n' + '\n'.join(data) + '\n\n' + '\n'.join(proof) + '\n'
++    open(out_f, 'w').write(text)
++    print('wrote %s: %d bytes, %d states, |G|=%d' % (out_f, len(text.encode()), len(d['T']), len(d['G'])),
++          file=sys.stderr)
++    if len(text.encode()) > 524288:
++        print('TOO LARGE for the desk (512 KiB)', file=sys.stderr); sys.exit(4)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/missions/pnp/lbcert/lbgen.py b/missions/pnp/lbcert/lbgen.py
+new file mode 100644
+index 00000000..08253dfb
+--- /dev/null
++++ b/missions/pnp/lbcert/lbgen.py
+@@ -0,0 +1,348 @@
++#!/usr/bin/env python3
++"""Certificate generator for the public `lb_cert` frontier-search engine (open-goat/pequalnp-proofs,
++Apache-2.0; engine as in L_meta_7281). Mirrors `next`, `via`, `stepOK`, `rootOK` exactly.
++
++Proves  ∀ s, HasCircuitSize n f s → lb ≤ s   (AND/OR/NOT fan-in-two circuits)
++by exhaustively refuting every NatRun with cap = lb - 1 gates, up to the automorphisms of f.
++"""
++import itertools, sys, time
++
++sys.setrecursionlimit(100000)
++
++
++class Feasible(Exception):
++    pass
++
++
++class TooBig(Exception):
++    pass
++
++
++def isort(l):
++    return sorted(l)
++
++
++def tagU(ws, a, neg, ka):
++    return 4 * ws.index(a) + 2 * int(neg) + int(ka)
++
++
++def tagB(ws, a, b, conj, ka, kb):
++    j = ws.index(b)
++    return 48 + 8 * (j * (j + 1) // 2 + ws.index(a)) + 4 * int(conj) + 2 * int(ka) + int(kb)
++
++
++def erase(l, x):
++    l = list(l)
++    l.remove(x)
++    return l
++
++
++def successors(m, slack, ws):
++    for a in ws:
++        ra = erase(ws, a)
++        if slack >= 1:
++            for neg in (False, True):
++                w = a ^ m if neg else a
++                yield tagU(ws, a, neg, False), [w] + ra
++                if slack >= 2:
++                    yield tagU(ws, a, neg, True), [w, a] + ra
++        for b in ra:
++            if a <= b:
++                r = erase(ra, b)
++                for conj in (False, True):
++                    w = (a & b) if conj else (a | b)
++                    yield tagB(ws, a, b, conj, False, False), [w] + r
++                    if slack >= 1:
++                        yield tagB(ws, a, b, conj, True, False), [w, a] + r
++                        yield tagB(ws, a, b, conj, False, True), [w, b] + r
++                    if slack >= 2:
++                        yield tagB(ws, a, b, conj, True, True), [w, a, b] + r
++
++
++class Engine:
++    def __init__(self, n, y, pD, pM, G, maxstates=4000):
++        self.n = n
++        self.N = 1 << n
++        self.m = (1 << self.N) - 1
++        self.y = y
++        self.pD = pD
++        self.pM = pM
++        self.G = G
++        self.T = {}
++        self.maxstates = maxstates
++
++    def accD(self, d, ws):
++        acc = 0
++        for w in ws:
++            acc |= w ^ (w >> d)
++        return acc
++
++    def accM(self, q, ws):
++        acc = 0
++        for w in ws:
++            if not (w >> q) & 1:
++                acc |= w
++        return acc
++
++    def via(self, t, ws):
++        if len(ws) > t + 1:
++            return False
++        if t == 0 and sorted(ws) != [self.y]:
++            return False
++        for d, R in self.pD:
++            if R & self.accD(d, ws) != R:
++                return False
++        if len(ws) == t + 1:
++            for q, P in self.pM:
++                if P & self.accM(q, ws) != P:
++                    return False
++        return True
++
++    def act(self, pi, w):
++        r = 0
++        for k, p in enumerate(pi):
++            if (w >> p) & 1:
++                r |= 1 << k
++        return r
++
++    def canon(self, ws):
++        best = isort(ws)
++        bj = None
++        for j, pi in enumerate(self.G):
++            c = isort([self.act(pi, w) for w in ws])
++            if c < best:
++                best, bj = c, j
++        return best, bj
++
++    def explore(self, t, es):
++        key = (t,) + tuple(es)
++        if key in self.T:
++            return
++        if len(self.T) >= self.maxstates:
++            raise TooBig(len(self.T))
++        self.T[key] = None
++        hints = []
++        seen = {}
++        slack = t + 1 - len(es)
++        for tag, ys in successors(self.m, slack, es):
++            tt = t - 1
++            if not self.via(tt, ys):
++                continue
++            if tt == 0:
++                raise Feasible()
++            sy = isort(ys)
++            k2 = (tt,) + tuple(sy)
++            if k2 in seen:
++                cj = seen[k2]
++            else:
++                c, j = self.canon(ys)
++                self.explore(tt, c)
++                cj = j
++                seen[k2] = j
++            if cj is not None:
++                hints.append((tag, cj))
++        hh, st = [], set()
++        for tag, j in hints:
++            if tag not in st:
++                st.add(tag)
++                hh.append((tag, j))
++        self.T[key] = hh
++
++
++def automorphisms(n, y):
++    N = 1 << n
++    G = []
++    for sigma in itertools.permutations(range(n)):
++        if list(sigma) == list(range(n)):
++            continue
++        pi = []
++        for k in range(N):
++            v = 0
++            for i in range(n):
++                if (k >> i) & 1:
++                    v |= 1 << sigma[i]
++            pi.append(v)
++        e = Engine(n, y, [], [], [])
++        if e.act(pi, y) == y:
++            G.append(pi)
++    return G
++
++
++def make_pD(n, y, m):
++    out = []
++    for i in range(n):
++        d = 1 << i
++        R = (y ^ (y >> d)) & ~(m ^ (m >> d)) & m
++        if R:
++            out.append((d, R))
++    return out
++
++
++def make_pM(n, y, limit=8):
++    N = 1 << n
++    false_pts = [q for q in range(N) if not (y >> q) & 1]
++    false_pts.sort(key=lambda q: -bin(q).count('1'))
++    return [(q, y) for q in false_pts[:limit]]
++
++
++def prsOK(m, y, pD, pM):
++    for d, R in pD:
++        if R & (y ^ (y >> d)) != R or R & (m ^ (m >> d)) != 0:
++            return False
++    for q, P in pM:
++        if P & y != P or (y >> q) & 1:
++            return False
++    return True
++
++
++def gen_y(n, y, lb, maxstates=4000, pm_limit=8, verbose=True):
++    t0 = time.time()
++    N = 1 << n
++    m = (1 << N) - 1
++    xs = [sum(1 << v for v in range(N) if (v >> i) & 1) for i in range(n)]
++    pD = make_pD(n, y, m)
++    pM = make_pM(n, y, pm_limit)
++    assert prsOK(m, y, pD, pM)
++    G = automorphisms(n, y)
++    E = Engine(n, y, pD, pM, G, maxstates)
++    cap = lb - 1
++    roots = 0
++    for r in range(len(xs) + 1):
++        for zs in itertools.combinations(xs, r):
++            zs = list(zs)
++            if not zs or not E.via(cap, zs):
++                continue
++            roots += 1
++            c, j = E.canon(zs)
++            E.explore(cap, c)
++    if verbose:
++        print('n=%d lb=%d |G|=%d roots=%d states=%d time=%.1fs' % (n, lb, len(G), roots, len(E.T), time.time() - t0),
++              file=sys.stderr)
++    return dict(n=n, m=m, y=y, xs=xs, pD=pD, pM=pM, G=G, T=E.T, cap=cap, lb=lb)
++
++
++def build_bt(items):
++    if not items:
++        return 'BT.lf'
++    mid = len(items) // 2
++    return '(BT.nd %s [%s] %s)' % (build_bt(items[:mid]), ','.join(map(str, items[mid])), build_bt(items[mid + 1:]))
++
++
++def emit_data(d, chunks=6):
++    keys = sorted([list(k) for k in d['T'].keys()])
++    lines = []
++    lines.append('def L_ : List ℕ := [%s]' % ','.join(map(str, range(1 << d['n']))))
++    lines.append('def M_ : ℕ := %d' % d['m'])
++    lines.append('def Y_ : ℕ := %d' % d['y'])
++    lines.append('def XS_ : List ℕ := [%s]' % ','.join(map(str, d['xs'])))
++    lines.append('def PD_ : List (ℕ × ℕ) := [%s]' % ','.join('(%d,%d)' % p for p in d['pD']))
++    lines.append('def PM_ : List (ℕ × ℕ) := [%s]' % ','.join('(%d,%d)' % p for p in d['pM']))
++    lines.append('')
++    lines.append('def G_ : List (List ℕ) := [%s]' % ','.join('[%s]' % ','.join(map(str, pi)) for pi in d['G']))
++    lines.append('')
++    lines.append('-- the closed set of failing search states (%d states, up to %d symmetries)' % (len(keys), len(d['G'])))
++    lines.append('noncomputable def T_cert : BT := %s' % build_bt(keys))
++    lines.append('')
++    k = max(1, min(chunks, len(keys)))
++    size = (len(keys) + k - 1) // k
++    parts = [keys[i * size:(i + 1) * size] for i in range(k)]
++    parts = [p for p in parts if p]
++    for i, p in enumerate(parts):
++        ent = []
++        for key in p:
++            h = d['T'][tuple(key)]
++            ent.append('([%s],[%s])' % (','.join(map(str, key)), ','.join('(%d,%d)' % th for th in h)))
++        lines.append('noncomputable def K_%d : List (List ℕ × List (ℕ × ℕ)) := [%s]' % (i, ','.join(ent)))
++    return lines, len(parts)
++
++
++def balanced_append(names):
++    if len(names) == 1:
++        return names[0]
++    mid = len(names) // 2
++    return '(%s ++ %s)' % (balanced_append(names[:mid]), balanced_append(names[mid:]))
++
++
++def balanced_all(names):
++    if len(names) == 1:
++        return names[0]
++    mid = len(names) // 2
++    return '(all_app %s %s)' % (balanced_all(names[:mid]), balanced_all(names[mid:]))
++
++
++def emit_proof(d, nparts, module, statement, aux):
++    lines = []
++    for i in range(nparts):
++        lines.append('lemma c_%d : K_%d.all (fun kh => stepOK M_ Y_ PD_ PM_ G_ T_cert kh.1 kh.2) = true := by decide +kernel' % (i, i))
++    ks = ['K_%d' % i for i in range(nparts)]
++    cs = ['c_%d' % i for i in range(nparts)]
++    lines.append('set_option maxRecDepth 100000 in')
++    lines.append('lemma hK_cert : T_cert.toList = %s.map Prod.fst := by decide +kernel' % balanced_append(ks))
++    lines.append('set_option maxRecDepth 100000 in')
++    lines.append('lemma hT_cert : ∀ x, T_cert.mem x = true → ∃ h, (stepOK M_ Y_ PD_ PM_ G_ T_cert) x h = true :=')
++    lines.append('  cover (p := stepOK M_ Y_ PD_ PM_ G_ T_cert) T_cert _ hK_cert (%s)' % balanced_all(cs))
++    lines.append('')
++    lines.append('end %s' % aux)
++    lines.append('')
++    lines.append('open %s in' % aux)
++    lines.append('theorem %s : %s := by' % (module, statement))
++    lines.append('  exact lb_cert _ L_ M_ Y_ XS_ PD_ PM_ G_ T_cert %d %d rfl (by decide +kernel) (by decide +kernel) '
++                 '(by decide +kernel) ⟨fun _ => false, fun _ => true, by decide⟩ (by decide +kernel) '
++                 '(by decide +kernel) hT_cert (by decide +kernel)' % (d['cap'], d['lb']))
++    return lines
++
++
++def emit_data_compact(d, chunks=6, prefix='Z'):
++    keys = sorted([list(k) for k in d['T'].keys()])
++    wires = sorted({w for k in keys for w in k[1:]})
++    B62 = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
++
++    def b62(i):
++        r = B62[i % 62]
++        i //= 62
++        while i:
++            r = B62[i % 62] + r
++            i //= 62
++        return r
++    name = {w: prefix + b62(i) for i, w in enumerate(wires)}
++    lines = []
++    lines.append('def L_ : List ℕ := [%s]' % ','.join(map(str, range(1 << d['n']))))
++    lines.append('def M_ : ℕ := %d' % d['m'])
++    lines.append('def Y_ : ℕ := %d' % d['y'])
++    lines.append('def XS_ : List ℕ := [%s]' % ','.join(map(str, d['xs'])))
++    lines.append('def PD_ : List (ℕ × ℕ) := [%s]' % ','.join('(%d,%d)' % p for p in d['pD']))
++    lines.append('def PM_ : List (ℕ × ℕ) := [%s]' % ','.join('(%d,%d)' % p for p in d['pM']))
++    lines.append('')
++    lines.append('def G_ : List (List ℕ) := [%s]' % ','.join('[%s]' % ','.join(map(str, pi)) for pi in d['G']))
++    lines.append('')
++    for w in wires:
++        lines.append('def %s : ℕ := 0x%x' % (name[w], w))
++    lines.append('')
++
++    def kstr(k):
++        return '[%d%s]' % (k[0], ''.join(',' + name[w] for w in k[1:]))
++
++    def bt(items):
++        if not items:
++            return 'Z_e'
++        mid = len(items) // 2
++        return '(Z_n %s %s %s)' % (bt(items[:mid]), kstr(items[mid]), bt(items[mid + 1:]))
++
++    lines.append('def Z_n : BT → List ℕ → BT → BT := BT.nd')
++    lines.append('def Z_e : BT := BT.lf')
++    lines.append('-- the closed set of failing search states (%d states, up to %d symmetries)' % (len(keys), len(d['G'])))
++    lines.append('noncomputable def T_cert : BT := %s' % bt(keys))
++    lines.append('')
++    k = max(1, min(chunks, len(keys)))
++    size = (len(keys) + k - 1) // k
++    nparts = 0
++    for i in range(k):
++        part = keys[i * size:(i + 1) * size]
++        if not part:
++            continue
++        hs = ['[%s]' % ','.join('(%d,%d)' % th for th in d['T'][tuple(key)]) for key in part]
++        lines.append('def H_%d : List (List (ℕ × ℕ)) := [%s]' % (i, ','.join(hs)))
++        lines.append('noncomputable def K_%d : List (List ℕ × List (ℕ × ℕ)) := '
++                     'List.zip ((T_cert.toList.drop %d).take %d) H_%d' % (i, i * size, len(part), i))
++        nparts += 1
++    return lines, nparts
+diff --git a/missions/pnp/lbcert/lbparse.py b/missions/pnp/lbcert/lbparse.py
+new file mode 100644
+index 00000000..9218433e
+--- /dev/null
++++ b/missions/pnp/lbcert/lbparse.py
+@@ -0,0 +1,110 @@
++#!/usr/bin/env python3
++"""Robust statement classifier for HasCircuitSize lower bounds (any pretty-printing style).
++
++classify(stmt) -> dict(kind, n, lb, fun) or None
++  kind 'forall': ∀ (t : ℕ), HasCircuitSize N F t → K ≤ t
++  kind 'neg'   : ¬HasCircuitSize N F S            (lb = S + 1)
++truth_table(n, fun_text) -> int bitmask (Python translation; marceline-dev also has a Lean #eval fallback).
++"""
++import os, re, subprocess, tempfile
++
++HCS = 'PEqualNP.MetaComplexity.HasCircuitSize'
++NUM = r'\(?\s*(\d+)\s*(?::\s*ℕ\s*)?\)?'
++
++
++def norm(s):
++    s = re.sub(r'\s+', ' ', s).strip()
++    for _ in range(3):
++        s = re.sub(r'\(\s*(\d+)\s*:\s*ℕ\s*\)', r'\1', s)
++        s = re.sub(r'\(\s*(\d+)\s*:\s*Fin\s+\d+\s*\)', r'\1', s)
++    return s
++
++
++def take_group(s, i):
++    assert s[i] == '('
++    d = 0
++    for j in range(i, len(s)):
++        if s[j] == '(':
++            d += 1
++        elif s[j] == ')':
++            d -= 1
++            if d == 0:
++                return j + 1
++    raise ValueError('unbalanced')
++
++
++def split_hcs(s):
++    assert s.startswith(HCS)
++    r = s[len(HCS):].lstrip()
++    m = re.match(NUM, r)
++    if not m:
++        return None
++    n = int(m.group(1))
++    r = r[m.end():].lstrip()
++    if not r.startswith('('):
++        return None
++    e = take_group(r, 0)
++    fun = r[1:e - 1].strip()
++    if not fun.startswith('fun'):
++        return None
++    return n, fun, r[e:].strip()
++
++
++def classify(stmt):
++    s = norm(stmt)
++    m = re.match(r'∀ \(?(\w+) : ℕ\)?, ', s)
++    if m:
++        v = m.group(1)
++        body = s[m.end():]
++        if not body.startswith(HCS):
++            return None
++        p = split_hcs(body)
++        if not p:
++            return None
++        n, fun, rest = p
++        m2 = re.fullmatch(r'%s → (\d+) ≤ %s' % (re.escape(v), re.escape(v)), rest)
++        if m2:
++            return dict(kind='forall', n=n, lb=int(m2.group(1)), fun=fun)
++        return None
++    m = re.match(r'¬ ?\(?', s)
++    if m and s[m.end():].startswith(HCS):
++        body = s[m.end():]
++        if body.endswith(')') and s[m.end() - 1] == '(':
++            body = body[:-1]
++        p = split_hcs(body)
++        if not p:
++            return None
++        n, fun, rest = p
++        m2 = re.fullmatch(r'(\d+)', rest)
++        if m2:
++            return dict(kind='neg', n=n, lb=int(m2.group(1)) + 1, fun=fun)
++    return None
++
++
++def py_truth_table(n, fun):
++    m = re.match(r'fun \(?(\w+) : Fin \(?\d+\)? → Bool\)? => (.*)$', fun)
++    if not m:
++        raise ValueError('binder')
++    var, b = m.group(1), m.group(2)
++    b = re.sub(r'\b%s (\d+)' % re.escape(var), r'X[\1]', b)
++    if re.search(r'\b%s\b' % re.escape(var), b):
++        raise ValueError('var use')
++    b = b.replace('&&', ' and ').replace('||', ' or ')
++    b = re.sub(r'!(?!=)', ' not ', b)
++    b = b.replace('Bool.true', 'True').replace('Bool.false', 'False')
++    b = re.sub(r'\btrue\b', 'True', b)
++    b = re.sub(r'\bfalse\b', 'False', b)
++    if re.sub(r'\b(and|or|not|True|False|X)\b', '', b).strip(' ()[]0123456789') != '' and \
++            not re.fullmatch(r'[\s()\[\]\d]*', re.sub(r'\b(and|or|not|True|False|X)\b', '', b)):
++        raise ValueError('tokens')
++    code = compile(b, '<body>', 'eval')
++    y = 0
++    for v in range(1 << n):
++        X = [(v >> i) & 1 == 1 for i in range(n)]
++        if eval(code, {'__builtins__': {}}, {'X': X}):
++            y |= 1 << v
++    return y
++
++
++def truth_table(n, fun):
++    return py_truth_table(n, fun), 'py'
+diff --git a/missions/pnp/lbcert/lbremote.py b/missions/pnp/lbcert/lbremote.py
+new file mode 100644
+index 00000000..9cbb35c8
+--- /dev/null
++++ b/missions/pnp/lbcert/lbremote.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python3
++"""Build an lb_cert candidate on marceline-dev (32 cores) through the relay op `lb-cert`.
++
++usage: lbremote.py STATEMENT_FILE MODULE OUT.lean [--maxstates N] [--chunks K] [--timeout SECONDS]
++exit: 0 written (sha256 verified), 3 bound false (a smaller circuit exists), 4 too big,
++      2 unsupported statement, 1 relay/handler error (fall back to local lbassemble.py).
++Prints one JSON summary line on stdout.
++"""
++import base64, gzip, hashlib, json, os, subprocess, sys, tempfile
++
++REQ = os.path.expanduser('~/.local/bin/marceline-request')
++
++
++def arg(name, default):
++    return type(default)(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else default
++
++
++def main():
++    stmt_f, module, out = sys.argv[1:4]
++    req = {'statement': open(stmt_f).read().strip(), 'module': module,
++           'maxstates': arg('--maxstates', 60000), 'chunks': arg('--chunks', 40)}
++    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
++        json.dump(req, f)
++        rf = f.name
++    try:
++        sub = subprocess.run([REQ, 'submit', 'lb-cert', rf], capture_output=True, text=True, timeout=60)
++        rid = sub.stdout.strip().split('\n')[-1]
++        if sub.returncode != 0 or len(rid) != 36:
++            print(json.dumps({'status': 'relay_error', 'detail': sub.stderr[-300:]})); return 1
++        w = subprocess.run([REQ, 'wait', rid, str(arg('--timeout', 1500))], capture_output=True, text=True,
++                           timeout=arg('--timeout', 1500) + 60)
++    finally:
++        os.unlink(rf)
++    try:
++        e = json.loads(w.stdout.strip().split('\n')[-1])
++    except Exception:
++        print(json.dumps({'status': 'relay_error', 'id': rid, 'detail': w.stderr[-300:]})); return 1
++    r = e.get('result') or {}
++    st = r.get('status', 'error')
++    summary = {k: r.get(k) for k in ('status', 'engine', 'states', 'bytes', 'sha256')}
++    summary['id'] = rid
++    if st == 'ok':
++        data = gzip.decompress(base64.b64decode(r['file_gz_b64']))
++        if hashlib.sha256(data).hexdigest() != r['sha256']:
++            summary['status'] = 'digest_mismatch'; print(json.dumps(summary)); return 1
++        tmp = out + '.tmp'
++        open(tmp, 'wb').write(data)
++        os.replace(tmp, out)
++        print(json.dumps(summary)); return 0
++    summary['log'] = (r.get('log') or e.get('events', [{}])[-1].get('message', ''))[-200:]
++    print(json.dumps(summary))
++    return {'false': 3, 'toobig': 4, 'unsupported': 2}.get(st, 1)
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/missions/pnp/lbcert/patch_relay.py b/missions/pnp/lbcert/patch_relay.py
+new file mode 100644
+index 00000000..ac409ae5
+--- /dev/null
++++ b/missions/pnp/lbcert/patch_relay.py
+@@ -0,0 +1,68 @@
++#!/usr/bin/env python3
++"""Add the `lb-cert` operation to relay.mjs (idempotent). usage: patch_relay.py RELAY.mjs"""
++import sys
++p = sys.argv[1]
++s = open(p).read()
++if "'lb-cert'" in s:
++    print('already patched'); sys.exit(0)
++
++
++def rep(old, new):
++    global s
++    assert s.count(old) == 1, 'anchor not unique: ' + old[:60]
++    s = s.replace(old, new)
++
++
++rep("const ops=new Set(['ping','lean-check']);",
++    "const ops=new Set(['ping','lean-check','lb-cert']);\nconst MAX_LB=8;")
++rep("    if(x.op==='lean-check'&&(!x.payload||typeof x.payload!=='object'||!(/^[0-9a-f]{64}$/.test(x.payload.job))))throw Error();",
++    "    if(x.op==='lean-check'&&(!x.payload||typeof x.payload!=='object'||!(/^[0-9a-f]{64}$/.test(x.payload.job))))throw Error();\n"
++    "    if(x.op==='lb-cert'&&!lbOK(x.payload))throw Error();")
++rep("function open(c,box,raw){",
++    "// lb-cert: a lower-bound certificate request (data only: statement text, module name, two bounded integers).\n"
++    "function lbOK(p){return !!p&&typeof p==='object'&&typeof p.statement==='string'&&Buffer.byteLength(p.statement)<=16384&&\n"
++    " /^PEqualNP\\.Outside\\.[A-Za-z0-9_]{1,80}$/.test(p.module)&&Number.isSafeInteger(p.maxstates)&&p.maxstates>=1&&p.maxstates<=300000&&\n"
++    " Number.isSafeInteger(p.chunks)&&p.chunks>=1&&p.chunks<=200;}\n"
++    "function open(c,box,raw){")
++rep("  return {ping:true,lean_bases,max_parallel_lean:MAX_LEAN};",
++    "  return {ping:true,lean_bases,max_parallel_lean:MAX_LEAN,lb_cert:fs.existsSync(path.join(HERE,'lb-handler.py')),max_parallel_lb:MAX_LB};")
++rep("async function worker(c){",
++    "function launchLb(req){\n"
++    " // Fixed handler, no shell; the request supplies only validated data on stdin.\n"
++    " const child=spawn(path.join(HOME,'.local/bin/python3'),[path.join(HERE,'lb-handler.py')],{\n"
++    "  stdio:['pipe','pipe','ignore'],env:{HOME,PATH:path.join(HOME,'.elan/bin')+':'+(process.env.PATH||'/usr/bin:/bin'),LANG:'C.UTF-8'},shell:false\n"
++    " });\n"
++    " let out=Buffer.alloc(0),failed=false;\n"
++    " const deadline=setTimeout(()=>{failed=true;child.kill('SIGTERM');},1800000);deadline.unref();\n"
++    " child.stdout.on('data',b=>{if(out.length+b.length>1536*1024){failed=true;child.kill('SIGTERM');}else out=Buffer.concat([out,b]);});\n"
++    " child.stdin.on('error',()=>{});\n"
++    " child.stdin.end(JSON.stringify(req.payload));\n"
++    " const promise=new Promise(resolve=>{\n"
++    "  child.on('error',()=>resolve({error:'cannot start lb-cert handler'}));\n"
++    "  child.on('close',code=>{\n"
++    "   clearTimeout(deadline);\n"
++    "   if(code!==0||failed)return resolve({error:'lb-cert handler failed'});\n"
++    "   try{const result=JSON.parse(out);if(!result||result.module!==req.payload.module)throw Error();resolve({result});}\n"
++    "   catch{resolve({error:'invalid lb-cert handler response'});}\n"
++    "  });\n"
++    " });\n"
++    " return {promise,cancel:()=>child.kill('SIGTERM')};\n"
++    "}\n"
++    "async function worker(c){")
++rep("    if(req.op==='ping'){\n     const result=",
++    "    if(req.op==='lb-cert'&&[...active.values()].filter(a=>a.op==='lb-cert'&&!a.finished).length>=MAX_LB)continue;\n"
++    "    if(req.op==='ping'){\n     const result=")
++rep("     const job=launchLean(req),a={...job,op:req.op,rss:req.payload.rss_mib,finished:false};",
++    "     const job=req.op==='lb-cert'?launchLb(req):launchLean(req),a={...job,op:req.op,rss:req.payload.rss_mib||0,finished:false};")
++rep(" throw Error('unknown relay operation');\n}",
++    " if(op==='lb-cert'){\n"
++    "  if(args.length!==1)throw Error('lb-cert requires one request JSON file');\n"
++    "  const st=fs.statSync(args[0]);if(!st.isFile()||st.size>65536)throw Error('invalid lb-cert request file');\n"
++    "  const value=JSON.parse(fs.readFileSync(args[0],'utf8'));\n"
++    "  if(!lbOK(value))throw Error('invalid lb-cert request: statement, module, maxstates, chunks');\n"
++    "  return value;\n"
++    " }\n"
++    " throw Error('unknown relay operation');\n}")
++rep("lean-check JOB.json | submit OP [argument]", "lean-check JOB.json | submit OP [argument] (OP: ping, lean-check, lb-cert REQ.json)")
++open(p, 'w').write(s)
++print('patched')
+diff --git a/missions/pnp/lbcert/prune_engine.py b/missions/pnp/lbcert/prune_engine.py
+new file mode 100644
+index 00000000..54c40708
+--- /dev/null
++++ b/missions/pnp/lbcert/prune_engine.py
+@@ -0,0 +1,55 @@
++#!/usr/bin/env python3
++"""Conservatively drop engine declarations not (textually, transitively) reachable from the roots.
++A declaration is kept if the last component of its name occurs as a token in any kept text.
++usage: prune_engine.py IN.lean OUT.lean"""
++import re, sys
++
++ROOTS = {'lb_cert', 'cover', 'all_app', 'stepOK', 'BT', 'toList', 'mem', 'nd', 'lf'}
++DECL = re.compile(r'^(?:@\[[^\]]*\]\s*)?(?:private |protected |noncomputable |partial )*'
++                  r'(theorem|lemma|def|abbrev|inductive|structure|instance|class)\b\s*([^\s:(\[{]*)')
++STRUCT = re.compile(r'^(import|namespace|end|open|section|variable|universe|set_option|--)')
++
++src = open(sys.argv[1]).read().split('\n')
++blocks = []
++cur = None
++for line in src:
++    m = DECL.match(line)
++    if m:
++        cur = [m.group(1), m.group(2), [line]]
++        blocks.append(cur)
++    elif STRUCT.match(line) or (line.strip() == '' and cur is None):
++        cur = None
++        blocks.append(['struct', None, [line]])
++    else:
++        if cur is None:
++            cur = ['struct', None, [line]]
++            blocks.append(cur)
++        else:
++            cur[2].append(line)
++
++tok = re.compile(r"[A-Za-z_][A-Za-z_0-9'!?]*")
++last = lambda nm: nm.split('.')[-1] if nm else nm
++keep = set(i for i, b in enumerate(blocks) if b[0] in ('struct', 'instance', 'class'))
++need = set(ROOTS)
++for i in keep:
++    need |= set(tok.findall('\n'.join(blocks[i][2])))
++changed = True
++while changed:
++    changed = False
++    for i, b in enumerate(blocks):
++        if i in keep:
++            continue
++        nm = b[1]
++        if nm and (last(nm) in need or nm in need):
++            keep.add(i)
++            need |= set(tok.findall('\n'.join(b[2])))
++            changed = True
++out = []
++for i, b in enumerate(blocks):
++    if i in keep:
++        out.extend(b[2])
++res = re.sub(r'\n{3,}', '\n\n', '\n'.join(out))
++open(sys.argv[2], 'w').write(res)
++print('kept %d of %d decls; %d -> %d bytes' % (
++    sum(1 for i in keep if blocks[i][0] != 'struct'), sum(1 for b in blocks if b[0] != 'struct'),
++    len('\n'.join(src).encode()), len(res.encode())), file=sys.stderr)
+diff --git a/missions/pnp/lbcert/twin_publish.py b/missions/pnp/lbcert/twin_publish.py
+new file mode 100644
+index 00000000..c909ddae
+--- /dev/null
++++ b/missions/pnp/lbcert/twin_publish.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python3
++"""Publish a proof of the NEGATED TWIN of a step we hold (join.txt: "If you believe a step is false,
++prove its negated twin, listed beside it on the desk: that is how a counterexample is sent, as an
++ordinary proof in a pull request").  Uses the town's own gitctl/github/validate helpers unchanged:
++same fork, same signed identity, same branch scheme and PR shape as the publisher.
++
++usage (from /var/lib/lubko/wd/viche):
++  python3 /home/lubko/pnp-work/infra/twin_publish.py HELD_GAP TWIN_GAP CANDIDATE.lean [--dry-run]
++Requires: HELD_GAP is LEASED by us; TWIN_GAP's statement is exactly the negation-twin of HELD_GAP's
++(one is '¬ (' + other + ')'); TWIN_GAP is open on the public desk with no open PR.
++"""
++import json, re, sys, time, urllib.request
++sys.path.insert(0, '/var/lib/lubko/wd/viche')
++from missions.pnp import config, gitctl as git, github as gh, state, validate
++
++held, twin, cand = sys.argv[1:4]
++dry = '--dry-run' in sys.argv
++
++
++def norm(s):
++    return re.sub(r'\s+', ' ', s).strip()
++
++
++rec = state.load(held)
++assert rec and rec['state'] in ('LEASED', 'RESEARCHING'), 'held gap not leased: %r' % (rec and rec['state'])
++r = urllib.request.Request('https://data.pequalnp.com/data/desk/gaps.json', headers={'User-Agent': 'viche-town'})
++G = {g['id']: g for g in json.loads(urllib.request.urlopen(r, timeout=40).read())['gaps']}
++assert twin in G, 'twin not open on the desk'
++tg = G[twin]
++a, b = norm(rec['statement']), norm(tg['statement'])
++assert a in ('¬ (' + b + ')', '¬(' + b + ')') or b in ('¬ (' + a + ')', '¬(' + a + ')'), 'not negation twins'
++assert tg['pr_open'] == 0, 'twin already has an open PR'
++data = open(cand, 'rb').read()
++meta = {'id': twin, 'file': tg['file'], 'module': tg['module'], 'statement': tg['statement'],
++        'imports': tg['imports']}
++digest = validate.validate(meta, data)
++print('validated', twin, digest, len(data), 'bytes')
++if dry:
++    sys.exit(0)
++branch = config.branch_for(twin)
++base = git.ensure_mirror()
++wt = git.fresh_worktree(twin, base, branch)
++git.prepare_unpublished(wt, branch, base, None)
++git.pin_candidate(wt, tg['file'], data)
++sha = git.signed_commit(wt, base, twin)
++print('signed', sha)
++pushed = git.push_branch(branch)
++assert pushed == sha, 'pushed sha differs'
++for _ in range(30):
++    ver = gh.commit_verification(sha)
++    if ver.get('verified') is True:
++        break
++    time.sleep(5)
++assert ver.get('verified') is True and ver.get('name') == config.AUTHOR_NAME, 'signature not verified'
++num = gh.pr_exists_for(branch, twin) or gh.create_pr(branch, twin)
++pr, problems = gh.validate_created(int(num), sha, tg['file'], expected_commits=[sha])
++print('PR', num, 'problems', problems)
+diff --git a/missions/pnp/research/README.md b/missions/pnp/research/README.md
+index f0727749..ac4bb8ac 100644
+--- a/missions/pnp/research/README.md
++++ b/missions/pnp/research/README.md
+@@ -14,6 +14,20 @@ Independent method/tool agents run `pnp-research start --role method` or
+ and proof-producing automation without acquiring desk leases. The Executive
+ maintains these independent roles alongside baseline and focused researchers.
+ 
++## Concrete circuit-size steps: generated on marceline-dev
++
++Statements `∀ t, HasCircuitSize n f t → K ≤ t`, `¬HasCircuitSize n f S` and their `¬ (...)` twins
++are handled by software (missions/pnp/lbcert/README.md). Candidates are pre-built on marceline-dev
++for every open step into PNP_STATE_ROOT/lbcert/cands/GAP.lean and the allocator fast lane submits
++them within one tick of acquisition. To build one yourself on marceline-dev (32 cores, ~20 s):
++```sh
++python3 /var/lib/lubko/wd/viche/missions/pnp/lbcert/lbremote.py STATEMENT.txt \
++    PEqualNP.Outside.L_meta_N OUT.lean          # 0 written, 3 bound false, 4 too big
++marceline-request status                        # capabilities.lb_cert must be true
++```
++Do not spend a research session on such a step: if its status is `toobig`, the open problem is a
++stronger engine (tool role), not the instance.
++
+ ## Use the mathematical memory
+ 
+ ```sh
+diff --git a/missions/pnp/research/playbook.py b/missions/pnp/research/playbook.py
+index adb8aacd..f5f31785 100644
+--- a/missions/pnp/research/playbook.py
++++ b/missions/pnp/research/playbook.py
+@@ -51,7 +51,12 @@ def guide(role):
+     lines = [f"YOUR ROLE: {role}. {purpose}",
+              "FIRST: run ~/.local/bin/pnp-research start --role " + role +
+              " (a small current work packet, not a documentation reading task).",
+-             guidance]
++             guidance,
++             "CONCRETE CIRCUIT-SIZE STEPS (statement `∀ t, HasCircuitSize n f t → K ≤ t`, `¬HasCircuitSize n f S`, or a `¬ (...)` twin): "
++             "do not hand-prove them. The lb_cert generator pre-builds candidates on marceline-dev for every open step into "
++             "PNP_STATE_ROOT/lbcert/cands/GAP.lean (status in GAP.status) and the allocator fast lane submits them within one tick. "
++             "Build one yourself on marceline-dev (32 cores, ~20 s): python3 /var/lib/lubko/wd/viche/missions/pnp/lbcert/lbremote.py "
++             "STATEMENT.txt PEqualNP.Outside.L_meta_N OUT.lean  (exit 0 written, 3 bound false, 4 too big). See missions/pnp/lbcert/README.md."]
+     if role in BOUND:
+         lines += [
+           "In your workspace, pnp-research obligations ready --current shows open dependencies; obligations show ID gives the exact type. Request with obligations request --statement TYPE --requires ID; solve with obligations solve ID BODY --async, collect with obligations collect ID. BODY is a Lean term beginning with by.",

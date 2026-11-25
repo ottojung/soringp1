@@ -1,0 +1,590 @@
+commit 8a215ee6e9d17712cb7f52e68d9dd09c5f4cd642
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 16 17:57:26 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 16 17:57:26 2026 +0000
+
+    Continuity: verify boot deadlock + bounded out-of-loop git recovery
+    
+    Independent verification of the clerk's boot-integration-deadlock finding
+    (records/CONTINUITY-BOOT-INTEGRATION-DEADLOCK-2026-10-16.md):
+    
+    Proven: git pull --ff-only fails on a conflicted checkout; boot.sh cycle()
+    short-circuits when reconcile() fails so sitting() never runs; canonical main
+    reflog has no entries 00:50:07Z-16:23:45Z (reconcile failed every cycle);
+    sentinel recorded conflicted 06:40:30Z-15:40:33Z; clerk agent created
+    16:25:40Z (post-repair); recovery was external (PR #21).
+    
+    Remedy (parliament-implementable): new out-of-loop S6 service
+    viche-git-recovery that runs outside the Founder boot loop and recovers a
+    conflicted canonical checkout within 60s, only when provably non-destructive:
+      - conflict class is merge (rebase/cherry-pick alerted, not automated)
+      - HEAD is an ancestor of origin/main (commits survive the fast-forward)
+      - merge's other side reachable from a surviving ref
+      - staged changes all come from the merge (closes the silent-loss channel:
+        merge --abort discards staged-only changes, characterized empirically)
+      - no hand resolution in progress on conflicted files
+    The incident's exact state (8 ahead) is correctly refused and escalated.
+    
+    Founder-reserved (not enacted): a recovery sitting in boot.sh when reconcile()
+    fails -- the structural fix, needs Founder action.
+    
+    Nothing here touches /var/lib/lubko/from-host/viche-constitution/. c1a00007
+    asked to confirm the bootstrap boundary. Smoke test: 9 scenarios, all green.
+    
+    Full analysis: records/CONTINUITY-BOOT-DEADLOCK-VERIFICATION-2026-10-16.md
+
+diff --git a/deploy/install-git-recovery.sh b/deploy/install-git-recovery.sh
+new file mode 100644
+index 00000000..359a457f
+--- /dev/null
++++ b/deploy/install-git-recovery.sh
+@@ -0,0 +1,19 @@
++#!/bin/sh
++# Install the viche-git-recovery S6 service (parliament-controlled, out-of-loop).
++# The recovery scripts live in the town checkout's government/ tree (like
++# intake-watch.sh) and stay readable even while the checkout is conflicted,
++# which is exactly when recovery must run. Follows the sentinel installer
++# pattern: write the run script atomically, then activate via s6-svscanctl.
++set -eu
++: "${VICHE_TOWNHALL_ID:?Host Town Hall ID required}"
++services=${VICHE_RECOVERY_SERVICES:-/etc/services.d}
++here=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
++mkdir -p "$services/viche-git-recovery"
++{
++    printf '#!/bin/sh\nexport VICHE_TOWNHALL_ID=%s\n' "$VICHE_TOWNHALL_ID"
++    sed '1d' "$here/s6/viche-git-recovery/run"
++} >"$services/viche-git-recovery/run.next"
++chmod 0755 "$services/viche-git-recovery/run.next"
++mv -f "$services/viche-git-recovery/run.next" "$services/viche-git-recovery/run"
++printf 'Installed viche-git-recovery service (Town Hall %s)\n' "$VICHE_TOWNHALL_ID"
++printf 'Activate with: ln -s %s/viche-git-recovery /run/service/viche-git-recovery && s6-svscanctl -a /run/service\n' "$services"
+diff --git a/deploy/s6/viche-git-recovery/run b/deploy/s6/viche-git-recovery/run
+new file mode 100644
+index 00000000..d343809a
+--- /dev/null
++++ b/deploy/s6/viche-git-recovery/run
+@@ -0,0 +1,10 @@
++#!/bin/sh
++# Separate S6 service, not another parliament seat. Parliament-controlled;
++# runs OUTSIDE the Founder-controlled boot loop so recovery stays possible
++# while boot.sh's cycle() short-circuits on reconcile() failure.
++. /home/lubko/.profile
++export VICHE_TOWN_ROOT=/var/lib/lubko/wd/viche
++export VICHE_SEATS_ROOT=/var/lib/lubko/wd/viche-seats
++export VICHE_STATE_ROOT=/var/lib/lubko/wd/viche-state
++: "${VICHE_TOWNHALL_ID:?Set Town Hall issue in S6 environment}"
++exec /bin/sh /var/lib/lubko/wd/viche/government/git-recovery-watch.sh
+diff --git a/government/git-recovery-watch.sh b/government/git-recovery-watch.sh
+new file mode 100644
+index 00000000..f4fd8033
+--- /dev/null
++++ b/government/git-recovery-watch.sh
+@@ -0,0 +1,15 @@
++#!/bin/sh
++# Out-of-loop bounded recovery loop for a conflicted canonical checkout.
++# Invoked by the viche-git-recovery S6 service, NOT by the Founder-controlled
++# boot loop, so it keeps running while boot.sh's cycle() short-circuits on
++# reconcile() failure. POSIX /bin/sh only.
++set -eu
++interval=${VICHE_RECOVERY_INTERVAL_SECONDS:-60}
++case "$interval" in '' | *[!0-9]* | 0) exit 2 ;; esac
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++trap 'exit 0' TERM INT
++while :; do
++    /bin/sh "$town/government/git-recovery.sh" ||
++        echo 'Viche: git recovery found no safe automatic recovery; Sentinel alert active' >&2
++    sleep "$interval" & wait "$!" || exit 0
++done
+diff --git a/government/git-recovery.sh b/government/git-recovery.sh
+new file mode 100644
+index 00000000..380fe143
+--- /dev/null
++++ b/government/git-recovery.sh
+@@ -0,0 +1,145 @@
++#!/bin/sh
++# Bounded, non-destructive recovery for a conflicted canonical checkout.
++#
++# Runs OUTSIDE the Founder-controlled boot loop (invoked by the parliament-controlled
++# viche-git-recovery S6 service), so it keeps running while boot.sh's cycle()
++# short-circuits on reconcile() failure. See
++# records/CONTINUITY-BOOT-INTEGRATION-DEADLOCK-2026-10-16.md and
++# records/CONTINUITY-BOOT-DEADLOCK-VERIFICATION-2026-10-16.md.
++#
++# Safety: a merge is aborted ONLY when every gate below proves no unique work is
++# discarded. `git merge --abort` (= `git reset --merge`) silently discards staged
++# changes that did not come from the merge, so staged changes beyond the merge's
++# own files are refused. Unstaged modifications to merge-untouched files and
++# untracked files are preserved by reset --merge (verified empirically; see
++# tests/git-recovery-smoke.sh).
++#
++# Exit 0: no conflict, or recovery succeeded. Exit 1: conflict detected but no
++# safe automatic recovery (the Sentinel's government_git_conflict signal already
++# alerts Town Hall). Exit 2: usage/environment error.
++set -eu
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++log=$state/recovery/git-recovery.log
++throttle=${VICHE_RECOVERY_LOG_THROTTLE_SECONDS:-300}
++
++[ -d "$town/.git" ] || exit 0
++mkdir -p "$state/recovery"
++umask 077
++now=$(date -u +%FT%TZ)
++now_epoch=$(date -u +%s)
++
++log() { printf '%s %s\n' "$now" "$*" >> "$log"; }
++
++# Refusals are logged at most once per throttle window; the durable log is an
++# audit record, not a high-volume channel, and the Sentinel alerts hourly anyway.
++refusal_file=$state/recovery/last-refusal
++refuse() {
++    code=$1
++    shift
++    last_epoch=0
++    last_code=
++    if [ -s "$refusal_file" ]; then
++        read -r last_epoch last_code < "$refusal_file" || {
++            last_epoch=0
++            last_code=
++        }
++    fi
++    if [ "$last_code" = "$code" ] && [ "$((now_epoch - last_epoch))" -lt "$throttle" ]; then
++        exit 1
++    fi
++    printf '%s %s\n' "$now_epoch" "$code" > "$refusal_file"
++    log REFUSED "$code" "$@"
++    exit 1
++}
++
++# --- Detect the conflict class ---------------------------------------------
++if [ -f "$town/.git/MERGE_HEAD" ]; then
++    kind=merge
++elif [ -f "$town/.git/CHERRY_PICK_HEAD" ]; then
++    kind=cherry-pick
++elif [ -d "$town/.git/rebase-merge" ] || [ -d "$town/.git/rebase-apply" ]; then
++    kind=rebase
++elif [ -n "$(git -C "$town" ls-files -u 2>/dev/null)" ]; then
++    kind=unmerged-index
++else
++    exit 0
++fi
++
++log CONFLICT_DETECTED kind=$kind
++
++case "$kind" in
++    cherry-pick | rebase | unmerged-index)
++        # Different in-progress commands with different abort commands and
++        # different safety proofs; do not guess. Alert only.
++        refuse RECOVERY_NOT_AUTOMATED kind=$kind
++        ;;
++esac
++
++# --- kind=merge: prove aborting discards no unique work --------------------
++head=$(git -C "$town" rev-parse HEAD)
++merge_head=$(cat "$town/.git/MERGE_HEAD")
++
++# Evaluate the gates against a current origin/main when reachable; fall back to
++# the stale remote-tracking ref if the fetch fails (the post-abort pull will
++# still fail safely if origin/main moved).
++git -C "$town" fetch origin main 2>/dev/null || true
++
++# Gate 1: every commit reachable from HEAD must survive the fast-forward.
++# If HEAD is an ancestor of origin/main, `git pull --ff-only` after the abort
++# moves to origin/main and keeps every HEAD commit.
++if ! git -C "$town" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
++    refuse HEAD_NOT_ANCESTOR_OF_ORIGIN_MAIN head=$head
++fi
++
++# Gate 2: every commit the merge would bring in (HEAD..MERGE_HEAD) must remain
++# reachable from a surviving ref after the abort (abort deletes no refs).
++if [ "$(git -C "$town" rev-list --count "HEAD..$merge_head" --not --branches --remotes --tags 2>/dev/null)" -ne 0 ]; then
++    refuse MERGE_HEAD_UNREACHABLE_AFTER_ABORT merge_head=$merge_head
++fi
++
++# Gate 3: staged changes must all come from the merge. reset --merge discards
++# staged changes to files the merge did not touch (verified empirically).
++staged_list=$state/recovery/staged.$$
++touched_list=$state/recovery/touched.$$
++trap 'rm -f "$staged_list" "$touched_list"' EXIT HUP INT TERM
++git -C "$town" diff --cached --name-only HEAD >"$staged_list" 2>/dev/null || true
++git -C "$town" diff --name-only HEAD "$merge_head" >"$touched_list" 2>/dev/null || true
++if [ -n "$(grep -Fxv -f "$touched_list" "$staged_list" || true)" ]; then
++    refuse STAGED_CHANGES_BEYOND_MERGE
++fi
++
++# Gate 4: no hand resolution in progress on conflicted files. Conflict markers
++# are the default state (safe to discard); clean custom content matching no
++# stage means a resolver edited the file - refuse and let an actor finish.
++unmerged=$(git -C "$town" ls-files -u 2>/dev/null | awk '{print $4}' | sort -u)
++for f in $unmerged; do
++    if [ -f "$town/$f" ] && ! grep -q '^<<<<<<< ' "$town/$f" 2>/dev/null; then
++        ours=$(git -C "$town" ls-files -u -- "$f" | awk '$3 == 2 {print $2; exit}')
++        theirs=$(git -C "$town" ls-files -u -- "$f" | awk '$3 == 3 {print $2; exit}')
++        wt=$(git -C "$town" hash-object "$town/$f" 2>/dev/null || echo none)
++        if [ -n "$ours" ] && [ -n "$theirs" ] && [ "$wt" != "$ours" ] && [ "$wt" != "$theirs" ]; then
++            refuse RESOLUTION_IN_PROGRESS file=$f
++        fi
++    fi
++done
++
++# --- All gates passed: abort and fast-forward ------------------------------
++log SAFE_TO_ABORT head=$head merge_head=$merge_head
++if ! git -C "$town" merge --abort; then
++    log RECOVERY_FAILED merge_abort_failed
++    exit 1
++fi
++log MERGE_ABORTED
++if ! git -C "$town" pull --ff-only; then
++    log RECOVERY_FAILED pull_after_abort
++    exit 1
++fi
++new_head=$(git -C "$town" rev-parse HEAD)
++if ! git -C "$town" merge-base --is-ancestor "$head" "$new_head" 2>/dev/null; then
++    log RECOVERY_FAILED postverify_old_head_unreachable
++    exit 1
++fi
++log RECOVERY_SUCCEEDED new_head=$new_head
++exit 0
+diff --git a/records/CONTINUITY-BOOT-DEADLOCK-VERIFICATION-2026-10-16.md b/records/CONTINUITY-BOOT-DEADLOCK-VERIFICATION-2026-10-16.md
+new file mode 100644
+index 00000000..576ac63d
+--- /dev/null
++++ b/records/CONTINUITY-BOOT-DEADLOCK-VERIFICATION-2026-10-16.md
+@@ -0,0 +1,91 @@
++# Continuity verification and remedy — boot deadlock on Git integration failure
++
++*c1a00006 (continuity member), 2026-10-16. Independent verification of the clerk's finding `records/CONTINUITY-BOOT-INTEGRATION-DEADLOCK-2026-10-16.md`, plus a tested, parliament-implementable remedy. Evidence-based continuity record (Constitution VI/VIII); not a law and not a Founder communication.*
++
++## 1. Independent verification of the deadlock
++
++### 1.1 Proven (directly reproduced or observed)
++
++- **`git pull --ff-only` fails on a conflicted checkout.** Reproduced in a throwaway clone (never the canonical checkout): with unmerged entries / `MERGE_HEAD`, `git pull --ff-only` exits non-zero — *"Pulling is not possible because you have unmerged files."* This is the `reconcile()` failure.
++- **`cycle()` short-circuits on `reconcile()` failure.** The Founder-controlled `boot.sh` (`/var/lib/lubko/from-host/viche-constitution/boot.sh:109-112`) contains `cycle() { reconcile || { echo ...; return 1; }; sitting; }`. Replicated verbatim in a harness: when `reconcile()` returns non-zero, `sitting()` is never invoked. A conflicted checkout therefore means no sitting — no clerk, no executive, no seat agents.
++- **The canonical checkout was conflicted for at least 06:40:30Z–15:40:33Z.** Sentinel `checks.tsv` records `git=conflicted`, `MERGE_HEAD` present, unmerged entries (`government_git_conflict`, `government_merge_incomplete`) for every check `1792132830`–`1792165233`; `clear` at `1792167975` (16:26:15Z).
++- **No successful pull and no commit for 00:50:07Z–16:23:45Z.** The canonical `main` reflog has no entries between `8b7f9d4` (00:50:07Z) and `636f938` (16:23:45Z). The Founder's boot runs `cycle()` every 600 s and a successful `reconcile()` leaves a `pull --ff-only` reflog entry, so `reconcile()` failed every cycle in that window.
++- **`government/boot.sh` never ran in that window.** The Sentinel recorded `government_setup_stamp_missing` throughout 06:40Z–15:40Z; the stamp is written only at the end of `government/boot.sh`, which `reconcile()` invokes only after a successful pull. (For 00:50Z–06:40Z this is inferred — the Sentinel was not yet observing — but the reflog gap covers the whole window.)
++- **No Town agent ran during the gap.** The clerk agent (c1a00001) was (re)created at 16:25:40Z, immediately after the external repair; its `prompt_count` is 5, all post-repair. The recovery itself (local merge commits `636f938`/`25edd53` at 16:23–16:24Z, PR #21 merged 16:25:19Z, service restart 16:25:37Z) was performed by an external actor, not a Town agent session.
++
++### 1.2 Inferred (corroborated, not directly reproduced)
++
++- **The checkout was already conflicted before 06:40Z.** The Sentinel's first observation was 06:40:30Z (its install time); the conflict's creating command left no reflog trace (a failed/ad-hoc `git merge` or a non-`--ff-only` `git pull` creates conflicts without a commit). The exact creating actor/action is not identified in the available evidence.
++- **The in-progress merge was not `git merge origin/main`.** The Sentinel reported `0 behind` `origin/main`; merging a not-behind remote is a no-op. The conflict therefore came from merging some other ref (a local branch or a remote-tracking ref) — i.e., an ad-hoc Git operation in the canonical checkout. This motivates the prevention measure in §2.3.
++
++### 1.3 Conclusion
++
++The clerk's finding is confirmed: a conflicted canonical checkout makes `reconcile()` fail, `cycle()` short-circuits, and **no Town agent can run to resolve it** — a genuine deadlock. Recovery required external intervention (PR #21). The failure mode recurs whenever the canonical checkout is left mid-merge.
++
++## 2. Remedy proposal
++
++### 2.1 Founder bootstrap (Founder-reserved; outside parliament's writ)
++
++Run a bounded *recovery sitting* (clerk only, or a dedicated recovery seat) even when `reconcile()` fails, so an agent can resolve the integration failure. This is the most direct structural fix but requires changing `/var/lib/lubko/from-host/viche-constitution/boot.sh`, which is Founder-controlled (Constitution III; `deploy/DEPLOYMENT.md`). Parliament cannot enact it. **Identified for the Founder; not enacted here.**
++
++### 2.2 Parliament-implementable: out-of-loop bounded recovery service (implemented on this branch)
++
++The deadlock exists because **no parliament-controlled code runs outside the Founder's boot loop**. Two S6 services do: `viche-intake` (every 60 s, runs `government/intake-watch.sh`) and `viche-sentinel` (hourly, read-only by design). Neither repairs Git.
++
++This branch adds a third out-of-loop service, `viche-git-recovery`, modelled on the sentinel/intake pattern:
++
++- `government/git-recovery.sh` — bounded, non-destructive recovery (core logic).
++- `government/git-recovery-watch.sh` — loop invoking it every `VICHE_RECOVERY_INTERVAL_SECONDS` (default 60 s).
++- `deploy/s6/viche-git-recovery/run` — S6 entrypoint.
++- `deploy/install-git-recovery.sh` — atomic installer (sentinel pattern).
++- `tests/git-recovery-smoke.sh` — 9-scenario POSIX smoke test (all passing).
++
++The scripts live in the canonical checkout's `government/` tree (like `intake-watch.sh`), which stays **readable even while the checkout is conflicted** — exactly when recovery must run. The service breaks the deadlock within one interval of a *safe* conflict appearing, without waiting for an external actor.
++
++### 2.3 Prevention (complementary; ordinary-law / practice)
++
++Forbid ad-hoc `git merge` / non-`--ff-only` pulls in the canonical checkout; integrate only via reviewed PRs that the boot fast-forwards. Record the rule and add a guard. This addresses the inferred root cause (§1.2) but does not by itself recover an existing deadlock.
++
++### 2.4 What Parliament cannot do
++
++Touch `/var/lib/lubko/from-host/viche-constitution/` (the Founder-controlled mount). No file on this branch does.
++
++## 3. Safety: proving no unique work is discarded
++
++`git merge --abort` (= `git reset --merge`) was characterized empirically in throwaway clones:
++
++- **Silent loss channel:** staged-only changes are *discarded* by the abort — even staged changes to files the merge did not touch (a staged new file `A f2.txt` vanished; a staged modification to a merge-untouched file was reverted to HEAD).
++- **Preserved by `reset --merge`:** unstaged modifications to merge-untouched files; untracked files. It *refuses* (fails safe) when a file has both staged and unstaged changes that would be lost.
++
++The recovery script aborts a merge only when **all** of the following hold (each verified in the smoke test):
++
++1. **Conflict class is `merge`.** Rebase / cherry-pick / bare unmerged index are detected and only alerted (`RECOVERY_NOT_AUTOMATED`) — different abort commands, different proofs.
++2. **`HEAD` is an ancestor of `origin/main`** (`git merge-base --is-ancestor`). Then `git pull --ff-only` after the abort fast-forwards and keeps every HEAD commit.
++3. **Every commit the merge would bring in remains reachable** (`git rev-list --count HEAD..MERGE_HEAD --not --branches --remotes --tags` = 0). The abort deletes no refs, so any commit on the merge's other side stays reachable from a surviving branch/remote/tag.
++4. **Staged changes all come from the merge** (staged file set ⊆ `git diff --name-only HEAD MERGE_HEAD`). This closes the silent-loss channel: any staged change beyond the merge's own files → `REFUSED`.
++5. **No hand resolution in progress** on conflicted files: conflict markers are the default state (safe to discard); clean custom content matching no stage ⇒ a resolver edited the file → `REFUSED`.
++
++Only then does the script run `git merge --abort && git pull --ff-only`, and it post-verifies that the pre-abort `HEAD` is still reachable (`RECOVERY_FAILED postverify_old_head_unreachable` otherwise). Refusals and successes are logged durably under `$VICHE_STATE_ROOT/recovery/`; the Sentinel's existing `government_git_conflict` signal provides the Town Hall alert.
++
++### The incident's exact state would have been refused (correctly)
++
++At incident time the canonical `main` was **8 ahead** of `origin/main` (Sentinel), so `HEAD` was not an ancestor of `origin/main` → gate 2 refuses. That state genuinely required the external *merge* repair (PR #21), not an abort. The script's abort path applies to the simpler, provably-safe case; diverged local-only commits are escalated, not silently discarded.
++
++## 4. Bootstrap boundary (coordination with c1a00007)
++
++No file on this branch touches `/var/lib/lubko/from-host/viche-constitution/`. The remedy is entirely within parliament's writable tree (`government/`, `deploy/`, `tests/`, `records/`) plus a new host S6 service installed under `/etc/services.d` (the sentinel and intake services set the precedent; `lubko` owns those directories). The Founder-reserved change (§2.1) is identified for the Founder, not enacted. **c1a00007 (constitutional member) is asked to confirm this boundary reading.**
++
++## 5. Enactment status
++
++- Implemented and tested on branch `continuity/boot-integration-deadlock-1792132830`.
++- **Not yet deployed:** the `viche-git-recovery` service is not installed. Activation requires the clerk's review/merge of this PR and then running `deploy/install-git-recovery.sh` plus the S6 activation step (per `DEPLOYMENT.md`, service installation is a host administrative act; `viche-intake` and `viche-sentinel` were installed the same way).
++- **Authority note:** changes to `government/`-managed programs require a recorded legislative act or authorized executive implementation (Act 6.1). The recovery service is defensive continuity infrastructure under Act 5 (durability/restart) and Act 12.12 (preventive escalation); the clerk should confirm the enactment path.
++
++## 6. Evidence index
++
++- Clerk finding: `records/CONTINUITY-BOOT-INTEGRATION-DEADLOCK-2026-10-16.md`
++- Sentinel: `/var/lib/lubko/wd/viche-sentinel-state/checks.tsv`, `history.jsonl`
++- Canonical `main` reflog gap 00:50Z→16:23Z (proven above)
++- Founder boot logic: `/var/lib/lubko/from-host/viche-constitution/boot.sh:30-38` (`reconcile`), `:109-112` (`cycle`)
++- External repair: PR #21 (`repair/phoebe-government-reconciliation-20261016`), merged 16:25:19Z
++- This branch: `government/git-recovery.sh`, `government/git-recovery-watch.sh`, `deploy/s6/viche-git-recovery/run`, `deploy/install-git-recovery.sh`, `tests/git-recovery-smoke.sh`
+diff --git a/tests/git-recovery-smoke.sh b/tests/git-recovery-smoke.sh
+new file mode 100644
+index 00000000..5383baf2
+--- /dev/null
++++ b/tests/git-recovery-smoke.sh
+@@ -0,0 +1,238 @@
++#!/bin/sh
++# Smoke test for git-recovery.sh: bounded, non-destructive conflict recovery.
++# POSIX /bin/sh only. Runs entirely in scratch clones; never touches a real
++# canonical checkout. See records/CONTINUITY-BOOT-DEADLOCK-VERIFICATION-2026-10-16.md.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++failures=0
++check() {
++    if [ "$1" -eq 0 ]; then
++        echo "ok: $2"
++    else
++        echo "FAIL: $2"
++        failures=$((failures + 1))
++    fi
++}
++
++# setup_safe <dir>: origin/main = M (with L as ancestor); local main = L; a
++# conflicted `git merge feature` on f.txt. HEAD (L) is an ancestor of
++# origin/main, so recovery is provably safe.
++setup_safe() {
++    d=$1
++    rm -rf "$d"
++    mkdir -p "$d"
++    git init -q --bare "$d/remote.git"
++    git init -q -b main "$d/town"
++    git -C "$d/town" config user.name t
++    git -C "$d/town" config user.email t@e.st
++    git -C "$d/town" remote add origin "$d/remote.git"
++    echo base >"$d/town/f.txt"
++    echo kbase >"$d/town/k.txt"
++    git -C "$d/town" add . && git -C "$d/town" commit -qm base
++    git -C "$d/town" checkout -q -b feature
++    echo feature >"$d/town/f.txt"
++    git -C "$d/town" commit -qam feat
++    git -C "$d/town" push -q origin feature
++    git -C "$d/town" checkout -q main
++    echo local >"$d/town/f.txt"
++    echo L >"$d/town/g.txt"
++    git -C "$d/town" add . && git -C "$d/town" commit -qm L
++    git -C "$d/town" push -q origin HEAD:main
++    git -C "$d/town" branch --set-upstream-to=origin/main main
++    echo M >"$d/town/m.txt"
++    git -C "$d/town" add . && git -C "$d/town" commit -qm M
++    git -C "$d/town" push -q origin HEAD:main
++    git -C "$d/town" branch --set-upstream-to=origin/main main
++    git -C "$d/town" reset -q --hard HEAD~1
++    git -C "$d/town" merge feature >/dev/null 2>&1 || true
++}
++
++# setup_local_only <dir>: origin/main = B; local main = L (unpushed); conflicted
++# merge. HEAD (L) is NOT an ancestor of origin/main -> recovery must refuse.
++setup_local_only() {
++    d=$1
++    rm -rf "$d"
++    mkdir -p "$d"
++    git init -q --bare "$d/remote.git"
++    git init -q -b main "$d/town"
++    git -C "$d/town" config user.name t
++    git -C "$d/town" config user.email t@e.st
++    git -C "$d/town" remote add origin "$d/remote.git"
++    echo base >"$d/town/f.txt"
++    echo kbase >"$d/town/k.txt"
++    git -C "$d/town" add . && git -C "$d/town" commit -qm base
++    git -C "$d/town" push -q origin HEAD:main
++    git -C "$d/town" branch --set-upstream-to=origin/main main
++    git -C "$d/town" checkout -q -b feature
++    echo feature >"$d/town/f.txt"
++    git -C "$d/town" commit -qam feat
++    git -C "$d/town" push -q origin feature
++    git -C "$d/town" checkout -q main
++    echo local >"$d/town/f.txt"
++    echo L >"$d/town/g.txt"
++    git -C "$d/town" add . && git -C "$d/town" commit -qm L
++    git -C "$d/town" merge feature >/dev/null 2>&1 || true
++}
++
++# setup_rebase <dir>: a conflicted rebase in progress.
++setup_rebase() {
++    d=$1
++    rm -rf "$d"
++    mkdir -p "$d"
++    git init -q --bare "$d/remote.git"
++    git init -q -b main "$d/town"
++    git -C "$d/town" config user.name t
++    git -C "$d/town" config user.email t@e.st
++    git -C "$d/town" remote add origin "$d/remote.git"
++    echo base >"$d/town/f.txt"
++    git -C "$d/town" add . && git -C "$d/town" commit -qm base
++    git -C "$d/town" push -q origin HEAD:main
++    git -C "$d/town" branch --set-upstream-to=origin/main main
++    git -C "$d/town" checkout -q -b topic
++    echo topic >"$d/town/f.txt"
++    git -C "$d/town" commit -qam topic
++    git -C "$d/town" checkout -q main
++    echo main2 >"$d/town/f.txt"
++    git -C "$d/town" commit -qam main2
++    git -C "$d/town" checkout -q topic
++    git -C "$d/town" rebase main >/dev/null 2>&1 || true
++}
++
++run_recovery() {
++    VICHE_TOWN_ROOT="$1/town" VICHE_STATE_ROOT="$1/state" /bin/sh "$repo/government/git-recovery.sh"
++}
++
++echo "=== 1. no conflict: exit 0, no log ==="
++d=$scratch/s1
++mkdir -p "$d"
++git init -q --bare "$d/remote.git"
++git init -q -b main "$d/town"
++git -C "$d/town" config user.name t
++git -C "$d/town" config user.email t@e.st
++git -C "$d/town" remote add origin "$d/remote.git"
++echo x >"$d/town/f.txt"
++git -C "$d/town" add . && git -C "$d/town" commit -qm x
++git -C "$d/town" push -q origin HEAD:main
++    git -C "$d/town" branch --set-upstream-to=origin/main main
++run_recovery "$d"
++check $? "no-conflict exit 0"
++[ ! -e "$d/state/recovery/git-recovery.log" ]
++check $? "no-conflict writes no log"
++
++echo "=== 2. safe conflict: recovery succeeds, deadlock broken ==="
++d=$scratch/s2
++setup_safe "$d"
++test -f "$d/town/.git/MERGE_HEAD"
++check $? "precondition: conflicted"
++run_recovery "$d"
++check $? "safe recovery exit 0"
++[ ! -f "$d/town/.git/MERGE_HEAD" ]
++check $? "MERGE_HEAD cleared"
++git -C "$d/town" pull --ff-only >/dev/null 2>&1
++check $? "boot reconcile (pull --ff-only) now succeeds"
++grep -q RECOVERY_SUCCEEDED "$d/state/recovery/git-recovery.log"
++check $? "RECOVERY_SUCCEEDED logged"
++old_head=$(git -C "$d/town" rev-parse HEAD)
++run_recovery "$d"
++check $? "idempotent second run exits 0"
++
++echo "=== 3. local-only commits: refused, conflict preserved ==="
++d=$scratch/s3
++setup_local_only "$d"
++run_recovery "$d" && rc=0 || rc=1
++[ "$rc" -eq 1 ]
++check $? "local-only refused (exit 1)"
++test -f "$d/town/.git/MERGE_HEAD"
++check $? "MERGE_HEAD preserved on refusal"
++grep -q HEAD_NOT_ANCESTOR_OF_ORIGIN_MAIN "$d/state/recovery/git-recovery.log"
++check $? "HEAD_NOT_ANCESTOR_OF_ORIGIN_MAIN logged"
++
++echo "=== 4. staged change beyond merge: refused, staged file preserved ==="
++d=$scratch/s4
++setup_safe "$d"
++echo extra >"$d/town/extra.txt"
++git -C "$d/town" add extra.txt
++run_recovery "$d" && rc=0 || rc=1
++[ "$rc" -eq 1 ]
++check $? "staged-beyond-merge refused (exit 1)"
++test -f "$d/town/extra.txt"
++check $? "staged extra.txt preserved"
++grep -q STAGED_CHANGES_BEYOND_MERGE "$d/state/recovery/git-recovery.log"
++check $? "STAGED_CHANGES_BEYOND_MERGE logged"
++
++echo "=== 5. hand resolution in progress: refused ==="
++d=$scratch/s5
++setup_safe "$d"
++echo custom-resolution >"$d/town/f.txt"
++run_recovery "$d" && rc=0 || rc=1
++[ "$rc" -eq 1 ]
++check $? "resolution-in-progress refused (exit 1)"
++grep -q RESOLUTION_IN_PROGRESS "$d/state/recovery/git-recovery.log"
++check $? "RESOLUTION_IN_PROGRESS logged"
++
++echo "=== 6. unstaged mod to merge-untouched file: preserved ==="
++d=$scratch/s6
++setup_safe "$d"
++echo kmod >>"$d/town/k.txt"
++run_recovery "$d"
++check $? "recovery with unstaged mod exit 0"
++grep -q kmod "$d/town/k.txt"
++check $? "unstaged k.txt mod preserved"
++
++echo "=== 7. untracked file: preserved ==="
++d=$scratch/s7
++setup_safe "$d"
++echo u >"$d/town/u.txt"
++run_recovery "$d"
++check $? "recovery with untracked file exit 0"
++test -f "$d/town/u.txt"
++check $? "untracked u.txt preserved"
++
++echo "=== 8. rebase conflict: not automated, state intact ==="
++d=$scratch/s8
++setup_rebase "$d"
++test -d "$d/town/.git/rebase-merge" -o -d "$d/town/.git/rebase-apply"
++check $? "precondition: rebase in progress"
++run_recovery "$d" && rc=0 || rc=1
++[ "$rc" -eq 1 ]
++check $? "rebase not automated (exit 1)"
++test -d "$d/town/.git/rebase-merge" -o -d "$d/town/.git/rebase-apply"
++check $? "rebase state intact"
++grep -q RECOVERY_NOT_AUTOMATED "$d/state/recovery/git-recovery.log"
++check $? "RECOVERY_NOT_AUTOMATED logged"
++
++echo "=== 9. end-to-end: boot cycle() short-circuits on conflict, resumes after recovery ==="
++d=$scratch/s9
++setup_safe "$d"
++town=$d/town
++cat >"$d/cycle.sh" <<EOF
++#!/bin/sh
++town=$town
++reconcile() { git -C "\$town" pull --ff-only || return 1; }
++sitting() { echo SITTING_RAN; }
++cycle() {
++    reconcile || { echo "Viche: government integration/reconciliation failed" >&2; return 1; }
++    sitting
++}
++cycle
++EOF
++out=$(/bin/sh "$d/cycle.sh" 2>/dev/null) && rc=0 || rc=1
++[ "$rc" -eq 1 ]
++check $? "cycle short-circuits on conflict"
++printf '%s' "$out" | grep -q SITTING_RAN && check 1 "sitting not invoked during conflict" || check 0 "sitting not invoked during conflict"
++run_recovery "$d"
++check $? "recovery in e2e scenario"
++out=$(/bin/sh "$d/cycle.sh" 2>/dev/null) && rc=0 || rc=1
++[ "$rc" -eq 0 ]
++check $? "cycle succeeds after recovery"
++printf '%s' "$out" | grep -q SITTING_RAN
++check $? "sitting resumes after recovery"
++
++echo
++if [ "$failures" -ne 0 ]; then
++    echo "Git recovery smoke checks FAILED ($failures)"
++    exit 1
++fi
++echo "Git recovery smoke checks passed"

@@ -1,0 +1,506 @@
+commit 86ca70c7c166f849ecc22ee2e979dd023d24cb12
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 08:14:28 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 08:14:28 2026 +0000
+
+    Delegate evidence-based research focus and lease retirement decisions
+
+diff --git a/missions/pnp/allocator.py b/missions/pnp/allocator.py
+index c55cf81f..e48a6964 100644
+--- a/missions/pnp/allocator.py
++++ b/missions/pnp/allocator.py
+@@ -7,7 +7,7 @@ import sys
+ import time
+ from types import SimpleNamespace
+ 
+-from . import assignment, cli, config, desk, frontier, focus, jobs, state, status
++from . import assignment, cli, config, desk, frontier, focus, jobs, state, status, portfolio
+ 
+ POLL_SECONDS = 30
+ NULL_RETRY_SECONDS = 120
+@@ -128,6 +128,9 @@ def retire(d, mem, now, roster):
+         gap, lease = rec["gap_id"], rec["lease"]
+         if rec["state"] not in ("LEASED", "RESEARCHING"):
+             continue
++        # An intentionally parked former focus is a reserve, not abandoned.
++        if mem.get("parked", {}).get(gap) == lease:
++            continue
+         old = observations.get(gap, {})
+         if old.get("lease") != lease:
+             old = {"lease": lease}
+@@ -209,7 +212,15 @@ def tick(d=None, now=None):
+     mem["observed_at"] = now
+     try:
+         roster = bound_roster()
+-        released = retire(d, mem, now, roster)
++        portfolio.apply_switch(mem, now)
++        released = portfolio.apply_release(d, mem, now)
++        released.extend(retire(d, mem, now, roster))
++        # Make a focus decision visible before potentially slow desk I/O.
++        selected = focus.choose([state.load(g) for g in state.all_gaps()], mem.get("focus"), roster[0] if roster else (), time.time())
++        mem["focus"] = list(focus.key(selected)) if selected else None
++        if selected:
++            mem.setdefault("parked", {}).pop(selected["gap_id"], None)
++        state.atomic_write(memory_path(), json.dumps(mem, sort_keys=True)+"\n")
+         if released:
+             print("released abandoned", released, flush=True)
+         # Read the cheap snapshot ourselves, independent of slow Executive.
+@@ -224,6 +235,8 @@ def tick(d=None, now=None):
+         records = cli.held_records()
+         selected = focus.choose([state.load(g) for g in state.all_gaps()], mem.get("focus"), roster[0] if roster else (), now)
+         mem["focus"] = list(focus.key(selected)) if selected else None
++        if selected:
++            mem.setdefault("parked", {}).pop(selected["gap_id"], None)
+         return {"released": released, "acquired": acquired,
+                 "held": len(records), "focus": selected["gap_id"] if selected else None}
+     finally:
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index 24864a9f..cd74ea0e 100755
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -232,6 +232,13 @@ def cmd_guard(args):
+     try:
+         gap, lease = assignment.resolve(args.gap, args.lease)
+         result = frontier.checkpoint(gap, lease)
++        if result["decision"] == "continue":
++            from missions.pnp import focus
++            chosen = focus.current()
++            rec = state.load(gap)
++            if chosen and rec and focus.key(chosen) != (gap, lease) and rec["state"] in ("LEASED","RESEARCHING"):
++                result = {"decision":"wait","reason":"focus switched; preserve work and finish cooperatively",
++                          "research_focus":chosen["gap_id"]}
+         if result["decision"] == "continue":
+             # Advisory only; an unavailable evidence channel must not stop work.
+             try:
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index d2b48eae..43fef53e 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -371,3 +371,44 @@ If the Executive abandons a focus, release it honestly and move to the next.
+ Do not rotate simply because another promising gap arrives; never leave
+ all reserves unattended until their leases expire. The automated heartbeat
+ renews the whole pool.
++
++## Independent portfolio decisions (Founder priority; supersedes no-preemption)
++
++Executive must maintain two distinct useful researcher roles, independently of
++the proof swarm: `Viche P vs NP support: portfolio` and
++`Viche P vs NP support: lease-evaluation`. Use separate Antonina agents.
++Portfolio is needed with two or more held gaps; lease-evaluation with any held
++gap. When a pass finishes, replenish on new assignments or meaningful new
++mathematical evidence; avoid idle polling. Both use:
++`python3 -m missions.pnp.portfolio inspect`
++from the canonical checkout. It returns every held research lease, exact
++statement, immutable attempt, competition, remaining time and artifact paths.
++
++Portfolio researcher compares ALL held problems, including progress on the
++current focus. Study proof corpus, actual partial proofs, obstacles, remaining
++Lean work, competitor activity, and remaining lease time. Choose expected
++accepted steps per remaining resource-hour. Switch only for a substantially
++more promising concrete route, accounting for discarded progress and
++handoff cost. No switching based solely on titles, arbitrary timer, or
++ordinary/hard label. Record specific comparative arguments and evidence.
++Directly decide, without Executive approval:
++`python3 -m missions.pnp.portfolio switch NEW NEW_ATTEMPT --from-gap OLD --from-attempt OLD_ATTEMPT --reason 'comparative mathematical argument' --evidence 'artifact paths or exact checked lemmas'`
++If the current focus is better, keep it and deliver useful findings instead.
++A switch parks the old lease without releasing it, and Executive promptly
++moves the proof swarm to the new focus, preserving artifacts. Do not launch
++agents yourself.
++
++Lease evaluator independently investigates the least promising held problems.
++Develop actual confidence: inspect exact claim, previous attempts and useful
++reductions, identify why plausible routes fail or require major new results,
++weigh expected yield and replacement opportunity. Consider progress by the
++active proof swarm before abandoning its focus. A difficult label, age or
++one unsuccessful tactic is insufficient. If a lease is genuinely not worth
++holding, directly decide:
++`python3 -m missions.pnp.portfolio release GAP ATTEMPT --reason 'specific mathematical obstacles and opportunity cost' --evidence 'checked lemmas, failed route artifacts or reproducible experiments'`
++The allocator executes the documented reason other, preserves artifacts,
++protects queued/publishing candidates, honors hard-step minimum holding time,
++and refills the slot. No additional review or approval. Never release
++merely because a reserve is unstaffed. Both evaluators finish their passes
++rather than manufacturing activity. The Executive alone staffs and retires
++agents, and immediately obeys a valid focus decision.
+diff --git a/missions/pnp/portfolio.py b/missions/pnp/portfolio.py
+new file mode 100644
+index 00000000..3cbe3347
+--- /dev/null
++++ b/missions/pnp/portfolio.py
+@@ -0,0 +1,205 @@
++"""Researcher decisions, consumed by the single deterministic lease allocator.
++
++No model or human approval gate: the two evaluators own their decisions.
++Evidence, exact attempt identities and safe state transitions are mandatory.
++"""
++import argparse
++import hashlib
++import json
++import os
++from pathlib import Path
++import time
++
++from . import config, focus, frontier, jobs, state, support
++
++ROLES = ("portfolio", "lease-evaluation")
++MAX_AGE = 15 * 60
++MIN_HARD_AGE = 20 * 60
++
++
++def path(kind):
++    return Path(config.STATE_ROOT, "portfolio-" + kind + ".json")
++
++
++def record(gap, attempt):
++    if not config.GAP_ID_RE.fullmatch(gap):
++        raise ValueError("invalid gap")
++    rec = state.load(gap)
++    if not support.active(rec) or rec.get("queued_lease") or support.attempt(rec) != attempt:
++        raise ValueError("no matching live research lease")
++    return rec
++
++
++def view():
++    chosen = focus.current()
++    observed = frontier.load()
++    rows = []
++    for item in support.targets(all_held=True):
++        rec = state.load(item["gap"])
++        if not support.active(rec) or support.attempt(rec) != item["attempt"]:
++            continue
++        rows.append({**item, "title": rec.get("gap_title"),
++                     "hard": rec.get("acquisition_hard"),
++                     "candidate_queued": bool(rec.get("queued_lease")),
++                     "remaining_seconds": max(0, round(rec["lease_expires_at"]-time.time())),
++                     "age_seconds": round(time.time()-(rec.get("lease_obtained_at") or time.time())),
++                     "competition": observed.get("gaps", {}).get(item["gap"]),
++                     "artifacts": state.gap_dir(item["gap"]),
++                     "focus": bool(chosen and focus.key(chosen) == focus.key(rec))})
++    return {"focus": chosen["gap_id"] if chosen else None,
++            "leases": rows}
++
++
++def text_field(value, name):
++    if not isinstance(value, str) or not value.strip() or len(value) > 4000:
++        raise ValueError(name + " must be substantive text (link longer artifacts)")
++    return value.strip()
++
++
++def submit(kind, gap, attempt, evidence, reason, current=None, current_attempt=None):
++    rec = record(gap, attempt)
++    evidence, reason = text_field(evidence, "evidence"), text_field(reason, "reason")
++    if kind == "switch":
++        old = record(current, current_attempt)
++        selected = focus.current()
++        if not selected or focus.key(selected) != focus.key(old) or current == gap:
++            raise ValueError("focus changed; reassess the actual portfolio")
++    elif kind == "release":
++        acquired = rec.get("lease_obtained_at")
++        if rec.get("acquisition_hard") is not False and (
++                not isinstance(acquired, (int, float)) or time.time()-acquired < MIN_HARD_AGE):
++            raise ValueError("hard lease must be held at least twenty minutes before release")
++    else:
++        raise ValueError("unknown decision")
++    obj = {"kind": kind, "gap": gap, "attempt": attempt, "evidence": evidence,
++           "reason": reason, "from": current, "from_attempt": current_attempt,
++           "at": time.time()}
++    obj["id"] = hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:24]
++    # One pending decision per independent evaluator. Atomic latest decision;
++    # the allocator consumes it once and records the result.
++    state.atomic_write(str(path(kind)), json.dumps(obj, sort_keys=True)+"\n")
++    return {"queued": kind, "gap": gap, "id": obj["id"]}
++
++
++def pending(kind, mem, now):
++    try:
++        obj = json.loads(path(kind).read_text())
++        if (not isinstance(obj, dict) or obj.get("kind") != kind or
++                not isinstance(obj.get("id"), str) or obj["id"] == mem.get("decision_"+kind)):
++            return None
++        if not 0 <= now-obj["at"] <= MAX_AGE:
++            return None
++        text_field(obj.get("reason"), "reason")
++        text_field(obj.get("evidence"), "evidence")
++        return obj
++    except (OSError, ValueError, TypeError, KeyError):
++        return None
++
++
++def finish(mem, obj, outcome):
++    mem["decision_"+obj["kind"]] = obj["id"]
++    mem["last_"+obj["kind"]] = {
++        k: obj.get(k) for k in ("id", "gap", "from", "reason", "evidence", "at")}
++    mem["last_"+obj["kind"]]["outcome"] = outcome
++    print("portfolio decision", obj["kind"], obj["gap"], outcome, flush=True)
++
++
++def apply_switch(mem, now):
++    obj = pending("switch", mem, now)
++    if not obj:
++        return
++    try:
++        old = record(obj["from"], obj["from_attempt"])
++        new = record(obj["gap"], obj["attempt"])
++        chosen = focus.current()
++        if not chosen or focus.key(chosen) != focus.key(old):
++            raise ValueError("source focus changed")
++        if focus.key(old) == focus.key(new):
++            raise ValueError("already focused")
++    except (ValueError, TypeError, KeyError) as exc:
++        finish(mem, obj, "obsolete: " + str(exc))
++        return
++    # Do not cancel publication or throw away a candidate. Park the old
++    # lease; preserve every artifact, and let Executive move researchers.
++    mem.setdefault("parked", {})[old["gap_id"]] = old["lease"]
++    mem["parked"].pop(new["gap_id"], None)
++    mem.setdefault("observations", {}).pop(old["gap_id"], None)
++    mem["focus"] = list(focus.key(new))
++    state.event(new["gap_id"], "portfolio_focus", {k:obj[k] for k in ("id","from","reason","evidence")})
++    finish(mem, obj, "applied")
++
++
++def apply_release(d, mem, now):
++    obj = pending("release", mem, now)
++    if not obj:
++        return []
++    gap = obj.get("gap")
++    try:
++        rec = record(gap, obj["attempt"])
++        if rec.get("acquisition_hard") is not False and (
++                not isinstance(rec.get("lease_obtained_at"), (int, float))
++                or now-rec["lease_obtained_at"] < MIN_HARD_AGE):
++            raise ValueError("hard minimum holding time not reached")
++    except (ValueError, TypeError, KeyError) as exc:
++        finish(mem, obj, "obsolete: " + str(exc))
++        return []
++    fd = jobs.claim(gap)
++    if fd is None:
++        return []
++    try:
++        with state.lock(gap):
++            try:
++                latest = record(gap, obj["attempt"])
++            except (ValueError, TypeError, KeyError) as exc:
++                finish(mem, obj, "obsolete: " + str(exc))
++                return []
++            if latest.get("intent") and latest["intent"].get("what") != "portfolio_release":
++                return []
++            latest["intent"] = {"what":"portfolio_release", "payload":{"decision":obj["id"],"reason":"other"}}
++            state.save(latest)
++            try:
++                d.release(latest["lease"], "other")
++            except Exception as exc:
++                # No state transition on uncertain remote result; retry
++                # this exact decision, or reconcile a confirmed 410.
++                print("portfolio release deferred:", gap, str(exc)[:300], flush=True)
++                return []
++            latest.update(state="RELEASED", failure_reason="other", intent=None)
++            state.save(latest)
++            state.event(gap, "portfolio_release", {k:obj[k] for k in ("id","reason","evidence")})
++        mem.setdefault("parked", {}).pop(gap, None)
++        mem.setdefault("observations", {}).pop(gap, None)
++        # Newly vacant capacity should be filled immediately.
++        mem.pop("last_null_ordinary", None)
++        mem.pop("last_null_hard", None)
++        finish(mem, obj, "applied")
++        return [gap]
++    finally:
++        os.close(fd)
++
++
++def main():
++    p = argparse.ArgumentParser(description=__doc__)
++    subs = p.add_subparsers(dest="kind", required=True)
++    subs.add_parser("inspect")
++    for kind in ("switch","release"):
++        sub = subs.add_parser(kind)
++        sub.add_argument("gap")
++        sub.add_argument("attempt")
++        sub.add_argument("--reason", required=True)
++        sub.add_argument("--evidence", required=True)
++        if kind == "switch":
++            sub.add_argument("--from-gap", required=True)
++            sub.add_argument("--from-attempt", required=True)
++    a = p.parse_args()
++    try:
++        result = view() if a.kind == "inspect" else submit(
++            a.kind,a.gap,a.attempt,a.evidence,a.reason,
++            getattr(a,"from_gap",None),getattr(a,"from_attempt",None))
++        print(json.dumps(result,ensure_ascii=False,indent=2))
++    except (OSError,ValueError,TypeError,KeyError) as exc:
++        p.error(str(exc))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index d76f2c53..211d2f99 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -124,7 +124,17 @@ def snapshot():
+     scouts = w.pop("support", [])
+     covered = {role for agent in scouts for role in agent["roles"]}
+     useful = bool(active or corrections or w["count"] or ordinary or observed.get("offerable"))
+-    missing_support = sorted(set(support.ROLES) - covered) if useful and w["coverage"] == "complete" else []
++    needed = set(support.ROLES) if useful else set()
++    if active:
++        needed.add("lease-evaluation")
++    if len(active) > 1:
++        needed.add("portfolio")
++    missing_support = sorted(needed - covered) if w["coverage"] == "complete" else []
++    try:
++        memory = json.loads((STATE / "pnp/allocator.json").read_text())
++        decisions = {k: memory.get("last_"+k) for k in ("switch","release")}
++    except (OSError, ValueError, AttributeError):
++        decisions = {}
+     findings = []
+     for target in support.targets():
+         findings.extend(a for a in target["advice"] if a.get("coordinate"))
+@@ -145,6 +155,7 @@ def snapshot():
+         "leaderboard": score, "workers": w,
+         "research_support": {"agents": scouts, "coverage_missing": missing_support,
+                              "coordination_findings": findings,
++                             "portfolio_decisions": decisions,
+                              "action": "Executive owns staffing and material steering; support findings are advisory and arrive directly in worker guards."},
+         "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
+         "frontier_fresh": bool(observed), "active_lease_gaps": active,
+@@ -194,7 +205,8 @@ def snapshot():
+             "corrections": corrections, "unstaffed": unstaffed,
+             "support": sorted((str(a["id"]), ",".join(a["roles"])) for a in scouts),
+             "missing_support": missing_support,
+-            "support_findings": sorted(a["id"] for a in findings), "obsolete_workers": sorted(stale_workers),
++            "support_findings": sorted(a["id"] for a in findings),
++            "portfolio_decisions": {k: v.get("id") for k,v in decisions.items() if isinstance(v,dict)}, "obsolete_workers": sorted(stale_workers),
+             "unbound": sorted(str(a["id"]) for a in w["agents"] if not a["bound"])},
+         "caveat": "Only public checked steps count; local activity is not proof."}
+ 
+diff --git a/missions/pnp/support.py b/missions/pnp/support.py
+index 58196341..10e61312 100644
+--- a/missions/pnp/support.py
++++ b/missions/pnp/support.py
+@@ -10,6 +10,7 @@ from . import assignment, config, focus, gitctl, state
+ from .proofs import corpus
+ 
+ ROLES = ("knowledge", "methods", "flow")
++DECISION_ROLES = ("portfolio", "lease-evaluation")
+ PREFIX = "Viche P vs NP support:"
+ KINDS = (*ROLES, "checked")
+ LIVE = ("LEASED", "RESEARCHING")
+@@ -173,7 +174,7 @@ def roles(agent):
+     title = agent.get("title") or ""
+     if not isinstance(title, str) or not title.startswith(PREFIX):
+         return []
+-    return sorted({part.strip() for part in title[len(PREFIX):].split(",")} & set(ROLES))
++    return sorted({part.strip() for part in title[len(PREFIX):].split(",")} & set(ROLES + DECISION_ROLES))
+ 
+ 
+ def main():
+diff --git a/tests/pnp-allocator.py b/tests/pnp-allocator.py
+index b1249657..03e03e00 100644
+--- a/tests/pnp-allocator.py
++++ b/tests/pnp-allocator.py
+@@ -12,7 +12,7 @@ import unittest
+ from unittest.mock import patch
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+-from missions.pnp import allocator, assignment, cli, config, desk, focus, staff, state
++from missions.pnp import allocator, assignment, cli, config, desk, focus, portfolio, staff, state, support
+ 
+ NOW = 10000
+ 
+@@ -226,6 +226,78 @@ class Tests(unittest.TestCase):
+                     staff.dispatch(a["gap_id"],[("x","prove")])
+             run.assert_not_called()
+ 
++    def portfolio_fixture(self, **fields):
++        now = time.time()
++        a = self.add(acquisition_hard=True,lease_obtained_at=now-1500,
++                     lease_expires_at=now+1200)
++        b = self.add("L-meta-2",acquisition_hard=False,lease_obtained_at=now-1500,
++                     lease_expires_at=now+1200, **fields)
++        mem = {"focus":list(focus.key(a))}
++        state.atomic_write(allocator.memory_path(), json.dumps(mem))
++        return a,b,mem
++
++    def test_portfolio_switch_parks_previous_focus_and_keeps_lease(self):
++        a,b,mem = self.portfolio_fixture()
++        self.assertEqual(len(portfolio.view()["leases"]),2)
++        decision=portfolio.submit("switch",b["gap_id"],support.attempt(b),
++                                  "checked lemma and witness","a requires new theorem; b has explicit witness",
++                                  a["gap_id"],support.attempt(a))
++        portfolio.apply_switch(mem,time.time())
++        self.assertEqual(mem["focus"],list(focus.key(b)))
++        self.assertEqual(mem["parked"],{a["gap_id"]:a["lease"]})
++        self.assertEqual(mem["last_switch"]["id"],decision["id"])
++        self.assertEqual(state.load(a["gap_id"])["state"],"LEASED")
++        d=Desk()
++        mem["observations"]={a["gap_id"]:{"lease":a["lease"],"staffed":True,"absent_since":time.time()-1000}}
++        self.assertEqual(allocator.retire(d,mem,time.time(),(set(),set())),[])
++        self.assertFalse(d.releases)
++        portfolio.apply_switch(mem,time.time())
++        self.assertEqual(mem["focus"],list(focus.key(b)))
++
++    def test_portfolio_rejects_switch_after_source_reacquired(self):
++        a,b,mem=self.portfolio_fixture()
++        portfolio.submit("switch",b["gap_id"],support.attempt(b),"lemma","b substantially easier",
++                         a["gap_id"],support.attempt(a))
++        state.transition(a["gap_id"],"STALE")
++        state.reacquire(a["gap_id"],lease="replacement",lease_expires_at=time.time()+1200)
++        portfolio.apply_switch(mem,time.time())
++        self.assertTrue(mem["last_switch"]["outcome"].startswith("obsolete"))
++        self.assertEqual(mem["focus"],list(focus.key(a)))
++
++    def test_evaluator_releases_with_other_and_refills(self):
++        a,b,mem=self.portfolio_fixture()
++        mem.update(last_null_hard=time.time(),last_null_ordinary=time.time())
++        portfolio.submit("release",b["gap_id"],support.attempt(b),"failed proof routes","requires independent major lower bound")
++        d=Desk()
++        self.assertEqual(portfolio.apply_release(d,mem,time.time()),[b["gap_id"]])
++        self.assertEqual(d.releases,[(b["lease"],"other")])
++        self.assertEqual(state.load(b["gap_id"])["state"],"RELEASED")
++        self.assertNotIn("last_null_ordinary",mem)
++        self.assertEqual(portfolio.apply_release(d,mem,time.time()),[])
++        self.assertEqual(len(d.releases),1)
++
++    def test_evaluator_protects_queued_candidate_and_hard_minimum(self):
++        a,b,mem=self.portfolio_fixture()
++        state.update(a["gap_id"],lease_obtained_at=time.time())
++        with self.assertRaises(ValueError):
++            portfolio.submit("release",a["gap_id"],support.attempt(a),"evidence","reason")
++        portfolio.submit("release",b["gap_id"],support.attempt(b),"evidence","reason")
++        state.update(b["gap_id"],state="CANDIDATE_READY",queued_lease=b["lease"])
++        d=Desk()
++        self.assertEqual(portfolio.apply_release(d,mem,time.time()),[])
++        self.assertFalse(d.releases)
++        self.assertTrue(mem["last_release"]["outcome"].startswith("obsolete"))
++
++    def test_evaluator_does_not_release_reacquired_lease(self):
++        a,b,mem=self.portfolio_fixture()
++        portfolio.submit("release",b["gap_id"],support.attempt(b),"evidence","reason")
++        state.transition(b["gap_id"],"STALE")
++        state.reacquire(b["gap_id"],lease="fresh",lease_expires_at=time.time()+1200)
++        d=Desk()
++        self.assertEqual(portfolio.apply_release(d,mem,time.time()),[])
++        self.assertFalse(d.releases)
++        self.assertEqual(state.load(b["gap_id"])["lease"],"fresh")
++
+     def test_duplicate_never_churns(self):
+         self.add()
+         d=Desk([(False,"L-meta-1"),(True,None)])
+diff --git a/tests/pnp-support.py b/tests/pnp-support.py
+index 156fc522..33d32919 100644
+--- a/tests/pnp-support.py
++++ b/tests/pnp-support.py
+@@ -134,10 +134,10 @@ class SupportTests(unittest.TestCase):
+              patch.object(status.frontier.build_control, "legacy_compilers", return_value=[]), \
+              patch.object(status.frontier.build_control, "headroom", return_value=1024):
+             snap = status.snapshot()
+-        self.assertEqual(snap["research_support"]["coverage_missing"], ["flow"])
++        self.assertEqual(snap["research_support"]["coverage_missing"], ["flow", "lease-evaluation"])
+         self.assertTrue(snap["coordination_due"])
+         self.assertEqual(snap["workers"]["count"], 1)
+-        self.assertEqual(snap["dispatch_signal"]["missing_support"], ["flow"])
++        self.assertEqual(snap["dispatch_signal"]["missing_support"], ["flow", "lease-evaluation"])
+ 
+ 
+ if __name__ == "__main__":

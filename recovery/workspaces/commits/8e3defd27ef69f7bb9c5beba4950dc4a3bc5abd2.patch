@@ -1,0 +1,317 @@
+commit 8e3defd27ef69f7bb9c5beba4950dc4a3bc5abd2
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 18:32:36 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 18:32:36 2026 +0000
+
+    Repair activation delayed native-session binding in knowledge budget
+    
+    Poll for native-session/meter binding outside the accounting flock for at most
+    one monitor interval or 20 seconds, bounded by the creation-anchored wall cap.
+    Full cap liability is retained while reserved; do_start_locked still rechecks
+    identity and meter under the lock and holds/stops if unknown. Add delayed,
+    missing and unmetered regression cases to the isolated host-cpu lifecycle smoke.
+    No hash-bound Act34 file, config, permit or cap changed; no live dispatch.
+
+diff --git a/government/knowledge-budget.sh b/government/knowledge-budget.sh
+index c45f90be..0db84de0 100644
+--- a/government/knowledge-budget.sh
++++ b/government/knowledge-budget.sh
+@@ -146,6 +146,68 @@ usage_from_snapshot() {
+       cost:.cost,cost_reported:.cost_reported,source:.source,at:.at}'
+ }
+ 
++# ---- pre-lock native-session/meter binding wait -------------------------------
++#
++# `antonina agent run ... --detach` acknowledges only the runner claim. The
++# authoritative native_session_id (and its meter row) can appear on a later
++# status poll. Polling for that binding happens OUTSIDE the shared accounting
++# flock, so other seats are never blocked by a starting runner. The wait is
++# bounded to one monitor interval or 20 seconds, and never past the reservation's
++# conservative hard wall deadline (created_at + wall_seconds). Full per-run
++# liability is retained throughout: the reservation stays `reserved` and is
++# charged at caps by aggregate(). do_start_locked re-verifies exact agent
++# identity and meter under the lock and still holds/stops if binding is unknown.
++binding_ready() {
++  _br_agent=$1; _br_db=$2
++  if ! _br_meta=$(agent_status "$_br_agent"); then return 1; fi
++  # Mirror do_start_locked's authoritative checks exactly: exact agent id is
++  # enforced by the caller, here we require the native session id and a live
++  # meter row. No agent state predicate is invented here.
++  _br_sid=$(printf '%s\n' "$_br_meta" | jq -r '.native_session_id // empty')
++  [ -n "$_br_sid" ] || return 1
++  _br_pid=$(printf '%s\n' "$_br_meta" | jq -r '.runner_pid // .pid // empty')
++  if ! _br_snap=$(python3 "$TOOL" snapshot "$_br_db" "$_br_sid" "$_br_pid" 2>/dev/null); then
++    return 1
++  fi
++  [ "$(printf '%s\n' "$_br_snap" | jq -r '.session_found')" = true ] || return 1
++  [ "$(printf '%s\n' "$_br_snap" | jq -r '.cpu_available')" = true ] || return 1
++  return 0
++}
++
++wait_for_binding() {
++  _wb_id=$1; _wb_agent=$2
++  _wb_cur=$(res_read "$_wb_id")
++  [ "$(printf '%s\n' "$_wb_cur" | jq -r '.state')" = reserved ] || return 0
++  _wb_expected=$(printf '%s\n' "$_wb_cur" | jq -r '.agent_id // ""')
++  [ "$_wb_agent" = "$_wb_expected" ] || return 0
++  _wb_db=$(printf '%s\n' "$_wb_cur" | jq -r '.meter_db')
++  _wb_interval=$(printf '%s\n' "$_wb_cur" | jq -r '.monitor_interval_seconds // 20')
++  case "$_wb_interval" in ''|*[!0-9]*) _wb_interval=20;; esac
++  [ "$_wb_interval" -gt 0 ] || _wb_interval=20
++  _wb_created=$(printf '%s\n' "$_wb_cur" | jq -r '.created_at')
++  _wb_wall=$(printf '%s\n' "$_wb_cur" | jq -r '.caps.wall_seconds')
++  _wb_hard_deadline=$((_wb_created + _wb_wall))
++  _wb_now=$(date +%s)
++  [ "$_wb_hard_deadline" -gt "$_wb_now" ] || return 0
++  _wb_allowance=$((_wb_hard_deadline - _wb_now))
++  [ "$_wb_allowance" -lt "$_wb_interval" ] || _wb_allowance=$_wb_interval
++  [ "$_wb_allowance" -le 20 ] || _wb_allowance=20
++  if binding_ready "$_wb_agent" "$_wb_db"; then return 0; fi
++  _wb_deadline=$((_wb_now + _wb_allowance))
++  log "awaiting native session/meter binding for $_wb_agent (<=${_wb_allowance}s; full cap retained)"
++  while :; do
++    _wb_now=$(date +%s)
++    [ "$_wb_now" -lt "$_wb_deadline" ] || break
++    sleep 1
++    if binding_ready "$_wb_agent" "$_wb_db"; then
++      log "native session/meter binding established for $_wb_agent"
++      return 0
++    fi
++  done
++  log "native session/meter binding still unknown for $_wb_agent; locked start will hold at full cap"
++  return 0
++}
++
+ # ---- terminal state transitions (all assume the lock is held) ----------------
+ 
+ hold_locked() {
+@@ -289,7 +351,11 @@ do_start_locked() {
+     die 'host CPU meter invalid after launch; full-cap hold'
+   fi
+   _ds_now=$(date +%s)
+-  _ds_expiry=$((_ds_now + $(printf '%s\n' "$_ds_cur" | jq -r '.caps.wall_seconds')))
++  # The hard wall deadline is anchored at reservation creation, never pushed
++  # out by a delayed native-session binding. The pre-lock wait therefore only
++  # consumes the original wall budget; it can never extend the reservation.
++  _ds_created=$(printf '%s\n' "$_ds_cur" | jq -r '.created_at')
++  _ds_expiry=$((_ds_created + $(printf '%s\n' "$_ds_cur" | jq -r '.caps.wall_seconds')))
+   _ds_new=$(printf '%s\n' "$_ds_cur" | jq -c --arg a "$_ds_agent" --arg s "$_ds_sid" \
+     --arg p "$_ds_pid" --argjson now "$_ds_now" --argjson ex "$_ds_expiry" --argjson snap "$_ds_snap" \
+     '.state="active" | .agent_id=$a | .native_session_id=$s | .runner_pid=$p |
+@@ -581,7 +647,16 @@ case "$cmd" in
+   guard) check_office "${1:-}"; guard "$1";;
+   reserve) check_office "${1:-}"; init; with_lock do_reserve_locked "$1" "$2";;
+   mark-dispatched) init; with_lock mark_dispatched_locked "${1:-}";;
+-  start) init; with_lock do_start_locked "${1:-}" "${2:-}"; launch_monitor "${1:-}"; printf 'active %s\n' "$1";;
++  start)
++    init
++    _st_id=${1:-}; _st_agent=${2:-}
++    # Bound the native-session/meter binding wait OUTSIDE the flock; full-cap
++    # liability is retained until do_start_locked re-verifies under the lock.
++    wait_for_binding "$_st_id" "$_st_agent"
++    with_lock do_start_locked "$_st_id" "$_st_agent"
++    launch_monitor "$_st_id"
++    printf 'active %s\n' "$_st_id"
++    ;;
+   monitor) init; monitor "${1:-}";;
+   reconcile) init; with_lock reconcile_locked;;
+   resolve) init; with_lock resolve_locked "${1:-}" "${2:-}";;
+diff --git a/records/knowledge/2026-11-24-activation-delayed-binding-repair.md b/records/knowledge/2026-11-24-activation-delayed-binding-repair.md
+new file mode 100644
+index 00000000..bc39777b
+--- /dev/null
++++ b/records/knowledge/2026-11-24-activation-delayed-binding-repair.md
+@@ -0,0 +1,78 @@
++# Activation delayed-binding repair — 2026-11-24
++
++**Class:** implementation record + separate finding. Not a bill, ballot, law change,
++cap change or permit change. No live office dispatch was performed.
++
++## Defect
++
++`knowledge-budget.sh start` runs immediately after
++`knowledge-free-dispatch.sh ... --detach`. The Antonina CLI acknowledges only the
++runner claim at that point; the authoritative `native_session_id` and its meter
++row can appear on a later `agent status` poll. `do_start_locked` treated a
++still-empty binding as unknown, killed the legitimate starting runner and held
++the reservation at the full per-run cap — consuming the whole allowance and
++blocking operation.
++
++## Repair (narrow scope)
++
++- `government/knowledge-budget.sh`: added `binding_ready` / `wait_for_binding`.
++  The bounded poll runs **outside** the shared accounting flock, so other seats
++  are never blocked by a starting runner. Bound is `min(monitor_interval_seconds,
++  20, remaining wall)` measured conservatively from `created_at`; the reservation
++  stays `reserved` and is charged at caps (full liability) throughout. The loop
++  fast-paths when binding is already present and logs only when it must wait.
++  `do_start_locked` still re-verifies exact agent identity and meter under the
++  lock and still holds/stops if binding is unknown.
++- Hard wall deadline is now `created_at + caps.wall_seconds`, never
++  `now + wall_seconds` after a delayed binding; the wait can only consume the
++  original wall budget, never extend it. `started_at` remains the actual
++  activation time for usage deltas.
++- `tests/knowledge-host-cpu-lifecycle-smoke.sh`: isolated regression with a
++  stub whose `agent status` reports `starting`/no SID on the first two polls,
++  then `running` with the metered SID. Asserts start succeeds, the runner was
++  not killed, activation carries the creation-anchored expiry, and liability
++  stays at the full 150-token cap. Two fail-closed cases were added: a SID that
++  never appears, and a SID with no authoritative meter row; both must fail
++  `start`, stop the runner and hold at full cap.
++
++Unchanged: all hash-bound Act34 files (gate, cycle, wrapper, zero-billed policy
++and verifier, negative smoke, provider snapshot), `knowledge-budget.conf`,
++permits, and Act34 law. No office was activated or dispatched.
++
++## Verification
++
++`sh -n` on both changed scripts, then green:
++`knowledge-host-cpu-lifecycle-smoke.sh`, `knowledge-budget-smoke.sh`,
++`knowledge-budget-negative-20261122.sh`, `knowledge-budget-run-slices-smoke.sh`,
++`knowledge-budget-admit-negative-20261122.sh`,
++`knowledge-office-cumulative-admission-smoke.sh`, `knowledge-host-cpu-smoke.sh`,
++`test_knowledge_host_cpu.py`, `knowledge-activation-smoke.sh`,
++`knowledge-phase-dispatch-binding-smoke.sh`, `knowledge-free-dispatch-smoke.sh`,
++`audit-prompt-budget-smoke.sh`, `statistics-cumulative-budget-smoke.sh`.
++
++`knowledge-activation-binding-smoke.sh` fails on an unrelated pre-existing
++repository-state mismatch: `government/boot.sh` does not reference the shared
++verifier (also true at HEAD); not touched by this repair.
++
++## Separate finding — `per_run_caps` equal to cumulative caps blocks a second run
++
++Measured read-only against `knowledge-budget-tool.py admit()` with the shipped
++400,000-token Statistics cap:
++
++| prior office tokens | `per_run_caps == caps` | `per_run_caps = 120000` |
++|---|---|---|
++| 0 | admitted | admitted |
++| 1 | **refused** | admitted |
++| 10,000 | **refused** | admitted |
++| 280,000 | **refused** | admitted |
++| 360,000 | refused | refused |
++
++With `per_run_caps == caps`, `admit()` projects `office_used + full_caps` against
++the cumulative office cap, so **any** positive prior usage (including an
++in-flight first run, which is charged at caps) refuses a second run. The first
++run is admitted only at exactly zero prior usage. With a strictly smaller
++per-run slice (the Act34 proposed config and each permit's
++`per_run_caps_reference` use 120000/1800/3600 against a 3.36M cumulative cap),
++repeated runs are admitted until the remaining cumulative allowance is less
++than one slice. This is a cap/configuration question for lawful Act31/Executive
++handling; no law, config, cap or permit was changed here.
+diff --git a/tests/knowledge-host-cpu-lifecycle-smoke.sh b/tests/knowledge-host-cpu-lifecycle-smoke.sh
+index 5cee7fd5..8be0cf78 100644
+--- a/tests/knowledge-host-cpu-lifecycle-smoke.sh
++++ b/tests/knowledge-host-cpu-lifecycle-smoke.sh
+@@ -25,7 +25,18 @@ PY
+ cat > "$tmp/bin/antonina" <<'SH'
+ #!/bin/sh
+ case "$1 $2" in
+-  'agent status') cat "$TEST_AGENT_STATE" ;;
++  'agent status')
++    if [ -n "${TEST_DELAY_CALLS:-}" ]; then
++      _n=$(cat "$TEST_DELAY_COUNT" 2>/dev/null || printf '0\n')
++      _n=$((_n + 1))
++      printf '%s\n' "$_n" > "$TEST_DELAY_COUNT"
++      if [ "$_n" -le "$TEST_DELAY_CALLS" ]; then
++        printf '{"state":"starting","native_session_id":null}\n'
++        exit 0
++      fi
++    fi
++    cat "$TEST_AGENT_STATE"
++    ;;
+   'agent kill')
+     printf '%s\n' "$*" >> "$TEST_AGENT_KILLS"
+     if [ "$TEST_KILL_FAIL" = yes ]; then exit 1; fi
+@@ -104,4 +115,88 @@ jq -e '.state=="held" and .charge.tokens_total==150 and
+ if /bin/sh "$engine" reserve statistics agent-3 >/dev/null 2>&1; then
+   echo 'Another agent was admitted over still-running held session' >&2; exit 1
+ fi
+-echo 'whole-host CPU and tokens: active overrun, verified stop, failed-kill hold and no replay passed'
++
++# Delayed native-session binding: `antonina agent run --detach` acknowledges
++# only the runner claim; the native session id and its meter row appear on a
++# later status poll. The bounded pre-lock wait must let this legitimate
++# starting runner bind instead of killing it and consuming the whole
++# reservation. Full liability stays charged at caps until binding is verified,
++# and the wall deadline is NOT pushed out by the wait.
++export TEST_KILL_FAIL=no
++python3 - "$db" <<'PY'
++import sqlite3,sys
++con=sqlite3.connect(sys.argv[1])
++con.execute("update session_v2 set tokens_input=100,time_updated=1795279850000 where id='sid'")
++con.commit()
++PY
++# One monitor interval here is 5s; still far below the 3600s wall cap.
++python3 - "$tmp/fixture/government/knowledge-budget.conf" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['monitor_interval_seconds']=5; json.dump(c,open(p,'w'))
++PY
++export VICHE_STATE_ROOT="$tmp/state-delayed"
++mkdir -p "$VICHE_STATE_ROOT"
++export TEST_DELAY_CALLS=2
++export TEST_DELAY_COUNT="$tmp/delay-count-delayed"
++: > "$TEST_DELAY_COUNT"
++printf '{"state":"running","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++export TEST_AGENT_KILLS="$tmp/kills-delayed"
++: > "$TEST_AGENT_KILLS"
++r3=$(/bin/sh "$engine" reserve statistics delayed-agent)
++/bin/sh "$engine" mark-dispatched "$r3"
++result3=$(/bin/sh "$engine" start "$r3" delayed-agent)
++[ "$result3" = "active $r3" ] || { echo "delayed-binding start failed: $result3" >&2; exit 1; }
++[ ! -s "$TEST_AGENT_KILLS" ] || { echo 'Starting runner was killed during binding wait' >&2; exit 1; }
++jq -e '.state=="active" and .native_session_id=="sid" and .agent_id=="delayed-agent" and
++        .expires_at==(.created_at + .caps.wall_seconds)' \
++  "$VICHE_STATE_ROOT/knowledge/budget/reservations/$r3.json" >/dev/null || {
++  echo 'Delayed binding did not activate with conservative creation-based expiry' >&2; exit 1; }
++python3 "$town/government/knowledge-budget-tool.py" aggregate \
++  "$VICHE_STATE_ROOT/knowledge/budget/reservations" 3888000 "$(date +%s)" |
++  jq -e '.tokens_total==150 and .by_office.statistics.tokens_total==150' >/dev/null || {
++  echo 'Full per-run liability was not retained through binding' >&2; exit 1; }
++unset TEST_DELAY_CALLS
++
++# Missing native session (delay never resolves) still fails closed: the runner
++# is stopped and the full cap is held, never activated on an unknown binding.
++python3 - "$tmp/fixture/government/knowledge-budget.conf" <<'PY'
++import json,sys
++p=sys.argv[1]; c=json.load(open(p)); c['monitor_interval_seconds']=2; json.dump(c,open(p,'w'))
++PY
++export VICHE_STATE_ROOT="$tmp/state-missing"
++mkdir -p "$VICHE_STATE_ROOT"
++export TEST_DELAY_CALLS=999
++export TEST_DELAY_COUNT="$tmp/delay-count-missing"
++: > "$TEST_DELAY_COUNT"
++printf '{"state":"running","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++export TEST_AGENT_KILLS="$tmp/kills-missing"
++: > "$TEST_AGENT_KILLS"
++r4=$(/bin/sh "$engine" reserve statistics unbound-agent)
++/bin/sh "$engine" mark-dispatched "$r4"
++if /bin/sh "$engine" start "$r4" unbound-agent >/dev/null 2>&1; then
++  echo 'FAIL: missing native-session binding was accepted' >&2; exit 1
++fi
++jq -e '.state=="held" and .charge.tokens_total==150 and
++        .held_reason=="meter_or_session_binding_unknown_after_launch"' \
++  "$VICHE_STATE_ROOT/knowledge/budget/reservations/$r4.json" >/dev/null || {
++  echo 'Missing binding did not hold at full cap' >&2; exit 1; }
++grep -q 'agent kill' "$TEST_AGENT_KILLS" || {
++  echo 'Missing binding did not stop the runner' >&2; exit 1; }
++
++# Unknown meter (sid present but no authoritative meter row) also fails closed.
++unset TEST_DELAY_CALLS
++export VICHE_STATE_ROOT="$tmp/state-unmetered"
++mkdir -p "$VICHE_STATE_ROOT"
++printf '{"state":"running","native_session_id":"absent-session"}\n' > "$TEST_AGENT_STATE"
++export TEST_AGENT_KILLS="$tmp/kills-unmetered"
++: > "$TEST_AGENT_KILLS"
++r5=$(/bin/sh "$engine" reserve statistics unmetered-agent)
++/bin/sh "$engine" mark-dispatched "$r5"
++if /bin/sh "$engine" start "$r5" unmetered-agent >/dev/null 2>&1; then
++  echo 'FAIL: unmetered native session was accepted' >&2; exit 1
++fi
++jq -e '.state=="held" and .charge.tokens_total==150 and
++        .held_reason=="meter_or_session_binding_unknown_after_launch"' \
++  "$VICHE_STATE_ROOT/knowledge/budget/reservations/$r5.json" >/dev/null || {
++  echo 'Unknown meter did not hold at full cap' >&2; exit 1; }
++echo 'whole-host CPU and tokens: active overrun, verified stop, failed-kill hold, delayed binding, missing/unknown fail-closed and no replay passed'
