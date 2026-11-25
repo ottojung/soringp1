@@ -26,6 +26,8 @@ and exclusion reasons. Objects are deduplicated by sanitized content. The
 to the complete [catalogue](../catalog/README.md). The data are historical;
 the archive is not a fresh independent proof review.
 
+[Integration verification and reproducible checks](VERIFICATION.md)
+
 ## Known limits
 
 - Original files that were deleted before recovery cannot be recreated
