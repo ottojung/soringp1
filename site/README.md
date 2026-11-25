@@ -1,5 +1,7 @@
 # SoringP1 research website
 
+Live site: https://ottojung.github.io/soringp1/
+
 A dependency-free static website generated entirely from the research archive.
 It is a reading and discovery interface, not an active research service.
 
@@ -28,9 +30,22 @@ The site has pre-rendered evidence-graded results, topic, front, board-message, 
 plus paginated collection indexes; these are usable without JavaScript.
 The search interface uses a sharded inverted index and loads it on demand.
 
-To activate GitHub Pages for a newly configured repository, select
+GitHub Pages is active. If it is ever disabled, select
 **Settings → Pages → Build and deployment → Source → GitHub Actions**.
 The expected public URL is https://ottojung.github.io/soringp1/.
 The administrator must enable Pages once; a default Actions token cannot
 activate a disabled Pages site. Thereafter no separate hosting service,
 additional token or runtime backend is required.
+
+
+## Browser verification
+
+With Node 24+ and Chromium:
+
+    node site/browser-test.js
+
+Set `SORING_SITE_URL=http://localhost:8000/` to test a local preview,
+`CHROMIUM` to select a browser executable, and `SORING_SCREENSHOTS` to
+save desktop and mobile screenshots to a directory. The test uses a fresh
+temporary browser profile and verifies actual search, filters, pagination,
+keyboard focus, mobile reading order and discussion navigation.

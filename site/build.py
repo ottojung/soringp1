@@ -106,6 +106,14 @@ board_by_id={b['id']:b for b in DATA['board']}
 board_pages={b['id']:'board/'+b['id'].split(':')[-1]+'.html' for b in DATA['board']}
 board_by_file=defaultdict(list)
 for b in DATA['board']:board_by_file[b['path']].append(b)
+threads=defaultdict(list)
+for b in DATA['board']:threads[b['path'].split('/')[1]].append(b)
+neighbors={}
+for rows in threads.values():
+    rows.sort(key=lambda b:(b['date'],b['id']))
+    for i,b in enumerate(rows):
+        neighbors[b['id']]=(rows[i-1]['id'] if i else None,rows[i+1]['id'] if i+1<len(rows) else None)
+
 guide_pages={}
 for source,title,summary in GUIDES:
     name=Path(source).stem.lower()
@@ -161,7 +169,8 @@ def toc_html(toc):
 
 def article(path,title,original,text,side='',intro='',parents=(),anchor='',active=''):
     rendered,toc=markdown(text,resolver(path,original),omit_h1=True)
-    body=crumb(path,title,parents)+'<div class="article-layout"><article class="article"><h1>'+esc(title)+'</h1>'+intro+rendered+'</article><aside class="sidebar" aria-label="Related evidence"><h2>Source &amp; navigation</h2>'+source_button(original,anchor)+side+toc_html(toc)+'</aside></div>'
+    actions='<div class="article-actions">'+external(repo_link(original,anchor),'Original source')+' · <a href="#site-related-evidence">Jump to related evidence</a></div>'
+    body=crumb(path,title,parents)+'<div class="article-layout"><article class="article"><h1>'+esc(title)+'</h1>'+actions+intro+rendered+'</article><aside id="site-related-evidence" class="sidebar" aria-label="Related evidence"><h2>Source &amp; navigation</h2>'+source_button(original,anchor)+side+toc_html(toc)+'</aside></div>'
     page(path,title,body,compact(intro or title,160),active)
 
 def item_record(path,record):
@@ -205,13 +214,15 @@ def make_explorer(index):
     topic_options='<option value="">All topics</option>'+''.join(f'<option value="{esc(t)}">{esc(t)}</option>' for t in sorted(topics))
     body=crumb(path,'Explore')+'''<span class="kicker">Research explorer</span><h1>Find a result, question or source.</h1><p class="muted">Search full indexed text, titles, original paths, and historical reports. Combine terms to narrow results.</p>
 <form id="search-form" class="searchbar" role="search"><input id="query" type="search" name="q" aria-label="Search research archive" placeholder="e.g. cospectral minimax" autocomplete="off"><button class="btn primary" type="submit">Search</button></form>
-<p class="muted"><small>Press / or Ctrl+K to focus search. No tracking. Large text files are indexed up to 1 MiB.</small></p>
+<p class="muted"><small><span class="desktop-hint">Press / or Ctrl+K to focus search. </span>No tracking. Large text files are indexed up to 1 MiB.</small></p>
 <div class="search-layout"><aside class="filters" aria-label="Search filters">
+<button id="filter-toggle" class="btn filter-toggle" type="button" aria-expanded="true" aria-controls="filter-fields"><span>Filters</span><span id="filter-count" class="muted"></span><span aria-hidden="true">⌄</span></button>
+<div id="filter-fields" class="filter-fields">
 <div><label for="kind">Collection</label><select id="kind">'''+kind_options+'''</select></div>
 <div><label for="topic">Topic (linked records)</label><select id="topic">'''+topic_options+'''</select></div>
 <div><label for="status">Historical workflow status</label><select id="status"><option value="">Any status</option><option value="investigated">Investigated</option><option value="blocked">Blocked</option><option value="review">Board review / verdict marker</option></select></div>
 <div><label for="evidence">Curated evidence type</label><select id="evidence">'''+evidence_options+'''</select></div>
-<button id="clear" class="btn" type="button">Clear filters</button></aside>
+<button id="clear" class="btn" type="button">Clear filters</button></div></aside>
 <section class="results" aria-label="Search results"><div class="results-header"><p id="result-count" role="status" aria-live="polite">Loading index…</p><label>Sort <select id="sort"><option value="relevance">Relevance</option><option value="newest">Newest dated evidence</option><option value="title">Title A–Z</option></select></label></div>
 <div id="results-list"></div><div class="pagination"><button id="prev" class="btn" type="button" disabled>Previous</button><span id="page-count"></span><button id="next" class="btn" type="button" disabled>Next</button></div></section></div>
 <noscript><div class="note">Search requires JavaScript. '''+link(path,'browse/index.html','Browse all evidence without JavaScript')+' or '+link(path,'topics/index.html','browse by topic')+'.</div></noscript>'
@@ -286,7 +297,12 @@ def build():
             values=f.get(key,[])
             if values:
                 side+='<details><summary>'+name+f' ({len(values)})</summary><ul>'+''.join('<li>'+external(repo_link('recovery/'+v),Path(v).name)+'</li>' for v in values)+'</ul></details>'
-        intro='<div class="result-meta"><span class="pill">'+esc(f['status'])+'</span><span>'+esc(topic)+'</span></div><div class="note">Historical workflow status, not a mathematical proof assessment. See the '+link(path,'guides/corrections.html','corrections')+' and original evidence.</div>'
+        intro='<div class="result-meta"><span class="pill">'+esc(f['status'])+'</span><span>'+esc(topic)+'</span></div><section class="front-summary"><h2>Research question</h2><p>'+esc(f['question'])+'</p>'
+        if f.get('reported_excerpt'):
+            intro+='<h2>Reported outcome <span class="pill warm">Unverified excerpt</span></h2><p>'+esc(f['reported_excerpt'])+'</p>'
+        if f.get('falsifier'):intro+='<details><summary>Intended falsifier</summary><p>'+esc(f['falsifier'])+'</p></details>'
+        if f.get('implication'):intro+='<details><summary>Proposed implication</summary><p>'+esc(f['implication'])+'</p></details>'
+        intro+='</section><div class="note">Historical workflow status, not a mathematical proof assessment. See the '+link(path,'guides/corrections.html','corrections')+' and original evidence.</div><h2>Full historical report</h2>'
         text=read(source)
         article(path,title,source,text,side,intro,[('topics/index.html','Topics'),('topics/'+slug(topic)+'.html',topic)])
         index.add({'kind':'front','title':title,'summary':f['question'],'url':path,'source':repo_link(source),'topics':[topic],'status':f['status'],'outcome':f.get('reported_excerpt','')},text)
@@ -301,6 +317,11 @@ def build():
             related=[f for f in dict.fromkeys(b['fronts']+b.get('mentions',[])) if f in fronts]
             ts=sorted({fronts[f]['topic'] for f in related})
             side='<h3>Original message</h3><p>'+esc(b['id'])+'</p>'
+            earlier,later=neighbors[b['id']]
+            side+='<h3>Discussion chronology</h3><div class="evidence-list">'
+            if earlier:side+=link(path,board_pages[earlier],'Earlier message')
+            if later:side+=link(path,board_pages[later],'Later message')
+            side+='</div>'
             if related:side+='<h3>Related ledger fronts</h3><ul>'+''.join('<li>'+link(path,front_pages[f],f)+'</li>' for f in related)+'</ul>'
             intro='<div class="result-meta"><span class="pill">Historical board message</span><span>'+esc(b['date'])+'</span><span>'+esc(b['author'])+'</span></div>'
             if b.get('verdict'):intro+='<div class="note"><strong>Historical verdict marker:</strong> '+esc(b['verdict'])+'<br>Not a new proof assessment.</div>'

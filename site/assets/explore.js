@@ -8,6 +8,18 @@
   const evidenceNames={formal:"Lean kernel theorem",literature:"Literature baseline",argument:"Paper / algorithm argument",structural:"Historical structural deduction",finite:"Finite computational evidence",conditional:"Conditional argument",corrected:"Corrected proof scope"};
   let records, manifest, generation=0, timer, currentPage=1, match={ids:[],terms:[]};
   const cache = new Map(), pageSize=25;
+  const media=window.matchMedia("(max-width:800px)"), filterToggle=$("filter-toggle"), filterFields=$("filter-fields");
+  let mobileExpanded=false;
+  function updateFilterPanel(){
+    const open=!media.matches||mobileExpanded;
+    filterFields.hidden=!open;
+    filterToggle.setAttribute("aria-expanded",String(open));
+    const n=[kind,topic,status,evidence].filter(c=>c.value).length;
+    $("filter-count").textContent=n?n+" active":"";
+  }
+  filterToggle.addEventListener("click",()=>{mobileExpanded=!mobileExpanded;updateFilterPanel();});
+  media.addEventListener("change",updateFilterPanel);
+
   function el(tag, text, cls) {
     const node=document.createElement(tag);
     if(text!==undefined)node.textContent=text;
@@ -52,6 +64,7 @@
       control.value=v && [...control.options].some(o=>o.value===v)?v:(control.id==="sort"?"relevance":"");
     }
     currentPage=Math.max(1,Number.parseInt(p.get("page"),10)||1);
+    updateFilterPanel();
   }
   async function json(url) {
     const r=await fetch(url);
@@ -96,6 +109,7 @@
     list.append(fragment);
   }
   async function search({reset=true,push=false}={}){
+    updateFilterPanel();
     if(!records || !manifest)return;
     const own=++generation;
     if(reset)currentPage=1;
@@ -113,7 +127,7 @@
   form.addEventListener("submit",e=>{e.preventDefault();clearTimeout(timer);search({push:true});});
   query.addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(()=>search(),250);});
   for(const control of [kind,topic,status,evidence,sort])control.addEventListener("change",()=>search({push:true}));
-  $("clear").addEventListener("click",()=>{query.value="";kind.value="";topic.value="";status.value="";evidence.value="";sort.value="relevance";search({push:true});query.focus();});
+  $("clear").addEventListener("click",()=>{kind.value="";topic.value="";status.value="";evidence.value="";sort.value="relevance";search({push:true});query.focus();});
   prev.addEventListener("click",()=>{currentPage--;render();syncURL(true);count.scrollIntoView({block:"start"});});
   next.addEventListener("click",()=>{currentPage++;render();syncURL(true);count.scrollIntoView({block:"start"});});
   window.addEventListener("popstate",()=>{loadURL();search({reset:false});});

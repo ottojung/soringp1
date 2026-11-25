@@ -40,3 +40,25 @@ python3 -m unittest discover -s tests
 
 The first three commands need only the checked-in archive and Python's
 standard library. They do not rely on the original research host's files.
+
+
+## Independent network clone and website verification
+
+A new shallow clone of public `main` on marceline-dev at
+`3e55f79b7ca545bc9beb297280403cfedf5b38ac` completed successfully.
+It passed archive object verification, all 29,617 relative navigation
+links, exact catalogue regeneration, and deterministic regeneration of
+the 570 scratch-reference and 240 historical-label entries.
+
+The research website is live at https://ottojung.github.io/soringp1/.
+GitHub Actions [build and deployment run 45686119149](https://github.com/ottojung/soringp1/actions/runs/45686119149)
+completed both jobs successfully. The first deployed version had 18,814
+searchable records and 101,043 indexed terms. A separate Chromium test
+verified live desktop/mobile rendering, exact front search, multiword
+search, workflow filtering, pagination, formal-evidence filtering, and
+keyboard focus with zero JavaScript exceptions. The subsequent mobile
+usability improvements are covered by the reproducible browser test in
+[site/browser-test.js](../../site/browser-test.js).
+
+These checks verify publishing and discoverability, not mathematical truth.
+The project remains suspended.
