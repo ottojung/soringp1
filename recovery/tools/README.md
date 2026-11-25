@@ -38,6 +38,9 @@ python3 recovery/tools/search.py extract soring-fronts/cospectral-gap-span-alln 
 # Validate source object hashes and catalogue references
 python3 recovery/tools/search.py verify
 
+# Check relative Markdown links and line anchors
+python3 recovery/tools/verify_navigation.py
+
 # Rebuild the deterministic Markdown and JSON indices from archived data
 python3 recovery/tools/build_catalog.py
 python3 recovery/tools/build_catalog.py --check
