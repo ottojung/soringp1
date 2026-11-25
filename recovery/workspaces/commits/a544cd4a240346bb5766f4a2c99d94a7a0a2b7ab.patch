@@ -1,0 +1,155 @@
+commit a544cd4a240346bb5766f4a2c99d94a7a0a2b7ab
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Fri Oct 16 13:18:59 2026 -0700
+Commit:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+CommitDate: Fri Oct 16 13:18:59 2026 -0700
+
+    Track audit evidence, overdue selections and exhaustive model invariants
+
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+new file mode 100644
+index 00000000..813ec50a
+--- /dev/null
++++ b/government/audit-accountability.py
+@@ -0,0 +1,141 @@
++#!/usr/bin/env python3
++"""Deterministic oversight of randomized audit coverage and recorded findings.
++
++Auditor submissions are claims with evidence references, not independently verified
++facts. The controller never declares an issue solved from agent completion alone.
++"""
++import argparse
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import time
++
++
++def json_file(path, fallback=None):
++    return json.loads(path.read_text()) if path.exists() else fallback
++
++
++def atomic(path, data):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    temp = path.with_suffix(".tmp")
++    temp.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n")
++    os.replace(temp, path)
++
++
++def base():
++    return Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state")) / "oversight" / "random"
++
++
++def report(args):
++    root = base()
++    case = json_file(root / "cases" / f"{args.case}.json")
++    if case is None:
++        raise ValueError("unknown audit case")
++    if not args.evidence or not args.evidence.strip():
++        raise ValueError("durable evidence reference is required")
++    path = root / "outcomes" / f"{args.case}.json"
++    prior = json_file(path)
++    if prior and prior["verdict"] != "finding":
++        raise ValueError("case already has a final verdict")
++    if args.verdict == "verified_fixed" and (not prior or prior["verdict"] != "finding"):
++        raise ValueError("verified_fixed requires a previous finding")
++    now = int(os.environ.get("VICHE_OVERSIGHT_NOW", time.time()))
++    result = {"case_id": args.case, "population": case["population"],
++              "subject": case["id"], "verdict": args.verdict, "at": now,
++              "evidence_ref": args.evidence, "details": args.details[:1000],
++              "caveat": "auditor_report_not_independent_proof"}
++    atomic(path, result)
++    print(json.dumps(result))
++
++
++def listed_agents():
++    all_agents = []
++    for page in range(1, 101):
++        p = subprocess.run(["antonina", "agent", "list", "--running",
++                            "--page", str(page), "--json"], capture_output=True,
++                           text=True, timeout=30)
++        if p.returncode:
++            raise RuntimeError(f"agent list failed: {p.stderr[-160:]}")
++        items = json.loads(p.stdout)
++        if not isinstance(items, list):
++            raise RuntimeError("invalid agent list response")
++        all_agents.extend(items)
++        if len(items) < 50:
++            return all_agents
++    raise RuntimeError("incomplete agent list")
++
++
++def check(args):
++    root = base()
++    now = int(os.environ.get("VICHE_OVERSIGHT_NOW", time.time()))
++    deadline = int(os.environ.get("VICHE_AUDIT_EVIDENCE_DEADLINE", "7200"))
++    if deadline <= 0:
++        raise ValueError("invalid deadline")
++    signals = []
++    cases = list((root / "cases").glob("*.json")) if (root / "cases").exists() else []
++    findings = {}
++    overdue = 0
++    for path in cases:
++        case = json_file(path)
++        verdict = json_file(root / "outcomes" / path.name)
++        if verdict is None and now - int(case["at"]) > deadline:
++            overdue += 1
++            signals.append({"type": "unreported_sample", "case_id": case["case_id"]})
++        if verdict is not None and verdict["verdict"] == "finding":
++            subject = f"{case['population']}:{case['id']}"
++            findings[subject] = findings.get(subject, 0) + 1
++            signals.append({"type": "unresolved_finding", "case_id": case["case_id"],
++                            "evidence_ref": verdict["evidence_ref"]})
++        if verdict is not None and verdict["verdict"] == "inconclusive" and now - verdict["at"] > deadline:
++            signals.append({"type": "unresolved_inconclusive", "case_id": case["case_id"]})
++    for subject, count in findings.items():
++        if count >= 2:
++            signals.append({"type": "repeated_finding", "subject": subject,
++                            "count": count})
++    agents = 0
++    try:
++        inventory = listed_agents()
++        agents = len(inventory)
++        for agent in inventory:
++            if agent.get("model") != "opencode-go/longcat-2.5-preview-free" or agent.get("variant") != "low":
++                signals.append({"type": "prohibited_model", "agent_id": str(agent.get("id", "unknown"))})
++    except Exception as e:
++        signals.append({"type": "agent_inventory_unavailable", "detail": str(e)[:180]})
++    evidence = {"at": now, "cases_total": len(cases), "cases_unreported_overdue": overdue,
++                "running_agents_checked": agents, "signals": signals,
++                "finding_count": sum(findings.values()),
++                "assessment": "requires_investigation_not_a_guilt_verdict"}
++    atomic(root / "health.json", evidence)
++    incident = root / "incident.json"
++    if signals:
++        atomic(incident, evidence)
++    elif incident.exists():
++        os.replace(incident, root / f"cleared-{now}.json")
++    print(json.dumps(evidence))
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("action", choices=["check", "report"])
++    p.add_argument("--case", default="")
++    p.add_argument("--verdict", choices=["verified", "not_assigned",
++                                           "finding", "inconclusive", "verified_fixed"])
++    p.add_argument("--evidence", default="")
++    p.add_argument("--details", default="")
++    args = p.parse_args()
++    if args.action == "report":
++        if not args.case or not args.verdict:
++            raise ValueError("case and verdict are required")
++        report(args)
++    else:
++        check(args)
++
++
++if __name__ == "__main__":
++    try:
++        main()
++    except Exception as err:
++        print(f"Audit accountability failed: {err}", file=sys.stderr)
++        sys.exit(1)

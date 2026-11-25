@@ -1,0 +1,196 @@
+commit ada195a065b7110ae3433d0d0a25f903f5ef5020
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Wed Nov 25 00:19:52 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Wed Nov 25 00:19:52 2026 +0000
+
+    Integrate delivery/pnp-bench-timestamps-20261124 (operator): PnP: bench-timestamps follow-up
+    
+    Landed by the integration queue (Act 31) as one candidate on main 0b9b67a59da8.
+    
+    Delivery-Branch: delivery/pnp-bench-timestamps-20261124
+    Delivery-Head: c81495cfea8f3e3522295f508f0efc3a236b84c4
+    Proposed-By: operator
+    Reviewed-By: reviewer-3mscn7m73jrkxjvtoyvs6f-whig
+    Review-Reason: The follow-up correctly adds an opt-in --contributors-export path that parses/canonicalizes official checked-step times, annotates rows without breaking the no-timestamp fallback, and splits time holdouts by official time groups while excluding undated rows, keeping ties together; the honest relabel
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/missions/pnp/bench/cli.py b/missions/pnp/bench/cli.py
+index 8a7416a6..d3e8073d 100644
+--- a/missions/pnp/bench/cli.py
++++ b/missions/pnp/bench/cli.py
+@@ -6,7 +6,7 @@ import json
+ import sys
+ from pathlib import Path
+ 
+-from .corpus import DEFAULT_DB, load_graph_circuits
++from .corpus import DEFAULT_DB, load_graph_circuits, checked_timestamps
+ from .evaluate import evaluate_row, evaluate_with_holdouts, summarize
+ from .generators import GENERATORS, get as get_generator
+ 
+@@ -71,6 +71,8 @@ def main(argv=None):
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--corpus-db", default=str(DEFAULT_DB),
+                         help="Public checked-corpus sqlite index (read-only).")
++    parser.add_argument("--contributors-export", type=Path,
++                        help="Frozen public official contributors JSON export; enables real checked-time splits.")
+     parser.add_argument("--generator", action="append", default=[],
+                         choices=sorted(GENERATORS),
+                         help="Generator to run. May be given multiple times.")
+@@ -88,7 +90,14 @@ def main(argv=None):
+                         help="Omit per-row results from JSON.")
+     args = parser.parse_args(argv)
+ 
+-    rows = load_graph_circuits(args.corpus_db, limit=args.limit)
++    timestamps = None
++    export_sha256 = None
++    if args.contributors_export is not None:
++        import hashlib
++        raw = args.contributors_export.read_bytes()
++        timestamps = checked_timestamps(json.loads(raw))
++        export_sha256 = hashlib.sha256(raw).hexdigest()
++    rows = load_graph_circuits(args.corpus_db, limit=args.limit, timestamps=timestamps)
+     if not rows:
+         print("no graph-circuit constructions found in corpus", file=sys.stderr)
+         return 2
+@@ -100,6 +109,7 @@ def main(argv=None):
+         "corpus_db": str(args.corpus_db),
+         "rows": len(rows),
+         "test_fraction": args.test_fraction,
++        "contributors_export_sha256": export_sha256,
+         "reports": reports,
+     }
+     if args.no_results:
+diff --git a/missions/pnp/bench/corpus.py b/missions/pnp/bench/corpus.py
+index 22ad366b..b269a593 100644
+--- a/missions/pnp/bench/corpus.py
++++ b/missions/pnp/bench/corpus.py
+@@ -8,6 +8,8 @@ missions.pnp.proofs.synthesis.parse.
+ from __future__ import annotations
+ 
+ import json
++from datetime import datetime, timezone
++import re
+ import sqlite3
+ from pathlib import Path
+ 
+@@ -24,7 +26,30 @@ def _open_ro(path):
+     return sqlite3.connect(uri, uri=True, timeout=15)
+ 
+ 
+-def load_graph_circuits(db_path=DEFAULT_DB, limit=None):
++def checked_timestamps(export):
++    """Use official public checked-step times, never PR creation or module order."""
++    entries = export.get("contributors", export.get("entries"))
++    if not isinstance(entries, list):
++        raise ValueError("missing public contributor entries")
++    times = {}
++    for entry in entries:
++        for lemma in entry.get("lemmas", []):
++            gid, at = lemma.get("id"), lemma.get("at")
++            if not isinstance(gid, str) or not re.fullmatch(r"L-[a-z]+-[0-9]+", gid):
++                continue
++            try:
++                dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
++                if dt.tzinfo is None:
++                    continue
++                canonical = dt.astimezone(timezone.utc).isoformat(timespec="microseconds")
++            except (AttributeError, TypeError, ValueError):
++                continue
++            # Keep the earliest recorded checked event if there are duplicates.
++            times[gid] = min(times.get(gid, canonical), canonical)
++    return times
++
++
++def load_graph_circuits(db_path=DEFAULT_DB, limit=None, timestamps=None):
+     """Return checked-corpus graph-circuit construction metadata rows.
+ 
+     Each row contains only public metadata derived from the checked corpus:
+@@ -60,6 +85,9 @@ def load_graph_circuits(db_path=DEFAULT_DB, limit=None):
+                 "statement": statement,
+             }
+         )
++        if timestamps is not None:
++            gid = module.split(".")[-1].replace("_", "-")
++            out[-1]["checked_at"] = timestamps.get(gid)
+         if limit is not None and len(out) >= limit:
+             break
+     return out
+diff --git a/missions/pnp/bench/evaluate.py b/missions/pnp/bench/evaluate.py
+index aa0ffe42..a3a38356 100644
+--- a/missions/pnp/bench/evaluate.py
++++ b/missions/pnp/bench/evaluate.py
+@@ -153,9 +153,23 @@ def evaluate_with_holdouts(rows, generator, generator_name=None, test_fraction=0
+     fam_test_keys = {r["module"] for r in fam_test}
+     fam_results = [r for r in all_results if r["module"] in fam_test_keys]
+ 
+-    ordered = sorted(rows, key=time_key)
+-    cut = max(1, int(round(len(ordered) * (1 - test_fraction)))) if ordered else 0
+-    time_test = ordered[cut:]
++    if not 0 < test_fraction < 1:
++        raise ValueError("test fraction must be between zero and one")
++    # Missing times are excluded, not silently treated as future examples.
++    # Do not split simultaneous checked events across train/test.
++    timestamp_mode = any("checked_at" in row for row in rows)
++    if timestamp_mode:
++        dated = [r for r in rows if r.get("checked_at")]
++        _, time_test = holdout_split(dated, lambda r: r["checked_at"], test_fraction)
++        if len({r["checked_at"] for r in dated}) < 2:
++            time_test = []
++        split = "tail_by_official_checked_at_groups"
++    else:
++        dated = []
++        ordered = sorted(rows, key=time_key)
++        cut = max(1, int(round(len(ordered) * (1 - test_fraction)))) if ordered else 0
++        time_test = ordered[cut:]
++        split = "module_number_proxy_not_acceptance_time"
+     time_test_keys = {r["module"] for r in time_test}
+     time_results = [r for r in all_results if r["module"] in time_test_keys]
+ 
+@@ -170,7 +184,10 @@ def evaluate_with_holdouts(rows, generator, generator_name=None, test_fraction=0
+             "summary": summarize(fam_results),
+         },
+         "time_holdout": {
+-            "split": "tail_by_public_module_time_key",
++            "split": split,
++            "dated_rows": len(dated),
++            "undated_rows": len(rows) - len(dated),
++            "interpretation": "Retrospective split, not evidence of unseen generalization.",
+             "test_fraction": test_fraction,
+             "test_modules": [r["module"] for r in time_test],
+             "summary": summarize(time_results),
+diff --git a/tests/pnp-bench.py b/tests/pnp-bench.py
+index 4bd60005..b2f01d81 100644
+--- a/tests/pnp-bench.py
++++ b/tests/pnp-bench.py
+@@ -102,6 +102,30 @@ class BenchTests(unittest.TestCase):
+         finally:
+             Path(db_path).unlink(missing_ok=True)
+ 
++    def test_real_checked_times_and_ties(self):
++        entries = {"contributors":[{"lemmas":[
++            {"id":"L-meta-1","at":"2026-11-24T10:00:00Z"},
++            {"id":"L-meta-2","at":"2026-11-24T12:00:00+01:00"},
++            {"id":"L-meta-3","at":"2026-11-24T11:00:00Z"},
++            {"id":"L-meta-4","at":"invalid"},
++            {"id":"L-meta-1","at":"2026-11-24T12:00:00Z"},
++        ]}]}
++        times = corpus.checked_timestamps(entries)
++        self.assertEqual(len(times), 3)
++        self.assertEqual(times["L-meta-2"], times["L-meta-3"])
++        db = _make_db([(f"PEqualNP.Outside.L_meta_{i}", [(0,1)], 1) for i in range(1,5)])
++        try:
++            loaded = corpus.load_graph_circuits(db, timestamps=times)
++            out = evaluate.evaluate_with_holdouts(loaded, generators.exact_star_cover)
++            holdout = out["time_holdout"]
++            self.assertEqual(holdout["dated_rows"], 3)
++            self.assertEqual(holdout["undated_rows"], 1)
++            self.assertEqual(set(holdout["test_modules"]),
++                {"PEqualNP.Outside.L_meta_2","PEqualNP.Outside.L_meta_3"})
++            self.assertEqual(holdout["summary"]["total"], 2)
++        finally:
++            Path(db).unlink(missing_ok=True)
++
+     def test_holdout_group_split(self):
+         rows = []
+         for i in range(8):

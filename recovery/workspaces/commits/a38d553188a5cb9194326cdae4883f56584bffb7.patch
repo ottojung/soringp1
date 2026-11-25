@@ -1,0 +1,47 @@
+commit a38d553188a5cb9194326cdae4883f56584bffb7
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 17 16:37:37 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 17 16:37:37 2026 +0000
+
+    Fix tally.sh regression: seed accepted seats from current roster
+    
+    The historical-seat union broke tests/tally-smoke.sh because the fixture
+    sets VICHE_TOWN_ROOT to a non-git directory, so git log yielded nothing
+    and every ballot was rejected. Now the accepted-seat set is the union of
+    historical seats (from git history) and current roster seats (always),
+    degrading gracefully when git history is unavailable.
+
+diff --git a/government/tally.sh b/government/tally.sh
+index 35f5433f..b3f2e78c 100644
+--- a/government/tally.sh
++++ b/government/tally.sh
+@@ -19,23 +19,25 @@ done
+ digest=$(sha256sum "$proposal" | cut -d ' ' -f 1)
+ tab=$(printf '\t')
+ # Build set of all seats that have ever been in the roster (historical + current).
++# Degrade gracefully: if git history is unavailable, seed from current roster.
+ historical_seats=$(git -C "$town" log --all --format=%H -- government/seats.tsv 2>/dev/null | while read -r commit; do
+     git -C "$town" show "$commit:government/seats.tsv" 2>/dev/null || true
+ done | cut -f1 | sort -u)
+ awk -F "$tab" -v quorum="$quorum" -v required="$required" -v digest="$digest" -v bill="$1" -v hist="$historical_seats" '
+ BEGIN {
+     n = split(hist, arr, "\n")
+-    for (i = 1; i <= n; i++) if (arr[i]) hist_seats[arr[i]] = 1
++    for (i = 1; i <= n; i++) if (arr[i]) seen[arr[i]] = 1
+ }
+ FNR == NR {
+-    if (NF != 3 || $1 !~ /^[0-9a-f]+$/ || seen[$1]++) {
++    if (NF != 3 || $1 !~ /^[0-9a-f]+$/ || roster_seen[$1]++) {
+         bad=1; print "Invalid seat roster"; exit 2
+     }
++    seen[$1] = 1
+     seats++
+     next
+ }
+ {
+-    if (NF != 3 || !($1 in hist_seats) || voted[$1]++ ||
++    if (NF != 3 || !($1 in seen) || voted[$1]++ ||
+         $3 != digest || ($2 != "yes" && $2 != "no" && $2 != "abstain")) {
+         bad=1; print "Invalid, duplicate or mismatched ballot"; exit 2
+     }

@@ -1,0 +1,102 @@
+commit ad0c511c1fac5ec7f7dc18e5c0885969c6c21c17
+Author:     billy-dev <billy-dev@viche.invalid>
+AuthorDate: Mon Nov 9 18:28:08 2026 +0000
+Commit:     billy-dev <billy-dev@viche.invalid>
+CommitDate: Mon Nov 9 18:28:08 2026 +0000
+
+    Accept both Act 27 row-hash conventions (with or without the trailing newline)
+
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+index 46fcbd7e..f5686e44 100644
+--- a/government/audit-accountability.py
++++ b/government/audit-accountability.py
+@@ -18,8 +18,10 @@ Act 27 §3 legacy marker schema (append-only row in a correction trail, e.g.
+                                   "rows_unmodified": true,
+                                   "no_identity": true}}}
+ 
+-A row's hash is SHA-256 over its JSON text without the trailing newline, as
+-committed at the cited introducing commit.  A marker is effective only for the
++A row's hash is SHA-256 over the row's bytes as committed at the cited
++introducing commit.  The Act does not fix whether the single trailing newline
++is included; the review procedure requires the reviewer to record the
++convention, and this checker accepts either (both bind the same line).  A marker is effective only for the
+ two case ids named in Act 27 §3(1), only when it is the single marker in the
+ committed trail, lists every correction row that existed when the trail was
+ first committed (and no later row) exactly once by position, and carries an
+@@ -87,8 +89,16 @@ def _git_show(town, rev, rel):
+                           capture_output=True, text=True, timeout=15)
+ 
+ 
+-def _line_sha256(line):
+-    return hashlib.sha256(line.encode("utf-8")).hexdigest()
++def _line_sha256s(line):
++    """The two defensible readings of "the row's bytes": with or without the
++    single trailing newline that separates it from the next row.  Act 27 §3(2)
++    does not fix the convention and the review procedure explicitly asks the
++    reviewer to record which was used, so both bind the same line content and
++    only the terminator differs.
++    """
++    text = line.encode("utf-8")
++    return {hashlib.sha256(text).hexdigest(),
++            hashlib.sha256(text + b"\n").hexdigest()}
+ 
+ 
+ def effective_legacy_marker(case_id):
+@@ -189,9 +199,9 @@ def effective_legacy_marker(case_id):
+             return None
+         anchor_line = anchor_lines[position - 1]
+         head_line = lines[position - 1]
+-        if _line_sha256(anchor_line) != entry["sha256"]:
++        if entry["sha256"] not in _line_sha256s(anchor_line):
+             return None
+-        if _line_sha256(head_line) != entry["sha256"]:
++        if entry["sha256"] not in _line_sha256s(head_line):
+             return None
+         row = parsed[position - 1]
+         if row.get("correction") is not True:
+diff --git a/tests/audit-legacy-marker-smoke.sh b/tests/audit-legacy-marker-smoke.sh
+index 8c37c789..9176f15a 100644
+--- a/tests/audit-legacy-marker-smoke.sh
++++ b/tests/audit-legacy-marker-smoke.sh
+@@ -96,6 +96,8 @@ for position, line in enumerate(lines, 1):
+     if row.get("correction") is not True:
+         continue
+     digest = hashlib.sha256(line.encode("utf-8")).hexdigest()
++    if mode == "newline":
++        digest = hashlib.sha256((line + "\n").encode("utf-8")).hexdigest()
+     if mode == "badhash" and first:
+         digest = "0" * 64
+     first = False
+@@ -177,6 +179,32 @@ expect_refused 'second same-cycle correction' \
+     file_correction "$CASE_LEGACY" "$TOKEN1" finding not_assigned \
+     "a second same-cycle attempt" "second attempt in the same cycle"
+ echo 'legacy marker (ii): second same-cycle correction refused'
++# (i-b) The review procedure requires the reviewer to record whether the hash
++# covers the trailing newline. Both conventions bind the same row and must be
++# accepted.
++fresh
++make_case "$CASE_LEGACY"
++base_verdict "$CASE_LEGACY"
++set_token "$TOKEN1"
++legacy_trail "$CASE_LEGACY"
++commit_town 'legacy trail for newline-convention fixture'
++anchor=$(git -C "$scratch/town" rev-parse HEAD)
++add_marker "$TRAIL" "$CASE_LEGACY" "$anchor" newline
++commit_town 'append a marker whose cited hashes include the trailing newline'
++file_correction "$CASE_LEGACY" "$TOKEN1" not_assigned finding \
++    "evidence under the newline hash convention" "materially stronger replay" >/dev/null
++python3 "$CTRL" report --case "$CASE_LEGACY" --confirm \
++    --evidence "procedural confirmation of the newline-convention correction" >/dev/null
++commit_town 'anchor the newline-convention correction and confirmation'
++python3 "$CTRL" check > "$scratch/check"
++if jq -e --arg c "$CASE_LEGACY" \
++    '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' \
++    "$scratch/check" >/dev/null; then
++    echo "with-newline marker convention was not accepted" >&2
++    exit 1
++fi
++echo 'legacy marker (i-b): with-newline hash convention accepted on the same rows'
++
+ 
+ # (iii) A hash mismatch against the introducing commit makes the marker ineffective.
+ fresh

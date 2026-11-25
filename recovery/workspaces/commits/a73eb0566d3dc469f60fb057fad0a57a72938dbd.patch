@@ -1,0 +1,163 @@
+commit a73eb0566d3dc469f60fb057fad0a57a72938dbd
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Wed Nov 25 00:30:19 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Wed Nov 25 00:30:19 2026 +0000
+
+    Protect live research from unaudited direct operator release and preserve exact-attempt evidence
+
+diff --git a/missions/pnp/PROTOCOL.md b/missions/pnp/PROTOCOL.md
+index a79e438c..accb9bf3 100644
+--- a/missions/pnp/PROTOCOL.md
++++ b/missions/pnp/PROTOCOL.md
+@@ -28,7 +28,7 @@ Define the stable operator interface:
+   python3 missions/pnp/cli.py status
+   python3 missions/pnp/cli.py acquire [--hard]
+   python3 missions/pnp/cli.py beat <gap-id>
+-  python3 missions/pnp/cli.py release <gap-id> <reason>
++  python3 missions/pnp/cli.py release <gap-id> <reason> --operator-override --attempt ATTEMPT --evidence EVIDENCE
+   python3 missions/pnp/cli.py submit <gap-id> <candidate-file>
+   python3 missions/pnp/cli.py reconcile
+ The exact file structure can vary only if the commands and behaviors remain equally clear and tested.
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index fc08a51c..12aafe89 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -11,7 +11,7 @@ authenticated GitHub mutation commands directly.
+     python3 missions/pnp/cli.py status
+     python3 -m missions.pnp.staff GAP --worker LABEL=APPROACH
+     python3 missions/pnp/cli.py beat <gap-id>
+-    python3 missions/pnp/cli.py release <gap-id> <reason>
++    python3 missions/pnp/cli.py release <gap-id> <reason> --operator-override --attempt ATTEMPT --evidence EVIDENCE
+     python3 missions/pnp/cli.py submit <gap-id> <candidate-file>
+     python3 missions/pnp/cli.py reconcile
+ 
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index 0492b553..0bfefb12 100755
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -4,7 +4,7 @@
+     python3 missions/pnp/cli.py status
+     python3 missions/pnp/cli.py acquire [--hard]
+     python3 missions/pnp/cli.py beat <gap-id>
+-    python3 missions/pnp/cli.py release <gap-id> <reason>
++    python3 missions/pnp/cli.py release <gap-id> <reason> --operator-override --attempt ATTEMPT --evidence EVIDENCE
+     python3 missions/pnp/cli.py submit <gap-id> <candidate-file>
+     python3 missions/pnp/cli.py reconcile
+ """
+@@ -199,14 +199,46 @@ def cmd_beat(args):
+ 
+ 
+ def cmd_release(args):
+-    rec = state.load(args.gap)
+-    if not rec or not rec.get("lease"):
+-        print("no lease for gap", file=sys.stderr)
++    """Exceptional operator repair, never a competing portfolio mechanism."""
++    if not args.operator_override or not args.attempt or not args.evidence or not args.evidence.strip():
++        print("Routine release belongs to the lease evaluator: use portfolio release GAP ATTEMPT --reason ... --evidence ... . "
++              "For deliberate operator repair use --operator-override --attempt ATTEMPT --evidence EVIDENCE.",file=sys.stderr)
+         return 2
+-    desk_mod.Desk().release(rec["lease"], args.reason)
+-    state.transition(args.gap, "RELEASED", failure_reason=args.reason)
+-    print("released " + args.gap + " with reason " + args.reason)
+-    return 0
++    if len(args.evidence)>4000 or args.reason not in config.RELEASE_REASONS-{"submitted"}:
++        print("invalid operator release evidence/reason (submitted is publisher-only)",file=sys.stderr)
++        return 2
++    if not config.GAP_ID_RE.fullmatch(args.gap):
++        print("invalid gap",file=sys.stderr);return 2
++    rec=state.load(args.gap)
++    if not support.active(rec) or support.attempt(rec)!=args.attempt:
++        print("obsolete or nonresearch assignment; inspect the current attempt",file=sys.stderr);return 2
++    fd=jobs.claim(args.gap)
++    if fd is None:
++        print("publisher owns assignment; release refused",file=sys.stderr);return 2
++    try:
++        with state.lock(args.gap):
++            rec=state.load(args.gap)
++            if (not support.active(rec) or support.attempt(rec)!=args.attempt
++                    or rec.get("queued_lease") or rec.get("intent")
++                    or rec.get("pr_number") or rec.get("candidate_digest")):
++                print("assignment changed or publication pending; release refused",file=sys.stderr);return 2
++            detail={"attempt":args.attempt,"reason":args.reason,"evidence":args.evidence.strip(),
++                    "agent":os.environ.get("ANTONINA_AGENT_ID"),"pid":os.getpid(),"operator_override":True}
++            # Durable evidence even if the network operation fails after dispatch.
++            state.event(args.gap,"operator_release_requested",detail)
++            try:
++                desk_mod.Desk().release(rec["lease"],args.reason)
++            except Exception as exc:
++                state.event(args.gap,"operator_release_uncertain",{"attempt":args.attempt,"error_type":type(exc).__name__})
++                print("release not confirmed; reconcile before retrying",file=sys.stderr);return 1
++            rec.update(state="RELEASED",failure_reason=args.reason)
++            state.save(rec)
++            state.event(args.gap,"state",{"to":"RELEASED","fields":{"failure_reason":args.reason}})
++            state.event(args.gap,"operator_release",detail)
++        print("released "+args.gap+" with reason "+args.reason)
++        return 0
++    finally:
++        os.close(fd)
+ 
+ 
+ def cmd_submit(args):
+@@ -309,6 +341,9 @@ def main(argv=None):
+     rel = sub.add_parser("release")
+     rel.add_argument("gap")
+     rel.add_argument("reason")
++    rel.add_argument("--operator-override",action="store_true",help="exceptional explicit operator repair only")
++    rel.add_argument("--attempt",help="exact current attempt from portfolio inspect")
++    rel.add_argument("--evidence",help="substantive reason for exceptional operator repair")
+     rel.set_defaults(fn=cmd_release)
+     subp = sub.add_parser("submit")
+     subp.add_argument("gap")
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 7668c00d..18eef5fd 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -471,6 +471,13 @@ active proof swarm before abandoning its focus. A difficult label, age or
+ one unsuccessful tactic is insufficient. If a lease is genuinely not worth
+ holding, directly decide:
+ `python3 -m missions.pnp.portfolio release GAP ATTEMPT --reason 'specific mathematical obstacles and opportunity cost' --evidence 'checked lemmas, failed route artifacts or reproducible experiments'`
++Direct operator CLI release is reserved for deliberate exceptional repair;
++it requires --operator-override, exact current --attempt and --evidence.
++It cannot release an assignment owned by the publisher or a superseded
++attempt. Routine releases must go through the independent lease evaluator;
++do not mass-release live research assignments from external maintenance.
++No additional approval is required for the normal evaluator path.
++
+ The allocator executes the documented reason other, preserves artifacts,
+ protects queued/publishing candidates, honors hard-step minimum holding time,
+ and refills the slot. No additional review or approval. Never release
+diff --git a/tests/pnp-research.py b/tests/pnp-research.py
+index fdfc2dd6..9f5c4195 100644
+--- a/tests/pnp-research.py
++++ b/tests/pnp-research.py
+@@ -120,6 +120,29 @@ class Research(unittest.TestCase):
+         self.assertNotIn("general",report["roles"])
+         self.assertEqual(report["observed_usage"]["general"]["opened_packet"],1)
+         self.assertEqual(report["observed_usage"]["general"]["unconfirmed_dispatches"],1)
++    def test_operator_release_is_exact_and_explicit(self):
++        from missions.pnp import cli
++        from argparse import Namespace
++        gap="L-meta-7"
++        r=state.create(gap,state="LEASED",lease="fixture",statement="True",
++                       lease_expires_at=__import__("time").time()+600)
++        a=Namespace(gap=gap,reason="missing_lemma",operator_override=False,attempt=None,evidence=None)
++        with patch.object(cli.desk_mod,"Desk") as desk:
++            self.assertEqual(cli.cmd_release(a),2)
++            desk.assert_not_called()
++            a.operator_override=True;a.attempt="stale";a.evidence="concrete repair"
++            self.assertEqual(cli.cmd_release(a),2)
++            desk.assert_not_called()
++            a.attempt=support.attempt(r)
++            state.update(gap,queued_lease="fixture")
++            self.assertEqual(cli.cmd_release(a),2)
++            desk.assert_not_called()
++            state.update(gap,queued_lease=None)
++            self.assertEqual(cli.cmd_release(a),0)
++            desk.return_value.release.assert_called_once_with("fixture","missing_lemma")
++        self.assertEqual(state.load(gap)["state"],"RELEASED")
++        events=[json.loads(l) for l in Path(state.events_path(gap)).read_text().splitlines()]
++        self.assertTrue(any(e["kind"]=="operator_release" and e["detail"]["attempt"]==a.attempt for e in events))
+     def test_independent_roles_and_obligation_fronts(self):
+         rec=state.create("L-meta-9",state="LEASED",lease="fixture",statement="True",
+                          lease_expires_at=__import__("time").time()+600)

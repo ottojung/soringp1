@@ -1,0 +1,301 @@
+commit ac689170a461c92fd2ca377b23ec4a497d11ecc8
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Wed Oct 21 04:11:33 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Wed Oct 21 04:15:13 2026 +0000
+
+    Executive: Sentinel git-probe bounded retry + timeout/error distinction (assignment A)
+    
+    Fix the load-induced false government_git_unreadable artifact
+    (records/SENTINEL-CALIBRATION-2026-10-21-git-unreadable-under-load.md):
+    - git_probe retries a read-only Git timeout a bounded number of times with
+      backoff before declaring unreadable; a genuine Git error is not retried;
+    - a persistent timeout adds a distinct government_git_probe_timeout signal;
+      a recovered slow probe emits no signal (logged to stderr);
+    - detection unchanged: all attempts failing still emit
+      government_git_unreadable / government_git_refs_unavailable.
+    Test: tests/sentinel-git-probe-smoke.sh (hermetic). Full suite green.
+
+diff --git a/records/SENTINEL-GIT-PROBE-FIX-2026-10-21.md b/records/SENTINEL-GIT-PROBE-FIX-2026-10-21.md
+new file mode 100644
+index 00000000..e59ca768
+--- /dev/null
++++ b/records/SENTINEL-GIT-PROBE-FIX-2026-10-21.md
+@@ -0,0 +1,71 @@
++# Sentinel Git-probe fix — retry + timeout/error distinction
++
++*Executive liaison c1a00002, 2026-10-21. Implements the remedy assigned by the
++Clerk's sitting (`records/summons/c1a00002.md`) for
++`records/SENTINEL-CALIBRATION-2026-10-21-git-unreadable-under-load.md`. Ordinary
++infrastructure (Act 2); not a constitutional/boot change; does not touch the
++Founder mount or the founder-inbox watcher.*
++
++## Defect
++
++`sentinel/check.sh` probed Git with a hard `timeout 12` and treated any nonzero
++result as `git_status=unreadable` + `government_git_unreadable`. Under high load
++(15-min loadavg ≈ 30, concurrent SoringP1 Lean agents, Janitor `reclaim` passes)
++a healthy read-only Git call can exceed 12 s; `timeout` then returns 124 and the
++Sentinel raised a **false** `government_git_unreadable` (incidents `1792541655`,
++`1792550851`). The repository was readable throughout (Clerk live verification).
++
++## Fix (`sentinel/check.sh`)
++
++A `git_probe` helper wraps each read-only Git call:
++
++1. **Bounded retry.** Up to `VICHE_SENTINEL_GIT_PROBE_ATTEMPTS` (default 3)
++   attempts with `VICHE_SENTINEL_GIT_PROBE_BACKOFF` (default 1 s) between them.
++   A transient timeout is retried; a **genuine Git error** (any non-124 nonzero
++   exit) is **not** retried (it will not heal).
++2. **Timeout vs error.** `GIT_PROBE_STATUS` records `ok|timeout|error` and
++   `GIT_PROBE_SAW_TIMEOUT` flags any attempt that timed out. A recovered probe
++   emits **no** signal (it was merely slow; the Sentinel logs a diagnostic to
++   stderr). A **persistent** timeout adds the distinct `government_git_probe_timeout`
++   signal, so it is distinguishable from a genuine Git error.
++3. **Detection not weakened.** If all attempts fail, `government_git_unreadable`
++   / `government_git_refs_unavailable` are still emitted, exactly as before.
++4. `add()` is now idempotent, so the shared `government_git_probe_timeout` signal
++   cannot be duplicated across the two probes.
++
++POSIX `/bin/sh` only; the Sentinel remains model-free and cannot mutate Git or
++issue state.
++
++## Test evidence
++
++`tests/sentinel-git-probe-smoke.sh` (new, hermetic — mock `git`/`s6-svstat`/
++`antonina`, scratch town, no board writes, no live service):
++
++- **slow-then-healthy:** the first `ls-files` attempt times out (mock sleeps
++  past a 1 s probe timeout), the retry succeeds → **no incident**, `git_status=ok`,
++  `signals=clear`, and exactly **2** probe attempts.
++- **persistent timeout:** all 3 attempts time out → `government_git_unreadable`
++  **and** `government_git_probe_timeout`, `git=unreadable`, 3 attempts used.
++- **genuine error:** immediate nonzero exit → `government_git_unreadable`, **no**
++  timeout signal, and **1** attempt (not retried).
++
++`dash tests/sentinel-git-probe-smoke.sh` → `Sentinel git-probe retry smoke passed`.
++The pre-existing `tests/sentinel-smoke.sh` still passes. Full suite
++`sh tests/run-all.sh` → **All Viche tests passed** (exit 0).
++
++## Deployment
++
++Landed on `main` via reviewed merge; installed with `deploy/install-sentinel.sh`
++from a clean release checkout per `sentinel/README.md` (release commit recorded
++on Town Hall #302). The installed release is a **new commit** (previous installed
++release `eca7c35` predates this fix).
++
++## Honest limits
++
++- Closure of an incident is not the fix; the sensitivity is removed only when the
++  new release is installed **and** observed over a high-load window (e.g. a
++  Janitor `reclaim` pass). Until then, the fix is *tested*, not *field-verified*.
++- Retry adds a bounded delay (≤ ~3×12 s + backoff) before a persistent failure is
++  reported; the Sentinel's cadence (3600 s) makes this immaterial.
++- The timeout/error distinction is heuristic: a Git process killed by something
++  other than `timeout` for exactly exit 124 would be classified as a timeout.
+diff --git a/sentinel/check.sh b/sentinel/check.sh
+index 3232c410..a8e97af5 100755
+--- a/sentinel/check.sh
++++ b/sentinel/check.sh
+@@ -13,7 +13,56 @@ umask 077
+ exec 9>"$state/check.lock"
+ flock -n 9 || exit 0
+ signals=
+-add() { signals=${signals:+$signals,}$1; }
++add() { case ",$signals," in *",$1,"*) :;; *) signals=${signals:+$signals,}$1;; esac; }
++# Read-only Git probe with bounded retry/backoff. A transient timeout (exit 124
++# from `timeout`) is retried after a short backoff; a genuine Git error is not
++# retried (it will not heal on its own). On success sets GIT_PROBE_OUT to stdout
++# and GIT_PROBE_STATUS=ok, and returns 0. On persistent failure (all attempts
++# exhausted) returns 1 with GIT_PROBE_STATUS=timeout|error and GIT_PROBE_OUT
++# empty. GIT_PROBE_SAW_TIMEOUT is 1 if any attempt timed out, so a slow-but-
++# healthy repo is distinguishable from a genuine failure.
++#
++# This removes a measurement-sensitivity artifact: under high load a read-only
++# Git call can exceed the per-attempt timeout, which the old code reported as
++# `government_git_unreadable` (a false alarm). Detection is NOT weakened: a
++# persistent failure still emits government_git_unreadable /
++# government_git_refs_unavailable, plus a distinct `government_git_probe_timeout`
++# signal so a timeout is distinguishable from a genuine Git error.
++git_probe() {
++    attempts_max=${VICHE_SENTINEL_GIT_PROBE_ATTEMPTS:-3}
++    timeout_s=${VICHE_SENTINEL_GIT_PROBE_TIMEOUT:-12}
++    backoff_s=${VICHE_SENTINEL_GIT_PROBE_BACKOFF:-1}
++    case "$attempts_max" in ''|*[!0-9]*) attempts_max=3;; esac
++    [ "$attempts_max" -ge 1 ] || attempts_max=1
++    case "$timeout_s" in ''|*[!0-9]*) timeout_s=12;; esac
++    [ "$timeout_s" -ge 1 ] || timeout_s=1
++    case "$backoff_s" in ''|*[!0-9]*) backoff_s=1;; esac
++    [ "$backoff_s" -ge 0 ] || backoff_s=0
++    GIT_PROBE_ATTEMPTS=0
++    GIT_PROBE_SAW_TIMEOUT=0
++    GIT_PROBE_STATUS=error
++    GIT_PROBE_OUT=
++    while [ "$GIT_PROBE_ATTEMPTS" -lt "$attempts_max" ]; do
++        GIT_PROBE_ATTEMPTS=$((GIT_PROBE_ATTEMPTS+1))
++        rc=0
++        GIT_PROBE_OUT=$(timeout "$timeout_s" "$@" 2>/dev/null) || rc=$?
++        if [ "$rc" -eq 0 ]; then
++            GIT_PROBE_STATUS=ok
++            return 0
++        fi
++        if [ "$rc" -eq 124 ]; then
++            GIT_PROBE_STATUS=timeout
++            GIT_PROBE_SAW_TIMEOUT=1
++            if [ "$GIT_PROBE_ATTEMPTS" -lt "$attempts_max" ]; then
++                sleep "$backoff_s"
++            fi
++        else
++            GIT_PROBE_STATUS=error
++            break
++        fi
++    done
++    return 1
++}
+ service=unknown
+ if live=$(timeout 12 s6-svstat "$svc" 2>/dev/null); then
+     case "$live" in 'up (pid '*) service=up;; *) service=down; add government_service_down;; esac
+@@ -23,11 +72,18 @@ ahead=-1; behind=-1
+ if [ ! -d "$town/.git" ]; then
+     git_status=missing; add government_checkout_missing
+ else
+-    if conflicts=$(timeout 12 git -C "$town" ls-files -u 2>/dev/null); then
+-        if [ -n "$conflicts" ]; then git_status=conflicted; add government_git_conflict; fi
+-    else git_status=unreadable; add government_git_unreadable; fi
++    if git_probe git -C "$town" ls-files -u; then
++        if [ -n "$GIT_PROBE_OUT" ]; then git_status=conflicted; add government_git_conflict; fi
++        if [ "$GIT_PROBE_SAW_TIMEOUT" -eq 1 ]; then
++            echo "Sentinel: git status probe recovered after $GIT_PROBE_ATTEMPTS attempt(s); transient slowness, not unreadable" >&2
++        fi
++    else
++        git_status=unreadable; add government_git_unreadable
++        if [ "$GIT_PROBE_STATUS" = timeout ]; then add government_git_probe_timeout; fi
++    fi
+     if [ -f "$town/.git/MERGE_HEAD" ]; then add government_merge_incomplete; fi
+-    if counts=$(timeout 12 git -C "$town" rev-list --left-right --count HEAD...refs/remotes/origin/main 2>/dev/null); then
++    if git_probe git -C "$town" rev-list --left-right --count HEAD...refs/remotes/origin/main; then
++        counts=$GIT_PROBE_OUT
+         ahead=$(printf '%s\n' "$counts" | awk '{print $1}')
+         behind=$(printf '%s\n' "$counts" | awk '{print $2}')
+         case "$ahead:$behind" in *[!0-9:]*|'':*) add government_git_refs_invalid;; *)
+@@ -35,7 +91,13 @@ else
+             elif [ "$ahead" -gt 0 ]; then add government_unpublished_main
+             elif [ "$behind" -gt 0 ]; then add government_update_pending; fi
+         ;; esac
+-    else add government_git_refs_unavailable; fi
++        if [ "$GIT_PROBE_SAW_TIMEOUT" -eq 1 ]; then
++            echo "Sentinel: git refs probe recovered after $GIT_PROBE_ATTEMPTS attempt(s); transient slowness, not unavailable" >&2
++        fi
++    else
++        add government_git_refs_unavailable
++        if [ "$GIT_PROBE_STATUS" = timeout ]; then add government_git_probe_timeout; fi
++    fi
+ fi
+ setup_age=-1
+ if [ -s "$govstamp" ]; then
+diff --git a/tests/sentinel-git-probe-smoke.sh b/tests/sentinel-git-probe-smoke.sh
+new file mode 100755
+index 00000000..31e6fae8
+--- /dev/null
++++ b/tests/sentinel-git-probe-smoke.sh
+@@ -0,0 +1,100 @@
++#!/bin/sh
++# Sentinel Git-probe calibration (records/SENTINEL-CALIBRATION-2026-10-21-...).
++# A load-induced read-only Git timeout must be retried before the Sentinel
++# declares government_git_unreadable, and a timeout must be distinguishable from
++# a genuine Git error. Hermetic: mock git/s6-svstat/antonina, scratch town, no
++# board writes and no live service.
++set -eu
++root=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++export SCRATCH=$scratch
++mkdir -p "$scratch/bin" "$scratch/town/.git" "$scratch/oversight" "$scratch/health"
++# Fresh setup/oversight stamps so only the Git probe can produce a signal.
++printf '200000\t0\tidle\t0\t0\tnone\tclear\n' > "$scratch/oversight/observations.tsv"
++printf '200000\n' > "$scratch/health/government-setup.last"
++
++cat > "$scratch/bin/s6-svstat" <<'MOCK'
++#!/bin/sh
++echo 'up (pid 10 pgid 10) 200 seconds'
++MOCK
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++exit 1
++MOCK
++# Mock git: the `ls-files` probe times out on its first attempt (sleep longer
++# than the 1 s probe timeout) and then succeeds, unless a flag makes it always
++# time out or always error. `rev-list` always succeeds.
++cat > "$scratch/bin/git" <<'MOCK'
++#!/bin/sh
++cmd=
++for a in "$@"; do
++    case "$a" in ls-files|rev-list) cmd=$a;; esac
++done
++case "$cmd" in
++ls-files)
++    n=0
++    [ -f "$SCRATCH/ls_count" ] && n=$(cat "$SCRATCH/ls_count")
++    n=$((n + 1))
++    printf '%s\n' "$n" > "$SCRATCH/ls_count"
++    [ -f "$SCRATCH/ls_error" ] && exit 1
++    if [ -f "$SCRATCH/ls_always_timeout" ] || [ "$n" -eq 1 ]; then
++        sleep 3
++    fi
++    exit 0 ;;
++rev-list)
++    printf '0\t0\n'
++    exit 0 ;;
++*)
++    exit 0 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/s6-svstat" "$scratch/bin/antonina" "$scratch/bin/git"
++
++PATH="$scratch/bin:$PATH"
++VICHE_TOWN_ROOT=$scratch/town
++VICHE_OVERSIGHT_STATE=$scratch/oversight
++VICHE_GOV_HEALTH_STATE=$scratch/health
++VICHE_TOWNHALL_ID=999
++VICHE_SENTINEL_GIT_PROBE_ATTEMPTS=3
++VICHE_SENTINEL_GIT_PROBE_TIMEOUT=1
++VICHE_SENTINEL_GIT_PROBE_BACKOFF=0
++export PATH VICHE_TOWN_ROOT VICHE_OVERSIGHT_STATE VICHE_GOV_HEALTH_STATE
++export VICHE_TOWNHALL_ID VICHE_SENTINEL_GIT_PROBE_ATTEMPTS
++export VICHE_SENTINEL_GIT_PROBE_TIMEOUT VICHE_SENTINEL_GIT_PROBE_BACKOFF
++
++run() { VICHE_SENTINEL_STATE=$1 VICHE_SENTINEL_NOW=$2 /bin/sh "$root/sentinel/check.sh"; }
++
++# 1. Slow first attempt, recovers on retry: no incident, git_status=ok.
++rm -f "$scratch/ls_count"
++run "$scratch/state1" 200000
++[ ! -e "$scratch/state1/incident.json" ]
++last=$(tail -n 1 "$scratch/state1/checks.tsv")
++[ "$(printf '%s\n' "$last" | cut -f3)" = ok ]
++[ "$(printf '%s\n' "$last" | cut -f8)" = clear ]
++[ "$(cat "$scratch/ls_count")" -eq 2 ] # one retry after the timeout
++
++# 2. Persistent timeout: unreadable AND a distinct timeout signal; all attempts used.
++rm -f "$scratch/ls_count"
++: > "$scratch/ls_always_timeout"
++run "$scratch/state2" 200001
++[ -s "$scratch/state2/incident.json" ]
++jq -e '.git=="unreadable"
++       and (.signals|index("government_git_unreadable"))
++       and (.signals|index("government_git_probe_timeout"))' \
++    "$scratch/state2/incident.json" >/dev/null
++[ "$(cat "$scratch/ls_count")" -eq 3 ] # all attempts exhausted
++rm -f "$scratch/ls_always_timeout"
++
++# 3. Genuine Git error: unreadable but NOT a timeout signal, and no retry.
++rm -f "$scratch/ls_count"
++: > "$scratch/ls_error"
++run "$scratch/state3" 200002
++jq -e '.git=="unreadable"
++       and (.signals|index("government_git_unreadable"))
++       and ((.signals|index("government_git_probe_timeout"))|not)' \
++    "$scratch/state3/incident.json" >/dev/null
++[ "$(cat "$scratch/ls_count")" -eq 1 ] # a genuine error is not retried
++rm -f "$scratch/ls_error"
++
++echo 'Sentinel git-probe retry smoke passed'

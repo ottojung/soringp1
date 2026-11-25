@@ -1,0 +1,40 @@
+commit af5d04a724e3aa3d87b7e206bdb89e94f93e9a43
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Wed Oct 14 22:05:56 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Wed Oct 14 22:05:56 2026 +0000
+
+    Fix founder-intake retry clock: touch dispatched files so mv-preserved mtime does not re-fire retry every cycle; add regression test
+
+diff --git a/government/founder-intake.sh b/government/founder-intake.sh
+index bd2d6e6f..583e1289 100644
+--- a/government/founder-intake.sh
++++ b/government/founder-intake.sh
+@@ -112,5 +112,13 @@ if [ "$mode" = running ]; then
+ else
+   antonina agent run --id "$clerk" --cwd "$seat" --prompt "$prompt" --detach
+ fi
+-for f in "$@"; do mv "$f" "$q/sent/$(basename "$f")"; done
++for f in "$@"; do
++  dest="$q/sent/$(basename "$f")"
++  mv "$f" "$dest"
++  # Reset the retry clock on dispatch. mv/rename preserves mtime, so without this
++  # the age check below stays permanently satisfied after 600s and the message is
++  # re-dispatched every watcher cycle (which preempts the clerk). touch makes the
++  # next retry happen a full retry interval after this dispatch.
++  touch "$dest"
++done
+ printf 'Founder intake dispatched %s events to clerk (prior state %s)\n' "$#" "$mode"
+diff --git a/tests/intake-smoke.sh b/tests/intake-smoke.sh
+index f249a6a3..56fe771a 100644
+--- a/tests/intake-smoke.sh
++++ b/tests/intake-smoke.sh
+@@ -72,4 +72,8 @@ oldfile=$(find "$d/state/founder-inbox/sent" -name '*.json' | head -n 1)
+ touch -d '11 minutes ago' "$oldfile"
+ /bin/sh "$repo/government/founder-intake.sh"
+ [ "$(wc -l < "$d/mock/calls")" -eq 4 ]
++# Regression: a re-dispatched event must receive a FRESH retry clock (mtime). If the
++# dispatch only renames the file (mv preserves mtime), the 600s age check stays
++# satisfied and the message is re-dispatched every watcher cycle, preempting the clerk.
++[ -n "$(find "$oldfile" -newermt '1 minute ago' 2>/dev/null)" ]
+ echo 'Viche Founder intake smoke passed'

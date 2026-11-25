@@ -1,0 +1,160 @@
+commit aa4ea6af7d3d31d1bd8f3e7a73ff358b0165bf3c
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Oct 20 16:52:33 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Oct 20 16:52:33 2026 +0000
+
+    Janitor: make runtime-scratch staging reachable (#298/#299)
+    
+    scratch-quarantine could never fire on a live box: eligibility required the
+    NEWEST /tmp/.bcf* file to be aged (so a continuously refreshed batch never
+    qualified) and the batch-level live flag hard-blocked it. Dead scratch thus
+    accumulated unreclaimed (~1 GB/day observed; 211 files / 1.1 GB at 2026-10-20).
+    
+    Fix: key eligibility on the OLDEST file's age, treat the batch-level live flag
+    as informational (scratch-quarantine already re-checks each file and skips any
+    still referenced, so staging is safe while live scratch exists), and record both
+    oldest and newest age. JANITOR_SCRATCH_DIR allows hermetic tests. Smoke test
+    extended: an aged scratch file is staged while a fresh one is left.
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index 519f7e1b..8fba8163 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -85,6 +85,8 @@ lock_stale=$(confval lock_stale_seconds 900)
+ # host-managed Guix store.
+ inv_roots=${JANITOR_ROOTS:-/workspace /home/lubko /var/lib/lubko/wd /tmp /gnu}
+ inv_file_roots=${JANITOR_FILE_ROOTS:-/workspace /home/lubko /var/lib/lubko/wd /tmp}
++# Runtime scratch directory holding the node/opencode .bcf* bytecode files.
++scratch_dir=${JANITOR_SCRATCH_DIR:-/tmp}
+ 
+ for n in "$warn_pct" "$high_pct" "$crit_pct" "$observe_interval" "$reclaim_interval" \
+          "$min_age" "$max_log_bytes" "$safe_reclaim" "$reclaim_enabled" \
+@@ -392,8 +394,8 @@ inventory() {
+     scratch_oldest=
+     scratch_newest=
+     scratch_live=0
+-    if [ -d /tmp ]; then
+-        for f in /tmp/.bcf*; do
++    if [ -d "$scratch_dir" ]; then
++        for f in "$scratch_dir"/.bcf*; do
+             [ -f "$f" ] || continue
+             scratch_count=$((scratch_count + 1))
+             fkb=$(du -k "$f" 2>/dev/null | awk 'NR==1{print $1; exit}')
+@@ -407,41 +409,46 @@ inventory() {
+         # One /proc pass: count scratch files still mapped or open.
+         for _sf_p in /proc/[0-9]*; do
+             if [ -r "$_sf_p/maps" ]; then
+-                if grep -q -F -e "/tmp/.bcf" "$_sf_p/maps" 2>/dev/null; then scratch_live=1; fi
++                if grep -q -F -e "$scratch_dir/.bcf" "$_sf_p/maps" 2>/dev/null; then scratch_live=1; fi
+             fi
+             if [ -d "$_sf_p/fd" ]; then
+                 for _sf_fd in "$_sf_p/fd"/*; do
+                     _sf_val=$(readlink "$_sf_fd" 2>/dev/null) || continue
+                     case "$_sf_val" in
+-                        /tmp/.bcf*) scratch_live=1 ;;
++                        "$scratch_dir"/.bcf*) scratch_live=1 ;;
+                     esac
+                 done
+             fi
+         done
+     fi
+-    scratch_smallest_age_days=999999
++    scratch_newest_age_days=999999
++    scratch_oldest_age_days=0
+     if [ "$scratch_count" -gt 0 ]; then
+-        scratch_smallest_age_days=$(( (now - scratch_newest) / 86400 ))
++        scratch_newest_age_days=$(( (now - scratch_newest) / 86400 ))
++        scratch_oldest_age_days=$(( (now - scratch_oldest) / 86400 ))
+     fi
++    # Eligibility keys on the OLDEST file, not the newest: a continuously
++    # refreshed batch still contains reclaimable dead files, so requiring the
++    # newest file to be aged (the previous rule) made staging unreachable on a
++    # live box. The batch-level `live` flag is informational only —
++    # scratch_quarantine re-checks each file and skips any still referenced, so
++    # staging never breaks a running agent even while live scratch exists.
+     scratch_verdict=small
+     if [ "$scratch_kb" -ge "$inventory_min_kb" ]; then scratch_verdict=accumulating; fi
+-    if [ "$scratch_kb" -ge "$inventory_min_kb" ] && [ "$scratch_smallest_age_days" -ge 1 ]; then
+-        if [ "$scratch_live" -eq 1 ]; then
+-            scratch_verdict=live
+-        else
+-            scratch_verdict=quarantine-eligible
+-        fi
++    if [ "$scratch_kb" -ge "$inventory_min_kb" ] && [ "$scratch_oldest_age_days" -ge 1 ]; then
++        scratch_verdict=quarantine-eligible
+     fi
+     scratch=$jstate/scratch.tsv
+-    if [ ! -f "$scratch" ]; then
+-        printf 'ts\thost\tpattern\tcount\tsize_kb\tnewest_age_days\tlive_referenced\tverdict\n' > "$scratch"
++    scratch_hdr='ts	host	pattern	count	size_kb	oldest_age_days	newest_age_days	live_referenced	verdict'
++    if [ ! -f "$scratch" ] || [ "$(head -n 1 "$scratch" 2>/dev/null)" != "$scratch_hdr" ]; then
++        printf '%s\n' "$scratch_hdr" > "$scratch"
+     fi
+-    printf '%s\t%s\t/tmp/.bcf*\t%s\t%s\t%s\t%s\t%s\n' \
+-        "$ts" "$host" "$scratch_count" "$scratch_kb" "$scratch_smallest_age_days" \
+-        "$scratch_live" "$scratch_verdict" >> "$scratch"
++    printf '%s\t%s\t%s/.bcf*\t%s\t%s\t%s\t%s\t%s\t%s\n' \
++        "$ts" "$host" "$scratch_dir" "$scratch_count" "$scratch_kb" "$scratch_oldest_age_days" \
++        "$scratch_newest_age_days" "$scratch_live" "$scratch_verdict" >> "$scratch"
+     rotate "$scratch"
+     log_append "$jstate/actions.log" \
+-        "$ts scratch-batch pattern=/tmp/.bcf* count=$scratch_count size_kb=$scratch_kb newest_age_days=$scratch_smallest_age_days live=$scratch_live verdict=$scratch_verdict"
++        "$ts scratch-batch pattern=$scratch_dir/.bcf* count=$scratch_count size_kb=$scratch_kb oldest_age_days=$scratch_oldest_age_days newest_age_days=$scratch_newest_age_days live=$scratch_live verdict=$scratch_verdict"
+     if [ "$scratch_verdict" = "quarantine-eligible" ]; then
+         log_append "$jstate/actions.log" \
+             "$ts PREVENTION scratch batch quarantine-eligible (aged, unreferenced); run scratch-quarantine to stage it reversibly"
+@@ -672,7 +679,7 @@ scratch_quarantine() {
+         printf 'janitor: scratch-quarantine deferred (reclaim_enabled=%s)\n' "$reclaim_enabled"
+         return 0
+     }
+-    verdict=$(tail -n 1 "$scratch" | cut -f8)
++    verdict=$(tail -n 1 "$scratch" | cut -f9)
+     [ "$verdict" = "quarantine-eligible" ] || {
+         log_append "$jstate/actions.log" "$ts scratch-quarantine deferred verdict=$verdict"
+         printf 'janitor: scratch-quarantine deferred (verdict=%s)\n' "$verdict"
+@@ -686,7 +693,7 @@ scratch_quarantine() {
+     mkdir -p "$stage"
+     n=0
+     kb=0
+-    for f in /tmp/.bcf*; do
++    for f in "$scratch_dir"/.bcf*; do
+         [ -f "$f" ] || continue
+         fm=$(stat -c %Y "$f" 2>/dev/null || printf '0')
+         is_num "$fm" || fm=0
+@@ -725,7 +732,7 @@ scratch_quarantine() {
+     if [ ! -f "$qlog" ]; then
+         printf 'ts\tsrc\tdest\tsize_kb\tquarantined_at\n' > "$qlog"
+     fi
+-    printf '%s\t/tmp/.bcf*\t%s\t%s\t%s\n' "$ts" "$stage" "$kb" "$now" >> "$qlog"
++    printf '%s\t%s/.bcf*\t%s\t%s\t%s\n' "$ts" "$scratch_dir" "$stage" "$kb" "$now" >> "$qlog"
+     rotate "$qlog"
+     printf 'janitor: scratch-quarantine staged %s files (%s KB) at %s (grace=%ss, then reclaim-quarantined)\n' \
+         "$n" "$kb" "$stage" "$quarantine_grace"
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+index 210bd6d0..83b4e752 100644
+--- a/tests/janitor-smoke.sh
++++ b/tests/janitor-smoke.sh
+@@ -226,4 +226,22 @@ want=$((parent_kb + plain_kb))
+ got=$(awk -F'\t' 'NR==2{print $7}' "$state/janitor/territorial.tsv")
+ [ "$got" = "$want" ] || { echo "territorial box_visible got=$got want=$want"; exit 1; }
+ 
++# 14. Runtime scratch eligibility keys on the OLDEST file, and the batch-level
++#     live flag no longer blocks staging: an aged file is staged while a fresh
++#     one is left in place (per-file age/reference checks keep it safe).
++sdir=$d/scratch
++mkdir -p "$sdir"
++printf 'old\n' > "$sdir/.bcfold"
++printf 'new\n' > "$sdir/.bcfnew"
++touch -d '2 days ago' "$sdir/.bcfold"
++export JANITOR_SCRATCH_DIR=$sdir
++JANITOR_ROOTS=$ibox JANITOR_FILE_ROOTS=$ibox \
++    /bin/sh "$town/government/janitor.sh" inventory
++verdict=$(tail -n 1 "$state/janitor/scratch.tsv" | cut -f9)
++[ "$verdict" = "quarantine-eligible" ] || { echo "scratch verdict=$verdict"; exit 1; }
++/bin/sh "$town/government/janitor.sh" scratch-quarantine
++[ ! -f "$sdir/.bcfold" ] || { echo "aged scratch not staged"; exit 1; }
++[ -f "$sdir/.bcfnew" ] || { echo "fresh scratch wrongly staged"; exit 1; }
++unset JANITOR_SCRATCH_DIR
++
+ printf 'Viche: janitor observes metrics, reclaims only aged owned files, protects durable state, defers when disabled, responds to critical capacity, reclaims only quarantined items past grace, classifies build caches by liveness, retains live build toolchains, and gates quarantine on a recorded Act 12.4(d) liveness check\n'

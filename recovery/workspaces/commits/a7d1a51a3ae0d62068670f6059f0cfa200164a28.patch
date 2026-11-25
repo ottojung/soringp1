@@ -1,0 +1,81 @@
+commit a7d1a51a3ae0d62068670f6059f0cfa200164a28
+Author:     economy <economy@viche.local>
+AuthorDate: Wed Nov 25 16:15:57 2026 +0000
+Commit:     economy <economy@viche.local>
+CommitDate: Wed Nov 25 16:15:57 2026 +0000
+
+    pnp: preserve exec bits when sharing pinned corpus
+    
+    Independent review of delivery/pnp-corpus-hardlink-dedup-20261125 rejected chmod 0o444: it stripped the executable bit from tracked executables (tools/bin/lake, tools/build.sh, tools/pnp.sh, .github/scripts/lake-locked.sh, outside-guard.mjs), leaving worker worktrees dirty. Strip only write bits so read/exec survive; extract with tar -p for deterministic modes. Add a tracked-executable fixture and assertions covering the regression.
+
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index 7b7f5483..0321a28b 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -142,8 +142,10 @@ def share_pinned_corpus(worktree, base):
+ 
+     The shared corpus is made immutable so an in-place worker edit cannot
+     corrupt every attempt that hardlinks it; workers add new candidate files
+-    rather than rewriting pinned sources. Best effort: a failure here leaves
+-    the ordinary full checkout in place rather than blocking research.
++    rather than rewriting pinned sources. Only write bits are removed: read and
++    executable bits are preserved so tracked executables stay executable and git
++    still sees a clean pinned revision. Best effort: a failure here leaves the
++    ordinary full checkout in place rather than blocking research.
+     """
+     import fcntl
+     import re
+@@ -167,7 +169,7 @@ def share_pinned_corpus(worktree, base):
+                 ["git", "--git-dir=" + MIRROR, "archive", sha],
+                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+             extract = subprocess.Popen(
+-                ["tar", "-x", "-C", tmp], stdin=archive.stdout,
++                ["tar", "-x", "-p", "-C", tmp], stdin=archive.stdout,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+             archive.stdout.close()
+             extract_err = extract.communicate()[1]
+@@ -181,7 +183,11 @@ def share_pinned_corpus(worktree, base):
+                                    "utf-8", "replace")[:300])
+             for r, _dirs, files in os.walk(tmp):
+                 for name in files:
+-                    os.chmod(os.path.join(r, name), 0o444)
++                    p = os.path.join(r, name)
++                    # Strip write bits to make the shared corpus immutable, but
++                    # keep read/exec bits: a tracked executable must stay
++                    # executable in every worker or git status goes dirty.
++                    os.chmod(p, os.stat(p).st_mode & ~0o222)
+             os.replace(tmp, central)
+     finally:
+         os.close(fd)
+diff --git a/tests/pnp-corpus-dedup.py b/tests/pnp-corpus-dedup.py
+index bdda4ed8..36dede29 100644
+--- a/tests/pnp-corpus-dedup.py
++++ b/tests/pnp-corpus-dedup.py
+@@ -31,6 +31,13 @@ class CorpusDedup(unittest.TestCase):
+         for name in ("a.lean", "b.lean"):
+             with open(os.path.join(src, "lean", "PEqualNP", "Outside", name), "w") as f:
+                 f.write("theorem " + name.replace(".", "_") + " : True := trivial\n")
++        # A tracked executable, as in the real pinned tree (tools/bin/lake etc.).
++        bindir = os.path.join(src, "tools", "bin")
++        os.makedirs(bindir)
++        exe = os.path.join(bindir, "lake")
++        with open(exe, "w") as f:
++            f.write("#!/bin/sh\nexit 0\n")
++        os.chmod(exe, 0o755)
+         with open(os.path.join(src, "README.md"), "w") as f:
+             f.write("pinned\n")
+         git("add", "-A", cwd=src)
+@@ -59,6 +66,13 @@ class CorpusDedup(unittest.TestCase):
+                          os.stat(os.path.join(central, rel)).st_ino)
+         # The shared corpus is immutable so an edit cannot corrupt peers.
+         self.assertEqual(os.stat(os.path.join(central, rel)).st_mode & 0o222, 0)
++        # Tracked executables keep the exec bit in both the central corpus and
++        # the worker worktree, so git still sees a clean pinned revision.
++        exerel = os.path.join("tools", "bin", "lake")
++        for root in (self.wt, central):
++            mode = os.stat(os.path.join(root, exerel)).st_mode
++            self.assertTrue(mode & 0o111, "exec bit lost in " + root)
++            self.assertEqual(mode & 0o222, 0, "write bit present in " + root)
+         # Git still sees the worktree as exactly the pinned revision.
+         self.assertEqual(git("status", "--porcelain", cwd=self.wt), "")
+ 

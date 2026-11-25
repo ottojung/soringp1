@@ -1,0 +1,124 @@
+commit a29d72277e3534e3dae548dc259001d46b99064c
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 19:10:08 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 19:10:08 2026 +0000
+
+    Make unsafe-hold archiving crash-safe and serialized
+    
+    Review found the archive step could duplicate evidence if interrupted between
+    appending to the archive and removing the live lines, and that concurrent
+    callers were unserialized. Rewrite oc_archive_hold to:
+    
+    * take a mkdir lock (stolen only after a minute) around the whole operation;
+    * create the archive with an atomic hard link and, on retry, append only lines
+      not already archived, so an interrupted attempt cannot duplicate evidence;
+    * rewrite the live hold file through a temp file so a crash leaves the
+      original intact and a retry converges.
+    
+    The regression now also simulates an interruption after archive append and
+    asserts the retry neither duplicates the archived line nor leaves it live.
+
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index fffdd579..38c6098a 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -146,9 +146,9 @@ oc_clear_failures() {
+ 
+ # Archive the unsafe-hold lines that belong to ONE failed agent before its
+ # appointment is replaced. Unlike a blind `mv`, this keeps holds belonging to
+-# other invocations and never overwrites earlier archived evidence, so repeated
+-# recovery is idempotent. A hold is evidence of the old request, not a veto on
+-# the replacement agent.
++# other invocations and never loses or duplicates evidence if it is interrupted
++# or retried, so repeated recovery is idempotent. A hold is evidence of the old
++# request, not a veto on the replacement agent.
+ # $1 liveness dir, $2 office/seat key, $3 old agent id
+ oc_archive_hold() {
+   oc_hold_id=${3:-}
+@@ -159,23 +159,58 @@ oc_archive_hold() {
+     "$oc_hold_file" || return 0
+   oc_hold_dir=$1/archived-unsafe-holds
+   mkdir -p "$oc_hold_dir" || return 1
+-  oc_hold_backup=$oc_hold_dir/$2-$oc_hold_id
+-  oc_hold_n=0
+-  while [ -e "$oc_hold_backup" ]; do
+-    oc_hold_n=$((oc_hold_n + 1))
+-    oc_hold_backup=$oc_hold_dir/$2-$oc_hold_id.$oc_hold_n
++  # Serialize archive+rewrite. A crashed holder leaves the lock behind, so
++  # steal it only after a full minute; meanwhile the live hold stays in place.
++  oc_lock=$1/unsafe-holds/.archive-lock
++  oc_wait=0
++  while ! mkdir "$oc_lock" 2>/dev/null; do
++    if [ -d "$oc_lock" ] && [ -n "$(find "$oc_lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
++      rmdir "$oc_lock" 2>/dev/null || :
++      continue
++    fi
++    oc_wait=$((oc_wait + 1))
++    if [ "$oc_wait" -ge 50 ]; then
++      echo "Viche: unsafe-hold archive busy for $2; leaving the hold in place" >&2
++      return 0
++    fi
++    sleep 0.1 2>/dev/null || sleep 1
+   done
+-  awk -F '\t' -v id="$oc_hold_id" '$2==id' "$oc_hold_file" >> "$oc_hold_backup" || return 1
++  oc_extract=$oc_hold_file.extract.$$
++  if ! awk -F '\t' -v id="$oc_hold_id" '$2==id' "$oc_hold_file" > "$oc_extract"; then
++    rm -f "$oc_extract"; rmdir "$oc_lock" 2>/dev/null || :
++    return 1
++  fi
++  oc_hold_backup=$oc_hold_dir/$2-$oc_hold_id
++  if [ -e "$oc_hold_backup" ]; then
++    # A previous attempt may have archived these lines but been interrupted
++    # before removing them. Append only lines not already present.
++    oc_new=$oc_hold_file.new.$$
++    if ! awk 'NR==FNR {seen[$0]=1; next} !seen[$0]' "$oc_hold_backup" "$oc_extract" > "$oc_new"; then
++      rm -f "$oc_extract" "$oc_new"; rmdir "$oc_lock" 2>/dev/null || :
++      return 1
++    fi
++    if [ -s "$oc_new" ]; then
++      cat "$oc_new" >> "$oc_hold_backup" || {
++        rm -f "$oc_extract" "$oc_new"; rmdir "$oc_lock" 2>/dev/null || :; return 1; }
++    fi
++    rm -f "$oc_new"
++  elif ! ln "$oc_extract" "$oc_hold_backup" 2>/dev/null; then
++    cp "$oc_extract" "$oc_hold_backup" || {
++      rm -f "$oc_extract"; rmdir "$oc_lock" 2>/dev/null || :; return 1; }
++  fi
++  rm -f "$oc_extract"
+   oc_hold_tmp=$oc_hold_file.tmp.$$
+   if ! awk -F '\t' -v id="$oc_hold_id" '$2!=id' "$oc_hold_file" > "$oc_hold_tmp"; then
+-    rm -f "$oc_hold_tmp"
++    rm -f "$oc_hold_tmp"; rmdir "$oc_lock" 2>/dev/null || :
+     return 1
+   fi
+   if [ -s "$oc_hold_tmp" ]; then
+-    mv -f "$oc_hold_tmp" "$oc_hold_file" || return 1
++    mv -f "$oc_hold_tmp" "$oc_hold_file" || {
++      rm -f "$oc_hold_tmp"; rmdir "$oc_lock" 2>/dev/null || :; return 1; }
+   else
+     rm -f "$oc_hold_tmp" "$oc_hold_file"
+   fi
++  rmdir "$oc_lock" 2>/dev/null || :
+   return 0
+ }
+ 
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index 7b0a8326..602847b0 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -151,6 +151,14 @@ oc_archive_hold "$holdtest" executive old-b
+ test ! -e "$holdtest/unsafe-holds/executive" ||
+   { echo 'Empty hold file was not removed' >&2; exit 1; }
+ test -s "$holdtest/archived-unsafe-holds/executive-old-b"
++# Simulate a crash after the archive append but before the live removal: a
++# retry must not duplicate the archived evidence.
++printf 'executive\told-c\trun-c\n' > "$holdtest/unsafe-holds/executive"
++printf 'executive\told-c\trun-c\n' > "$holdtest/archived-unsafe-holds/executive-old-c"
++oc_archive_hold "$holdtest" executive old-c
++test "$(grep -c 'run-c' "$holdtest/archived-unsafe-holds/executive-old-c")" -eq 1 ||
++  { echo 'Interrupted archive retry duplicated evidence' >&2; exit 1; }
++test ! -e "$holdtest/unsafe-holds/executive"
+ if MOCK_STOP_FAIL=yes oc_quiesce_for_reset "$oc_quiesce_for_reset_test_id"; then
+   echo 'Failed quiescence incorrectly reported success' >&2; exit 1
+ fi

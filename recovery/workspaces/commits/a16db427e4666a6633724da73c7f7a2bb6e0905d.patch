@@ -1,0 +1,148 @@
+commit a16db427e4666a6633724da73c7f7a2bb6e0905d
+Author:     Viche operator <operator@viche>
+AuthorDate: Tue Nov 24 22:18:33 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 22:18:34 2026 +0000
+
+    PnP: correction-focus follow-up
+
+diff --git a/missions/pnp/continuity.py b/missions/pnp/continuity.py
+index 9f0738bb..66842211 100644
+--- a/missions/pnp/continuity.py
++++ b/missions/pnp/continuity.py
+@@ -11,7 +11,7 @@ SUPPORT = {
+     "knowledge": "Find checked equivalents, opposite conclusions, stronger reusable proofs and admissible imports. Send verified applicability and concrete proof fragments, not just scores.",
+     "methods": "Independently attack the focused claim. Derive a concrete sublemma, construction, refutation or identify a precise false premise. Use full-function checks; never duplicate an existing search.",
+     "flow": "Investigate actual idle time, duplicated computation, correction and publication delay. Deliver concrete improvements that increase checked contributions; do not monitor tool calls.",
+-    "portfolio": "Use portfolio inspect and compare all live leases using their researchers' findings and actual artifacts. Make the evidence-based switch decision directly with portfolio switch if justified.",
++    "portfolio": "Use portfolio inspect and compare all live leases and eligible published-proof corrections using their researchers' findings and actual artifacts. Make the evidence-based switch decision directly with portfolio switch if justified.",
+     "lease-evaluation": "Use portfolio inspect. Investigate actual mathematical blockers and alternatives. Decide justified releases through portfolio release; never release because of vacancies, age alone or temporary compiler contention.",
+ }
+ FRONTS = (
+@@ -32,6 +32,11 @@ def signature(role, records, selected):
+     # completed support pass. Its own advice does not trigger itself.
+     data = [(support.attempt(r), sorted([f["id"] for f in support.findings(r)] + [a["id"] for a in support.read(r) if a["kind"] == "checked"]))
+             for r in scope]
++    if role == "portfolio":
++        for gap in state.all_gaps():
++            rec = state.load(gap)
++            if focus.correction(rec) and rec.get("lease") and isinstance(rec.get("statement"), str):
++                data.append((support.attempt(rec), ["correction", rec.get("commit_sha") or "", rec.get("local_check_status") or "", rec.get("external_verdict") or ""]))
+     return hashlib.sha256(json.dumps(sorted(data)).encode()).hexdigest()
+ 
+ 
+diff --git a/missions/pnp/portfolio.py b/missions/pnp/portfolio.py
+index f9762788..3c5031a9 100644
+--- a/missions/pnp/portfolio.py
++++ b/missions/pnp/portfolio.py
+@@ -21,11 +21,13 @@ def path(kind):
+     return Path(config.STATE_ROOT, "portfolio-" + kind + ".json")
+ 
+ 
+-def record(gap, attempt):
++def record(gap, attempt, allow_correction=False):
+     if not config.GAP_ID_RE.fullmatch(gap):
+         raise ValueError("invalid gap")
+     rec = state.load(gap)
+-    if not support.active(rec) or rec.get("queued_lease") or support.attempt(rec) != attempt:
++    eligible = support.active(rec) or (allow_correction and focus.correction(rec)
++        and isinstance(rec.get("lease"), str) and isinstance(rec.get("statement"), str))
++    if not eligible or rec.get("queued_lease") or support.attempt(rec) != attempt:
+         raise ValueError("no matching live research lease")
+     return rec
+ 
+@@ -69,8 +71,21 @@ def view():
+                      "competition": observed.get("gaps", {}).get(item["gap"]),
+                      "artifacts": state.gap_dir(item["gap"]),
+                      "focus": bool(chosen and focus.key(chosen) == focus.key(rec))})
++    corrections = []
++    for gap in state.all_gaps():
++        rec = state.load(gap)
++        if not focus.correction(rec) or not rec.get("lease") or not isinstance(rec.get("statement"), str):
++            continue
++        corrections.append({"gap": gap, "attempt": support.attempt(rec),
++                            "title": rec.get("gap_title"), "statement": rec["statement"],
++                            "pr_url": rec.get("pr_url"), "revision": rec.get("commit_sha"),
++                            "local_check_status": rec.get("local_check_status"),
++                            "external_verdict": rec.get("external_verdict"),
++                            "artifacts": state.gap_dir(gap),
++                            "worktree": rec.get("worktree"),
++                            "focus": bool(chosen and focus.key(chosen) == focus.key(rec))})
+     return {"focus": chosen["gap_id"] if chosen else None,
+-            "leases": rows, "worker_roster_coverage":roster["coverage"]}
++            "leases": rows, "corrections": corrections, "worker_roster_coverage":roster["coverage"]}
+ 
+ 
+ def text_field(value, name):
+@@ -80,10 +95,10 @@ def text_field(value, name):
+ 
+ 
+ def submit(kind, gap, attempt, evidence, reason, current=None, current_attempt=None):
+-    rec = record(gap, attempt)
++    rec = record(gap, attempt, allow_correction=(kind == "switch"))
+     evidence, reason = text_field(evidence, "evidence"), text_field(reason, "reason")
+     if kind == "switch":
+-        old = record(current, current_attempt)
++        old = record(current, current_attempt, allow_correction=True)
+         selected = focus.current()
+         if not selected or focus.key(selected) != focus.key(old) or current == gap:
+             raise ValueError("focus changed; reassess the actual portfolio")
+@@ -97,6 +112,11 @@ def submit(kind, gap, attempt, evidence, reason, current=None, current_attempt=N
+     obj = {"kind": kind, "gap": gap, "attempt": attempt, "evidence": evidence,
+            "reason": reason, "from": current, "from_attempt": current_attempt,
+            "at": time.time()}
++    if kind == "switch":
++        # A correction is tied to the precise published revision, not merely
++        # a still-identical statement and old lease.
++        obj["to_revision"] = rec.get("commit_sha") if focus.correction(rec) else None
++        obj["from_revision"] = old.get("commit_sha") if focus.correction(old) else None
+     obj["id"] = hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:24]
+     # One pending decision per independent evaluator. Atomic latest decision;
+     # the allocator consumes it once and records the result.
+@@ -132,8 +152,12 @@ def apply_switch(mem, now):
+     if not obj:
+         return
+     try:
+-        old = record(obj["from"], obj["from_attempt"])
+-        new = record(obj["gap"], obj["attempt"])
++        old = record(obj["from"], obj["from_attempt"], allow_correction=True)
++        new = record(obj["gap"], obj["attempt"], allow_correction=True)
++        for rec, field in ((old,"from_revision"),(new,"to_revision")):
++            revision = rec.get("commit_sha") if focus.correction(rec) else None
++            if revision != obj.get(field):
++                raise ValueError("correction revision changed")
+         chosen = focus.current()
+         if not chosen or focus.key(chosen) != focus.key(old):
+             raise ValueError("source focus changed")
+diff --git a/tests/pnp-allocator.py b/tests/pnp-allocator.py
+index 7cc60429..3c0e5265 100644
+--- a/tests/pnp-allocator.py
++++ b/tests/pnp-allocator.py
+@@ -385,6 +385,27 @@ class Tests(unittest.TestCase):
+         portfolio.apply_switch(mem,time.time())
+         self.assertEqual(mem["focus"],list(focus.key(b)))
+ 
++    def test_portfolio_switch_to_correction_is_revision_bound(self):
++        a,b,mem=self.portfolio_fixture()
++        c=state.create("L-meta-3",state="PR_OPEN",lease="old-correction",statement="True",
++                       pr_number=42,commit_sha="a"*40,local_check_status="failed",
++                       external_verdict="pending",lease_expires_at=0)
++        with patch.object(allocator.status,"workers",return_value={"agents":[],"coverage":"complete"}):
++            self.assertEqual(portfolio.view()["corrections"][0]["gap"],c["gap_id"])
++        with self.assertRaises(ValueError):
++            portfolio.submit("release",c["gap_id"],support.attempt(c),"failed check","release")
++        portfolio.submit("switch",c["gap_id"],support.attempt(c),"exact checker failure",
++                         "repair likely high value",a["gap_id"],support.attempt(a))
++        state.update(c["gap_id"],commit_sha="b"*40)
++        portfolio.apply_switch(mem,time.time())
++        self.assertTrue(mem["last_switch"]["outcome"].startswith("obsolete"))
++        c=state.load(c["gap_id"])
++        portfolio.submit("switch",c["gap_id"],support.attempt(c),"new exact failure",
++                         "repair likely high value",a["gap_id"],support.attempt(a))
++        portfolio.apply_switch(mem,time.time())
++        self.assertEqual(mem["focus"],list(focus.key(c)))
++        self.assertEqual(state.load(a["gap_id"])["state"],"LEASED")
++
+     def test_portfolio_rejects_switch_after_source_reacquired(self):
+         a,b,mem=self.portfolio_fixture()
+         portfolio.submit("switch",b["gap_id"],support.attempt(b),"lemma","b substantially easier",
