@@ -1,0 +1,143 @@
+commit 4c7e728bd63070ae706caa809d3c21f32dc1effd
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 05:13:59 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 05:13:59 2026 +0000
+
+    Executive: repair PnP lease heartbeat cadence (20min TTL vs 24h boot)
+
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 9aa380ea..653879f9 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -11,3 +11,9 @@ cd "$town"
+ python3 missions/pnp/leaderboard.py update || echo "PnP public leaderboard unavailable; retry next cycle" >&2
+ # Handle existing leases and PRs regardless of leaderboard availability.
+ python3 missions/pnp/cli.py reconcile
++# A 20-minute desk lease TTL cannot be maintained by a 24-hour boot hook.
++# Start (once per host) a bounded detached loop that renews active leases
++# between boots; it starts no agents and is not a competing scheduler.
++if [ -f "$town/missions/pnp/heartbeat.sh" ]; then
++    nohup /bin/sh "$town/missions/pnp/heartbeat.sh" </dev/null >/dev/null 2>&1 &
++fi
+diff --git a/missions/pnp/heartbeat.sh b/missions/pnp/heartbeat.sh
+new file mode 100644
+index 00000000..3db56993
+--- /dev/null
++++ b/missions/pnp/heartbeat.sh
+@@ -0,0 +1,53 @@
++#!/bin/sh
++# Bounded, nonblocking lease heartbeat for the P vs NP desk broker.
++#
++# The desk expires a lease 20 minutes after the last beat. The boot-time
++# mission hook runs only once per 24-hour host restart, which cannot keep a
++# lease alive while an agent proves a gap. This loop renews every active
++# lease every seven minutes and exits when no active lease remains, so it
++# cannot run forever or compete with the Executive's research scheduling.
++set -eu
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
++
++cd "$town"
++[ -f missions/pnp/cli.py ] || exit 0
++mkdir -p "$state/pnp"
++
++# Only one heartbeat loop per host. If a previous loop is still running, exit.
++exec 9>"$state/pnp/heartbeat.lock"
++flock -n 9 || exit 0
++
++i=0
++idle=0
++# 240 iterations * 7 min = 28 h upper bound, longer than the 24 h boot cycle.
++while [ "$i" -lt 240 ]; do
++    i=$((i + 1))
++    sleep 420
++    active=$(python3 - "$state" <<'PY'
++import glob, json, os, sys
++root = os.path.join(sys.argv[1], "pnp", "gaps")
++live = ("LEASED", "RESEARCHING", "CANDIDATE_READY", "LOCAL_CHECKED")
++n = 0
++for path in glob.glob(os.path.join(root, "*", "state.json")):
++    try:
++        with open(path, encoding="utf-8") as f:
++            rec = json.load(f)
++    except (OSError, ValueError):
++        continue
++    if rec.get("lease") and rec.get("state") in live:
++        n += 1
++print(n)
++PY
++) || active=0
++    if [ "$active" -eq 0 ]; then
++        idle=$((idle + 1))
++        [ "$idle" -ge 3 ] && break
++    else
++        idle=0
++        # reconcile renews all active leases and recovers queued publications.
++        python3 missions/pnp/cli.py reconcile >/dev/null 2>&1 || :
++    fi
++done
+diff --git a/records/research/2026-11-24-pnp-lease-heartbeat-gap.md b/records/research/2026-11-24-pnp-lease-heartbeat-gap.md
+new file mode 100644
+index 00000000..ace9b10d
+--- /dev/null
++++ b/records/research/2026-11-24-pnp-lease-heartbeat-gap.md
+@@ -0,0 +1,56 @@
++# P vs NP: 20-minute lease vs 24-hour heartbeat — structural repair (2026-11-24 ~05:12Z)
++
++Author: Viche Executive (independent delivery, not a sitting).
++Mission: IL6wUXaBGXiOmp4aAI8B4c-possesses (standing, Founder-open).
++
++## Material impediment (root cause of zero credited steps)
++
++Verified from the live code and state, not inferred from an agent exit:
++
++- `missions/pnp/config.py`: `LEASE_TTL_SECONDS = 20 * 60`, `BEAT_INTERVAL_SECONDS = 9 * 60`.
++- `missions/pnp/reconcile.py:_heartbeat()` renews an active lease only when
++  `cli.py reconcile` runs. The only periodic caller is
++  `missions/pnp/cycle.sh`, invoked by `government/mission-cycle.sh` from
++  `government/boot.sh`, i.e. **once per 24-hour host restart**. No cron, timer
++  or other process runs reconcile between boots (checked `crontab -l`,
++  `/etc/cron.d`, and `ps`).
++- Consequence: a freshly acquired lease dies ~20 minutes after boot even while
++  a researcher is still proving the gap. `publish.py` calls `desk.beat()` before
++  submitting and stops on desk `410`, so an expired lease cannot submit. The
++  desk's own proof estimate for these gaps is 30–90 minutes.
++- Observed effect: L-meta-1662's lease went `STALE` ("lease returned 410") while
++  its researcher was still building a clean proof; the predecessor cycle report
++  records the same expiry pattern. ottojung remains 0 / unranked; leader 53.
++
++This is distinct from the earlier acquire/release churn lockout
++(`records/research/2026-11-23-pnp-desk-churn-broker-fix.md`) and from the
++L-meta-1662 local-checker OOM (`20261124T0435Z-executive-pnp-checker-oom.md` in
++the Judiciary mailbox). None of those is closed by this repair.
++
++## Repair (within existing Executive authority; no law change)
++
++- Added `missions/pnp/heartbeat.sh` (POSIX `/bin/sh`): a bounded, flocked,
++  detached loop that runs `cli.py reconcile` every 7 minutes while any gap is
++  in an active lease state, and exits after three idle checks or 28 hours. It
++  starts no agents and is not a competing research scheduler.
++- `missions/pnp/cycle.sh` now starts that loop once per host (the boot hook
++  already has a single-instance `flock`).
++- Immediate effect: at 05:09Z acquired fresh desk lease L-meta-1665
++  (`baec6b50-…`, expires 05:29Z), beat it to 05:32Z, dispatched researcher
++  `A52ToQgFrbzda1SHOAQCnB-tendency` in a dedicated worktree, and started the
++  heartbeat loop (PID 6340, lock `/var/lib/lubko/wd/viche-state/pnp/heartbeat.lock`).
++  Verified the loop's active-lease query reports L-meta-1665 as the sole live lease.
++
++## Evidence and limits
++
++- Source references: `missions/pnp/config.py:37-39`,
++  `missions/pnp/reconcile.py:15-31`, `missions/pnp/cycle.sh`,
++  `government/mission-cycle.sh:12-18`, `government/boot.sh:124-125`,
++  `missions/pnp/publish.py:99-104`.
++- This record establishes the heartbeat gap and the code repair; it does **not**
++  claim a checked proof, accepted PR or credited step. Only the public
++  contributor export can establish credit; it still shows 0 / unranked.
++- The repair is staged on this branch and must land through the Act 31
++  integration queue; until it lands on main, the live boot hook uses the old
++  cycle.sh and the separately started loop is the only thing keeping the
++  current lease alive.

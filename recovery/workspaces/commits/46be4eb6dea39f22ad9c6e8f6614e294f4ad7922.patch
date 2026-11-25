@@ -1,0 +1,525 @@
+commit 46be4eb6dea39f22ad9c6e8f6614e294f4ad7922
+Author:     c1a00002 <recovery-steward@viche.local>
+AuthorDate: Sun Nov 8 08:26:08 2026 +0000
+Commit:     c1a00002 <recovery-steward@viche.local>
+CommitDate: Sun Nov 8 08:26:08 2026 +0000
+
+    c1a00002: scoped, order-correct enactment delivery route (R5 prerequisite)
+    
+    Adds government/enactment-merge.sh and tests/enactment-merge-smoke.sh.
+    
+    Route properties required by the Clerk's R5 summons:
+    - verifies the exact candidate commit and tree BEFORE it can land (the candidate
+      is the delivery commit itself, fast-forwarded; nothing is rewritten);
+    - complete path allowlist in a committed manifest, exact bijection with the
+      realised delta (nothing undeclared, nothing declared-but-unchanged);
+    - refuses ambiguous/absolute paths, constitution/*, government/seats.tsv, and
+      any path outside records/* + government/LAWS.md;
+    - refuses ballot ROW edits (records/ballots/* may only be added);
+    - requires non-Clerk, non-sponsor, mutually distinct verifier and reviewer;
+    - records a durable receipt bound to commit+tree+manifest+authority;
+    - publish is fast-forward only, after canonical preflight; no force-push.
+    
+    The script grants no legal authority: it still requires Parliament to have
+    enacted the authorising bill; it only refuses undeclared or unverified changes.
+    
+    Hermetic scope/ordering tests: 14/14 pass.
+
+diff --git a/government/enactment-merge.sh b/government/enactment-merge.sh
+new file mode 100755
+index 00000000..8d642760
+--- /dev/null
++++ b/government/enactment-merge.sh
+@@ -0,0 +1,263 @@
++#!/bin/sh
++# Narrow, ordered enactment route for protected records.
++#
++# WHY THIS EXISTS: government/reviewed-merge.sh correctly refuses
++# constitution/*, records/ballots/*, records/bills/*, government/LAWS.md and
++# government/seats.tsv, so an enacted bill that must write those paths had no
++# reviewed delivery route. In practice such changes reached main as direct
++# commits, which lands the change BEFORE any exact-commit verification can run
++# -- the wrong order under Act 21 §§1-2.
++#
++# This route fixes the ORDER: it verifies the exact candidate commit and tree
++# while the change is still only on a delivery ref, then lands that same commit
++# by fast-forward. The candidate is never rewritten, so verification is about
++# exactly the bytes that land.
++#
++# THIS SCRIPT DOES NOT GRANT LEGAL AUTHORITY. It is a delivery mechanism. A real
++# enactment still requires Parliament to have enacted the bill authorising those
++# exact record changes. The script only refuses to deliver anything not declared
++# in an exact allowlist and not verified by offices other than sponsor/Clerk.
++#
++# Usage:
++#   enactment-merge.sh delivery/BRANCH --manifest PATH --sponsor SEAT \
++#       --verified-by OFFICE --reviewed-by OFFICE [--publish] [--check]
++#
++#   --check    validate ref shape, scope and actors; print the accepted scope
++#   --publish  verify the exact candidate, then fast-forward main to it
++#
++# Manifest (committed on the delivery branch, under records/enactment/):
++#   # bill: <bill-id>
++#   # authority: <path to the committed enactment record>
++#   <path><TAB>add|modify
++# The manifest must match the delivery delta EXACTLY: every changed path listed
++# once, nothing listed that did not change, nothing changed outside the set.
++set -eu
++
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++tab=$(printf '\t')
++
++usage() {
++    cat >&2 <<'U'
++usage: enactment-merge.sh delivery/BRANCH --manifest PATH --sponsor SEAT \
++           --verified-by OFFICE --reviewed-by OFFICE [--publish] [--check]
++U
++    exit 2
++}
++
++[ "$#" -ge 1 ] || usage
++branch=$1; shift
++case "$branch" in
++    delivery/*) : ;;
++    *) echo 'Only the delivery/ namespace may be integrated' >&2; exit 2 ;;
++esac
++case "$branch" in
++    *[!a-zA-Z0-9_/-]*|*../*|*//*|'delivery/') exit 2 ;;
++esac
++
++manifest=
++sponsor=
++verified_by=
++reviewed_by=
++publish=false
++check_only=false
++while [ "$#" -gt 0 ]; do
++    case "$1" in
++        --manifest) manifest=$2; shift 2 ;;
++        --sponsor) sponsor=$2; shift 2 ;;
++        --verified-by) verified_by=$2; shift 2 ;;
++        --reviewed-by) reviewed_by=$2; shift 2 ;;
++        --publish) publish=true; shift ;;
++        --check) check_only=true; shift ;;
++        *) echo "Unknown option: $1" >&2; usage ;;
++    esac
++done
++[ -n "$manifest" ] && [ -n "$sponsor" ] && [ -n "$verified_by" ] && [ -n "$reviewed_by" ] || usage
++case "$manifest" in
++    records/enactment/*.allowlist) : ;;
++    *) echo 'Manifest must be a committed records/enactment/*.allowlist path' >&2; exit 2 ;;
++esac
++
++# --- Actors: non-Clerk, non-sponsor, mutually distinct -----------------------
++is_clerk() {
++    case "$1" in
++        clerk|Clerk|'Viche Clerk c1a00001'|c1a00001) return 0 ;;
++        *) return 1 ;;
++    esac
++}
++is_clerk "$verified_by" && { echo 'Verifier may not be the Clerk (custodian)' >&2; exit 2; }
++is_clerk "$reviewed_by" && { echo 'Reviewer may not be the Clerk (custodian)' >&2; exit 2; }
++[ "$verified_by" != "$reviewed_by" ] || { echo 'Reviewer must differ from verifier' >&2; exit 2; }
++[ "$verified_by" != "$sponsor" ] || { echo 'Sponsor may not verify their own enactment' >&2; exit 2; }
++[ "$reviewed_by" != "$sponsor" ] || { echo 'Sponsor may not review their own enactment' >&2; exit 2; }
++
++# --- Pin refs; a later main update makes the publish fail rather than clobber --
++git -C "$town" fetch -q origin \
++    "+refs/heads/main:refs/remotes/origin/main" \
++    "+refs/heads/$branch:refs/remotes/origin/$branch" ||
++    { echo 'Cannot fetch canonical main and delivery ref' >&2; exit 1; }
++base=$(git -C "$town" rev-parse refs/remotes/origin/main)
++candidate=$(git -C "$town" rev-parse "refs/remotes/origin/$branch")
++[ "$base" != "$candidate" ] || { echo 'No delivery delta' >&2; exit 1; }
++
++# --- Ordering, part 1: the candidate must already contain main --------------
++# Refusing rather than merging keeps the verified bytes identical to the landed
++# bytes. The author rebases their delivery branch onto main; we never rewrite.
++git -C "$town" merge-base --is-ancestor "$base" "$candidate" || {
++    echo 'Delivery branch is not a fast-forward of main.' >&2
++    echo 'Rebase it onto main and re-run; this route never rewrites a candidate.' >&2
++    exit 1
++}
++
++tree=$(git -C "$town" rev-parse "$candidate^{tree}")
++delta=$(git -C "$town" diff --name-only "$base" "$candidate")
++[ -n "$delta" ] || { echo 'No delivery delta' >&2; exit 1; }
++
++# --- Manifest, read from the candidate itself -------------------------------
++git -C "$town" cat-file -e "$candidate:$manifest" 2>/dev/null ||
++    { echo "Manifest missing at delivery commit: $manifest" >&2; exit 1; }
++man=$(git -C "$town" show "$candidate:$manifest")
++
++bill=$(printf '%s\n' "$man" | sed -n 's/^# bill:[[:space:]]*//p' | head -n 1)
++authority=$(printf '%s\n' "$man" | sed -n 's/^# authority:[[:space:]]*//p' | head -n 1)
++[ -n "$bill" ] || { echo 'Manifest lacks "# bill: <id>"' >&2; exit 1; }
++[ -n "$authority" ] || { echo 'Manifest lacks "# authority: <path>"' >&2; exit 1; }
++case "$authority" in
++    records/*) : ;;
++    *) echo 'Authority must name a committed records/ enactment record' >&2; exit 1 ;;
++esac
++git -C "$town" cat-file -e "$base:$authority" 2>/dev/null ||
++    { echo "Authority record not present at base: $authority" >&2; exit 1; }
++
++entries=$(printf '%s\n' "$man" | grep -v '^#' | grep -v '^$' || :)
++
++# --- Exact bijection between manifest and delta -----------------------------
++# The manifest is committed on the delivery branch, so it appears in the delta;
++# it is metadata about the change, not one of the declared paths, and is exempt.
++listed=$(printf '%s\n' "$entries" | cut -f1 | grep -vx "$manifest" | sort)
++changed=$(printf '%s\n' "$delta" | grep -vx "$manifest" | sort)
++[ "$listed" = "$changed" ] || {
++    echo 'Manifest does not match the delivery delta exactly.' >&2
++    echo '  manifest:' >&2; printf '%s\n' "$listed" | sed 's/^/    /' >&2
++    echo '  delta:' >&2; printf '%s\n' "$changed" | sed 's/^/    /' >&2
++    exit 1
++}
++
++# --- Per-entry rules --------------------------------------------------------
++# Written to a file and read with redirection: a piped loop would run in a
++# subshell (so "exit 1" would not stop the script) and its final failing read
++# would trip set -e.
++entriesfile=$(mktemp) || exit 1
++trap 'rm -f "$entriesfile"' 0 1 2 3 15
++printf '%s\n' "$entries" > "$entriesfile"
++while IFS="$tab" read -r path mode; do
++    [ -n "$path" ] || continue
++    case "$path" in
++        *'*'*|*'?'*|*'['*|../*|/*|*'//'*)
++            echo "Ambiguous or absolute path refused: $path" >&2; exit 1 ;;
++        constitution/*|government/seats.tsv)
++            echo "Path may never be delivered by this route: $path" >&2; exit 1 ;;
++        records/*|government/LAWS.md) : ;;
++        *) echo "Path outside the permitted enactment set: $path" >&2; exit 1 ;;
++    esac
++    case "$mode" in
++        add|modify) : ;;
++        *) echo "Mode must be add or modify: $path -> $mode" >&2; exit 1 ;;
++    esac
++    present=no
++    git -C "$town" cat-file -e "$base:$path" 2>/dev/null && present=yes
++    [ "$mode" = add ] && [ "$present" = yes ] &&
++        { echo "Manifest says add but path exists at base: $path" >&2; exit 1; }
++    [ "$mode" = modify ] && [ "$present" = no ] &&
++        { echo "Manifest says modify but path is absent at base: $path" >&2; exit 1; }
++    case "$path" in
++        records/ballots/*)
++            [ "$mode" = modify ] &&
++                { echo "Ballot row edits are refused by design: $path" >&2; exit 1; } ;;
++    esac
++done < "$entriesfile"
++rm -f "$entriesfile"
++
++if [ "$check_only" = true ]; then
++    echo "SCOPE OK bill=$bill authority=$authority sponsor=$sponsor verifier=$verified_by reviewer=$reviewed_by"
++    echo "candidate=$candidate tree=$tree base=$base"
++    printf '%s\n' "$entries" | sed 's/^/  /'
++    echo 'Checked only; nothing verified against a suite and nothing pushed.'
++    exit 0
++fi
++
++# --- Ordering, part 2: verify the exact candidate BEFORE it can land --------
++suite=tests/records-smoke.sh
++while IFS= read -r file; do
++    case "$file" in
++        government/*|tests/*) suite=tests/run-all.sh ;;
++    esac
++done <<EOF
++$delta
++EOF
++
++mkdir -p "$state/delivery"
++scratch=$(mktemp -d "$state/delivery/enactment.XXXXXXXX") || exit 1
++cwd=$scratch/checkout
++cleanup() {
++    if [ -d "$cwd" ]; then
++        git -C "$town" worktree remove --force "$cwd" >/dev/null 2>&1 || :
++    fi
++    rm -rf "$scratch"
++}
++trap cleanup 0
++trap 'exit 130' 1 2 3 15
++
++# Exact-commit checkout of the candidate itself (not the canonical dirt).
++git -C "$town" worktree add --quiet --detach "$cwd" "$candidate"
++[ "$(git -C "$cwd" rev-parse HEAD)" = "$candidate" ] ||
++    { echo 'Could not check out the exact candidate commit' >&2; exit 1; }
++[ "$(git -C "$cwd" rev-parse HEAD^{tree})" = "$tree" ] ||
++    { echo 'Candidate tree mismatch during checkout' >&2; exit 1; }
++
++VICHE_TOWN_ROOT="$cwd" /bin/sh "$cwd/government/suite-status.sh" \
++    --commit "$candidate" --suite "$suite" > "$scratch/suite.log" 2>&1 ||
++    { echo "Exact enactment candidate $candidate failed $suite" >&2; tail -n 15 "$scratch/suite.log" >&2; exit 1; }
++jq -e --arg sha "$candidate" --arg tree "$tree" \
++    '.result=="green" and .commit==$sha and .tree==$tree and .incident==false' \
++    "$cwd/records/suite-status.json" >/dev/null ||
++    { echo 'Verifier did not attest the exact candidate/tree' >&2; exit 1; }
++
++receipt="$state/delivery/enactment-$candidate.json"
++jq -n --arg bill "$bill" --arg cand "$candidate" --arg tree "$tree" \
++      --arg manifest "$manifest" --arg authority "$authority" \
++      --arg sponsor "$sponsor" --arg verifier "$verified_by" \
++      --arg reviewer "$reviewed_by" --arg suite "$suite" --arg base "$base" \
++    '{bill:$bill,commit:$cand,tree:$tree,manifest:$manifest,authority:$authority,
++      sponsor:$sponsor,verified_by:$verifier,reviewed_by:$reviewer,suite:$suite,
++      base:$base,scope:"declared-manifest-exact",order:"verified-before-land"}' > "$receipt"
++
++if [ "$publish" != true ]; then
++    echo "VERIFIED candidate $candidate tree=$tree suite=$suite receipt=$receipt"
++    echo 'Not pushed; verification precedes landing but is not enactment or review.'
++    exit 0
++fi
++
++# --- Land it: fast-forward only, after canonical preflight ------------------
++canonical_head=$(git -C "$town" rev-parse HEAD)
++[ "$canonical_head" = "$base" ] ||
++    { echo 'Canonical checkout is not at fetched main; reconcile before publish' >&2; exit 1; }
++while IFS= read -r path; do
++    [ -n "$path" ] || continue
++    if { [ -e "$town/$path" ] || [ -L "$town/$path" ]; } &&
++       ! git -C "$town" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
++        echo "Canonical untracked evidence overlaps the approved enactment: $path" >&2
++        exit 1
++    fi
++    if ! git -C "$town" diff --quiet -- "$path" ||
++       ! git -C "$town" diff --cached --quiet -- "$path"; then
++        echo "Canonical working tree has uncommitted changes to: $path" >&2
++        exit 1
++    fi
++done <<EOF
++$changed
++EOF
++
++git -C "$town" push origin "$candidate:refs/heads/main" ||
++    { echo 'Push refused (concurrent main update?); reconcile and re-run' >&2; exit 1; }
++echo "LANDED enactment $bill commit=$candidate tree=$tree receipt=$receipt"
+diff --git a/tests/enactment-merge-smoke.sh b/tests/enactment-merge-smoke.sh
+new file mode 100755
+index 00000000..d0cebcf3
+--- /dev/null
++++ b/tests/enactment-merge-smoke.sh
+@@ -0,0 +1,223 @@
++#!/bin/sh
++# Hermetic scope/ordering tests for the enactment delivery route.
++# Local bare origin; no network, no canonical state, nothing published for real.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++town=$tmp/town
++remote=$tmp/origin.git
++state=$tmp/state
++mkdir -p "$town" "$state"
++git init --bare -q "$remote"
++git -C "$town" init -q -b main
++git -C "$town" config user.name Fixture
++git -C "$town" config user.email fixture@example.invalid
++git -C "$town" config commit.gpgsign false
++git -C "$town" remote add origin "$remote"
++mkdir -p "$town/government" "$town/tests" "$town/records/enactment" \
++         "$town/records/bills" "$town/records/ballots"
++cp "$repo/government/suite-status.sh" "$town/government/suite-status.sh"
++cp "$repo/government/enactment-merge.sh" "$town/government/enactment-merge.sh"
++printf '#!/bin/sh\nexit 0\n' > "$town/tests/records-smoke.sh"
++printf '#!/bin/sh\nexit 0\n' > "$town/tests/run-all.sh"
++chmod +x "$town/tests/records-smoke.sh" "$town/tests/run-all.sh"
++printf 'How Viche works\n' > "$town/AGENTS.md"
++printf 'Operative law v1\n' > "$town/government/LAWS.md"
++printf 'old bill\n' > "$town/records/bills/sample-act.md"
++printf 'enactment record\n' > "$town/records/enactment/sample-act-ENACTMENT.md"
++git -C "$town" add -A
++git -C "$town" commit -qm 'main baseline'
++git -C "$town" push -q -u origin main
++base=$(git -C "$town" rev-parse HEAD)
++
++# A delivery branch that is a fast-forward of main.
++mk_delivery() {
++    name=$1; shift
++    d=$tmp/$name
++    git -C "$town" worktree add -q -b "delivery/$name" "$d" main
++    "$@" "$d"
++    git -C "$d" add -A
++    git -C "$d" commit -qm "delivery $name"
++    git -C "$d" push -q origin "HEAD:refs/heads/delivery/$name"
++}
++
++write_manifest() { # dir bill paths(modes as "path mode" pairs on stdin)
++    d=$1; bill=$2
++    {
++        printf '# bill: %s\n' "$bill"
++        printf '# authority: records/enactment/sample-act-ENACTMENT.md\n'
++        cat
++    } > "$d/records/enactment/$bill.allowlist"
++}
++
++fails=0
++expect_fail() {
++    label=$1; shift
++    if out=$(run "$@" 2>&1); then
++        echo "FAIL (expected refusal): $label" >&2
++        printf '%s\n' "$out" | sed 's/^/    /' >&2
++        fails=$((fails+1))
++    else
++        printf 'ok   refused: %s\n' "$label"
++    fi
++}
++expect_ok() {
++    label=$1; shift
++    if out=$(run "$@" 2>&1); then
++        printf 'ok   accepted: %s\n' "$label"
++    else
++        echo "FAIL (expected success): $label" >&2
++        printf '%s\n' "$out" | sed 's/^/    /' >&2
++        fails=$((fails+1))
++    fi
++}
++run() {
++    VICHE_TOWN_ROOT=$town VICHE_STATE_ROOT=$state \
++        /bin/sh "$town/government/enactment-merge.sh" "$@"
++}
++
++tab=$(printf '\t')
++
++# --- 1. A correct declaration is accepted -------------------------------
++mk_delivery good sh -c "printf 'Operative law v2\n' > \"\$0/government/LAWS.md\""
++d=$tmp/good
++printf 'government/LAWS.md\tmodify\n' | write_manifest "$d" good-act
++git -C "$d" add -A; git -C "$d" commit -qm 'add manifest'
++git -C "$d" push -q origin "HEAD:refs/heads/delivery/good"
++expect_ok 'exact allowlist matches delta' \
++    delivery/good --manifest records/enactment/good-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --check
++
++# --- 2. Unlisted path ---------------------------------------------------
++mk_delivery extra sh -c "printf 'Operative law v2\n' > \"\$0/government/LAWS.md\"; printf 'sneak\n' > \"\$0/README.md\""
++d=$tmp/extra
++printf 'government/LAWS.md\tmodify\n' | write_manifest "$d" extra-act
++git -C "$d" add -A; git -C "$d" commit -qm 'manifest omits one path'
++git -C "$d" push -q origin "HEAD:refs/heads/delivery/extra"
++expect_fail 'path changed but not declared' \
++    delivery/extra --manifest records/enactment/extra-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --check
++
++# --- 3. Manifest lists an unchanged path --------------------------------
++mk_delivery over sh -c "printf 'Operative law v2\n' > \"\$0/government/LAWS.md\""
++d=$tmp/over
++{ printf 'government/LAWS.md\tmodify\n'; printf 'records/bills/sample-act.md\tmodify\n'; } |
++    write_manifest "$d" over-act
++git -C "$d" add -A; git -C "$d" commit -qm 'manifest over-declares'
++git -C "$d" push -q origin "HEAD:refs/heads/delivery/over"
++expect_fail 'declared path did not change' \
++    delivery/over --manifest records/enactment/over-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --check
++
++# --- 4. Ballot ROW edit refused ----------------------------------------
++# Baseline ballot file on main first, so the delivery can only be a row edit.
++git -C "$town" checkout -q main
++mkdir -p "$town/records/ballots"
++printf 'a\tyes\tcafebabe\n' > "$town/records/ballots/sample.tsv"
++git -C "$town" add -A; git -C "$town" commit -qm 'add ballot baseline'
++git -C "$town" push -q origin main
++
++d2=$tmp/ballotmod2
++git -C "$town" worktree add -q -b delivery/ballotmod2 "$d2" main
++printf 'a\tyes\tdeadbeef\n' > "$d2/records/ballots/sample.tsv"
++printf 'records/ballots/sample.tsv\tmodify\n' | write_manifest "$d2" bm2-act
++git -C "$d2" add -A; git -C "$d2" commit -qm 'edit ballot rows on new base'
++git -C "$d2" push -q origin "HEAD:refs/heads/delivery/ballotmod2"
++expect_fail 'ballot row edit refused' \
++    delivery/ballotmod2 --manifest records/enactment/bm2-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --check
++
++# --- 5. New ballot file (add) allowed only as add -----------------------
++d3=$tmp/ballotadd
++git -C "$town" worktree add -q -b delivery/ballotadd "$d3" main
++printf 'b\tyes\tf00d\n' > "$d3/records/ballots/new-act.tsv"
++printf 'records/ballots/new-act.tsv\tadd\n' | write_manifest "$d3" ba-act
++git -C "$d3" add -A; git -C "$d3" commit -qm 'add a new ballot file'
++git -C "$d3" push -q origin "HEAD:refs/heads/delivery/ballotadd"
++expect_ok 'new ballot file accepted as add' \
++    delivery/ballotadd --manifest records/enactment/ba-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --check
++
++# --- 6. Actor gate: Clerk may not verify -------------------------------
++expect_fail 'Clerk as verifier' \
++    delivery/good --manifest records/enactment/good-act.allowlist \
++    --sponsor c1a00004 --verified-by c1a00001 --reviewed-by c1a00007 --check
++expect_fail 'Clerk as reviewer' \
++    delivery/good --manifest records/enactment/good-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00001 --check
++expect_fail 'sponsor as verifier' \
++    delivery/good --manifest records/enactment/good-act.allowlist \
++    --sponsor c1a00004 --verified-by c1a00004 --reviewed-by c1a00007 --check
++expect_fail 'verifier equals reviewer' \
++    delivery/good --manifest records/enactment/good-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1e00008 --check
++
++# --- 7. Paths outside the permitted set --------------------------------
++d4=$tmp/outside
++git -C "$town" worktree add -q -b delivery/outside "$d4" main
++printf 'x\n' > "$d4/README.md"
++printf 'README.md\tmodify\n' | write_manifest "$d4" out-act
++git -C "$d4" add -A; git -C "$d4" commit -qm 'touch a non-records path'
++git -C "$d4" push -q origin "HEAD:refs/heads/delivery/outside"
++expect_fail 'path outside permitted set' \
++    delivery/outside --manifest records/enactment/out-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --check
++
++# --- 8. Ambiguous path --------------------------------------------------
++d5=$tmp/ambig
++git -C "$town" worktree add -q -b delivery/ambig "$d5" main
++printf 'y\n' > "$d5/records/bills/glob.md"
++printf 'records/bills/*.md\tadd\n' | write_manifest "$d5" amb-act
++git -C "$d5" add -A; git -C "$d5" commit -qm 'glob in manifest'
++git -C "$d5" push -q origin "HEAD:refs/heads/delivery/ambig"
++expect_fail 'glob path refused' \
++    delivery/ambig --manifest records/enactment/amb-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --check
++
++# --- 9. Ordering: non-fast-forward delivery refused --------------------
++d6=$tmp/behind
++git -C "$town" worktree add -q -b delivery/behind "$d6" main
++printf 'z\n' > "$d6/records/bills/behind.md"
++printf 'records/bills/behind.md\tadd\n' | write_manifest "$d6" behind-act
++git -C "$d6" add -A; git -C "$d6" commit -qm 'delivery based on old main'
++git -C "$d6" push -q origin "HEAD:refs/heads/delivery/behind"
++# advance main afterwards so the delivery is no longer a fast-forward
++git -C "$town" checkout -q main
++printf 'further law\n' >> "$town/government/LAWS.md"
++git -C "$town" add -A
++git -C "$town" commit -qm 'main moves ahead'
++git -C "$town" push -q origin main
++expect_fail 'stale delivery (not fast-forward)' \
++    delivery/behind --manifest records/enactment/behind-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --check
++
++# --- 10. Verification precedes landing; then fast-forward land ---------
++d7=$tmp/land
++git -C "$town" worktree add -q -b delivery/land "$d7" main
++printf 'final law\n' > "$d7/government/LAWS.md"
++printf 'government/LAWS.md\tmodify\n' | write_manifest "$d7" land-act
++git -C "$d7" add -A; git -C "$d7" commit -qm 'enactment delivery'
++git -C "$d7" push -q origin "HEAD:refs/heads/delivery/land"
++cand=$(git -C "$town" rev-parse refs/remotes/origin/delivery/land)
++expect_ok 'verify exact candidate without publishing' \
++    delivery/land --manifest records/enactment/land-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007
++[ -f "$state/delivery/enactment-$cand.json" ] ||
++    { echo "FAIL: no receipt for $cand" >&2; fails=$((fails+1)); }
++main_before=$(git -C "$remote" rev-parse main)
++[ "$main_before" != "$cand" ] ||
++    { echo 'FAIL: main moved without --publish' >&2; fails=$((fails+1)); }
++git -C "$town" fetch -q origin '+refs/heads/main:refs/remotes/origin/main'
++expect_ok 'publish fast-forwards main to the verified commit' \
++    delivery/land --manifest records/enactment/land-act.allowlist \
++    --sponsor c1a00004 --verified-by c1e00008 --reviewed-by c1a00007 --publish
++main_after=$(git -C "$remote" rev-parse main)
++[ "$main_after" = "$cand" ] ||
++    { echo "FAIL: main is $main_after, expected $cand" >&2; fails=$((fails+1)); }
++
++if [ "$fails" -ne 0 ]; then
++    echo "enactment-merge smoke FAILED ($fails)" >&2
++    exit 1
++fi
++echo 'enactment-merge scope and ordering smoke passed'

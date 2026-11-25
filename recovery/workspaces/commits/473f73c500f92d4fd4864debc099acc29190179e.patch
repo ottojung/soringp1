@@ -1,0 +1,994 @@
+commit 473f73c500f92d4fd4864debc099acc29190179e
+Merge: 0af8a87c 9d99c53c
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 23:17:42 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 23:17:42 2026 +0000
+
+    Integrate reviewed delivery delivery/act17-frozen-cycles-20261023
+
+diff --git a/government/AUDIT-CYCLE-IDENTITY.md b/government/AUDIT-CYCLE-IDENTITY.md
+new file mode 100644
+index 00000000..639ebc88
+--- /dev/null
++++ b/government/AUDIT-CYCLE-IDENTITY.md
+@@ -0,0 +1,49 @@
++# Act 17 audit-cycle finality guard
++
++An **audit cycle** is the frozen randomized sample that the Judiciary
++investigates. The ordinary audit dispatch refreshes the sample after its
++six-hour cadence. Incident-driven checks can dispatch as frequently as every
++30 minutes, but **reuse the current frozen draw** until it is six hours old.
++They must NOT mint fresh per-case correction opportunities just because a
++second session was launched. The actual draw is identified by its recorded
++timestamp, random seed and case IDs; its stable, 32-hex cycle identity is
++written to private oversight state.
++
++Before dispatch, `audit-cycle.sh` persists that ID in
++`current-audit-cycle` and in the append-only
++`audit-cycle-identities.tsv` ledger. The controller accepts a
++`--correction --cycle-id ID` only for the current ledger-backed token and
++rejects any later correction for the **same case and same frozen sample**
++even after its earlier correction has been confirmed. A per-case file lock
++serializes reads and append/cache updates between concurrent CLI processes.
++A missing, malformed or legacy correction identity fails closed without
++backdating or silently assigning an invented cycle. Confirmation is a
++procedural second pass, not independent verification. The monitoring check
++reads **committed Git HEAD** for each cached correction and never treats an
++untracked or modified working-tree correction log as legally effective. If
++there is no valid committed confirmed correction, the original verdict stays
++effective (where recoverable), and a distinct `correction_not_effective` or
++`correction_anchor_invalid` signal exposes the mismatch. Old original evidence
++references may be unavailable in legacy cache rows; the signal explicitly
++marks them uncertain instead of manufacturing corroboration.
++
++If the detached audit launch returns an error after token preparation, the
++dispatch time remains recorded; an immediate retry is refused because the
++backend may have started work despite reporting failure. A later dispatch
++of the SAME frozen sample uses its original token. This ensures token
++visibility before agent execution and preserves evidence of ambiguous
++launches. Identity in private state is not independent evidence of delivery.
++
++Tests: `tests/audit-cycle-identity-smoke.sh` checks incident reuse, fresh
++samples and ambiguous launches; `tests/audit-correction-smoke.sh` checks
++corrected/confirmed verdict semantics, tampered legacy trails and simultaneous
++same-cycle correction attempts. The Act 21 full suite must pass on the exact
++proposed merge before publication.
++
++**Scope and legal limit:** This is a prospective conservative enforcement
++of the existing Act 17 cap, not a legislative amendment and **not** a
++retroactive adjudication of the two previously reported corrections from
++the October 23 frozen draw. The original and proposed correction histories
++remain preserved as non-operative historical evidence. The Legislature and
++independent Judiciary must resolve their compliance and the old PR #32
++through the separate originating board issue.
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+index 6f9dfb2a..b0aacb3f 100644
+--- a/government/audit-accountability.py
++++ b/government/audit-accountability.py
+@@ -5,6 +5,7 @@ Auditor submissions are claims with evidence references, not independently verif
+ facts. The controller never declares an issue solved from agent completion alone.
+ """
+ import argparse
++import fcntl
+ import re
+ import json
+ import os
+@@ -35,6 +36,66 @@ def records_dir():
+     return Path(os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche")) / "records" / "oversight" / "corrections"
+ 
+ 
++def correction_trail(case_id):
++    path = records_dir() / f"{case_id}.jsonl"
++    if not path.exists():
++        return []
++    rows = []
++    for number, line in enumerate(path.read_text().splitlines(), 1):
++        try:
++            row = json.loads(line)
++        except (ValueError, TypeError) as exc:
++            raise ValueError(f"authoritative correction trail is malformed at line {number}") from exc
++        if not isinstance(row, dict):
++            raise ValueError(f"authoritative correction trail row {number} is not an object")
++        if row.get("correction") and row.get("case_id") != case_id:
++            raise ValueError(f"authoritative correction trail case mismatch at line {number}")
++        rows.append(row)
++    return rows
++
++
++def committed_confirmed_correction(case_id):
++    """Only rows committed in HEAD are effective under Act17 §2.2.
++
++    This NEVER reads untracked or modified worktree bytes as legal authority.
++    Fail closed on malformed committed rows, duplicate cycles or unpaired
++    confirmations. Returns the latest confirmed FILING (not its procedural
++    confirmation reference), or None when no correction has taken effect.
++    """
++    town = os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche")
++    rel = f"records/oversight/corrections/{case_id}.jsonl"
++    p = subprocess.run(["git", "-C", town, "show", f"HEAD:{rel}"],
++                       capture_output=True, text=True, timeout=15)
++    if p.returncode:
++        return None
++    pending = {}
++    confirmed = set()
++    effective = None
++    for idx, line in enumerate(p.stdout.splitlines(), 1):
++        try:
++            row = json.loads(line)
++        except (TypeError, ValueError) as exc:
++            raise ValueError(f"committed correction row {idx} malformed") from exc
++        if not isinstance(row, dict) or row.get("case_id") != case_id or row.get("correction") is not True:
++            raise ValueError(f"committed correction row {idx} wrong case or type")
++        token = row.get("cycle_id")
++        if not valid_cycle_token(token):
++            raise ValueError(f"committed correction row {idx} missing valid cycle identity")
++        if row.get("confirmed") is False:
++            if token in pending or token in confirmed:
++                raise ValueError("more than one correction filing in committed cycle")
++            pending[token] = row
++        elif row.get("confirmed") is True:
++            filed = pending.get(token)
++            if filed is None or token in confirmed or filed.get("verdict") != row.get("verdict"):
++                raise ValueError("orphan or mismatched committed correction confirmation")
++            confirmed.add(token)
++            effective = filed
++        else:
++            raise ValueError(f"committed correction row {idx} lacks confirmed status")
++    return effective
++
++
+ def append_correction(case_id, record):
+     # Append-only: never overwrite or rewrite a committed entry (Act 17 §2.2, §2.7).
+     d = records_dir()
+@@ -44,6 +105,47 @@ def append_correction(case_id, record):
+     return d / f"{case_id}.jsonl"
+ 
+ 
++def valid_cycle_token(token):
++    return isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
++
++
++def used_cycle_tokens(prior, case_id):
++    """Read only explicit identities; legacy rows are deliberately unclassified."""
++    tokens = set()
++    for item in prior.get("history", []):
++        if item.get("correction") and valid_cycle_token(item.get("cycle_id")):
++            tokens.add(item["cycle_id"])
++    for item in correction_trail(case_id):
++        if item.get("correction"):
++            token = item.get("cycle_id")
++            if not valid_cycle_token(token):
++                raise ValueError("authoritative correction trail has a correction without a valid cycle_id")
++            tokens.add(token)
++    return tokens
++
++
++def current_cycle_token():
++    state = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state")) / "oversight"
++    path = state / "current-audit-cycle"
++    try:
++        token = path.read_text().strip()
++    except OSError:
++        return ""
++    if not valid_cycle_token(token):
++        return ""
++    # Cross-check active identity against the durable dispatch ledger. An
++    # environment value alone is not proof that audit-cycle.sh dispatched it.
++    ledger = state / "audit-cycle-identities.tsv"
++    try:
++        entries = [line.split("\t", 1)[1] for line in ledger.read_text().splitlines()
++                   if "\t" in line]
++    except OSError:
++        return ""
++    if entries.count(token) != 1:
++        return ""
++    return token
++
++
+ def report(args):
+     root = base()
+     if not re.fullmatch(r"[0-9a-f]{18}", args.case):
+@@ -70,6 +172,14 @@ def report(args):
+                 pending = h
+         if pending is None:
+             raise ValueError("no pending correction to confirm")
++        pending_cycle = pending.get("cycle_id")
++        trail = correction_trail(args.case)
++        matching = [row for row in trail if row.get("correction")
++                    and row.get("cycle_id") == pending_cycle]
++        if not valid_cycle_token(pending_cycle) or len(matching) != 1 or matching[0].get("confirmed") is not False:
++            raise ValueError("pending correction is not bound to a valid authoritative trail entry")
++        if args.cycle_id and args.cycle_id != pending.get("cycle_id"):
++            raise ValueError("confirmation cycle_id does not match pending correction")
+         pending["confirmed"] = True
+         pending["confirmed_at"] = now
+         pending["confirm_evidence_ref"] = args.evidence
+@@ -79,6 +189,7 @@ def report(args):
+             "correction": True, "supersedes": pending["supersedes"],
+             "reason_code": pending.get("reason_code", ""),
+             "why_stronger": pending.get("why_stronger", ""),
++            "cycle_id": pending_cycle,
+             "confirmed": True, "phase": "second_procedural_pass_not_independent",
+         })
+         prior["verdict"] = pending["verdict"]
+@@ -86,6 +197,11 @@ def report(args):
+         prior["evidence_ref"] = pending["evidence_ref"]
+         prior["details"] = pending.get("details", prior.get("details", ""))
+         prior["correction_pending"] = False
++        prior.pop("correction_cycle_id", None)
++        if pending["verdict"] == "finding":
++            prior.pop("corrected_from_finding", None)
++        else:
++            prior["corrected_from_finding"] = True
+         if pending["supersedes"] == "finding" and pending["verdict"] != "finding":
+             prior["corrected_from_finding"] = True
+         atomic(path, prior)
+@@ -96,10 +212,17 @@ def report(args):
+         # File a superseding verdict (Act 17 §2.1-2.2, §2.5-2.6).
+         if prior is None:
+             raise ValueError("no prior verdict; file an ordinary verdict first")
++        if not valid_cycle_token(args.cycle_id):
++            raise ValueError("correction requires a valid current audit cycle token")
++        current_cycle = current_cycle_token()
++        if not current_cycle or args.cycle_id != current_cycle:
++            raise ValueError("cycle_id is not the current audit dispatch token")
+         if not args.supersedes or args.supersedes != prior["verdict"]:
+             raise ValueError("correction must state the verdict it supersedes")
+         if prior.get("correction_pending"):
+             raise ValueError("one correction per case per cycle (finality)")
++        if args.cycle_id in used_cycle_tokens(prior, args.case):
++            raise ValueError("one correction per case per cycle (cycle_id already used)")
+         if args.evidence == prior.get("evidence_ref"):
+             raise ValueError("correction evidence must be distinct from the original reference")
+         if not args.why_stronger or not args.why_stronger.strip():
+@@ -113,6 +236,11 @@ def report(args):
+         held = [h.get("verdict") for h in prior.get("history", [])]
+         if args.verdict in held:
+             raise ValueError("bare re-flip: target verdict already held by this case")
++        # Preserve the original verdict and evidence for a Git-unanchored
++        # correction's effective-state fallback and future independent audit.
++        prior.setdefault("original_verdict", prior.get("verdict"))
++        prior.setdefault("original_evidence_ref", prior.get("evidence_ref"))
++        prior.setdefault("original_at", prior.get("at"))
+         rec = {
+             "at": now, "case_id": args.case, "verdict": args.verdict,
+             "evidence_ref": args.evidence, "auditor": args.auditor,
+@@ -120,16 +248,20 @@ def report(args):
+             "reason_code": args.reason_code, "why_stronger": args.why_stronger[:1000],
+             "details": args.details[:1000], "confirmed": False,
+             "phase": "correction_filed",
++            "cycle_id": args.cycle_id,
+         }
+         append_correction(args.case, rec)
+         hist = prior.get("history", [])
+         hist.append(rec)
+         prior["history"] = hist
+         prior["correction_pending"] = True
++        prior["correction_cycle_id"] = args.cycle_id
+         atomic(path, prior)
+         print(json.dumps(prior))
+         return
+ 
++    if prior and any(item.get("correction") for item in prior.get("history", [])):
++        raise ValueError("outcome changes after a correction require the correction workflow")
+     if prior and prior["verdict"] != "finding":
+         raise ValueError("case already has a final verdict")
+     if args.verdict == "verified_fixed" and (not prior or prior["verdict"] != "finding"):
+@@ -182,17 +314,57 @@ def check(args):
+             overdue += 1
+             signals.append({"type": "unreported_sample", "case_id": case["case_id"]})
+         if verdict is not None:
++            # State-dir verdicts are a derived cache, NOT the legal correction
++            # trail. A confirmed procedural recheck does not make a correction
++            # effective until Git HEAD contains its filed+confirmed rows.
++            effective = verdict.get("verdict")
++            effective_ref = verdict.get("evidence_ref")
++            effective_at = verdict.get("at", now)
++            corrected_from_finding = bool(verdict.get("corrected_from_finding"))
++            history = [h for h in verdict.get("history", [])
++                       if isinstance(h, dict) and h.get("correction")]
++            if history:
++                original = verdict.get("original_verdict", history[0].get("supersedes"))
++                anchored = None
++                try:
++                    anchored = committed_confirmed_correction(case["case_id"])
++                except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
++                    signals.append({"type": "correction_anchor_invalid",
++                                    "case_id": case["case_id"], "detail": str(exc)[:180]})
++                if anchored is None:
++                    effective = original if original in (
++                        "finding", "verified", "not_assigned", "inconclusive", "verified_fixed") else None
++                    effective_ref = verdict.get("original_evidence_ref")
++                    effective_at = verdict.get("original_at", effective_at)
++                    corrected_from_finding = False
++                    signals.append({"type": "correction_not_effective",
++                                    "case_id": case["case_id"],
++                                    "reason": "no valid confirmed correction committed in Git HEAD"})
++                else:
++                    effective = anchored.get("verdict")
++                    effective_ref = anchored.get("evidence_ref")
++                    effective_at = anchored.get("at", effective_at)
++                    corrected_from_finding = (
++                        effective != "finding" and
++                        (original == "finding" or
++                         any(h.get("supersedes") == "finding" for h in history)))
++                    if effective != verdict.get("verdict"):
++                        signals.append({"type": "correction_not_effective",
++                                        "case_id": case["case_id"],
++                                        "reason": "state cache ahead of committed correction"})
+             if verdict.get("correction_pending"):
+                 signals.append({"type": "correction_pending", "case_id": case["case_id"]})
+-            if verdict["verdict"] == "finding":
++            if effective == "finding":
+                 subject = f"{case['population']}:{case['id']}"
+                 findings[subject] = findings.get(subject, 0) + 1
+                 signals.append({"type": "unresolved_finding", "case_id": case["case_id"],
+-                                "evidence_ref": verdict["evidence_ref"]})
+-            elif verdict.get("corrected_from_finding"):
++                                "evidence_ref": effective_ref,
++                                "caveat": "source_not_independently_verified"})
++            elif corrected_from_finding:
+                 signals.append({"type": "corrected_finding", "case_id": case["case_id"],
+-                                "evidence_ref": verdict["evidence_ref"]})
+-            if verdict["verdict"] == "inconclusive" and now - verdict["at"] > deadline:
++                                "evidence_ref": effective_ref,
++                                "git_anchored": True})
++            if effective == "inconclusive" and now - effective_at > deadline:
+                 signals.append({"type": "unresolved_inconclusive", "case_id": case["case_id"]})
+     for subject, count in findings.items():
+         if count >= 2:
+@@ -239,13 +411,15 @@ def main():
+     p.add_argument("--details", default="")
+     p.add_argument("--correction", action="store_true",
+                    help="file a superseding verdict (Act 17); requires --supersedes, "
+-                        "--why_stronger, --reason_code, --auditor")
++                         "--why_stronger, --reason_code, --auditor, --cycle-id")
+     p.add_argument("--confirm", action="store_true",
+                    help="second procedural pass confirming a pending correction (Act 17 §2.4)")
+     p.add_argument("--supersedes", default="")
+     p.add_argument("--why_stronger", default="")
+     p.add_argument("--reason_code", default="")
+     p.add_argument("--auditor", default="")
++    p.add_argument("--cycle-id", dest="cycle_id", default="",
++                   help="durable audit-dispatch cycle identity (corrections only)")
+     args = p.parse_args()
+     if args.action == "report":
+         if args.correction and args.confirm:
+@@ -255,7 +429,16 @@ def main():
+                 raise ValueError("case is required")
+         elif not args.case or not args.verdict:
+             raise ValueError("case and verdict are required")
+-        report(args)
++        # Correctness of the cycle cap requires an exclusive per-case
++        # read/check/append/cache transaction. Two Judiciary CLI invocations
++        # must not both pass the one-per-cycle check concurrently.
++        if not re.fullmatch(r"[0-9a-f]{18}", args.case):
++            raise ValueError("invalid audit case identifier")
++        lockdir = base() / "case-locks"
++        lockdir.mkdir(parents=True, exist_ok=True)
++        with (lockdir / f"{args.case}.lock").open("a+") as lock:
++            fcntl.flock(lock, fcntl.LOCK_EX)
++            report(args)
+     else:
+         check(args)
+ 
+diff --git a/government/audit-cycle.sh b/government/audit-cycle.sh
+index a163e9ac..88b4b4a3 100644
+--- a/government/audit-cycle.sh
++++ b/government/audit-cycle.sh
+@@ -33,12 +33,40 @@ evidence='No ordinary incident.'
+ [ ! -s "$root/random/incident.json" ] || evidence="$evidence $(cat "$root/random/incident.json")"
+ selection='Test-only no sample'
+ if [ "${VICHE_AUDIT_SELECTION:-1}" = 1 ]; then
+-  if [ "$incident" = yes ] && [ -s "$root/random/latest.json" ]; then
++  # The audit cycle belongs to a FROZEN randomized draw, not each repeat
++  # dispatch. Incident checks may recur every 30 minutes with the SAME draw.
++  # That must not mint additional correction slots for a case.
++  fresh_sample=no
++  if [ -s "$root/random/latest.json" ]; then
++    sample_at=$(jq -r '.at // -1' "$root/random/latest.json")
++    case "$sample_at" in ''|*[!0-9]*) fresh_sample=yes;; *)
++      if [ "$now" -lt "$sample_at" ] || [ $((now-sample_at)) -ge 21600 ]; then fresh_sample=yes; fi ;;
++    esac
++  else fresh_sample=yes
++  fi
++  if [ "$incident" = yes ] && [ "$fresh_sample" = no ]; then
+     selection=$(cat "$root/random/latest.json")
+   else
+     selection=$(python3 "$town/government/audit-selection.py") || exit 1
+   fi
+ fi
++# Identity is stable for the exact sampled case cohort. Repeated incident
++# dispatches and restarts of the same frozen draw reuse one cycle token.
++# Test-only no-selection mode uses a deterministic six-hour fixture bucket.
++if [ "$selection" = 'Test-only no sample' ]; then
++  cycle_id=$(printf 'test-only:%s\n' "$((now/21600))" | sha256sum | cut -c1-32)
++else
++  cycle_id=$(printf '%s\n' "$selection" | python3 -c '
++import hashlib,json,sys
++v=json.load(sys.stdin)
++if not isinstance(v,dict) or not isinstance(v.get("at"),int) or not isinstance(v.get("cases"),list) or not isinstance(v.get("seed_after_snapshot"),str):
++    raise SystemExit("invalid frozen audit batch")
++payload={"at":v["at"],"seed_after_snapshot":v["seed_after_snapshot"],
++         "cases":[c.get("case_id") for c in v["cases"]]}
++print(hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()[:32])
++') || exit 1
++fi
++
+ prompt=$(cat <<EOF
+ You are the independent Viche Judiciary under Act 4, accountable to
+ Parliament and the Founder, not to the Executive or Clerk. Your sole role is
+@@ -60,6 +88,13 @@ Separate verified evidence, uncertainty, and mere leading indicators.
+ $(cat "$charter")
+ === END AUTHORITATIVE CONSTITUTION ===
+ 
++Current audit dispatch cycle ID (include exactly as --cycle-id on every
++--correction command): $cycle_id
++Operational definition: the same frozen sampled batch has one durable
++audit-cycle ID, EVEN IF the Judiciary is summoned again during an incident.
++A later independent sample is a new cycle. This is not a retroactive
++adjudication of historical cycles or the contested PR #32 corrections.
++
+ Current deterministic watchdog evidence:
+ $evidence
+ Randomized audit cases (bounded deep review):
+@@ -72,6 +107,8 @@ lawfulness and effect. Submit an evidence-backed verdict for EVERY sampled case
+ using $town/government/audit-accountability.py report with --case, --verdict
+ (verified, not_assigned, finding, inconclusive) and --evidence. Record a
+ finding for neglect or false delivery, not for a mere absence of information.
++For --correction, also supply --cycle-id "$cycle_id". Corrections without this
++current dispatch token, or with a token from another dispatch, are rejected.
+ Use verified_fixed with new evidence only for later independent correction.
+ 
+ Inspect the complete, current ordinary laws at $town/government/LAWS.md and
+@@ -91,6 +128,22 @@ the evidence, including failures of judicial measurement, to Parliament. Do not
+ it thinks it is effective. Use Antonina-managed agents; model selection is Antonina's responsibility. Never perform unrelated projects. This is a judicial evidence review, not a legislative vote.
+ EOF
+ )
+-antonina agent run --id "$id" --cwd "$seats/branches/judiciary" --prompt "$prompt" --detach
++# Publish identity BEFORE launching a detached agent, otherwise a fast agent
++# may correctly report a correction before the CLI has made its token valid.
++# The registered token remains the same across repeated dispatches of a
++# frozen draw. A failed/ambiguous launch is recorded and not replayed
++# immediately, because it may already have started a side-effecting agent.
++umask 077
++if [ ! -f "$root/audit-cycle-identities.tsv" ] ||
++   ! awk -F '\t' -v token="$cycle_id" '$2==token{found=1} END{exit !found}' "$root/audit-cycle-identities.tsv"; then
++  printf '%s\t%s\n' "$now" "$cycle_id" >> "$root/audit-cycle-identities.tsv"
++fi
++printf '%s\n' "$cycle_id" > "$root/current-audit-cycle.tmp"
++mv "$root/current-audit-cycle.tmp" "$root/current-audit-cycle"
+ printf '%s\n' "$now" > "$root/last-audit-dispatch"
++if ! antonina agent run --id "$id" --cwd "$seats/branches/judiciary" --prompt "$prompt" --detach; then
++  printf '%s\t%s\tlaunch_failed_or_ambiguous\n' "$now" "$cycle_id" >> "$root/audit-dispatches.tsv"
++  echo "Judiciary: audit launch failed or ambiguous, preserving cycle identity" >&2
++  exit 1
++fi
+ printf '%s\t%s\taccepted_not_verified\n' "$now" "$incident" >> "$root/audit-dispatches.tsv"
+diff --git a/tests/audit-correction-smoke.sh b/tests/audit-correction-smoke.sh
+index 78048208..c0af7efd 100644
+--- a/tests/audit-correction-smoke.sh
++++ b/tests/audit-correction-smoke.sh
+@@ -12,7 +12,11 @@ mkdir -p "$scratch/bin" "$scratch/state/oversight/random/cases" \
+     "$scratch/seats/branches/judiciary"
+ printf 'authoritative fixture\n' > "$scratch/charter"
+ : > "$scratch/town/records/SUMMONED.txt"
++git -C "$scratch/town" init -q -b main
++git -C "$scratch/town" -c user.name=Fixture -c user.email=fixture@example.invalid \
++  commit --allow-empty -qm 'initial Git state: no effective corrections yet'
+ CASE=0123456789abcdef01
++TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ printf '{"case_id":"%s","population":"ignored_work","id":"301","at":2000000000}\n' \
+     "$CASE" > "$scratch/state/oversight/random/cases/$CASE.json"
+ cat > "$scratch/bin/antonina" <<'MOCK'
+@@ -33,7 +37,10 @@ VICHE_TOWN_ROOT=$scratch/town
+ VICHE_SEATS_ROOT=$scratch/seats
+ VICHE_CONSTITUTION=$scratch/charter
+ VICHE_OVERSIGHT_NOW=2000000000
+-export PATH VICHE_STATE_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_CONSTITUTION VICHE_OVERSIGHT_NOW
++VICHE_AUDIT_CYCLE_ID=$TOKEN
++printf '%s\n' "$TOKEN" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000000\t%s\n' "$TOKEN" > "$scratch/state/oversight/audit-cycle-identities.tsv"
++export PATH VICHE_STATE_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_CONSTITUTION VICHE_OVERSIGHT_NOW VICHE_AUDIT_CYCLE_ID
+ 
+ trail="$scratch/town/records/oversight/corrections/$CASE.jsonl"
+ CTRL="$repo/government/audit-accountability.py"
+@@ -45,6 +52,7 @@ python3 "$CTRL" report --case "$CASE" --verdict not_assigned \
+ # 2. A correction of that non-finding is now permitted (Act 17 §2.1/§2.5).
+ python3 "$CTRL" report --case "$CASE" --verdict finding \
+     --evidence "commit:deadbeef stronger replay" --correction \
++    --cycle-id "$TOKEN" \
+     --supersedes not_assigned --auditor c1e00008 --reason_code corrected_on_replay \
+     --why_stronger "replayed the full sample with an independent evaluator" >/dev/null
+ 
+@@ -54,6 +62,7 @@ grep -q '"correction": true' "$trail"
+ grep -q '"confirmed": false' "$trail"
+ grep -q '"supersedes": "not_assigned"' "$trail"
+ grep -q '"phase": "correction_filed"' "$trail"
++grep -q "\"cycle_id\": \"$TOKEN\"" "$trail"
+ 
+ # 4. Until the second procedural pass, the current verdict is unchanged and the
+ #    case is reported correction_pending (Act 17 §2.4).
+@@ -67,6 +76,13 @@ jq -e --arg c "$CASE" '.verdict' "$scratch/state/oversight/random/outcomes/$CASE
+ 
+ # 5. Second procedural pass (same office/model — NOT independent) confirms it.
+ python3 "$CTRL" report --case "$CASE" --confirm --evidence "second procedural replay" >/dev/null
++python3 "$CTRL" check > "$scratch/check"
++jq -e --arg c "$CASE" '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' "$scratch/check" >/dev/null
++# Only a committed Git version, not a writable state-dir cache or untracked
++# file, makes that first confirmed correction legally effective.
++git -C "$scratch/town" add records/oversight/corrections/"$CASE".jsonl
++git -C "$scratch/town" -c user.name=Fixture -c user.email=fixture@example.invalid \
++  commit -qm 'anchor first confirmed correction'
+ grep -q '"phase": "second_procedural_pass_not_independent"' "$trail"
+ grep -q '"confirmed": true' "$trail"
+ [ "$(jq -r .verdict "$scratch/state/oversight/random/outcomes/$CASE.json")" = finding ]
+@@ -75,57 +91,145 @@ if jq -e '[.signals[].type]|index("correction_pending")' "$scratch/check" >/dev/
+     echo "correction_pending cleared after confirmation" >&2; exit 1
+ fi
+ 
+-# 6. A finding may be corrected to a non-finding (§2.5); this raises the distinct
+-#    corrected_finding signal instead of unresolved_finding (§2.3).
++# 6. A finding may be corrected to a non-finding in a distinct dispatch cycle;
++#    confirmation of that correction does not consume another slot.
++TOKEN2=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
++VICHE_AUDIT_CYCLE_ID=$TOKEN2
++printf '%s\n' "$TOKEN2" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000001\t%s\n' "$TOKEN2" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
+ python3 "$CTRL" report --case "$CASE" --verdict not_assigned \
+     --evidence "commit:cafebabe still stronger retraction" --correction \
++    --cycle-id "$TOKEN2" \
+     --supersedes finding --auditor c1e00008 --reason_code retracted_on_stronger_evidence \
+     --why_stronger "new replay shows the original finding was a false positive" >/dev/null
+ python3 "$CTRL" report --case "$CASE" --confirm --evidence "procedural retraction replay" >/dev/null
++# This uncommitted retraction is a false-positive corrected_finding signal
++# unless check() derives its effective state from Git HEAD instead of cache.
++python3 "$CTRL" check > "$scratch/check"
++jq -e --arg c "$CASE" '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' "$scratch/check" >/dev/null
++jq -e --arg c "$CASE" '.signals[]|select(.type=="unresolved_finding" and .case_id==$c)' "$scratch/check" >/dev/null
++git -C "$scratch/town" add records/oversight/corrections/"$CASE".jsonl
++git -C "$scratch/town" -c user.name=Fixture -c user.email=fixture@example.invalid \
++  commit -qm 'anchor second confirmed correction'
+ python3 "$CTRL" check > "$scratch/check"
+ jq -e '[.signals[].type]|index("corrected_finding")' "$scratch/check" >/dev/null
+ if jq -e '[.signals[].type]|index("unresolved_finding")' "$scratch/check" >/dev/null; then
+     echo "corrected finding must not raise unresolved_finding" >&2; exit 1
+ fi
+ 
+-# 7. Finality: one correction per case per cycle — a second pending correction
+-#    is refused while one is pending.
++# After a confirmed finding correction, ordinary verdict submission cannot
++# bypass the correction evidence and cycle-token requirements.
++if python3 "$CTRL" report --case "$CASE" --verdict finding \
++    --evidence "ordinary overwrite" 2>/dev/null; then
++    echo "ordinary report bypassed post-correction safeguards" >&2; exit 1
++fi
++if python3 "$CTRL" report --case "$CASE" --confirm --evidence "unbound confirmation" \
++    --cycle-id "$TOKEN" 2>/dev/null; then
++    echo "confirmation of non-pending correction accepted" >&2; exit 1
++fi
++
++# The other correction direction (not_assigned -> finding) clears the
++# corrected_from_finding signal. Ordinary reports must still be blocked both
++# during the pending correction and after its confirmation.
++CASE_PENDING=121212121212121212
++printf '{"case_id":"%s","population":"ignored_work","id":"311","at":2000000000}\n' \
++    "$CASE_PENDING" > "$scratch/state/oversight/random/cases/$CASE_PENDING.json"
++TOKEN_PENDING=12121212121212121212121212121212
++VICHE_AUDIT_CYCLE_ID=$TOKEN_PENDING
++printf '%s\n' "$TOKEN_PENDING" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000016\t%s\n' "$TOKEN_PENDING" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++python3 "$CTRL" report --case "$CASE_PENDING" --verdict not_assigned --evidence "initial" >/dev/null
++python3 "$CTRL" report --case "$CASE_PENDING" --verdict finding --evidence "stronger" \
++    --correction --cycle-id "$TOKEN_PENDING" --supersedes not_assigned --auditor c1e00008 \
++    --reason_code corrected_to_finding --why_stronger "materially stronger evidence" >/dev/null
++if python3 "$CTRL" report --case "$CASE_PENDING" --verdict not_assigned --evidence "pending overwrite" 2>/dev/null; then
++    echo "ordinary verdict changed a pending correction" >&2; exit 1
++fi
++python3 "$CTRL" report --case "$CASE_PENDING" --confirm --evidence "confirmation" >/dev/null
++if python3 "$CTRL" report --case "$CASE_PENDING" --verdict not_assigned --evidence "confirmed overwrite" 2>/dev/null; then
++    echo "ordinary verdict changed a confirmed finding correction" >&2; exit 1
++fi
++
++# A non-finding-to-non-finding correction also establishes durable correction
++# history and cannot be overwritten by ordinary reporting after confirmation.
++CASE_NONFINDING=131313131313131313
++printf '{"case_id":"%s","population":"ignored_work","id":"312","at":2000000000}\n' \
++    "$CASE_NONFINDING" > "$scratch/state/oversight/random/cases/$CASE_NONFINDING.json"
++TOKEN_NONFINDING=13131313131313131313131313131313
++VICHE_AUDIT_CYCLE_ID=$TOKEN_NONFINDING
++printf '%s\n' "$TOKEN_NONFINDING" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000017\t%s\n' "$TOKEN_NONFINDING" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++python3 "$CTRL" report --case "$CASE_NONFINDING" --verdict not_assigned --evidence "initial" >/dev/null
++python3 "$CTRL" report --case "$CASE_NONFINDING" --verdict inconclusive --evidence "stronger" \
++    --correction --cycle-id "$TOKEN_NONFINDING" --supersedes not_assigned --auditor c1e00008 \
++    --reason_code correction_nonfinding --why_stronger "materially stronger evidence" >/dev/null
++python3 "$CTRL" report --case "$CASE_NONFINDING" --confirm --evidence "confirmation" >/dev/null
++if python3 "$CTRL" report --case "$CASE_NONFINDING" --verdict not_assigned --evidence "confirmed overwrite" 2>/dev/null; then
++    echo "ordinary verdict changed a confirmed non-finding correction" >&2; exit 1
++fi
++
++orphan_case=969696969696969696
++printf '{"case_id":"%s","population":"ignored_work","id":"310","at":2000000000}\n' \
++    "$orphan_case" > "$scratch/state/oversight/random/cases/$orphan_case.json"
++TOKEN18=cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
++VICHE_AUDIT_CYCLE_ID=$TOKEN18
++printf '%s\n' "$TOKEN18" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000015\t%s\n' "$TOKEN18" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++python3 "$CTRL" report --case "$orphan_case" --verdict not_assigned --evidence "orphan prior" >/dev/null
++python3 - "$scratch/state/oversight/random/outcomes/$orphan_case.json" <<'PY'
++import json,sys
++p=sys.argv[1]
++data=json.load(open(p)); data.update(correction_pending=True, history=[{
++ "correction":True,"confirmed":False,"verdict":"finding","supersedes":"not_assigned"}])
++json.dump(data,open(p,"w"))
++PY
++if python3 "$CTRL" report --case "$orphan_case" --confirm --evidence "no trail row" 2>/dev/null; then
++    echo "confirmation without authoritative correction entry accepted" >&2; exit 1
++fi
++
++# 7. Pending correction blocks a second same-cycle correction.
++TOKEN3=cccccccccccccccccccccccccccccccc
++VICHE_AUDIT_CYCLE_ID=$TOKEN3
++printf '%s\n' "$TOKEN3" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000002\t%s\n' "$TOKEN3" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
+ python3 "$CTRL" report --case "$CASE" --verdict verified \
+     --evidence "commit:feedface third look" --correction \
++    --cycle-id "$TOKEN3" \
+     --supersedes not_assigned --auditor c1e00008 --reason_code third \
+     --why_stronger "yet another replay" >/dev/null
+ if python3 "$CTRL" report --case "$CASE" --verdict finding \
+     --evidence "commit:feedface dup" --correction --supersedes not_assigned \
++    --cycle-id "$TOKEN3" \
+     --auditor c1e00008 --reason_code dup --why_stronger "again" 2>/dev/null; then
+     echo "second concurrent pending correction must be refused" >&2; exit 1
+ fi
+-
+-# 8. Finality: no bare re-flip — a target verdict already held is refused.
+-if python3 "$CTRL" report --case "$CASE" --verdict finding \
+-    --evidence "commit:feedface reflip" --correction --supersedes verified \
+-    --auditor c1e00008 --reason_code reflip --why_stronger "back again" 2>/dev/null; then
+-    echo "bare re-flip must be refused" >&2; exit 1
+-fi
+-
+-# 9. Guardrails: a correction missing why_stronger / reason_code / auditor /
++# 8. Guardrails: a correction missing why_stronger / reason_code / auditor /
+ #    supersedes, or citing the original evidence, is refused.
+ if python3 "$CTRL" report --case "$CASE" --verdict inconclusive \
+     --evidence "commit:x1" --correction --supersedes verified \
++    --cycle-id "$TOKEN3" \
+     --auditor c1e00008 --reason_code no_why --why_stronger "" 2>/dev/null; then
+     echo "empty why_stronger must be refused" >&2; exit 1
+ fi
+ if python3 "$CTRL" report --case "$CASE" --verdict inconclusive \
+     --evidence "commit:x1" --correction --supersedes verified \
++    --cycle-id "$TOKEN3" \
+     --auditor c1e00008 --reason_code no_why --why_stronger "diff" 2>/dev/null; then
+     echo "duplicate evidence must be refused" >&2; exit 1
+ fi
+ if python3 "$CTRL" report --case "$CASE" --verdict inconclusive \
+     --evidence "board #301 original sample" --correction --supersedes verified \
++    --cycle-id "$TOKEN3" \
+     --auditor c1e00008 --reason_code orig --why_stronger "same ref" 2>/dev/null; then
+     echo "original evidence reuse must be refused" >&2; exit 1
+ fi
+ 
+-# 10. verified_fixed still requires a previous finding (unchanged).
++# 9. verified_fixed still requires a previous finding (unchanged).
+ CASE2=fedcba9876543210fe
+ printf '{"case_id":"%s","population":"claimed_delivery","id":"218","at":2000000000}\n' \
+     "$CASE2" > "$scratch/state/oversight/random/cases/$CASE2.json"
+@@ -139,4 +243,214 @@ fi
+ n=$(wc -l < "$trail")
+ [ "$n" -ge 4 ]
+ 
++# A separate case exercises current/stale/forged/missing tokens without being
++# confounded by its verdict history.
++CASE3=abcdefabcdefabcdef
++printf '{"case_id":"%s","population":"ignored_work","id":"303","at":2000000000}\n' \
++    "$CASE3" > "$scratch/state/oversight/random/cases/$CASE3.json"
++TOKEN5=55555555555555555555555555555555
++VICHE_AUDIT_CYCLE_ID=$TOKEN5
++printf '%s\n' "$TOKEN5" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000003\t%s\n' "$TOKEN5" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++VICHE_AUDIT_CYCLE_ENFORCE=1
++export VICHE_AUDIT_CYCLE_ID
++export VICHE_AUDIT_CYCLE_ENFORCE
++python3 "$CTRL" report --case "$CASE3" --verdict not_assigned --evidence "start #303" >/dev/null
++for invalid in forged stale missing; do
++    case $invalid in
++        forged) token=dddddddddddddddddddddddddddddddd ;;
++        stale) token=$TOKEN ;;
++        missing) token= ;;
++    esac
++    if python3 "$CTRL" report --case "$CASE3" --verdict finding \
++        --evidence "rejected $invalid" --correction --cycle-id "$token" \
++        --supersedes not_assigned --auditor c1e00008 --reason_code invalid \
++        --why_stronger "not accepted" 2>/dev/null; then
++        echo "invalid or stale cycle token accepted: $invalid" >&2; exit 1
++    fi
++done
++# A valid current dispatch token files and confirms a correction.
++python3 "$CTRL" report --case "$CASE3" --verdict finding --evidence "new cycle" \
++    --correction --cycle-id "$TOKEN5" --supersedes not_assigned --auditor c1e00008 \
++    --reason_code new_cycle --why_stronger "new dispatch evidence" >/dev/null
++python3 "$CTRL" report --case "$CASE3" --confirm --evidence "confirmation" >/dev/null
++if python3 "$CTRL" report --case "$CASE3" --verdict finding --evidence "same cycle retry" \
++    --correction --cycle-id "$TOKEN5" --supersedes finding --auditor c1e00008 \
++    --reason_code retry --why_stronger "retry after confirmation" 2>/dev/null; then
++    echo "same-cycle correction after confirmation must be refused" >&2; exit 1
++fi
++# After confirmation, the same identity remains spent; a fresh current token
++# can be issued only for a separate dispatch.
++TOKEN6=66666666666666666666666666666666
++VICHE_AUDIT_CYCLE_ID=$TOKEN6
++printf '%s\n' "$TOKEN6" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000004\t%s\n' "$TOKEN6" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++if python3 "$CTRL" report --case "$CASE3" --verdict finding --evidence "missing token" \
++    --correction --supersedes inconclusive --auditor c1e00008 \
++    --reason_code missing --why_stronger "missing" 2>/dev/null; then
++    echo "missing cycle token must fail closed" >&2; exit 1
++fi
++CASE4=ababababababababab
++printf '{"case_id":"%s","population":"ignored_work","id":"304","at":2000000000}\n' \
++    "$CASE4" > "$scratch/state/oversight/random/cases/$CASE4.json"
++TOKEN19=abababababababababababababababab
++VICHE_AUDIT_CYCLE_ID=$TOKEN19
++printf '%s\n' "$TOKEN19" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000011\t%s\n' "$TOKEN19" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++python3 "$CTRL" report --case "$CASE4" --verdict not_assigned --evidence "forged case original" >/dev/null
++
++# Legacy correction history without cycle_id remains untouched/unclassified.
++TOKEN11=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc
++VICHE_AUDIT_CYCLE_ID=$TOKEN11
++printf '%s\n' "$TOKEN11" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000008\t%s\n' "$TOKEN11" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++python3 "$CTRL" report --case "$CASE2" --verdict not_assigned --evidence "old original" >/dev/null
++legacy_trail="$scratch/town/records/oversight/corrections/$CASE2.jsonl"
++printf '{"case_id":"%s","correction":true,"confirmed":true}\n' "$CASE2" > "$legacy_trail"
++cp "$legacy_trail" "$scratch/legacy-before"
++TOKEN12=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd
++VICHE_AUDIT_CYCLE_ID=$TOKEN12
++printf '%s\n' "$TOKEN12" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000009\t%s\n' "$TOKEN12" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++if python3 "$CTRL" report --case "$CASE2" --verdict finding --evidence "fresh evidence" \
++    --correction --cycle-id "$TOKEN12" --supersedes not_assigned --auditor c1e00008 \
++    --reason_code legacy --why_stronger "fresh evidence" 2>/dev/null; then
++    echo "legacy correction trail without cycle_id must fail closed" >&2; exit 1
++fi
++cmp "$scratch/legacy-before" "$legacy_trail"
++
++# A legacy correction row is preserved, but its absent identity cannot be
++# assigned a guessed cycle or used as a safe basis for a new correction.
++legacy_case=989898989898989898
++printf '{"case_id":"%s","population":"ignored_work","id":"308","at":2000000000}\n' \
++    "$legacy_case" > "$scratch/state/oversight/random/cases/$legacy_case.json"
++TOKEN15=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
++VICHE_AUDIT_CYCLE_ID=$TOKEN15
++printf '%s\n' "$TOKEN15" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000012\t%s\n' "$TOKEN15" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++python3 "$CTRL" report --case "$legacy_case" --verdict not_assigned --evidence "before old trail" >/dev/null
++legacy_trail="$scratch/town/records/oversight/corrections/$legacy_case.jsonl"
++printf '{"case_id":"%s","correction":true,"confirmed":true}\n' "$legacy_case" > "$legacy_trail"
++cp "$legacy_trail" "$scratch/legacy-before"
++TOKEN16=ffffffffffffffffffffffffffffffff
++VICHE_AUDIT_CYCLE_ID=$TOKEN16
++printf '%s\n' "$TOKEN16" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000013\t%s\n' "$TOKEN16" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++if python3 "$CTRL" report --case "$legacy_case" --verdict finding --evidence "new" \
++    --correction --cycle-id "$TOKEN16" --supersedes not_assigned --auditor c1e00008 \
++    --reason_code old_trail --why_stronger "new" 2>/dev/null; then
++    echo "legacy authoritative correction without cycle_id must fail closed" >&2; exit 1
++fi
++cmp "$scratch/legacy-before" "$legacy_trail"
++
++malformed_case=999999999999999999
++printf '{"case_id":"%s","population":"ignored_work","id":"307","at":2000000000}\n' \
++    "$malformed_case" > "$scratch/state/oversight/random/cases/$malformed_case.json"
++TOKEN13=cccccccccccccccccccccccccccccccc
++VICHE_AUDIT_CYCLE_ID=$TOKEN13
++printf '%s\n' "$TOKEN13" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000010\t%s\n' "$TOKEN13" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++python3 "$CTRL" report --case "$malformed_case" --verdict not_assigned --evidence "prior" >/dev/null
++malformed_trail="$scratch/town/records/oversight/corrections/$malformed_case.jsonl"
++printf '{"case_id":"%s","correction":true,"confirmed":true}\nnot-json\n' \
++    "$malformed_case" > "$malformed_trail"
++TOKEN9=99999999999999999999999999999999
++VICHE_AUDIT_CYCLE_ID=$TOKEN9
++printf '%s\n' "$TOKEN9" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000000\t%s\n' "$TOKEN9" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++if python3 "$CTRL" report --case "$malformed_case" --verdict finding --evidence "new" \
++    --correction --cycle-id "$TOKEN9" --supersedes not_assigned --auditor c1e00008 \
++    --reason_code malformed --why_stronger "stronger" 2>/dev/null; then
++    echo "malformed authoritative correction trail did not fail closed" >&2; exit 1
++fi
++[ "$(wc -l < "$malformed_trail")" -eq 2 ]
++
++# A current-token file without the matching durable dispatch-ledger entry is
++# forged and rejected; no environment variable alone creates a dispatch.
++no_token_case=979797979797979797
++printf '{"case_id":"%s","population":"ignored_work","id":"309","at":2000000000}\n' \
++    "$no_token_case" > "$scratch/state/oversight/random/cases/$no_token_case.json"
++TOKEN17=abababababababababababababababab
++VICHE_AUDIT_CYCLE_ID=$TOKEN17
++printf '%s\n' "$TOKEN17" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000014\t%s\n' "$TOKEN17" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++export VICHE_AUDIT_CYCLE_ID
++python3 "$CTRL" report --case "$no_token_case" --verdict not_assigned --evidence "no-token prior" >/dev/null
++rm "$scratch/state/oversight/current-audit-cycle"
++if python3 "$CTRL" report --case "$no_token_case" --verdict finding --evidence "no current dispatch" \
++    --correction --cycle-id "$TOKEN17" --supersedes not_assigned --auditor c1e00008 \
++    --reason_code no_current --why_stronger "should fail closed" 2>/dev/null; then
++    echo "missing current dispatch token accepted" >&2; exit 1
++fi
++TOKEN10=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab
++VICHE_AUDIT_CYCLE_ID=$TOKEN10
++printf '%s\n' "$TOKEN10" > "$scratch/state/oversight/current-audit-cycle"
++if python3 "$CTRL" report --case "$CASE4" --verdict finding --evidence "forged dispatch" \
++    --correction --cycle-id "$TOKEN10" --supersedes not_assigned --auditor c1e00008 \
++    --reason_code forged --why_stronger "unsupported" 2>/dev/null; then
++    echo "unledgered dispatch token accepted" >&2; exit 1
++fi
++# Two CLI submissions racing for the SAME case and cycle must not both
++# pass the read/check/append gate. This is a real concurrent-process test.
++RACE_CASE=454545454545454545
++RACE_TOKEN=45454545454545454545454545454545
++printf '{"case_id":"%s","population":"ignored_work","id":"301","at":2000000000}\n' \
++  "$RACE_CASE" > "$scratch/state/oversight/random/cases/$RACE_CASE.json"
++printf '%s\n' "$RACE_TOKEN" > "$scratch/state/oversight/current-audit-cycle"
++printf '2000000020\t%s\n' "$RACE_TOKEN" >> "$scratch/state/oversight/audit-cycle-identities.tsv"
++python3 "$CTRL" report --case "$RACE_CASE" --verdict not_assigned --evidence "baseline" >/dev/null
++for contender in first second; do
++ (
++  set +e
++  python3 "$CTRL" report --case "$RACE_CASE" --verdict finding \
++    --evidence "strong-$contender" --correction --cycle-id "$RACE_TOKEN" \
++    --supersedes not_assigned --auditor c1e00008 --reason_code parallel \
++    --why_stronger "verified-new-$contender" > "$scratch/race-$contender.out" 2> "$scratch/race-$contender.err"
++  echo "$?" > "$scratch/race-$contender.rc"
++ ) &
++done
++wait
++a=$(cat "$scratch/race-first.rc")
++b=$(cat "$scratch/race-second.rc")
++if ! { [ "$a" -eq 0 ] && [ "$b" -ne 0 ]; } &&
++   ! { [ "$b" -eq 0 ] && [ "$a" -ne 0 ]; }; then
++  echo "Concurrent same-cycle correction cap was bypassed: $a $b" >&2
++  exit 1
++fi
++[ "$(wc -l < "$scratch/town/records/oversight/corrections/$RACE_CASE.jsonl")" -eq 1 ]
++# Historical failure: a state cache advertises corrected_finding but its
++# two correction rows were never Git anchored. Act17 §2.2 keeps the original
++# finding operative. Do not create an imaginary independent confirmation.
++UNANCHORED=787878787878787878
++printf '{"case_id":"%s","population":"ignored_work","id":"999","at":2000000000}\n' \
++  "$UNANCHORED" > "$scratch/state/oversight/random/cases/$UNANCHORED.json"
++printf '{"case_id":"%s","verdict":"not_assigned","at":2000000000,"evidence_ref":"cached unanchored retraction","corrected_from_finding":true,"correction_pending":false,"history":[{"correction":true,"confirmed":true,"supersedes":"finding","verdict":"not_assigned"}]}\n' \
++  "$UNANCHORED" > "$scratch/state/oversight/random/outcomes/$UNANCHORED.json"
++python3 "$CTRL" check > "$scratch/check"
++jq -e --arg c "$UNANCHORED" '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' "$scratch/check" >/dev/null
++jq -e --arg c "$UNANCHORED" '.signals[]|select(.type=="unresolved_finding" and .case_id==$c)' "$scratch/check" >/dev/null
++if jq -e --arg c "$UNANCHORED" '.signals[]|select(.type=="corrected_finding" and .case_id==$c)' "$scratch/check" >/dev/null; then
++  echo 'Uncommitted cache falsely corrected an unresolved finding' >&2; exit 1
++fi
++# Exact historical failure pattern: original inconclusive -> (unanchored)
++# finding -> (unanchored) not_assigned. Both invalid corrections cannot
++# generate corrected_finding or turn the original inconclusive into finding.
++TWO_STEP=898989898989898989
++printf '{"case_id":"%s","population":"ignored_work","id":"998","at":2000000000}\n' \
++ "$TWO_STEP" > "$scratch/state/oversight/random/cases/$TWO_STEP.json"
++printf '{"case_id":"%s","verdict":"not_assigned","at":2000000000,"evidence_ref":"cached second retraction","corrected_from_finding":true,"history":[{"correction":true,"confirmed":true,"supersedes":"inconclusive","verdict":"finding"},{"correction":true,"confirmed":true,"supersedes":"finding","verdict":"not_assigned"}]}\n' \
++ "$TWO_STEP" > "$scratch/state/oversight/random/outcomes/$TWO_STEP.json"
++python3 "$CTRL" check > "$scratch/check"
++jq -e --arg c "$TWO_STEP" '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' "$scratch/check" >/dev/null
++if jq -e --arg c "$TWO_STEP" '.signals[]|select((.type=="corrected_finding" or .type=="unresolved_finding") and .case_id==$c)' "$scratch/check" >/dev/null; then
++ echo 'Unanchored two-step history changed original inconclusive verdict' >&2;exit 1
++fi
+ echo 'Act 17 audit correction smoke passed'
+diff --git a/tests/audit-cycle-identity-smoke.sh b/tests/audit-cycle-identity-smoke.sh
+new file mode 100644
+index 00000000..904f448b
+--- /dev/null
++++ b/tests/audit-cycle-identity-smoke.sh
+@@ -0,0 +1,87 @@
++#!/bin/sh
++# A frozen sampled cohort, not each incident dispatch, is one correction cycle.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++mkdir -p "$d/town/government" "$d/state/oversight/random" "$d/seats/branches/judiciary" "$d/bin"
++cp "$repo/government/audit-cycle.sh" "$d/town/government/audit-cycle.sh"
++printf 'Charter\n' > "$d/charter"
++printf 'observation\n' > "$d/state/oversight/observations.tsv"
++printf 'incident\n' > "$d/state/oversight/incident.json"
++cat > "$d/town/government/appointments.sh" <<'APPOINT'
++#!/bin/sh
++printf 'judicial-fixture-agent\n'
++APPOINT
++cat > "$d/town/government/audit-selection.py" <<'SAMPLE'
++import json,os,pathlib
++now=int(os.environ['VICHE_OVERSIGHT_NOW'])
++r=pathlib.Path(os.environ['VICHE_STATE_ROOT'])/'oversight/random'
++v={'at':now,'seed_after_snapshot':'b'*64,
++   'cases':[{'case_id':'0123456789abcdef01'}]}
++(r/'latest.json').write_text(json.dumps(v)+'\n')
++print(json.dumps(v))
++SAMPLE
++cat > "$d/bin/antonina" <<'ANTONINA'
++#!/bin/sh
++case "$1 $2" in
++ 'agent status') printf '{"state":"idle"}\n' ;;
++ 'agent run')
++    root=$VICHE_STATE_ROOT/oversight
++    [ -s "$root/current-audit-cycle" ] || exit 3
++    token=$(cat "$root/current-audit-cycle")
++    awk -F '\t' -v t="$token" '$2==t{found++} END{exit found!=1}' \
++      "$root/audit-cycle-identities.tsv" || exit 4
++    printf '%s\n' "$token" >> "$MOCK_RUNS"
++    [ "${MOCK_FAIL_RUN:-no}" != yes ] ;;
++ *) echo "Unexpected Antonina: $*" >&2; exit 2 ;;
++esac
++ANTONINA
++chmod +x "$d/town/government/appointments.sh" "$d/bin/antonina"
++base=2000000000
++python3 - "$d/state/oversight/random/latest.json" "$base" <<'PY'
++import json,sys
++open(sys.argv[1],'w').write(json.dumps({'at':int(sys.argv[2]),
++ 'seed_after_snapshot':'a'*64,'cases':[{'case_id':'0123456789abcdef01'}]})+'\n')
++PY
++export VICHE_STATE_ROOT="$d/state" VICHE_TOWN_ROOT="$d/town" \
++ VICHE_SEATS_ROOT="$d/seats" VICHE_CONSTITUTION="$d/charter" \
++ VICHE_OVERSIGHT_NOW="$base" VICHE_AUDIT_CHECKS=0 VICHE_AUDIT_SELECTION=1 \
++ MOCK_RUNS="$d/runs" PATH="$d/bin:$PATH"
++run() { /bin/sh "$d/town/government/audit-cycle.sh"; }
++run
++first=$(cat "$d/state/oversight/current-audit-cycle")
++[ "${#first}" -eq 32 ]
++[ "$(wc -l < "$d/state/oversight/audit-cycle-identities.tsv")" -eq 1 ]
++[ "$(wc -l < "$MOCK_RUNS")" -eq 1 ]
++
++# The incident-driven 30min dispatch retains the same frozen sample.
++VICHE_OVERSIGHT_NOW=$((base+1801));export VICHE_OVERSIGHT_NOW
++run
++second=$(cat "$d/state/oversight/current-audit-cycle")
++[ "$second" = "$first" ] || { echo 'Duplicate cycle for frozen batch' >&2; exit 1; }
++[ "$(wc -l < "$d/state/oversight/audit-cycle-identities.tsv")" -eq 1 ]
++[ "$(wc -l < "$MOCK_RUNS")" -eq 2 ]
++
++# A fresh sample after six hours opens a new legally distinguishable cycle.
++VICHE_OVERSIGHT_NOW=$((base+21601));export VICHE_OVERSIGHT_NOW
++run
++third=$(cat "$d/state/oversight/current-audit-cycle")
++[ "$third" != "$first" ] || exit 1
++[ "$(wc -l < "$d/state/oversight/audit-cycle-identities.tsv")" -eq 2 ]
++[ "$(wc -l < "$MOCK_RUNS")" -eq 3 ]
++
++# Ambiguous detached launch must have durable token before it starts and
++# cannot cause an immediate duplicate dispatch on retry.
++VICHE_OVERSIGHT_NOW=$((base+43202));export VICHE_OVERSIGHT_NOW
++if MOCK_FAIL_RUN=yes run >/dev/null 2>&1; then
++ echo 'Ambiguous launch unexpectedly succeeded' >&2; exit 1
++fi
++fourth=$(cat "$d/state/oversight/current-audit-cycle")
++[ "$fourth" != "$third" ] || exit 1
++[ "$(wc -l < "$d/state/oversight/audit-cycle-identities.tsv")" -eq 3 ]
++before=$(wc -l < "$MOCK_RUNS")
++run
++[ "$(wc -l < "$MOCK_RUNS")" -eq "$before" ] ||
++ { echo 'Immediate duplicate after ambiguous launch' >&2; exit 1; }
++echo 'Act17 frozen-sample identity and pre-launch durability passed'

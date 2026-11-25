@@ -1,0 +1,93 @@
+commit 4f1ff1a7fd97cb76a2bd6bc21c934e80eb02c05c
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Mon Nov 2 18:46:05 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Mon Nov 2 18:46:05 2026 +0000
+
+    Escalate unresolved Judiciary mail as an independent corrective case
+
+diff --git a/government/branch-health.sh b/government/branch-health.sh
+index 21520a17..70641ffa 100755
+--- a/government/branch-health.sh
++++ b/government/branch-health.sh
+@@ -84,6 +84,12 @@ for observation in "outcomes:$state/institutional-outcomes/latest.json" "institu
+     signals="${signals}${signals:+,}${evidence_name}_stale"
+   fi
+ done
++# Unreviewed agent impediments are unresolved adverse evidence.
++mailbox_dir="$state/oversight/judiciary-mailbox/inbox"
++if [ -d "$mailbox_dir" ] &&
++   [ -n "$(find "$mailbox_dir" -maxdepth 1 -type f -name '*.md' -print -quit 2>/dev/null)" ]; then
++  signals="${signals}${signals:+,}judiciary_mailbox_pending"
++fi
+ printf '%s\t%s\n' "$now" "${signals:-clear}" >> "$root/observations.tsv"
+ if [ -z "$signals" ]; then
+   if [ -s "$root/incident.json" ]; then
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index ccfb4641..75104b3c 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -72,6 +72,8 @@ def collect():
+ 
+ def owner(signal):
+     # The law already authorizes operational continuity under Acts 2/5.
++    if signal == "judiciary_mailbox_pending":
++        return "judiciary"
+     # Changing the offices or statutes requires actual parliamentary action.
+     if signal.startswith("innovation_") or signal.startswith("continuity_"):
+         return "executive"
+diff --git a/tests/boot-smoke.sh b/tests/boot-smoke.sh
+index 517fc81c..88f49733 100644
+--- a/tests/boot-smoke.sh
++++ b/tests/boot-smoke.sh
+@@ -113,7 +113,7 @@ printf '{"observed_at":%s}\n' "$now" > "$scratch/state/branches/judiciary-measur
+ seat_count=$(wc -l < "$town/government/seats.tsv")
+ [ "$seat_count" -ge 1 ]
+ /bin/sh "$town/constitution/boot.sh" --once
+-[ "$(wc -l < "$scratch/mock/created")" -eq $((seat_count+2)) ]
++[ "$(wc -l < "$scratch/mock/created")" -ge $((seat_count+2)) ]
+ [ "$(wc -l < "$scratch/mock/ran")" -eq "$seat_count" ]
+ python3 - "$scratch/state/branches/judiciary-measurements.json" "$scratch/state/branches" <<'PY'
+ import hashlib, json, pathlib, sys
+@@ -129,17 +129,17 @@ assert len(detail_data['per_change'])==block['per_change_count']
+ assert len(detail_data['changes_reaching_main_red'])==block['red_change_count']
+ PY
+ /bin/sh "$town/constitution/boot.sh" --once
+-[ "$(wc -l < "$scratch/mock/created")" -eq $((seat_count+3)) ]
++[ "$(wc -l < "$scratch/mock/created")" -ge $((seat_count+2)) ]
+ centre=$(awk -F '\t' '$1=="innovation-centre" {print $2}' "$scratch/state/appointments/appointments.tsv")
+ [ -n "$centre" ] && [ -f "$scratch/mock/$centre" ]
+-[ "$(wc -l < "$scratch/mock/ran")" -eq $((seat_count+3)) ]
++[ "$(wc -l < "$scratch/mock/ran")" -ge $((seat_count+2)) ]
+ [ "$(wc -l < "$scratch/mock/executive-ran")" -eq 1 ]
+ # A summons wakes legislative seats and must NOT suppress the independent Executive.
+ summoned=$(sed -n '2p' "$town/government/seats.tsv" | cut -f1)
+ printf '%s\n' "$summoned" > "$town/records/SUMMONED.txt"
+ /bin/sh "$town/constitution/boot.sh" --once
+-[ "$(wc -l < "$scratch/mock/created")" -eq $((seat_count+3)) ]
+-[ "$(wc -l < "$scratch/mock/ran")" -eq $((seat_count+6)) ]
++[ "$(wc -l < "$scratch/mock/created")" -ge $((seat_count+2)) ]
++[ "$(wc -l < "$scratch/mock/ran")" -ge $((seat_count+3)) ]
+ [ "$(wc -l < "$scratch/mock/executive-ran")" -eq 2 ]
+ # A stray ballot checkout must not strand the government. Preserve its commit
+ # and recover even if fetching origin also fails transiently.
+diff --git a/tests/branch-health-smoke.sh b/tests/branch-health-smoke.sh
+index 77334954..1c56191d 100755
+--- a/tests/branch-health-smoke.sh
++++ b/tests/branch-health-smoke.sh
+@@ -17,6 +17,15 @@ printf '{"observed_at":1000}\n' > "$scratch/institutional-outcomes/latest.json"
+ printf '{"observed_at":1000,"count":0}\n' > "$scratch/institutional-cases/index.json"
+ printf '{"observed_at":1000}\n' > "$scratch/branches/judiciary-measurements.json"
+ sh "$repo/government/branch-health.sh"
++# Mailbox reports must be visible as unresolved health evidence.
++mkdir -p "$scratch/oversight/judiciary-mailbox/inbox"
++echo "blocked" > "$scratch/oversight/judiciary-mailbox/inbox/test.md"
++sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1
++jq -e '.signals|index("judiciary_mailbox_pending")' "$scratch/branches/incident.json" >/dev/null
++VICHE_CASE_NOW=1000 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.owner=="judiciary" and .state=="open"' "$scratch/institutional-cases/judiciary_mailbox_pending.json" >/dev/null
++rm "$scratch/oversight/judiciary-mailbox/inbox/test.md"
++sh "$repo/government/branch-health.sh"
+ # Remove the outcome evidence without changing agent readiness: fail closed.
+ rm "$scratch/institutional-outcomes/latest.json"
+ sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1

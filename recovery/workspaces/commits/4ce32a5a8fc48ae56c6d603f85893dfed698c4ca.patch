@@ -1,0 +1,194 @@
+commit 4ce32a5a8fc48ae56c6d603f85893dfed698c4ca
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Wed Nov 25 03:10:55 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Wed Nov 25 03:10:55 2026 +0000
+
+    Integrate delivery/economy-refresh-isolation-20261125 (economy): Economy: isolate refresh from live ladder; drop suite-status hand-edits
+    
+    Landed by the integration queue (Act 31) as one candidate on main a855b4c56e11.
+    
+    Delivery-Branch: delivery/economy-refresh-isolation-20261125
+    Delivery-Head: 9c158c2b51c30e3c5f8cf4acaabd323e58847fab
+    Proposed-By: economy
+    Reviewed-By: reviewer-4gd8ajqlxzibfjevxduuhc-stubble
+    Review-Reason: Change matches its message: a pure noncanonical_refusal() guard closes the scratch-with-real-HOME bypass using fixed production paths, backed by adversarial smoke tests and scratch XDG pinning; the suite-status.json hand-edits that caused the prior rejection are dropped. Only economy-models.py and t
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/economy-models.py b/government/economy-models.py
+index 9b37fe2a..4f4cc7a6 100644
+--- a/government/economy-models.py
++++ b/government/economy-models.py
+@@ -58,6 +58,14 @@ COOLDOWNS = pathlib.Path(os.environ.get(
+         os.environ.get("XDG_STATE_HOME", str(HOME / ".local" / "state")))) / "antonina" / "model-cooldowns")))
+ LIVE_TOWN = pathlib.Path("/var/lib/lubko/wd/viche")
+ LIVE_STATE = pathlib.Path("/var/lib/lubko/wd/viche-state")
++# The production ladder lives under the canonical home, never under whatever
++# HOME/XDG a caller happens to inherit. These absolute paths are the authority
++# for "live" in the noncanonical guard below; deriving it from Path.home() or
++# XDG_CONFIG_HOME lets a scratch invocation point VICHE_ANTONINA_CONFIG at the
++# real ladder while disguising it as a fixture.
++LIVE_HOME = pathlib.Path("/home/lubko")
++LIVE_CONFIG = LIVE_HOME / ".config/antonina/config.json"
++LIVE_COOLDOWNS = LIVE_HOME / ".local/state/antonina/model-cooldowns"
+ MAX_MODELS = int(os.environ.get("VICHE_ECONOMY_MAX_MODELS", "32"))
+ PROBE_FRESH_SECONDS = 14 * 86400
+ PROBE_TIMEOUT = int(os.environ.get("VICHE_ECONOMY_PROBE_TIMEOUT", "120"))
+@@ -506,22 +514,42 @@ def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, cur
+     }
+ 
+ 
+-def refresh(args):
+-    # Smoke tests and temporary checkouts must never probe or rewrite the
+-    # production Antonina service, even when inherited HOME is real.
++def noncanonical_refusal():
++    """Reason string when a noncanonical invocation would touch live state, else None.
++
++    Pure: reads module constants and the environment only. It performs no
++    discovery and no writes, so callers (including tests) can check the gate
++    safely before any refresh can publish a ladder.
++    """
+     canonical = (pathlib.Path(__file__).resolve().parent.parent == LIVE_TOWN
+                  and STATE.resolve() == LIVE_STATE
+                  and pathlib.Path(os.environ.get("VICHE_TOWN_ROOT", str(LIVE_TOWN))).resolve() == LIVE_TOWN)
+-    if not canonical:
+-        fixture = all(os.environ.get(k) for k in (
+-            "VICHE_ANTONINA_CONFIG", "VICHE_ANTONINA_COOLDOWNS", "VICHE_OPENCODE_MODELS"))
+-        live_config = pathlib.Path.home() / ".config/antonina/config.json"
+-        live_cooldowns = pathlib.Path.home() / ".local/state/antonina/model-cooldowns"
+-        if (not fixture or CONFIG.resolve() == live_config.resolve()
+-                or COOLDOWNS.resolve() == live_cooldowns.resolve()
+-                or STATE.resolve() == LIVE_STATE):
+-            print("economy: noncanonical refresh skipped before discovery or writes", file=sys.stderr)
+-            return 1
++    if canonical:
++        return None
++    fixture = all(os.environ.get(k) for k in (
++        "VICHE_ANTONINA_CONFIG", "VICHE_ANTONINA_COOLDOWNS", "VICHE_OPENCODE_MODELS"))
++    # Compare against BOTH the fixed production paths and the caller's
++    # HOME-derived paths. An inherited real HOME or XDG_CONFIG_HOME must never
++    # make the real ladder look like a scratch fixture (and a scratch HOME must
++    # never hide a VICHE_ANTONINA_CONFIG that points at live).
++    live_configs = (LIVE_CONFIG.resolve(),
++                    (pathlib.Path.home() / ".config/antonina/config.json").resolve())
++    live_cooldowns = (LIVE_COOLDOWNS.resolve(),
++                      (pathlib.Path.home() / ".local/state/antonina/model-cooldowns").resolve())
++    if (not fixture or CONFIG.resolve() in live_configs
++            or COOLDOWNS.resolve() in live_cooldowns
++            or STATE.resolve() == LIVE_STATE):
++        return "noncanonical refresh skipped before discovery or writes"
++    return None
++
++
++def refresh(args):
++    # Smoke tests and temporary checkouts must never probe or rewrite the
++    # production Antonina service, even when inherited HOME is real.
++    refusal = noncanonical_refusal()
++    if refusal is not None:
++        print("economy: " + refusal, file=sys.stderr)
++        return 1
+     current = now()
+     ROOT.mkdir(parents=True, exist_ok=True)
+     cfg = read_config()
+diff --git a/tests/economy-cycle-smoke.sh b/tests/economy-cycle-smoke.sh
+index 24c7d637..07287d35 100644
+--- a/tests/economy-cycle-smoke.sh
++++ b/tests/economy-cycle-smoke.sh
+@@ -60,7 +60,11 @@ git -C "$d/town" -c user.name=t -c user.email=t@example.invalid commit -qm fixtu
+ printf 'Founder test constitution\n' > "$d/constitution"
+ mkdir -p "$d/state/economy"
+ printf '{"at":"x","funding_risk":"none","free_available_now":3,"order":[],"probes_run":[]}\n' > "$d/state/economy/report.json"
++# Keep the dispatcher's inherited host XDG pointers on scratch too: this test
++# stubs economy-models.py, but the real dispatcher reads these variables, and a
++# leaked /home/lubko/.config must never be reachable from a scratch checkout.
+ export PATH="$d/bin:$PATH" VICHE_TOWN_ROOT="$d/town" VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state" \
++  ANTONINA_HOST_XDG_CONFIG_HOME="$d/xdg-config" ANTONINA_HOST_XDG_STATE_HOME="$d/xdg-state" \
+   VICHE_CONSTITUTION="$d/constitution" MODE=idle DISPATCHES="$d/runs" MOCK_REFRESH_LOG="$d/refresh.log" \
+   MOCK_RESOURCES_LOG="$d/resources.log"
+ : > "$d/runs"; : > "$d/refresh.log"; : > "$d/resources.log"
+diff --git a/tests/economy-models-smoke.sh b/tests/economy-models-smoke.sh
+index 070cb08c..503c98ee 100644
+--- a/tests/economy-models-smoke.sh
++++ b/tests/economy-models-smoke.sh
+@@ -31,7 +31,12 @@ fi
+ jq -r '.models[].model' "$VICHE_ANTONINA_CONFIG"
+ MOCK
+ chmod +x "$d/bin/opencode" "$d/bin/antonina"
++# Pin every host XDG pointer to this test's scratch roots. The ambient runner
++# may inherit ANTONINA_HOST_XDG_CONFIG_HOME=/home/lubko/.config; leaving it set
++# would make the real ladder reachable by any path that prefers the host XDG
++# variable over VICHE_ANTONINA_CONFIG.
+ export PATH="$d/bin:$PATH" MOCK_PROBES="$d/probes.log" HOME="$d/home" \
++  ANTONINA_HOST_XDG_CONFIG_HOME="$d/cfg" ANTONINA_HOST_XDG_STATE_HOME="$d/xdg-state" \
+   VICHE_STATE_ROOT="$d/state" VICHE_ANTONINA_CONFIG="$d/cfg/config.json" \
+   VICHE_ANTONINA_COOLDOWNS="$d/cool" VICHE_ANTONINA_MODEL_HEALTH="$d/health" \
+   VICHE_OPENCODE_MODELS="$d/catalogue.txt" VICHE_ECONOMY_NOW=1794830400
+@@ -271,4 +276,68 @@ jq -e '.models[0].comment == "" and .models[0].variant == "low"' "$VICHE_ANTONIN
+ before=$(cat "$VICHE_ANTONINA_CONFIG")
+ (unset VICHE_OPENCODE_MODELS; $eco refresh) && exit 1
+ test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$before"
++
++# Adversarial: the live ladder stays untouched even when the caller inherits a
++# real HOME/XDG_CONFIG_HOME/ANTONINA_HOST_XDG_* environment. On the host the
++# live file exists; on CI it does not, and must not be created by any of this.
++live_cfg=/home/lubko/.config/antonina/config.json
++if [ -f "$live_cfg" ]; then
++  live_before=$(sha256sum "$live_cfg" | cut -d' ' -f1)
++else
++  live_before=absent
++fi
++check_live_untouched() {
++  if [ -f "$live_cfg" ]; then
++    test "$(sha256sum "$live_cfg" | cut -d' ' -f1)" = "$live_before"
++  else
++    test ! -e "$live_cfg"
++  fi
++}
++
++# (a) Real HOME/XDG but no VICHE_ANTONINA_CONFIG fixture: discovery cannot start.
++rc=0
++env -u VICHE_ANTONINA_CONFIG -u VICHE_ANTONINA_COOLDOWNS \
++  HOME=/home/lubko ANTONINA_HOST_XDG_CONFIG_HOME=/home/lubko/.config \
++  ANTONINA_HOST_XDG_STATE_HOME=/home/lubko/.local/state \
++  VICHE_TOWN_ROOT="$repo" VICHE_STATE_ROOT="$d/state" \
++  VICHE_OPENCODE_MODELS="$d/catalogue.txt" \
++  python3 "$repo/government/economy-models.py" refresh --probe-limit 0 2>"$d/live-refuse-a.err" || rc=$?
++test "$rc" -eq 1
++grep -q 'noncanonical refresh skipped' "$d/live-refuse-a.err"
++
++# (b) The bypass the guard must close: fixture vars are set and resolve to the
++# real ladder while HOME points at scratch. Assert the gate in-process (pure,
++# no writes), then invoke refresh and prove it refuses before discovery/writes.
++env HOME="$d/home" ANTONINA_HOST_XDG_CONFIG_HOME=/home/lubko/.config \
++  ANTONINA_HOST_XDG_STATE_HOME=/home/lubko/.local/state \
++  VICHE_ANTONINA_CONFIG="$live_cfg" \
++  VICHE_ANTONINA_COOLDOWNS=/home/lubko/.local/state/antonina/model-cooldowns \
++  VICHE_STATE_ROOT="$d/state" VICHE_TOWN_ROOT="$repo" \
++  VICHE_OPENCODE_MODELS="$d/catalogue.txt" \
++  python3 - "$repo" <<'PY'
++import importlib.util, pathlib, sys
++spec = importlib.util.spec_from_file_location("eco", pathlib.Path(sys.argv[1])/"government/economy-models.py")
++m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
++reason = m.noncanonical_refusal()
++assert reason is not None, "guard would allow a noncanonical refresh of the live ladder"
++assert "noncanonical" in reason
++PY
++rc=0
++env HOME="$d/home" ANTONINA_HOST_XDG_CONFIG_HOME=/home/lubko/.config \
++  ANTONINA_HOST_XDG_STATE_HOME=/home/lubko/.local/state \
++  VICHE_ANTONINA_CONFIG="$live_cfg" \
++  VICHE_ANTONINA_COOLDOWNS=/home/lubko/.local/state/antonina/model-cooldowns \
++  VICHE_STATE_ROOT="$d/state" VICHE_TOWN_ROOT="$repo" \
++  VICHE_OPENCODE_MODELS="$d/catalogue.txt" \
++  python3 "$repo/government/economy-models.py" refresh --probe-limit 0 2>"$d/live-refuse-b.err" || rc=$?
++test "$rc" -eq 1
++grep -q 'noncanonical refresh skipped' "$d/live-refuse-b.err"
++
++# (c) A properly isolated scratch refresh with the real HOME/XDG inherited still
++# writes only scratch; the live ladder is byte-for-byte unchanged.
++env HOME=/home/lubko ANTONINA_HOST_XDG_CONFIG_HOME=/home/lubko/.config \
++  ANTONINA_HOST_XDG_STATE_HOME=/home/lubko/.local/state VICHE_ECONOMY_NOW=1794837700 \
++  python3 "$repo/government/economy-models.py" refresh --probe-limit 0 >/dev/null
++check_live_untouched
++
+ echo 'economy models smoke passed'

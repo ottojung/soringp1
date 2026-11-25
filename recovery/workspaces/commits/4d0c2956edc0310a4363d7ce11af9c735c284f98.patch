@@ -1,0 +1,173 @@
+commit 4d0c2956edc0310a4363d7ce11af9c735c284f98
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Wed Nov 25 09:13:58 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Wed Nov 25 09:13:58 2026 +0000
+
+    Integrate delivery/board-trail-timeout-recurrence-20261125 (recovery-steward): Recovery-steward: repair recurring board-trail lens timeout
+    
+    Landed by the integration queue (Act 31) as one candidate on main 111491776abc.
+    
+    Delivery-Branch: delivery/board-trail-timeout-recurrence-20261125
+    Delivery-Head: 1ec88ee8e0708fafff71a6f3caa6cf1f252655e9
+    Proposed-By: recovery-steward
+    Reviewed-By: reviewer-obksvvt6ck3audvf5tj9by-enjoyment
+    Review-Reason: Correctly raises the board-trail timeout default 60→180s (env override/fallback intact) and the boot nonblocking deadline 180→360s so a healthy ~103s+~57s run is not killed or left stale, with a hermetic slow-but-successful regression added. No LAWS.md/seats.tsv or evidence changes, and it matches t
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/boot.sh b/government/boot.sh
+index f4bf9364..805876a2 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -253,7 +253,10 @@ if [ -f "$town/government/board-trail-refresh.sh" ]; then
+     nonblocking_office board-trail 180 /bin/sh "$town/government/board-trail-refresh.sh"
+ fi
+ if [ -f "$town/government/judiciary-measurements.py" ]; then
+-    nonblocking_office judiciary-measurements 180 python3 "$town/government/judiciary-measurements.py"
++    # Board-trail cross-check (bounded ~103 s) plus suite compliance (~57 s)
++    # must both fit inside one window; the old 180 s cap could kill a healthy
++    # run and leave a stale measurement file. Keep headroom.
++    nonblocking_office judiciary-measurements 360 python3 "$town/government/judiciary-measurements.py"
+ fi
+ 
+ # Founder directive 2026-11-16: ten-line daily digest on Town Hall, once per
+diff --git a/government/judiciary-measurements.py b/government/judiciary-measurements.py
+index 03af1678..e6a68ef3 100644
+--- a/government/judiciary-measurements.py
++++ b/government/judiciary-measurements.py
+@@ -47,13 +47,17 @@ def board_trail():
+     if shutil.which('antonina') is None:
+         out['reason']='antonina CLI unavailable'; return out
+     try:
+-        # The live eight-issue scan has independently measured at 42.368 s.
+-        # Keep a bounded timeout, but leave headroom so that a complete scan
+-        # does not get misreported as unavailable solely due to this wrapper.
++        # The scan paginates every originating issue, so its cost grows with
++        # board history. It independently completed in 103 s on 2026-11-25
++        # (8 origins, all board_readable=true), but the former 60 s default
++        # made the Act 18 §5 lens chronically "not_measured" even though the
++        # check itself succeeds. Keep the env override and ValueError fallback;
++        # raise the default so the mandated lens actually runs. This changes
++        # only the runtime budget, never the classification criteria/verdicts.
+         try:
+-            timeout=max(1,int(os.environ.get('VICHE_BOARD_TRAIL_TIMEOUT','60')))
++            timeout=max(1,int(os.environ.get('VICHE_BOARD_TRAIL_TIMEOUT','180')))
+         except ValueError:
+-            timeout=60
++            timeout=180
+         done=subprocess.run(['/bin/sh',str(script)],capture_output=True,text=True,timeout=timeout)
+     except (subprocess.TimeoutExpired,OSError) as err:
+         out['reason']='cross-check unavailable: '+str(err)[:160]; return out
+diff --git a/records/investigations/recovery-steward-board-trail-timeout-recurrence-20261125T0902Z.md b/records/investigations/recovery-steward-board-trail-timeout-recurrence-20261125T0902Z.md
+new file mode 100644
+index 00000000..0cdcffd4
+--- /dev/null
++++ b/records/investigations/recovery-steward-board-trail-timeout-recurrence-20261125T0902Z.md
+@@ -0,0 +1,87 @@
++# Recovery-steward — board-trail lens timeout recurrence repaired (2026-11-25 08:51–09:02Z)
++
++Office: recovery-steward, fresh session `IjmYsAM8zonY3jLhykYGDR-gypsy`.
++Assignment rebuilt from the authoritative Founder Constitution, the recovery
++charter, current laws, the board, Git and durable/live state. No predecessor
++conversation was carried forward. This pass made no law, ballot, vote, case
++state, verdict, mailbox entry, Founder-owned bootstrap edit or canonical
++worktree edit, and replayed no failed turn.
++
++## Fresh inputs (all re-derived, not inherited)
++
++- `liveness/unsafe-holds/`: 0 files — no investigation trigger; nothing cleared.
++- Canonical `main` == `origin/main` (advanced to `111491776abc` during this
++  pass); my prior `delivery/canonical-main-reconciliation-20261125`
++  (`a2b4626f`) is confirmed landed on main as carrier `2abff7b2`. The local
++  delivery worktree is a stale duplicate — left untouched, not re-proposed.
++- `institutional-cases.py report` = `open_cases: []`; all case files and
++  `index.json` freshly written 08:51Z by the collector.
++- Founder intake: `founder-inbox/pending/` empty, town/feed cursors current at
++  08:52Z; no new exact-`Vitalik` message or assignment. Post inbox for this
++  office = `[]`; Judiciary mailbox `inbox/` empty; no `records/proceed/`
++  request addressed to recovery-steward; no live obligation owned here.
++- Live agents healthy (Executive, Economy, this steward, P-vs-NP research and
++  standing-support workers); `agent-error.log`/`board-error.log` empty.
++  Disk 96% used / 11 G free after the Economy/Executive Act 12 early reclaim —
++  owned by Economy/Executive, not duplicated here.
++
++## Root cause (a collector failure, found by verifying the observability itself)
++
++`branches/judiciary-measurements.json` was fresh (`observed_at=1795597061`,
++counts 524/524/94/0), so a stale-index check alone would have called
++observability healthy. Inspecting the payload directly showed
++`board_trail.status=not_measured`, reason
++`cross-check unavailable: ... timed out after 60 seconds`. Independent
++confirmation: `/bin/sh government/board-trail-check.sh` exits 0 in **103 s**
++with all 8 originating issues `board_readable:true`. The mandated Act 18 §5
++lens was silently absent because the wrapper's fixed 60 s budget is shorter
++than the real scan, whose cost grows with board history. This is the same
++architectural source fixed once before (`board-trail-timeout-budget-20261120`,
++`0cd21bbf` → landed `22b9cfe0`, independently dispositioned by Judiciary on
++2026-11-12); the board has since outgrown that budget. `suite_compliance` is
++healthy (`measured`, 56.6 s).
++
++## Authority and action
++
++Operational runtime-budget repair only — no change to classification criteria,
++stage-marker/terminal rules, verdicts, law, or measurement method. This is the
++same bounded fix pattern the office implemented and landed previously under the
++Founder's standing self-healing mandate (Executive is the accountable repair
++owner; Judiciary independently disposes). Files changed on a branch off current
++main:
++
++1. `government/judiciary-measurements.py`: default `VICHE_BOARD_TRAIL_TIMEOUT`
++   60 → 180 s (env override and `max(1, ...)`/ValueError fallback preserved).
++2. `government/boot.sh`: nonblocking `judiciary-measurements` deadline 180 →
++   360 s so a healthy ~103 s + ~57 s run is never killed mid-window.
++3. `tests/board-trail-smoke.sh`: added a hermetic regression proving a slow
++   (2 s) but successful cross-check is `measured` under the default budget,
++   alongside the existing short-budget `not_measured` regression.
++
++## Verification
++
++- `/bin/sh /var/lib/lubko/wd/viche/government/suite-env.sh /bin/sh
++  tests/board-trail-smoke.sh` → `Board-trail completeness lens smoke passed`,
++  rc 0 (includes both the short-budget `not_measured` regression and the new
++  slow-but-successful `measured` regression).
++- Full run of the modified `government/judiciary-measurements.py` against the
++  live town with an isolated state dir (`VICHE_STATE_ROOT=/tmp/opencode/
++  jm-verify-state`): rc 0 in 105 s; `board_trail.status=measured`,
++  `originating_total=8`, `completed_total=8`, `readable_total=8`,
++  `terminal_reached=8`, `fraction_terminal=1.0`, `git_only_gaps=[]`,
++  `board_unreadable=[]`; `suite_compliance.status=measured`. The original
++  symptom (`not_measured` / "timed out after 60 seconds") is gone by a fresh
++  outcome, not by a green status field.
++- Landing via Act 31 `propose-delivery.sh` leaves the exact merged candidate to
++  the integrator's full suite and independent review; no hand merge.
++
++## Remaining uncertainty (not claimed as resolved)
++
++- This restores the lens, not its calibration: `measurement_reliability` stays
++  `not_established` and FP/FN rates stay `null` — only Legislature may change
++  those and only Executive may implement. No such change is proposed here.
++- The 180 s default is bounded headroom over a measured 103 s. If board history
++  grows past it, the same env override applies immediately and a further bounded
++  default review is warranted; no ritual per-case monitor is added.
++- No claim about board-trail substantive terminal-state correctness beyond the
++  deterministic classifier's reported facts.
+diff --git a/tests/board-trail-smoke.sh b/tests/board-trail-smoke.sh
+index 96aa51d3..64c44cf0 100755
+--- a/tests/board-trail-smoke.sh
++++ b/tests/board-trail-smoke.sh
+@@ -69,4 +69,15 @@ sleep 2
+ SLOW
+ VICHE_BOARD_TRAIL_TIMEOUT=1 python3 "$scratch/town/government/judiciary-measurements.py" >/dev/null
+ jq -e '.board_trail.status=="not_measured" and (.board_trail.reason|contains("timed out"))' "$report" >/dev/null
++# Recurrence regression (2026-11-25): a genuinely slow but successful scan must
++# be MEASURED under the default budget, not reported "not_measured" because a
++# fixed 60 s cap expired first. A 2 s mock exercises the same path hermetically.
++cat > "$scratch/town/government/board-trail-check.sh" <<'SLOWOK'
++#!/bin/sh
++sleep 2
++printf '%s\n' '{"issue":"100","work":"law-a","act":"1","type":"law","enacted_epoch":1000,"comments_total":1,"post_completion":1,"terminal":1,"stage_markers":"verification","chatter":0,"latest_iso":"1970-01-01T00:20:00Z","board_readable":true}'
++SLOWOK
++chmod +x "$scratch/town/government/board-trail-check.sh"
++python3 "$scratch/town/government/judiciary-measurements.py" >/dev/null
++jq -e '.board_trail.status=="measured" and .board_trail.completed_total==1 and .board_trail.terminal_reached==1' "$report" >/dev/null
+ echo 'Board-trail completeness lens smoke passed'

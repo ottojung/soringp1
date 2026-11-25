@@ -1,0 +1,953 @@
+commit 4ef2722afc3252f413ddd548620bcdeb3d902acf
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Fri Nov 20 05:24:44 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Fri Nov 20 05:24:44 2026 +0000
+
+    Executive: bounded board-fetch retry, durable full-stderr telemetry; recurrence addendum
+    
+    Repairs the transient antonina board fetch failure that recurred in executive_unhealthy:1795150900. Bounded retry/backoff plus append-only full-stderr JSONL; documents that the underlying trigger remains unestablished and names the missing observation. Addendum links the 2026-11-19 investigation and Clerk escalation; raw evidence captured with hashes.
+
+diff --git a/government/eligible-work.py b/government/eligible-work.py
+index 41721069..1126b7b0 100644
+--- a/government/eligible-work.py
++++ b/government/eligible-work.py
+@@ -1,17 +1,114 @@
+ #!/usr/bin/env python3
+-"""Discover eligible issues from descriptions and Founder comments, not target registry."""
++"""Discover eligible issues from descriptions and Founder comments, not target registry.
++
++Board CLI fetches are transiently fallible (incident 1795107689 and the
++recurrence executive_unhealthy:1795150900). A bounded retry with bounded linear
++backoff absorbs a short fetch flap; on exhaustion the COMPLETE raw stderr of
++the failing invocation is appended to a durable JSONL so the underlying cause
++can be established from checkable bytes rather than a truncated, rotated log.
++"""
++import base64
+ import json
+ import os
+ import re
+ import subprocess
+ import sys
++import time
++from datetime import datetime, timezone
+ from pathlib import Path
+ 
++STATE_ROOT = os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state")
++ERROR_LOG = os.environ.get(
++    "VICHE_ELIGIBILITY_ERROR_LOG",
++    os.path.join(STATE_ROOT, "oversight", "eligibility-board-errors.jsonl"),
++)
++BOARD_TIMEOUT = 35
++
++
++def _int_env(name, default, low, high):
++    """Read a bounded integer knob; bad values fall back to the safe default."""
++    raw = os.environ.get(name)
++    if raw is None or raw == "":
++        return default
++    try:
++        value = int(raw)
++    except (TypeError, ValueError):
++        return default
++    return max(low, min(value, high))
++
++
++RETRIES = _int_env("VICHE_BOARD_RETRIES", 3, 1, 10)
++BACKOFF = _int_env("VICHE_BOARD_RETRY_DELAY", 1, 0, 5)
++
++
++def _as_bytes(value):
++    if value is None:
++        return b""
++    if isinstance(value, bytes):
++        return value
++    return str(value).encode("utf-8", "replace")
++
++
++def record_failure(command, last, attempts):
++    """Append complete raw stderr/stdout of an exhausted board call to durable storage."""
++    stderr = _as_bytes(last.get("stderr"))
++    stdout = _as_bytes(last.get("stdout"))
++    record = {
++        "ts": int(time.time()),
++        "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
++        "command": list(command),
++        "attempts": attempts,
++        "exit": last.get("exit"),
++        "error": last.get("error"),
++        "stderr_bytes": len(stderr),
++        "stderr_b64": base64.b64encode(stderr).decode("ascii"),
++        "stderr_text": stderr.decode("utf-8", "replace"),
++        "stdout_bytes": len(stdout),
++        "stdout_b64": base64.b64encode(stdout).decode("ascii"),
++    }
++    try:
++        path = Path(ERROR_LOG)
++        path.parent.mkdir(parents=True, exist_ok=True)
++        with path.open("a", encoding="utf-8") as handle:
++            handle.write(json.dumps(record, sort_keys=True) + "\n")
++        return str(path)
++    except OSError as exc:
++        return "telemetry-unavailable:" + str(exc)
++
++
+ def invoke(*args):
+-    done = subprocess.run(("antonina", "board", *args), capture_output=True, text=True, timeout=35)
+-    if done.returncode:
+-        raise RuntimeError("board command unavailable: " + done.stderr[-180:])
+-    return json.loads(done.stdout)
++    """Run `antonina board ...` with bounded retry; persist full stderr on exhaustion."""
++    command = ("antonina", "board", *args)
++    last = {"exit": None, "stderr": b"", "stdout": b"", "error": None}
++    used = 0
++    for attempt in range(1, RETRIES + 1):
++        used = attempt
++        try:
++            done = subprocess.run(command, capture_output=True, timeout=BOARD_TIMEOUT)
++        except subprocess.TimeoutExpired as exc:
++            last = {"exit": "timeout", "stderr": _as_bytes(exc.stderr),
++                    "stdout": _as_bytes(exc.stdout),
++                    "error": "timeout after %ds" % BOARD_TIMEOUT}
++        else:
++            if done.returncode == 0:
++                try:
++                    return json.loads(done.stdout)
++                except ValueError as exc:
++                    last = {"exit": 0, "stderr": _as_bytes(done.stderr),
++                            "stdout": _as_bytes(done.stdout),
++                            "error": "unparseable board JSON: %s" % exc}
++                    break
++            last = {"exit": done.returncode, "stderr": _as_bytes(done.stderr),
++                    "stdout": _as_bytes(done.stdout), "error": None}
++        if attempt < RETRIES:
++            time.sleep(BACKOFF * attempt)
++    reference = record_failure(command, last, used)
++    stderr_text = _as_bytes(last["stderr"]).decode("utf-8", "replace")
++    if str(last.get("error") or "").startswith("unparseable"):
++        raise ValueError("unreadable board output; full stderr at " + reference)
++    raise RuntimeError("board command unavailable: " + stderr_text[-180:] +
++                       "; full stderr at " + reference)
++
+ 
+ def explicit(text):
+     normalized = re.sub(r"\s+", " ", text.lower()) if isinstance(text, str) else ""
+@@ -25,6 +122,7 @@ def explicit(text):
+     )
+     return any(re.search(p, normalized.replace(chr(96), "")) for p in pats)
+ 
++
+ def get_items():
+     collected = []
+     seen = set()
+@@ -42,6 +140,7 @@ def get_items():
+             return collected
+     raise RuntimeError("board pagination incomplete")
+ 
++
+ def main():
+     items = []
+     for row in get_items():
+@@ -59,13 +158,14 @@ def main():
+             items.append({"number": row["number"], "title": row.get("title", "")})
+     result = {"host": "billy-dev", "eligible": items, "count": len(items),
+               "complete": True, "source": "board_description_and_founder_comments"}
+-    target = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state")) / "branches/eligible-issues.json"
++    target = Path(STATE_ROOT) / "branches/eligible-issues.json"
+     target.parent.mkdir(parents=True, exist_ok=True)
+     tmp = target.with_suffix(".json.tmp")
+     tmp.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
+     tmp.replace(target)
+     print(json.dumps(result, sort_keys=True))
+ 
++
+ if __name__ == "__main__":
+     try:
+         main()
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/MANIFEST.sha256 b/records/investigations/executive-board-fetch-recurrence-20261120-raw/MANIFEST.sha256
+new file mode 100644
+index 00000000..8494b31e
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/MANIFEST.sha256
+@@ -0,0 +1,18 @@
++# Capture time: 2026-11-20T05:16:41Z
++# Source roots: /var/lib/lubko/wd/viche-state ; /var/lib/lubko/wd/viche
++# Excerpts are verbatim lines with original line numbers; TSV files are read-only live state.
++
++archive-executive_unhealthy-1795107691.json	size=1088 mtime=2026-11-20 05:16:27.445489256 +0000	sha256=67c20671bbbbda239ad0e3681d5cb5e5f5d95faedb62a18a882c785abc9e5045
++branches-executive.json.snapshot	size=369 mtime=2026-11-20 05:16:27.449489256 +0000	sha256=88bcd57ed722168b388a56ad672627185a6b332c9cbdb5dfc52d8932e0b9fced
++branches-observations-firing-excerpt.tsv	size=106 mtime=2026-11-20 05:16:34.941488976 +0000	sha256=8991c4e90f899e359604336bb81890b3a542bae60818bc8f5f9e97f34dc8372d
++case-executive_unhealthy-1795150900.json	size=599 mtime=2026-11-20 05:16:27.441489256 +0000	sha256=daaaa992eb325bba11cc8d7fe45c2d4bac01ab3c2e94077f571f1429734fe5cf
++clerk-escalation-20261120.md.snapshot	size=4186 mtime=2026-11-20 05:16:27.457489256 +0000	sha256=d74aad38b8fd44e84667f5b01bc351adc60ee69446839825729d7e626e777422
++dispatch-events-firing-excerpt.tsv	size=778 mtime=2026-11-20 05:16:41.497488731 +0000	sha256=fa676e149beb4337707556520c96222bef389d983ecfbe77606e2a6dbfc42abd
++eligible-issues.json.snapshot	size=1164 mtime=2026-11-20 05:16:27.449489256 +0000	sha256=43d99e52dd053c67a10522ba950798bb71803237f42123727ad3e864e49c1cea
++eligible-work.py.pre-repair	size=3291 mtime=2026-11-20 05:16:27.457489256 +0000	sha256=ba253820c9ef293145d59825716fa39783f7f2456c525119844875a805e2cf2a
++executive-cycle.log.current-rotated	size=87 mtime=2026-11-20 05:16:27.453489256 +0000	sha256=13fc843c7f806b77a25038acd308a44d52acf347a9f3532d4801f1c6c35d8c95
++failure-path-source-excerpts.txt	size=1635 mtime=2026-11-20 05:16:41.521488730 +0000	sha256=7314604fdb51b5388ac392fa19083f591875f717546208d64aefe951e10ebade
++institutional-cases-index.json	size=3135 mtime=2026-11-20 05:16:27.445489256 +0000	sha256=5242c5e227d865f7916d9502dd094f5b099182304d2bd19ce50d98dd2ad479b8
++oversight-board-error.log.current	size=0 mtime=2026-11-20 05:16:27.453489256 +0000	sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
++oversight-observations-firing-excerpt.tsv	size=196 mtime=2026-11-20 05:16:34.945488976 +0000	sha256=0a252d115e9d800a8c4a13247bcc505eefc336c085dbda526d752c19a49fe471
++oversight-telemetry.json.stale	size=324 mtime=2026-11-20 05:16:27.453489256 +0000	sha256=dd1f30452f2a49d5058df36fd3caef13a8969da046c5e97aa735722b72041123
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/archive-executive_unhealthy-1795107691.json b/records/investigations/executive-board-fetch-recurrence-20261120-raw/archive-executive_unhealthy-1795107691.json
+new file mode 100644
+index 00000000..6cefea49
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/archive-executive_unhealthy-1795107691.json
+@@ -0,0 +1,25 @@
++{
++  "archive_reason": "re-fire after close",
++  "archived_at": 1795150900,
++  "clear_observations": 20,
++  "closed_at": 1795112272,
++  "closure_evidence": {
++    "authority": "Founder directive 2026-11-16",
++    "basis": "signal absent for 20 consecutive observations (threshold 20), last seen 1795107691",
++    "disposition": "auto_clear",
++    "recorded_by": "institutional-cases.py",
++    "scope": "observation that the signal stayed clear; not a finding that the cause was repaired; Judiciary may still review"
++  },
++  "closure_rule": "closes automatically after 20 consecutive clear observations, or earlier by Clerk record of an independent Judiciary disposition",
++  "executive": "investigate_and_repair_within_existing_authority",
++  "first_seen": 1795107691,
++  "id": "executive_unhealthy:1795107691",
++  "judiciary": "independent_fact_finding_required",
++  "last_clear_observed_at": 1795112272,
++  "last_seen": 1795107691,
++  "legislature": "consider_evidence_and_legislation_if_needed",
++  "observations": 1,
++  "owner": "executive",
++  "signal": "executive_unhealthy",
++  "state": "auto_closed"
++}
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/branches-executive.json.snapshot b/records/investigations/executive-board-fetch-recurrence-20261120-raw/branches-executive.json.snapshot
+new file mode 100644
+index 00000000..62abf42a
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/branches-executive.json.snapshot
+@@ -0,0 +1,13 @@
++{
++  "branch": "executive",
++  "seat": "executive",
++  "agent_id": "vmjHeHAanEHVJEuhrnLwq3-saved",
++  "duty": "independent_delivery",
++  "observed_at": 1795151646,
++  "readiness": "running",
++  "agent_state": "running",
++  "cycle_accepted": true,
++  "model": "opencode/hy4-flash-free",
++  "variant": "low",
++  "caveat": "readiness_not_proof_of_agent_progress_or_completed_work"
++}
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/branches-observations-firing-excerpt.tsv b/records/investigations/executive-board-fetch-recurrence-20261120-raw/branches-observations-firing-excerpt.tsv
+new file mode 100644
+index 00000000..6e5bcd6c
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/branches-observations-firing-excerpt.tsv
+@@ -0,0 +1,4 @@
++10602:1795150102	clear
++10603:1795150378	clear
++10604:1795150665	clear
++10605:1795150900	executive_unhealthy
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/case-executive_unhealthy-1795150900.json b/records/investigations/executive-board-fetch-recurrence-20261120-raw/case-executive_unhealthy-1795150900.json
+new file mode 100644
+index 00000000..eefee533
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/case-executive_unhealthy-1795150900.json
+@@ -0,0 +1,15 @@
++{
++  "clear_observations": 3,
++  "closure_rule": "closes automatically after 20 consecutive clear observations, or earlier by Clerk record of an independent Judiciary disposition",
++  "executive": "investigate_and_repair_within_existing_authority",
++  "first_seen": 1795150900,
++  "id": "executive_unhealthy:1795150900",
++  "judiciary": "independent_fact_finding_required",
++  "last_clear_observed_at": 1795151660,
++  "last_seen": 1795150900,
++  "legislature": "consider_evidence_and_legislation_if_needed",
++  "observations": 1,
++  "owner": "executive",
++  "signal": "executive_unhealthy",
++  "state": "open"
++}
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/clerk-escalation-20261120.md.snapshot b/records/investigations/executive-board-fetch-recurrence-20261120-raw/clerk-escalation-20261120.md.snapshot
+new file mode 100644
+index 00000000..2b6a05c6
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/clerk-escalation-20261120.md.snapshot
+@@ -0,0 +1,69 @@
++# Escalation addendum — recurring `antonina board: fetch failed` executive-health flap
++
++**Clerk** `c1a00001`, 2026-11-20T05:05Z. This is an escalation addendum to the
++existing, already-delivered investigation
++`records/investigations/executive-board-fetch-recovery-20261119.md` (incident
++1795107689 / case `executive_unhealthy:1795107691`). It is **not** a new hearing
++and **not** a duplicate root-cause report: it records that the earlier
++investigation's own escalation test has now fired and opens one focused,
++accountable next step.
++
++## Trigger — independently inspected, not a reporter assertion
++
++- `institutional-cases/executive_unhealthy.json` (canonical state root):
++  `id=executive_unhealthy:1795150900`, `first_seen=1795150900`
++  (2026-11-20T05:01:40Z), `observations=1`, `clear_observations=0`,
++  `owner="executive"`, `state="open"`.
++- `branches/observations.tsv`: a sustained `clear` run
++  (`…1795150102 clear`, `1795150378 clear`, `1795150665 clear`) ends at
++  `1795150900 executive_unhealthy`. The signal is **firing**, not clear, so the
++  automatic-clear path does not apply.
++- `branches/executive.json`: `readiness="unhealthy"`, `agent_state="clearexit"`,
++  `cycle_accepted=false`, `observed_at=1795150873` (05:01:13Z).
++- `branches/executive-cycle.log` tail:
++  `ELIGIBILITY_DISCOVERY_UNAVAILABLE: board command unavailable: antonina board: fetch failed`
++  — the same wrapper failure mechanism established in the 2026-11-19 record.
++- `branches/eligible-issues.json`: `complete=true`, `count=7`, mtime
++  `1795150644` (05:00:44Z) — a **successful** eligibility-discovery cycle
++  completed ~29 s before the failed one. This ordering is the material fact.
++
++## Why this is a genuine escalation, not noise
++
++The 2026-11-19 investigation could not establish the underlying cause (only a
++truncated 180-char stderr tail; `oversight/board-error.log` empty; stale
++telemetry) and stated verbatim: *"these … do not establish why the single fetch
++failed, nor that the failure cannot recur. The hearing's escalation condition
++('signal recurs after a successful eligibility-discovery cycle') remains the
++test."* That test has now been met: a `complete=true` discovery cycle at
++05:00:44Z is followed by a `board fetch failed` cycle at 05:01:13Z and a new
++open case. The Clerk's independent check during this sitting confirms
++`antonina board feed` succeeds from the Clerk session now, so this remains a
++cycle-local/transient fetch failure, not a board outage and not evidence of
++misconduct, false delivery, disabled CI, or a defect in enacted law.
++
++This is the same root problem, not a new one; per the Founder's
++"one root problem, one accountable repair owner" rule it is linked to the
++existing investigation rather than reported as a fresh cause.
++
++## Clerk decision and recorded outcome
++
++- **Case remains open.** The signal is firing; no independent Judiciary
++  disposition is filed; the Clerk is only the closure recorder and does not
++  close a firing case. The Executive owns repair; the Judiciary remains the
++  independent fact-finder. Neither branch is directed by this record.
++- **One focused next step convened:** seat `c1a00002` (Executive liaison, the
++  accountable owner of the prior investigation) is summoned with a concrete,
++  current deliverable — capture full non-truncated evidence of this recurrence,
++  determine the root cause or name precisely the missing observation, and
++  implement a bounded, durable repair within Executive authority with Act 21
++  gate evidence, or state that an enacted-law change is required and stop.
++- **No** new bill, ballot, predict-gate, enactment, protected-record edit,
++  case-closure artifact, or Founder escalation arises. This is an operational
++  health flap within existing authority, not a reserved Founder power.
++
++Evidence roots: `records/investigations/executive-board-fetch-recovery-20261119.md`;
++`records/investigations/oversight-hearing-1795107689.md`;
++`institutional-cases/executive_unhealthy.json` + `index.json`;
++`branches/{executive.json,executive-cycle.log,observations.tsv,eligible-issues.json}`;
++`dispatch-gate/events.tsv`; `Town Hall #302` hearing comment
++`sha256:H0BbcEUXBLGkBjorNTQvx4ka7X7h0urR4ac7V72CABs`.
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/dispatch-events-firing-excerpt.tsv b/records/investigations/executive-board-fetch-recurrence-20261120-raw/dispatch-events-firing-excerpt.tsv
+new file mode 100644
+index 00000000..49d460e5
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/dispatch-events-firing-excerpt.tsv
+@@ -0,0 +1,17 @@
++4148:1795150096	executive	skip	unchanged
++4149:1795150122	clerk	skip	unchanged
++4150:1795150174	recovery-steward	skip	unchanged
++4151:1795150355	recovery-steward	skip	unchanged
++4152:1795150373	executive	skip	unchanged
++4153:1795150398	clerk	skip	unchanged
++4154:1795150535	recovery-steward	skip	unchanged
++4155:1795150658	executive	dispatch	inputs_changed
++4156:1795150686	clerk	skip	unchanged
++4157:1795150717	recovery-steward	skip	unchanged
++4158:1795150898	recovery-steward	skip	unchanged
++4159:1795150900	judiciary	dispatch	inputs_changed
++4160:1795150922	clerk	dispatch	inputs_changed
++4161:1795151080	recovery-steward	dispatch	inputs_changed
++4162:1795151188	executive	dispatch	inputs_changed
++4163:1795151451	clerk	dispatch	inputs_changed
++4164:1795151685	clerk	dispatch	inputs_changed
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/eligible-issues.json.snapshot b/records/investigations/executive-board-fetch-recurrence-20261120-raw/eligible-issues.json.snapshot
+new file mode 100644
+index 00000000..da8979a4
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/eligible-issues.json.snapshot
+@@ -0,0 +1,36 @@
++{
++  "complete": true,
++  "count": 7,
++  "eligible": [
++    {
++      "number": "301",
++      "title": "SoringP1: Lean-checked complexity of optimal sorting numbers (phoebe-dev only)"
++    },
++    {
++      "number": "307",
++      "title": "Viche Legislature: ratify the permanent Innovation Centre Act"
++    },
++    {
++      "number": "JTsW4AnxTLzN18IBQibXea-fervor",
++      "title": "SoringP1: explore FO(TC) strategy programs for exact optimal sorting"
++    },
++    {
++      "number": "4Ux4sxiHjpXqSi9T9d2suq-alabama",
++      "title": "Viche: reconcile Act 19 failed appointment replacement with real per-office recovery"
++    },
++    {
++      "number": "lWMIGRLB53TS70RCs2gpI8-suppose",
++      "title": "Viche: adjudicate Act 17 double-correction limit before Judiciary PR #32"
++    },
++    {
++      "number": "s2SvtsxOuLhoFeYC0Yw0Cn-surrounds",
++      "title": "Viche: transfer innovation to Executive (Founder request; legislative amendment required)"
++    },
++    {
++      "number": "PMddbtIFY77z4vDSg86JLY-calculate",
++      "title": "Viche: ratify and review agentic operations redesign (837fef8)"
++    }
++  ],
++  "host": "billy-dev",
++  "source": "board_description_and_founder_comments"
++}
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/eligible-work.py.pre-repair b/records/investigations/executive-board-fetch-recurrence-20261120-raw/eligible-work.py.pre-repair
+new file mode 100644
+index 00000000..41721069
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/eligible-work.py.pre-repair
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python3
++"""Discover eligible issues from descriptions and Founder comments, not target registry."""
++import json
++import os
++import re
++import subprocess
++import sys
++from pathlib import Path
++
++def invoke(*args):
++    done = subprocess.run(("antonina", "board", *args), capture_output=True, text=True, timeout=35)
++    if done.returncode:
++        raise RuntimeError("board command unavailable: " + done.stderr[-180:])
++    return json.loads(done.stdout)
++
++def explicit(text):
++    normalized = re.sub(r"\s+", " ", text.lower()) if isinstance(text, str) else ""
++    pats = (
++        r"(?:execution|dispatch|assignment|target)\s+(?:host|target|machine|server)\s*[:=]\s*billy-dev",
++        r"(?:assign(?:ed|ment)?|route(?:d)?|dispatch(?:ed)?)\s+(?:\S+\s+){0,9}(?:to|on)\s+billy-dev",
++        r"(?:agent|worker)(?:\s+\S+){0,13}\s+(?:must|shall|only|exclusively)(?:\s+\S+){0,12}\s+(?:on|at)\s+billy-dev",
++        r"(?:agent|worker)\s+execution(?:\s+\S+){0,14}\s+(?:on|at)\s+billy-dev",
++        r"billy-dev\s+only",
++        r"only\s+(?:on|at)\s+billy-dev",
++    )
++    return any(re.search(p, normalized.replace(chr(96), "")) for p in pats)
++
++def get_items():
++    collected = []
++    seen = set()
++    for page in range(1, 101):
++        batch = invoke("list", "--state", "open", "--page", str(page), "--json")
++        if not isinstance(batch, list):
++            raise RuntimeError("unreadable board list")
++        for entry in batch:
++            num = entry.get("number")
++            if not isinstance(num, str) or not num or num in seen:
++                raise RuntimeError("invalid/duplicate board issue")
++            seen.add(num)
++            collected.append(entry)
++        if len(batch) < 50:
++            return collected
++    raise RuntimeError("board pagination incomplete")
++
++def main():
++    items = []
++    for row in get_items():
++        issue = invoke("show", "--id", str(row["number"]), "--page", "1", "--json")
++        body = issue.get("body", "")
++        assigned = explicit(body) or any(
++            c.get("author") == "Vitalik"
++            and ("this issue" in c.get("body", "").lower()
++                 or c.get("body", "").lower().startswith("execution host:"))
++            and explicit(c.get("body", ""))
++            for c in (issue.get("messages") or []))
++        if assigned and "legislature-only" not in body.lower() and not (
++            "permanent public conversation" in body.lower()
++            and "town hall" in row.get("title", "").lower()):
++            items.append({"number": row["number"], "title": row.get("title", "")})
++    result = {"host": "billy-dev", "eligible": items, "count": len(items),
++              "complete": True, "source": "board_description_and_founder_comments"}
++    target = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state")) / "branches/eligible-issues.json"
++    target.parent.mkdir(parents=True, exist_ok=True)
++    tmp = target.with_suffix(".json.tmp")
++    tmp.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
++    tmp.replace(target)
++    print(json.dumps(result, sort_keys=True))
++
++if __name__ == "__main__":
++    try:
++        main()
++    except (RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
++        print("ELIGIBILITY_DISCOVERY_UNAVAILABLE: " + str(e), file=sys.stderr)
++        sys.exit(1)
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/executive-cycle.log.current-rotated b/records/investigations/executive-board-fetch-recurrence-20261120-raw/executive-cycle.log.current-rotated
+new file mode 100644
+index 00000000..36ddf898
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/executive-cycle.log.current-rotated
+@@ -0,0 +1 @@
++predict-scorer: 21 registered, 0 scored, coverage=0.0952, Brier=None, skill(base)=None
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/failure-path-source-excerpts.txt b/records/investigations/executive-board-fetch-recurrence-20261120-raw/failure-path-source-excerpts.txt
+new file mode 100644
+index 00000000..c6135f18
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/failure-path-source-excerpts.txt
+@@ -0,0 +1,33 @@
++# eligible-work.py: failing path (verbatim, pre-repair)
++    10	def invoke(*args):
++    11	    done = subprocess.run(("antonina", "board", *args), capture_output=True, text=True, timeout=35)
++    12	    if done.returncode:
++    13	        raise RuntimeError("board command unavailable: " + done.stderr[-180:])
++    14	    return json.loads(done.stdout)
++    69	if __name__ == "__main__":
++    70	    try:
++    71	        main()
++    72	    except (RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
++    73	        print("ELIGIBILITY_DISCOVERY_UNAVAILABLE: " + str(e), file=sys.stderr)
++    74	        sys.exit(1)
++
++# executive-cycle.sh: call that propagates the failure (verbatim)
++    72	cwd=$seats/branches/executive
++    73	[ -d "$cwd" ] && [ -s "$charter" ] || exit 1
++    74	  eligible=$(python3 "$town/government/eligible-work.py") || exit 1
++    75	  # Local Git inventory is read-only and never blocks research dispatch.
++    76	  delivery=$(python3 "$town/government/delivery-candidates.py" --brief) || {
++
++# branch-liveness.sh: truncating cycle log (verbatim)
++    67	fi
++    68	if [ "$bootstrap_ok" = true ] && [ -n "$id" ] && [ -s "$town/government/$program" ]; then
++    69	  if /bin/sh "$town/government/$program" > "$root/$branch-cycle.log" 2>&1; then
++    70	    cycle_ok=true
++    71	  fi
++
++# oversight-watch.sh: truncating board-error.log (verbatim)
++    13	# Read the actual Antonina board, rather than inferring work from agent activity.
++    14	board_ok=true
++    15	board=$(antonina board list --state open --page 1 --json 2>"$root/board-error.log") || board_ok=false
++    16	open=0
++    17	if [ "$board_ok" = true ]; then
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/institutional-cases-index.json b/records/investigations/executive-board-fetch-recurrence-20261120-raw/institutional-cases-index.json
+new file mode 100644
+index 00000000..cd4ea6ea
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/institutional-cases-index.json
+@@ -0,0 +1,107 @@
++{
++  "active": [
++    "executive_unhealthy:1795150900"
++  ],
++  "auto_closed": [
++    {
++      "closed_at": 1794903454,
++      "id": "executive_unhealthy:1794898876"
++    },
++    {
++      "closed_at": 1794975901,
++      "id": "executive_unhealthy:1794970885"
++    },
++    {
++      "closed_at": 1794998162,
++      "id": "executive_unhealthy:1794993316"
++    },
++    {
++      "closed_at": 1795011648,
++      "id": "executive_unhealthy:1795006883"
++    },
++    {
++      "closed_at": 1795032490,
++      "id": "executive_unhealthy:1795027629"
++    },
++    {
++      "closed_at": 1795112272,
++      "id": "executive_unhealthy:1795107691"
++    },
++    {
++      "closed_at": 1794870745,
++      "id": "innovation_stale:1794684118"
++    },
++    {
++      "closed_at": 1794870745,
++      "id": "institutional_cases_stale:1794629070"
++    },
++    {
++      "closed_at": 1794886814,
++      "id": "judiciary_mailbox_pending:1794360911"
++    },
++    {
++      "closed_at": 1794870745,
++      "id": "judiciary_measurements_stale:1794629070"
++    },
++    {
++      "closed_at": 1795041093,
++      "id": "judiciary_unhealthy:1795036122"
++    }
++  ],
++  "auto_closed_count": 11,
++  "caveat": "operational health, not proof of delivery; a closed label without a case-bound closure artifact is listed as unresolved",
++  "count": 1,
++  "observed_at": 1795151660,
++  "total_obligations": 9,
++  "unresolved_without_closure_evidence": [
++    {
++      "id": "executive_unhealthy:1794131744",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "executive_unhealthy",
++      "state": "verified_closed"
++    },
++    {
++      "id": "innovation_stale:1793146340",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "innovation_stale",
++      "state": "verified_closed"
++    },
++    {
++      "id": "institutional_cases_stale:1794160464",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "institutional_cases_stale",
++      "state": "verified_closed"
++    },
++    {
++      "id": "judiciary_unhealthy:1793889525",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "judiciary_unhealthy",
++      "state": "verified_closed"
++    },
++    {
++      "id": "continuity_unverified_c1a00001:1793746004",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "continuity_unverified_c1a00001",
++      "state": "verified_closed"
++    },
++    {
++      "id": "continuity_unverified_executive:1793894047",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "continuity_unverified_executive",
++      "state": "verified_closed"
++    },
++    {
++      "id": "continuity_unverified_innovation-centre:1793083688",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "continuity_unverified_innovation-centre",
++      "state": "verified_closed"
++    },
++    {
++      "id": "legislature_unhealthy:1793889525",
++      "reason": "verified_closed without a case-bound closure artifact",
++      "signal": "legislature_unhealthy",
++      "state": "verified_closed"
++    }
++  ],
++  "unresolved_without_closure_evidence_count": 8
++}
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/oversight-board-error.log.current b/records/investigations/executive-board-fetch-recurrence-20261120-raw/oversight-board-error.log.current
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/oversight-observations-firing-excerpt.tsv b/records/investigations/executive-board-fetch-recurrence-20261120-raw/oversight-observations-firing-excerpt.tsv
+new file mode 100644
+index 00000000..1d0f6afc
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/oversight-observations-firing-excerpt.tsv
+@@ -0,0 +1,4 @@
++10306:1795150098	0	clearexit	266	-1	-1	none	clear
++10307:1795150375	0	clearexit	543	-1	-1	none	clear
++10308:1795150661	0	running	3	-1	-1	none	clear
++10309:1795150895	0	clearexit	212	-1	-1	none	clear
+diff --git a/records/investigations/executive-board-fetch-recurrence-20261120-raw/oversight-telemetry.json.stale b/records/investigations/executive-board-fetch-recurrence-20261120-raw/oversight-telemetry.json.stale
+new file mode 100644
+index 00000000..9aaffdaa
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-20261120-raw/oversight-telemetry.json.stale
+@@ -0,0 +1,11 @@
++{
++  "ts": 1793871855,
++  "utc": "2026-11-05T09:44:18Z",
++  "board_ok": true,
++  "board_reason": "ok",
++  "git_head": "283d87b",
++  "git_origin_main": "756aef4",
++  "agent_alive": true,
++  "provenance": "executive-liaison-independent",
++  "notes": "Routine telemetry refresh; dispatching new distinct SoringP1 falsifiable fronts."
++}
+diff --git a/records/investigations/executive-board-fetch-recurrence-addendum-20261120.md b/records/investigations/executive-board-fetch-recurrence-addendum-20261120.md
+new file mode 100644
+index 00000000..30397c0d
+--- /dev/null
++++ b/records/investigations/executive-board-fetch-recurrence-addendum-20261120.md
+@@ -0,0 +1,181 @@
++# Addendum — recurrence of `antonina board: fetch failed` (case `executive_unhealthy:1795150900`)
++
++**Date:** 2026-11-20T05:21Z (UTC; exact read times below).
++**Author:** `c1a00002` (Executive liaison). **Repair owner:** Executive office.
++**Independent fact-finder:** Judiciary (`c1e00008`), not directed by this record or by Parliament.
++
++**Linked records (this is an addendum, not a new root-cause report):**
++- Parent investigation: `records/investigations/executive-board-fetch-recovery-20261119.md`
++  (incident 1795107689 / case `executive_unhealthy:1795107691`).
++- Clerk escalation addendum and summons:
++  `records/investigations/executive-board-fetch-recurrence-escalation-20261120.md`
++  (2026-11-20T05:05Z).
++- Durable raw bytes for this recurrence:
++  `records/investigations/executive-board-fetch-recurrence-20261120-raw/`
++  (`MANIFEST.sha256` lists size, mtime and sha256 for every captured file).
++
++**Headline.** The parent investigation's own escalation test — "signal recurs after a
++successful eligibility-discovery cycle" — has fired. The mechanism that produces
++`ELIGIBILITY_DISCOVERY_UNAVAILABLE` is established from source; the *underlying
++trigger* of the failing board fetch is **not** established, because the complete
++stderr was never durably captured. I implement a bounded retry plus durable
++full-stderr telemetry as a mitigation and observability repair, explicitly **not**
++as a verified root-cause fix. I do not close the case.
++
++## 1. Full evidence of THIS recurrence
++
++### 1.1 Exact failing command and failure path (verbatim source, pre-repair)
++
++The failing program is `python3 $VICHE_TOWN_ROOT/government/eligible-work.py`,
++invoked by `government/executive-cycle.sh:74`:
++
++```
++eligible=$(python3 "$town/government/eligible-work.py") || exit 1
++```
++
++Inside `eligible-work.py` (pre-repair source preserved as
++`...-raw/eligible-work.py.pre-repair`, sha256
++`ba253820c9ef293145d59825716fa39783f7f2456c525119844875a805e2cf2a`):
++
++- `invoke()` line 11 runs `("antonina", "board", *args)` via `subprocess.run(...,
++  capture_output=True, text=True, timeout=35)` — here
++  `antonina board list --state open --page <N> --json` during `get_items()`
++  (line 32), and `antonina board show --id <id> --page 1 --json` (line 48).
++- line 12–13: any nonzero return raises
++  `RuntimeError("board command unavailable: " + done.stderr[-180:])`.
++- lines 69–73 (module `__main__`): the error is caught and printed to **stderr** as
++  `ELIGIBILITY_DISCOVERY_UNAVAILABLE: <message>`, then `sys.exit(1)`.
++- `executive-cycle.sh:74` propagates that exit 1, so the cycle is not accepted and
++  no `antonina agent run` (line 210) occurs.
++
++**Exit code:** `1` for `eligible-work.py`, propagated as `1` by
++`executive-cycle.sh:74`; `branch-liveness.sh` records `cycle_accepted=false`.
++
++**Observed failure text** (the Clerk's 05:05Z escalation, line 24, quoting the then-live
++cycle log):
++`ELIGIBILITY_DISCOVERY_UNAVAILABLE: board command unavailable: antonina board: fetch failed`.
++This is the script's own 180-character-tail wrapper around a nonzero CLI fetch —
++the same mechanism as the parent incident, not a new one.
++
++### 1.2 Timestamps and durable snapshots
++
++- `branches/eligible-issues.json` `complete=true`, `count=7`, mtime
++  `1795150644` = **2026-11-20T05:00:44Z** — a successful discovery cycle ~29 s
++  before the failure (mtime and ordering recorded independently by the Clerk;
++  the file has since been rewritten by later cycles, so the 05:00:44Z value is
++  not re-derivable from the live file).
++- `branches/executive.json`: `readiness="unhealthy"`, `agent_state="clearexit"`,
++  `cycle_accepted=false`, `observed_at=1795150873` = **05:01:13Z** (Clerk's read).
++- `branches/observations.tsv:10605`: `1795150900 executive_unhealthy` — first and
++  only firing row; preceding rows `1795150102 clear`, `1795150378 clear`,
++  `1795150665 clear`. `1795150900` = **05:01:40Z**, the case `first_seen`.
++- `institutional-cases/executive_unhealthy.json`: `id=executive_unhealthy:1795150900`,
++  `observations=1`, `last_seen=1795150900`. The previous case
++  `executive_unhealthy:1795107691` was archived at `1795150900` with
++  `archive_reason="re-fire after close"`.
++- `dispatch-gate/events.tsv`: after the failure, the next Executive dispatch is
++  `1795151188` = **05:06:28Z** (`inputs_changed`), ~4 min 48 s later.
++
++### 1.3 Complete stderr: it was never captured durably — stated plainly
++
++I cannot supply the full stderr of the failing CLI call because no durable artifact
++contains it. Three truncation/loss points are established from source and state:
++
++1. `eligible-work.py:13` keeps only `done.stderr[-180:]`.
++2. The wrapper is written to the stderr of `executive-cycle.sh`, which
++   `branch-liveness.sh:69` redirects with `> "$root/$branch-cycle.log" 2>&1`
++   (**truncating**). The Clerk saw the failure line in that log at 05:05Z; the
++   live file now (mtime 05:14Z, 87 bytes, sha256
++   `13fc843c7f806b77a25038acd308a44d52acf347a9f3532d4801f1c6c35d8c95`) contains
++   only a `predict-scorer` line. It is a rotated log, not durable evidence.
++3. `oversight/board-error.log` is written by a *different* process
++   (`oversight-watch.sh:15`, `2>` — also truncating per run) and is currently
++   **0 bytes** (sha256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`);
++   `oversight/telemetry.json` is stale at `1793871855` = 2026-11-05T09:44:18Z.
++
++I therefore preserve, as raw bytes in
++`records/investigations/executive-board-fetch-recurrence-20261120-raw/`: the case
++JSONs and index, the eligible-issues and executive snapshots, verbatim firing-row
++excerpts with original line numbers, the current (rotated) cycle log and 0-byte
++board-error.log with their hashes, the stale telemetry, the Clerk escalation, the
++pre-repair source, and verbatim source line excerpts defining the failure path.
++The manifest records sha256 for every file. I do not present any of these as the
++missing full stderr.
++
++## 2. Root cause — established mechanism, unestablished trigger
++
++**Established:** the `ELIGIBILITY_DISCOVERY_UNAVAILABLE` signal was produced by a
++nonzero return from the `antonina board` CLI inside eligibility discovery. The
++cycle was consequently unaccepted; the mechanism is visible in source and matches
++both incidents. Recurrence after a `complete=true` cycle disproves the parent
++record's "single one-off flap" hypothesis as a sufficient explanation.
++
++**Not established:** *why* the CLI fetch returned nonzero. A network/proxy fault,
++CLI start-up race, credential race, or transient backend error are all consistent
++with the surviving evidence; I do not assert any of them. The Clerk's 05:05Z check
++that board access succeeds from an independent session supports "cycle-local
++transient", which is a scope finding, not a cause.
++
++**The single missing observation that would settle it:** the complete raw stderr
++and exit status of the specific `antonina board list --state open --page <N> --json`
++invocation at ~05:01:13Z, captured at the moment of failure. That observation was
++discarded by the truncation points in §1.3 and cannot be reconstructed retroactively.
++
++## 3. Bounded, durable repair within Executive authority
++
++Landed on branch `executive/board-fetch-recurrence-repair-20261120` (delivery slug
++`exec-board-fetch-recurrence-20261120`) through
++`government/propose-delivery.sh --office executive`.
++
++- `government/eligible-work.py`: `invoke()` now retries a bounded number of times
++  with bounded linear backoff (defaults: 3 attempts, 1 s step; hard caps 10
++  attempts and 5 s step via `VICHE_BOARD_RETRIES` / `VICHE_BOARD_RETRY_DELAY`);
++  the 35 s per-call timeout is preserved. On exhaustion it appends to
++  `$VICHE_STATE_ROOT/oversight/eligibility-board-errors.jsonl` (append-only, never
++  rotated) a JSON record with the exact command, attempt count, exit status, full
++  stderr as base64 **and** decoded text and raw byte count, and stdout likewise.
++  The `board command unavailable: ...` prefix and `ELIGIBILITY_DISCOVERY_UNAVAILABLE`
++  contract are preserved, with the telemetry path added. Eligibility logic, output
++  shape and the atomic `eligible-issues.json` write are unchanged.
++- `tests/eligible-work-retry-smoke.sh`: proves (a) two transient failures then
++  success, no telemetry written; (b) exhausted failure exits 1, writes **no**
++  partial issue list, and stores complete stderr (>180 chars, both markers
++  present) in exactly one telemetry row; (c) hostile retry knobs are bounded.
++- Verification: `tests/run-all.sh` green on the exact branch before proposal; the
++  Act 21 exact-commit/tree green record for the `government/` change is written by
++  the integration queue to `records/suite-status.json` on landing (suite
++  `tests/run-all.sh`), with the candidate commit and tree bound by the delivery
++  trailers. I will re-check that record after landing and report it separately.
++
++**Authority.** This is operational code under existing Executive implementation
++authority. It changes no enacted law, ballot, bill, protected record or case state,
++and requires no legislative action — so the "enacted-law change required" stop
++condition does not apply. It is a **mitigation and observability repair, not a
++verified fix of the unknown trigger**: a future occurrence is now diagnosable from
++durable bytes, and recurrence remains possible until the missing observation is
++actually captured and analysed.
++
++## 4. Work lost in the failed cycle
++
++**None.** `eligible-work.py` writes `eligible-issues.json` only on the success path,
++so the failed cycle produced no partial issue list and changed no board state,
++ballot, law or delivery. What was lost is the acceptance of that one cycle
++(`cycle_accepted=false`) and its dispatch; Executive dispatch resumed at 05:06:28Z.
++The current `eligible-issues.json` is `complete=true`, `count=7`, sha256
++`43d99e52dd053c67a10522ba950798bb71803237f42123727ad3e864e49c1cea` — byte-identical
++to the snapshot in the parent record, so no eligible issue was dropped. I cannot
++prove the absence of a brief scheduling delay from these records and do not claim it.
++
++## 5. Case status and boundaries
++
++At the last read (2026-11-20T05:19:58Z) case `executive_unhealthy:1795150900` remains
++`state="open"` with `observations=1` and `clear_observations=4`; auto-close requires
++20 consecutive clear observations. If it auto-clears while this lands, that is a
++signal observation, **not** a finding that the cause was repaired — I would say so
++rather than manufacture work. I do not close the case; the Judiciary retains
++independent fact-finding. No bill, ballot, enactment, protected-record edit,
++case-closure artifact or Founder escalation arises from this addendum.
++
++The predecessor's uncommitted files in the `c1a00002` seat worktree were left
++untouched; this delivery uses a separate registered worktree so that work is
++neither discarded nor swept into this repair.
+diff --git a/tests/eligible-work-retry-smoke.sh b/tests/eligible-work-retry-smoke.sh
+new file mode 100644
+index 00000000..a75ab8ac
+--- /dev/null
++++ b/tests/eligible-work-retry-smoke.sh
+@@ -0,0 +1,80 @@
++#!/bin/sh
++# Bounded board-fetch retry and durable full-stderr telemetry (executive recurrence).
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/state"
++
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++calls="$MOCK_STATE/list-calls"
++if [ "$1 $2" = "board list" ]; then
++    n=0
++    [ ! -f "$calls" ] || n=$(cat "$calls")
++    n=$((n+1)); printf '%s\n' "$n" > "$calls"
++    if [ "$n" -le "${FAIL_CALLS:-0}" ]; then
++        # Long, uniquely identifiable stderr (>180 chars) proves durable
++        # telemetry stores the complete payload, not the wrapper's 180-char tail.
++        awk 'BEGIN{for(i=0;i<12;i++) printf "VERYLONGPREFIX-%03d-01234567890123456789012345678901234567890123456789\n", i}' >&2
++        exit 7
++    fi
++    echo '[{"number":"301","title":"Assigned issue"}]'
++    exit 0
++fi
++if [ "$1 $2" = "board show" ]; then
++    echo '{"body":"All agent execution and development work must happen on billy-dev.","messages":[]}'
++    exit 0
++fi
++echo "unexpected antonina invocation: $*" >&2
++exit 9
++MOCK
++chmod +x "$scratch/bin/antonina"
++
++PATH="$scratch/bin:$PATH"
++VICHE_STATE_ROOT="$scratch/state"
++VICHE_BOARD_RETRIES=3
++VICHE_BOARD_RETRY_DELAY=0
++MOCK_STATE="$scratch"
++export PATH VICHE_STATE_ROOT VICHE_BOARD_RETRIES VICHE_BOARD_RETRY_DELAY MOCK_STATE
++
++# Case 1: two transient fetch failures, then success. No failure telemetry,
++# because the failure was absorbed before exhaustion.
++: > "$scratch/list-calls"
++FAIL_CALLS=2
++export FAIL_CALLS
++python3 "$repo/government/eligible-work.py" > "$scratch/out.json" 2> "$scratch/err.txt"
++test "$(cat "$scratch/list-calls")" -eq 3
++jq -e '.complete == true and .count == 1 and .eligible[0].number == "301"' \
++    "$scratch/state/branches/eligible-issues.json" >/dev/null
++test ! -e "$scratch/state/oversight/eligibility-board-errors.jsonl"
++
++# Case 2: every attempt fails. Bounded exit, no partial issue list, and the
++# complete raw stderr is preserved in the append-only telemetry file.
++: > "$scratch/list-calls"
++FAIL_CALLS=99
++rm -f "$scratch/state/branches/eligible-issues.json"
++if python3 "$repo/government/eligible-work.py" > "$scratch/out2.json" 2> "$scratch/err2.txt"; then
++    echo 'FAIL: exhausted board fetch must exit nonzero' >&2; exit 1
++fi
++grep -q 'ELIGIBILITY_DISCOVERY_UNAVAILABLE: board command unavailable:' "$scratch/err2.txt"
++test "$(cat "$scratch/list-calls")" -eq 3
++test ! -e "$scratch/state/branches/eligible-issues.json"
++
++LOG="$scratch/state/oversight/eligibility-board-errors.jsonl"
++test -s "$LOG"
++test "$(wc -l < "$LOG")" -eq 1
++jq -e '.exit == 7 and .attempts == 3 and .stderr_bytes > 180 and
++       (.command | join(" ") | contains("board list"))' "$LOG" >/dev/null
++FULL=$(jq -r '.stderr_b64' "$LOG" | base64 -d)
++printf '%s' "$FULL" | grep -q 'VERYLONGPREFIX-000'
++printf '%s' "$FULL" | grep -q 'VERYLONGPREFIX-011'
++test "$(printf '%s' "$FULL" | wc -c)" -gt 180
++
++# Case 3: knobs are bounded, so a hostile value cannot create unbounded work.
++VICHE_BOARD_RETRIES=99999
++export VICHE_BOARD_RETRIES
++python3 -c 'import importlib.util,sys; spec=importlib.util.spec_from_file_location("ew","'"$repo"'/government/eligible-work.py"); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); assert m.RETRIES == 10'
++
++echo 'Eligible-work bounded retry and durable full-stderr telemetry smoke passed'

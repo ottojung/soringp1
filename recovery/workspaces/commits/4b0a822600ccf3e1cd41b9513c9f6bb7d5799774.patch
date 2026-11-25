@@ -1,0 +1,67 @@
+commit 4b0a822600ccf3e1cd41b9513c9f6bb7d5799774
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 22:25:01 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 22:25:01 2026 +0000
+
+    Bound held-charge history and verify full overrun-floor distinction
+    
+    T18 verifies that a held charge equal to its cap may be released down to a
+    positively verified same-session terminal reading; T19 verifies that a charge
+    above its cap is retained in full through both manual resolution and reconcile
+    (tokens, CPU and wall independently). T20 verifies repeated reconciliation does
+    not append history once the charge floor is stable.
+    
+    Engine rule was already committed in 48f8c50c; this change adds only the
+    missing focused regression and audit note. No live ledger, permits or dispatch.
+
+diff --git a/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md b/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md
+index cec6d33f..476ae638 100644
+--- a/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md
++++ b/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md
+@@ -110,3 +110,17 @@ No budgets, caps, config, permits, source restrictions, stop/expiry checks or
+ `knowledge-budget-tool.py` were changed. No live state, credentials, agents or
+ model dispatch were used; all fixtures are private temp directories behind the
+ `suite-env.sh` barrier.
++
++## Final focused charge-floor review
++
++Recovery-steward commit `48f8c50c` already implemented the reviewed rule: a
++held charge above its cap is observed debt and is retained in full, while a
++charge equal to the cap is only reserved liability and may be released by a
++positively verified same-session terminal measurement. `retain_overrun_floor`
++applies the rule independently to tokens/CPU/wall in both `finalize_locked` and
++`resolve_locked`. T18 (charge == cap, terminal reading 120 of 1000) verifies the
++lawful release; T19 (cap 100, charge 150, stale terminal reading 90) verifies
++the full 150 is retained through both manual resolution and reconcile. T20
++verifies repeated reconciliation stops appending history once the floor is
++stable. Against parent `48f8c50c^`, T13, T18 and T19 fail; all 20 cases pass at
++HEAD.
+diff --git a/tests/knowledge-budget-finalize-after-stop-smoke.sh b/tests/knowledge-budget-finalize-after-stop-smoke.sh
+index 062f44ee..50accee1 100644
+--- a/tests/knowledge-budget-finalize-after-stop-smoke.sh
++++ b/tests/knowledge-budget-finalize-after-stop-smoke.sh
+@@ -456,4 +456,22 @@ for method in resolve reconcile; do
+ done
+ echo 'T19 ok'
+ 
+-echo 'PASS: terminal accounting, held floors, manual resolution and adjusted final snapshots verified'
++echo '--- T20: repeated reconciliation stops appending history once the floor is stable ---'
++s20=$tmp/s20; db20=$tmp/m20.db
++mkdb "$db20" 100; mkcfg "$s20" "$db20" 150
++export VICHE_STATE_ROOT="$s20" TEST_DB="$db20" TEST_MODE=still_running
++rid=$(/bin/sh "$engine" reserve statistics stable-history-agent)
++f20=$s20/knowledge/budget/reservations/$rid.json
++python3 "$tmp/mkheld.py" "$f20" "$tool" "$db20" sid stable-history-agent 185
++/bin/sh "$engine" reconcile >/dev/null
++first=$(jq '[.history[] | select(.event=="held_charge_preserved")] | length' "$f20")
++/bin/sh "$engine" reconcile >/dev/null
++/bin/sh "$engine" reconcile >/dev/null
++later=$(jq '[.history[] | select(.event=="held_charge_preserved")] | length' "$f20")
++jq -e '.state=="held" and .charge.tokens_total>=185' "$f20" >/dev/null ||
++  fail 'stable held floor was not retained'
++[ "$first" -eq 1 ] && [ "$later" -eq "$first" ] ||
++  fail "reconcile history not bounded to the charge change ($first -> $later)"
++echo 'T20 ok'
++
++echo 'PASS: terminal accounting, held floors, manual resolution, stable history and adjusted final snapshots verified'

@@ -1,0 +1,100 @@
+commit 4f3ef5c553cf484b7419cf381979d6cd98d8dfd0
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 17 04:30:31 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 17 04:30:31 2026 +0000
+
+    Janitor: protect repos with unpushed commits; fix log size clobber and classify header
+    
+    - inventory now records unpushed commit count; classify marks such repos
+      retain-unpushed so unique local work is never quarantined (evidence
+      standard Act 12.4). Caught 11 repos incl. assemblyp1 (64 unpushed).
+    - rotate() no longer clobbers the global 'size' var, so quarantine logs the
+      artifact size (not the log-file size).
+    - classify now writes the header, so its output no longer loses the first
+      data row to 'tail -n +2'.
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index 9a47b5da..fa3878bd 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -100,9 +100,9 @@ if [ ! -d "$probe" ]; then probe=.; fi
+ rotate() {
+     # rotate <file>: keep the file bounded, preserving the newest lines.
+     [ -f "$1" ] || return 0
+-    size=$(wc -c < "$1" 2>/dev/null || printf '0')
+-    is_num "$size" || return 0
+-    if [ "$size" -gt "$max_log_bytes" ]; then
++    _rot_bytes=$(wc -c < "$1" 2>/dev/null || printf '0')
++    is_num "$_rot_bytes" || return 0
++    if [ "$_rot_bytes" -gt "$max_log_bytes" ]; then
+         tmpf=$1.$$
+         if tail -n 1000 "$1" > "$tmpf" 2>/dev/null; then
+             mv "$tmpf" "$1"
+@@ -322,7 +322,7 @@ incident() {
+ inventory() {
+     inv=$jstate/inventory.tsv
+     tmp_inv=$jstate/tmp/inventory.tsv
+-    printf 'ts\thost\tpath\tsize_kb\tmtime\tage_days\tis_git\tuncommitted\tclass\n' > "$tmp_inv"
++    printf 'ts\thost\tpath\tsize_kb\tmtime\tage_days\tis_git\tuncommitted\tunpushed\tclass\n' > "$tmp_inv"
+     log_append "$jstate/actions.log" "$ts inventory begin min_kb=$inventory_min_kb"
+     for root in /workspace /home/lubko /var/lib/lubko/wd /tmp/opencode; do
+         [ -d "$root" ] || continue
+@@ -335,14 +335,17 @@ inventory() {
+             age_days=$(( (now - mtime) / 86400 ))
+             is_git=0
+             uncommitted=0
++            unpushed=0
+             if [ -d "$d/.git" ]; then
+                 is_git=1
+                 if [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]; then
+                     uncommitted=1
+                 fi
++                unpushed=$(timeout 15 git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr -d ' ')
++                is_num "$unpushed" || unpushed=0
+             fi
+-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n' \
+-                "$ts" "$host" "$d" "$size" "$mtime" "$age_days" "$is_git" "$uncommitted" >> "$tmp_inv"
++            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n' \
++                "$ts" "$host" "$d" "$size" "$mtime" "$age_days" "$is_git" "$uncommitted" "$unpushed" >> "$tmp_inv"
+         done
+     done
+     mv "$tmp_inv" "$inv"
+@@ -359,12 +362,14 @@ classify() {
+     [ -f "$inv" ] || { echo "janitor: no inventory; run inventory first" >&2; return 1; }
+     log_append "$jstate/actions.log" "$ts classify begin"
+     tmp=$jstate/tmp/classify.tsv
+-    : > "$tmp"
+-    tail -n +2 "$inv" 2>/dev/null | while IFS="$(printf '\t')" read -r ts host path size mtime age is_git uncommitted _class; do
++    printf 'ts\thost\tpath\tsize_kb\tmtime\tage_days\tis_git\tuncommitted\tunpushed\tclass\n' > "$tmp"
++    tail -n +2 "$inv" 2>/dev/null | while IFS="$(printf '\t')" read -r ts host path size mtime age is_git uncommitted unpushed _class; do
+         [ -n "$path" ] || continue
+         [ -d "$path" ] || continue
+         class=retain
+-        if [ "$is_git" -eq 1 ] && [ "$uncommitted" -eq 1 ]; then
++        if [ "$is_git" -eq 1 ] && [ "${unpushed:-0}" -gt 0 ]; then
++            class=retain-unpushed
++        elif [ "$is_git" -eq 1 ] && [ "$uncommitted" -eq 1 ]; then
+             class=retain-live
+         elif [ "$is_git" -eq 1 ] && [ "$age" -ge 30 ]; then
+             class=quarantine-candidate
+@@ -373,8 +378,8 @@ classify() {
+         elif [ "$age" -ge 7 ]; then
+             class=monitor
+         fi
+-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+-            "$ts" "$host" "$path" "$size" "$mtime" "$age" "$is_git" "$uncommitted" "$class" >> "$tmp"
++        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
++            "$ts" "$host" "$path" "$size" "$mtime" "$age" "$is_git" "$uncommitted" "$unpushed" "$class" >> "$tmp"
+     done
+     mv "$tmp" "$inv"
+     n=$(wc -l < "$inv" 2>/dev/null || printf '0')
+@@ -391,7 +396,7 @@ quarantine() {
+     log_append "$jstate/actions.log" "$ts quarantine begin dir=$quarantine_dir"
+     tmp=$jstate/tmp/quarantine.tsv
+     : > "$tmp"
+-    tail -n +2 "$inv" 2>/dev/null | while IFS="$(printf '\t')" read -r ts host path size mtime age is_git uncommitted class; do
++    tail -n +2 "$inv" 2>/dev/null | while IFS="$(printf '\t')" read -r ts host path size mtime age is_git uncommitted unpushed class; do
+         [ -n "$path" ] || continue
+         [ -d "$path" ] || continue
+         [ "$class" = "quarantine-candidate" ] || continue

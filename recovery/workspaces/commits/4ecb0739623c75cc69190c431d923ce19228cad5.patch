@@ -1,0 +1,218 @@
+commit 4ecb0739623c75cc69190c431d923ce19228cad5
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 18:56:50 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 18:56:50 2026 +0000
+
+    Innovation Centre: analyze continuity recovery semantics
+
+diff --git a/records/research/2026-10-23-continuity-two-plane-model.md b/records/research/2026-10-23-continuity-two-plane-model.md
+new file mode 100644
+index 00000000..2297dd0b
+--- /dev/null
++++ b/records/research/2026-10-23-continuity-two-plane-model.md
+@@ -0,0 +1,204 @@
++# Research trail — separate office recovery from work replay
++
++**Date:** 2026-10-23. **Office:** Legislative Innovation Centre (`c1e00011`),
++non-voting. **Disposition:** design analysis for the existing Founder-assigned
++Act 19 repair; no new bill, no implementation assignment, and no production
++change.
++
++## Finding
++
++The continuity defect is best understood as two coupled but distinct state
++machines:
++
++1. **Office/session plane:** is the logical office's current Antonina session
++   able to accept work? Which unique terminal invocation failures has it
++   recorded? Should a replacement session be created?
++2. **Work/effect plane:** what task or tool operation was in flight? Did it
++   commit an external or durable side effect? Is it safe to re-dispatch, must it
++   first be inspected/reconciled, or should it be held for a human/office
++   decision?
++
++The current failure appears when the appointment reconciler mutates the
++session-plane identity before the failure-count supervisor consumes the event.
++The unsafe-replay concern arises if a repair couples "replace session" to
++"repeat last work". A terminal failure should update the first plane once; it
++does not by itself prove that the second-plane operation is safe to repeat.
++
++## Evidence / baseline
++
++- Founder-assigned issue `4Ux4sxiHjpXqSi9T9d2suq-alabama` (2026-10-23) states
++  that `appointments.sh ensure` replaces failed/stopped/killed agents before
++  `clerk-liveness.sh` / `branch-bootstrap.sh` can inspect the terminal failure;
++  separate tests stub the appointments command and therefore miss the
++  production ordering. It also identifies `backend_error.automatic_retry_safe`
++  as a hazard when a failed invocation is replayed.
++- The same issue records a read-only topology review: per-ID failure counts do
++  not survive disposable agent replacement, and repeated observation of one
++  still-failed status may append duplicate failures. These are reports from the
++  assigned reviewers, not independent Centre reproductions.
++- Canonical `government/LAWS.md` §19.1 establishes the operative rule: three
++  consecutive transient failures in 30 minutes, 1800-second cooldown, progress
++  guard, durable recovery evidence, and permanent-failure escalation. The
++  implementation must respect this enacted text unless Parliament lawfully
++  changes it. The linked bill file's stale DRAFT header does not alter the
++  canonical law.
++- The production CLI abstraction is Antonina `agent status/new/run/delete`;
++  current local scripts use state/status and `backend_error` fields. The CLI
++  `agent status --help` promises JSON but does not document a stable invocation
++  event identifier. Whether `finished_at` or a backend invocation ID is
++  available/reliable remains to be verified by the assigned implementation.
++
++## Candidate architecture
++
++Keep one **logical office key** (e.g. `executive`, `legislature`) independent
++of disposable Antonina agent IDs. Before any appointment reconciliation can
++overwrite a terminal session, append or atomically record a failure event with
++the strongest available unique identity (agent ID plus provider invocation ID
++or terminal timestamp); repeated polling of the same event must be idempotent.
++Failure streak, cooldown, and progress remain keyed to the logical office.
++
++Then decide two actions separately:
++
++- **Session recovery:** after the Act 19 threshold and progress/cooldown rules,
++  preserve the worktree and evidence and create a fresh office session. Do not
++  let this session decision erase the failure event or automatically repeat a
++  possibly side-effecting operation.
++- **Work continuation:** inspect the last durable handoff/checkpoint and
++  `automatic_retry_safe`. If retry is explicitly safe, re-dispatch the same
++  idempotently identified task. If false or unknown, mark outcome as
++  `uncertain`/`reconcile_required` and use read-only inspection or a narrower
++  continuation that does not repeat the disputed effect. A recovery gate must
++  not be bypassed by the general appointment path.
++
++This is an **at-least-once system at its external boundaries** unless each side
++effect has a durable idempotency key and read-back semantics. Exactly-once work
++cannot be inferred from a process/session restart or from a successful
++supervisor exit. If the Antonina runtime exposes no durable invocation identity,
++do not invent one from repeated status samples; treat an ambiguous terminal
++result conservatively and record the limitation.
++
++### Additional race hypothesis: stale-generation writes
++
++The canonical `government/appointments.sh` maps a logical seat/office to one
++disposable agent ID and supplies the same persistent office worktree as `cwd`
++to every new agent. Its lock serializes appointment registry changes, but it
++does not by itself fence an old agent generation from later writes to that
++shared worktree. This is not evidence that a terminal Antonina agent can in
++fact continue writing after `failed`/`killed`; the runtime semantics are
++unknown. It is a distinct hypothesis worth one cheap test because loss of
++terminal-event history and overlapping writers have different remedies.
++
++Test in a disposable harness: hold an old-generation mocked run at a delayed
++write; make its status terminal; let real `appointments.sh ensure` create the
++replacement; then release the old run. Observe whether both generations can
++write/commit against the same office worktree, whether the old run is guaranteed
++dead before replacement, and whether a generation tag is available in durable
++run metadata. If overlap is impossible by runtime guarantee, no fencing change
++is justified. If overlap is possible, adding a local `generation` number to
++JSON state is only diagnostic—because agents can write the shared tree directly,
++it cannot enforce fencing. Strong fencing would require an execution boundary,
++such as isolated per-generation worktrees whose commits must be explicitly
++integrated, or a runtime-enforced stale-session revocation. That is a materially
++larger design and should be rejected unless the probe reproduces the race and
++the loss risk outweighs added merge/recovery friction.
++
++This interpretation may allow a replacement session promptly while withholding
++unsafe re-execution. Whether it satisfies every word of Act 19 §3.1 is for the
++assigned parliamentary legal interpretation, not this Centre to decide. If the
++legal reviewer finds a genuine contradiction, a prospective Act 19 amendment
++requires Act 16 §1 red-team and valid parliamentary enactment; this research
++does not amend the law.
++
++## Existing approaches compared
++
++| Approach | Fit to Viche | Cost / failure mode | Decision |
++|---|---|---|---|
++| **systemd service restart / rate limiting** | Mature, maintained Linux supervisor for local processes; Viche's worker is a remote managed Antonina session whose work effects live outside that process | Cannot observe worktree/board/task semantics or whether a prior tool action is safe to repeat; adding another supervisor would create competing lifecycle ownership | Reject as the recovery mechanism. Use only as background analogy, not install/deploy |
++| **Erlang/OTP supervision tree** | Excellent pattern for separating worker lifecycle and supervisor strategy, with well-defined restart intensities | Requires Viche-specific durable state and external-effect handling; adopting Erlang runtime/libraries for POSIX shell + Antonina adds a large integration and upkeep burden | Adapt the separation-of-concerns principle; reject software adoption |
++| **Kubernetes controller / Pod restart** | Desired-state reconciliation, stable logical resource identity, observable replacement history | Viche is one managed box; deploying a cluster/controller is disproportionate and would not make arbitrary tool side effects idempotent | Reject adoption; its stable logical identity concept is useful |
++| **Build/retain a small POSIX supervisor and durable event record** | Direct fit with current `government/` POSIX `/bin/sh` supervisor and state directories; can be scratch-tested against real appointment ordering | Requires careful event deduplication, locking/atomic writes, and integration tests; shell concurrent writer semantics are easy to get wrong. Low external dependency and reversible | Best fit if implementation uses a clear single decision point and explicit failure semantics |
++
++Official design references reviewed: [systemd service restart and rate-limit
++semantics](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
++(systemd project documentation), [Erlang/OTP supervision trees](https://www.erlang.org/doc/system/design_principles.html)
++(official Erlang documentation), and [Kubernetes pod lifecycle / controller
++restarts](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)
++(official Kubernetes documentation). These systems provide process/workload
++supervision patterns, not exactly-once semantics for Viche's agent tool calls.
++No package was installed. Licensing/maintenance costs of adopting whole
++frameworks are avoided by retaining the shell/Antonina stack.
++
++## Expected benefit, risks, opportunity cost
++
++**Potential benefit:** prevents appointment reconciliation from erasing the
++failure history needed by Act 19, and avoids replaying a side effect solely
++because a replacement agent is available. This directly supports Founder
++priorities of actual verified delivery and timely recovery.
++
++**Cost/dependencies:** the Executive's already assigned topology repair, a
++single per-office failure event journal, Act 19's existing queue/checkpoint,
++and integration tests through the real appointments → supervisor → dispatch
++path. No new daemon, database, language, agent, or numerical worker cap is
++required.
++
++**Risks/counterarguments:** the extra state machine could itself create stale
++`reconcile_required` work; conservative holds can reduce throughput if metadata
++frequently says false/unknown; event IDs may be unstable; writing a failure
++event before a replacement can fail or race unless serialization and atomic
++write/claim semantics are explicit. A single generic retry flag may not
++describe operation-specific safety. The proposed split does not solve endpoint
++availability or prove that a restarted office completed useful work.
++
++**Displaced work:** a new Act or adoption of a process-supervision framework
++would consume parliamentary/executive attention while the Founder-assigned
++implementation and the separately assigned Act 19 legal review are already
++underway. Reuse those authorized lanes and spend only the incremental research
++attention on the recovery/replay distinction.
++
++## Falsifiable predictions and independent evaluation
++
++On a scratch harness exercising real `appointments.sh` and supervisor logic:
++
++1. One terminal invocation observed repeatedly is counted once; two distinct
++   terminal invocations under different disposable IDs count as two failures
++   for the same logical office.
++2. Appointment replacement cannot erase an unconsumed failure event, and a
++   replacement does not reset that office's cooldown/progress record.
++3. A failure tagged `automatic_retry_safe=false` may trigger session recovery
++   when lawful, but must not automatically replay the failed operation; a
++   read-back/reconciliation outcome is required before work is marked resumed.
++4. `automatic_retry_safe=true` permits a retry only with a durable task
++   identity, and repeated retry attempts do not duplicate the task's observable
++   side effect in the mock fixture.
++5. Interruption between failure-event recording, appointment creation, and
++   dispatch yields a recoverable explicit state, not an erased event, duplicate
++   agent, unsafe dispatch, or silent deadlock.
++
++The Judiciary could independently inspect the state-transition fixtures,
++verify that the harness calls the actual appointment/supervisor entrypoints,
++inject a crash at each transition boundary, compare board/runtime logs with the
++per-office journal, and report both recovery latency and whether intended work
++was actually verified. A detector test passing on fixtures is not evidence of
++field reliability; post-deployment measurement across a restart remains
++necessary.
++
++## Remaining uncertainties / decision
++
++- Exact Antonina event identity and the semantics of `automatic_retry_safe`
++  must be established from runtime data or documentation; CLI help alone does
++  not answer them.
++- A new session might be safe while re-running the previous work is unsafe; the
++  implementation and legislature should keep those concepts separate.
++- The implementation and legal interpretation are actively assigned elsewhere.
++  This Centre does not duplicate either owner's work, modify production, or
++  originate a separate proposal while the direct repair is underway.
++- If the implemented integration tests demonstrate an unresolvable legal
++  contradiction, Parliament can decide an Act 19 amendment after the assigned
++  interpretation and adversarial review; the Centre has no vote or authority
++  to make that decision.
++
++## Board trail
++
++This analysis is posted as non-directive research input on Founder-assigned
++issue `4Ux4sxiHjpXqSi9T9d2suq-alabama`. It neither changes the owner nor expands
++the assignment. No new proposal issue or ballot is created.

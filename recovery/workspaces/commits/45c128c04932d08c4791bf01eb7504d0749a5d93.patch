@@ -1,0 +1,563 @@
+commit 45c128c04932d08c4791bf01eb7504d0749a5d93
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Fri Nov 20 17:52:48 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Fri Nov 20 17:52:48 2026 +0000
+
+    Integrate delivery/post-redaction-20261120 (operator): Act32: reject public Post credentials and quarantine historical messages
+    
+    Landed by the integration queue (Act 31) as one candidate on main bf8fe1c93386.
+    
+    Delivery-Branch: delivery/post-redaction-20261120
+    Delivery-Head: 481415f53b8f2d4a98651b34f7bb30c326c78dac
+    Proposed-By: operator
+    Reviewed-By: reviewer-xw79gdogalizjn1dzqg0bd-muffled
+    Review-Reason: Implements Act32 Post credential guard: rejects credential-like content before insert, audits pattern IDs only, quarantines/masks legacy matches via archive-scan, and adds bounded boot scan/tests without records or law changes.
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/KNOWLEDGE-OFFICES.md b/government/KNOWLEDGE-OFFICES.md
+index f61e8146..11ee630f 100644
+--- a/government/KNOWLEDGE-OFFICES.md
++++ b/government/KNOWLEDGE-OFFICES.md
+@@ -92,8 +92,17 @@ Do not initiate unrelated external missions.
+ 
+ ## Post and Gazette
+ 
+-Use python3 government/post.py --help. Mail is durable PUBLIC addressed correspondence (explicit --public on sends);
+-it offers no confidentiality or authoritative sender authentication.
++Use python3 government/post.py --help. Mail is durable PUBLIC addressed
++correspondence (explicit --public on sends); it offers no confidentiality or
++authoritative sender authentication. The Post guard rejects high-confidence
++credential patterns *before database insertion*, records only pattern IDs,
++and periodically scans previously stored messages for suspected credentials,
++placing affected IDs in immutable quarantine metadata. Quarantined messages
++are masked by Post read APIs, and health reports the incident count. **This
++does not make the original SQLite bytes confidential** on the shared Unix UID;
++incident responders must assess exposure and revoke or rotate leaked credentials
++through authorized channels. Sender identity, scrubbed text and read receipts
++are not trustworthy proof of factual claims.
+ Gazette is opt-in publication on topics. Senders and author
+ labels cannot be authenticated on the current shared host UID; the legal
+ Founder intake, ballot and independent verification pathways do not change.
+diff --git a/government/boot.sh b/government/boot.sh
+index 563a50b4..20b900d2 100644
+--- a/government/boot.sh
++++ b/government/boot.sh
+@@ -172,6 +172,29 @@ if grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \
+     ) 9>"$statistics_root/report.lock" >> "$statistics_root/report.log" 2>&1 < /dev/null &
+ fi
+ 
++# Act 32 PUBLIC Post archive redaction scan: independent, bounded and
++# strictly nonblocking. Scanner failures are reported without silencing
++# constitutional, legislative or judicial duties.
++if grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \(enacted ' "$town/government/LAWS.md" &&
++   [ -f "$town/government/post.py" ]; then
++    guard_state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/post
++    mkdir -p "$guard_state"
++    (
++        flock -n 9 || exit 0
++        now=$(date +%s)
++        last=0
++        [ ! -s "$guard_state/last-archive-scan" ] ||
++            last=$(cat "$guard_state/last-archive-scan")
++        case "$last" in ''|*[!0-9]*) last=0;; esac
++        [ $((now-last)) -ge 21600 ] || exit 0
++        if timeout 90 python3 "$town/government/post.py" archive-scan; then
++            printf '%s\n' "$now" > "$guard_state/last-archive-scan"
++        else
++            echo "Viche Post: public archive scan failed; retry next boot" >&2
++        fi
++    ) 9>"$guard_state/guard.lock" >> "$guard_state/guard.log" 2>&1 < /dev/null &
++fi
++
+ # Deterministic oversight continues even when every AI session is unavailable.
+ # Failure of telemetry/auditing must not prevent unrelated reconciliation.
+ if [ -f "$town/government/oversight-watch.sh" ]; then
+diff --git a/government/post.py b/government/post.py
+index 8bee92e5..4ad6ff35 100644
+--- a/government/post.py
++++ b/government/post.py
+@@ -15,6 +15,8 @@ import sys
+ import time
+ import uuid
+ 
++import post_guard
++
+ NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+ TOPIC = re.compile(r"^[a-z][a-z0-9/-]{0,127}$")
+ KINDS = ("letter", "request", "observation", "forecast", "scenario",
+@@ -42,6 +44,12 @@ CREATE TABLE IF NOT EXISTS subscriptions(
+ CREATE TABLE IF NOT EXISTS events(
+   event_id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL,
+   actor TEXT NOT NULL, action TEXT NOT NULL, message_id TEXT, details TEXT NOT NULL);
++CREATE TABLE IF NOT EXISTS quarantine(
++  message_id TEXT PRIMARY KEY REFERENCES messages(id),
++  detected_at INTEGER NOT NULL, pattern_ids TEXT NOT NULL);
++CREATE TABLE IF NOT EXISTS guard_scans(
++  scanned_at INTEGER PRIMARY KEY, messages_checked INTEGER NOT NULL,
++  messages_quarantined INTEGER NOT NULL);
+ CREATE INDEX IF NOT EXISTS msg_channel_topic ON messages(channel,topic,created_at);
+ CREATE INDEX IF NOT EXISTS delivery_inbox ON deliveries(recipient,status,created_at);
+ CREATE TRIGGER IF NOT EXISTS immutable_messages_update BEFORE UPDATE ON messages
+@@ -52,6 +60,10 @@ CREATE TRIGGER IF NOT EXISTS immutable_events_update BEFORE UPDATE ON events
+ BEGIN SELECT RAISE(ABORT,'event history is immutable'); END;
+ CREATE TRIGGER IF NOT EXISTS immutable_events_delete BEFORE DELETE ON events
+ BEGIN SELECT RAISE(ABORT,'event history deletion is forbidden'); END;
++CREATE TRIGGER IF NOT EXISTS immutable_quarantine_update BEFORE UPDATE ON quarantine
++BEGIN SELECT RAISE(ABORT,'quarantine record cannot be changed'); END;
++CREATE TRIGGER IF NOT EXISTS immutable_quarantine_delete BEFORE DELETE ON quarantine
++BEGIN SELECT RAISE(ABORT,'quarantine record cannot be erased'); END;
+ """
+ 
+ def clock():
+@@ -91,10 +103,24 @@ def valid_topic(value):
+ def output(obj):
+     print(json.dumps(obj,sort_keys=True,ensure_ascii=False))
+ 
+-def msg_dict(row):
++def msg_dict(row, db):
+     result = dict(row)
+-    for key in ("sources","based_on"):
+-        result[key] = json.loads(result[key])
++    quarantined = db.execute(
++        "SELECT pattern_ids FROM quarantine WHERE message_id=?",
++        (result["id"],)).fetchone()
++    result["quarantined"] = quarantined is not None
++    if quarantined:
++        for key in ("subject","body","conditions","baseline","resolution_rule",
++                    "alternative","resolution"):
++            if key in result:
++                result[key] = "[REDACTED: suspected credential]"
++        result["idempotency_key"] = None
++        result["sources"] = []
++        result["based_on"] = []
++        result["quarantine_pattern_ids"] = json.loads(quarantined[0])
++    else:
++        for key in ("sources","based_on"):
++            result[key] = json.loads(result[key])
+     result["sender_authenticated"]=False
+     result["confidential"]=False
+     return result
+@@ -109,6 +135,9 @@ def source_roots(db, message_id, visited=None):
+                      (message_id,)).fetchone()
+     if row is None:
+         raise ValueError("unknown source message " + message_id)
++    if db.execute("SELECT 1 FROM quarantine WHERE message_id=?",
++                  (message_id,)).fetchone():
++        return set()
+     roots = set(json.loads(row["sources"]))
+     for parent in json.loads(row["based_on"]):
+         roots.update(source_roots(db,parent,seen))
+@@ -158,6 +187,19 @@ def publish(db, args):
+     text = Path(args.body_file).read_text() if args.body_file else args.body
+     if not text or not args.subject.strip():
+         raise ValueError("message subject and body are required")
++    try:
++        post_guard.check(sender,recipient,topic,args.subject, text, args.key,
++                         args.conditions,args.baseline,args.resolution_rule,
++                         args.alternative,args.source,args.based_on)
++    except ValueError as exc:
++        # The rejection audit contains only pattern IDs, never raw credentials.
++        with db:
++            event(db,sender,"credential-like-content-rejected",
++                  pattern_ids=post_guard.check_ids(
++                      sender,recipient,topic,args.subject,text,args.key,
++                      args.conditions,args.baseline,args.resolution_rule,
++                      args.alternative,args.source,args.based_on))
++        raise ValueError(str(exc)) from None
+     sources = sorted(set(args.source))
+     based_on = sorted(set(args.based_on))
+     if kind == "observation" and (not sources or not args.conditions):
+@@ -270,13 +312,13 @@ def inbox(db, args):
+          WHEN m.channel='mail' AND d.status='new' THEN 0
+          WHEN d.status='new' THEN 1 ELSE 2 END,
+          m.created_at,m.id LIMIT ?""",(office,min(max(args.limit,1),200))).fetchall()
+-    return [msg_dict(row) for row in rows]
++    return [msg_dict(row,db) for row in rows]
+ 
+ def feed(db,args):
+     rows=db.execute("""SELECT * FROM messages WHERE channel='gazette'
+       AND (?='' OR topic=?) ORDER BY created_at DESC,id DESC LIMIT ?""",
+       (args.topic or "",args.topic or "",args.limit)).fetchall()
+-    return [msg_dict(r) for r in rows]
++    return [msg_dict(r,db) for r in rows]
+ 
+ def transition(db,args):
+     office=valid_name(args.office)
+@@ -294,6 +336,14 @@ def transition(db,args):
+         return {"id":args.id,"status":status,"already_advanced":True}
+     if requested=="resolved" and not args.reason:
+         raise ValueError("resolutions require a reason; not proof of task success")
++    if requested=="resolved":
++        try:
++            post_guard.check(args.reason)
++        except ValueError as exc:
++            event(db,office,"credential-like-content-rejected",args.id,
++                  pattern_ids=post_guard.check_ids(args.reason))
++            db.commit()
++            raise ValueError(str(exc)) from None
+     if requested==status:
+         return {"id":args.id,"status":status,"duplicate":True}
+     at=clock()
+@@ -324,6 +374,46 @@ def wake(db,args):
+             "ids":[],"automatic_dispatch":False,
+             "reason":"public untrusted correspondence cannot awaken agents"}
+ 
++def archive_scan(db,args):
++    """Quarantine public API retrieval of existing credential-like messages.
++
++    Historical on-disk copies are NOT made confidential by this operation:
++    the shared Unix user may read the database. Record incidents for follow-up.
++    """
++    checked=0
++    newly=0
++    with db:
++        db.execute("BEGIN IMMEDIATE")
++        messages=db.execute("SELECT * FROM messages").fetchall()
++        for row in messages:
++            checked+=1
++            values=[row[k] for k in row.keys() if k not in ("created_at","chain_depth")]
++            values.extend(r[0] for r in db.execute(
++                "SELECT resolution FROM deliveries WHERE message_id=? AND resolution IS NOT NULL",
++                (row["id"],)))
++            values.extend(r[0] for r in db.execute(
++                "SELECT details FROM events WHERE message_id=?",
++                (row["id"],)))
++            ids=post_guard.check_ids(*values)
++            if not ids:
++                continue
++            if db.execute("SELECT 1 FROM quarantine WHERE message_id=?",
++                          (row["id"],)).fetchone():
++                continue
++            db.execute("INSERT INTO quarantine VALUES(?,?,?)",
++                       (row["id"],clock(),json.dumps(ids)))
++            event(db,"post-guard","credential-like-content-quarantined",
++                  row["id"],pattern_ids=ids)
++            newly+=1
++        db.execute("INSERT OR REPLACE INTO guard_scans VALUES(?,?,?)",
++                   (clock(),checked,newly))
++    total=db.execute("SELECT COUNT(*) FROM quarantine").fetchone()[0]
++    return {"checked":checked,"newly_quarantined":newly,
++            "total_quarantined":total,"api_redaction":True,
++            "disk_confidentiality":False,
++            "warning":"shared Unix UID can still read historical raw SQLite bytes"}
++
++
+ def health(db,args):
+     check=db.execute("PRAGMA integrity_check").fetchone()[0]
+     counts={row[0]:row[1] for row in db.execute(
+@@ -332,7 +422,12 @@ def health(db,args):
+     msg=db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+     pending=db.execute("""SELECT MIN(created_at) FROM deliveries
+        WHERE status IN ('new','read','acknowledged')""").fetchone()[0]
+-    return {"healthy":check=="ok","integrity":check,"messages":msg,
++    quarantine=db.execute("SELECT COUNT(*) FROM quarantine").fetchone()[0]
++    last_scan=db.execute("SELECT MAX(scanned_at) FROM guard_scans").fetchone()[0]
++    return {"healthy":check=="ok" and quarantine==0,
++            "integrity":check,"messages":msg,
++            "quarantined_messages":quarantine,
++            "last_archive_scan_at":last_scan,
+             "publications":pubs,"delivery_status":counts,
+             "oldest_unresolved_age_s":clock()-pending if pending else None,
+             "db_bytes":location().stat().st_size,
+@@ -358,7 +453,7 @@ def thread(db,args):
+         if mid in seen:continue
+         seen.add(mid)
+         r=db.execute("SELECT * FROM messages WHERE id=?",(mid,)).fetchone()
+-        if r: found.append(msg_dict(r))
++        if r: found.append(msg_dict(r,db))
+         queue.extend(x[0] for x in db.execute(
+             "SELECT id FROM messages WHERE caused_by=? ORDER BY created_at,id",(mid,)))
+     return {"root_id":root,"messages":found,
+@@ -371,7 +466,14 @@ def trace(db,args):
+         "SELECT * FROM deliveries WHERE message_id=? ORDER BY recipient",(args.id,))]
+     events=[dict(x) for x in db.execute(
+         "SELECT * FROM events WHERE message_id=? ORDER BY event_id",(args.id,))]
+-    return {"message":msg_dict(row),"deliveries":deliveries,
++    protected = bool(db.execute("SELECT 1 FROM quarantine WHERE message_id=?",
++                                (args.id,)).fetchone())
++    if protected:
++        for item in deliveries:
++            item["resolution"] = "[REDACTED: suspected credential]"
++        for item in events:
++            item["details"] = "[REDACTED: suspected credential]"
++    return {"message":msg_dict(row,db),"deliveries":deliveries,
+             "events":events,"lineage":lineage(db,args)}
+ 
+ def search(db,args):
+@@ -379,7 +481,7 @@ def search(db,args):
+     rows=db.execute("SELECT * FROM messages WHERE "
+        "(subject LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\') "
+        "ORDER BY created_at DESC,id DESC LIMIT ?",(q,q,args.limit)).fetchall()
+-    return [msg_dict(r) for r in rows]
++    return [msg_dict(r,db) for r in rows]
+ 
+ def parser():
+     p=argparse.ArgumentParser(description=__doc__)
+@@ -420,6 +522,7 @@ def parser():
+     q=s.add_parser("wake");q.add_argument("--office",required=True)
+     q=s.add_parser("lineage");q.add_argument("--id",required=True)
+     s.add_parser("health")
++    s.add_parser("archive-scan")
+     for name in ("thread","trace"):
+         q=s.add_parser(name);q.add_argument("--id",required=True)
+         if name=="thread":q.add_argument("--limit",type=int,default=200)
+@@ -440,6 +543,7 @@ def main():
+         elif args.command=="wake": result=wake(db,args)
+         elif args.command=="lineage": result=lineage(db,args)
+         elif args.command=="health": result=health(db,args)
++        elif args.command=="archive-scan": result=archive_scan(db,args)
+         elif args.command=="thread": result=thread(db,args)
+         elif args.command=="trace": result=trace(db,args)
+         elif args.command=="search": result=search(db,args)
+@@ -447,7 +551,9 @@ def main():
+             destination=Path(args.destination)
+             if destination.exists(): raise ValueError("backup destination already exists")
+             with sqlite3.connect(str(destination)) as dst: db.backup(dst)
+-            result={"backup":str(destination),"integrity":"check with post.py health on backup"}
++            result={"backup":str(destination),"contains_raw_quarantined_records":bool(
++                db.execute("SELECT COUNT(*) FROM quarantine").fetchone()[0]),
++                "warning":"backup remains PUBLIC to same-UID processes; handle suspected credentials as an incident"}
+         else: raise ValueError("unknown command")
+         output(result)
+     except (ValueError,sqlite3.Error,OSError) as exc:
+diff --git a/government/post_guard.py b/government/post_guard.py
+new file mode 100644
+index 00000000..34afa572
+--- /dev/null
++++ b/government/post_guard.py
+@@ -0,0 +1,70 @@
++"""Conservative secret-pattern barrier for PUBLIC Viche Post.
++
++This is defense in depth, NOT confidentiality: all Post messages and the SQLite
++database remain readable by the shared Unix user. Never include a matching
++credential or substring in an error, log, receipt, or incident report.
++"""
++import re
++
++PATTERNS = {
++    "private-key": re.compile(
++        r"-----BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY-----", re.I),
++    "github-token": re.compile(
++        r"\b(?:github_pat_[A-Za-z0-9_]{40,}|gh[pousr]_[A-Za-z0-9]{30,})\b"),
++    "cloud-key": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
++    "openai-token": re.compile(
++        r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{24,}\b"),
++    "gitlab-token": re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
++    "slack-token": re.compile(
++        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
++    "bearer-token": re.compile(
++        r"\b(?:Authorization\s*:\s*)?Bearer\s+[A-Za-z0-9_+./=-]{24,}\b",
++        re.I),
++    "ssh-key": re.compile(
++        r"\bssh-(?:rsa|ed25519)\s+[A-Za-z0-9+/]{90,}={0,3}\b"),
++}
++ASSIGNMENT = re.compile(
++    r"\b(?:password|api[_-]?key|access[_-]?token|client[_-]?secret|"
++    r"secret[_-]?key|private[_-]?key)\s*[:=]\s*['\"]?"
++    r"(?P<value>[A-Za-z0-9_+./=-]{12,})", re.I)
++PLACEHOLDER = re.compile(
++    r"(?:redacted|placeholder|dummy|example|fake|sample|test|changeme|"
++    r"xxxxxxxx|00000000)", re.I)
++
++
++def detect(value):
++    """Return IDs of likely credential patterns without retaining raw matches."""
++    text = value if isinstance(value, str) else str(value)
++    hits = {name for name, pattern in PATTERNS.items() if pattern.search(text)}
++    for match in ASSIGNMENT.finditer(text):
++        if not PLACEHOLDER.search(match.group("value")):
++            hits.add("credential-assignment")
++    return sorted(hits)
++
++
++def check(*values):
++    patterns = set()
++    for value in values:
++        if value is None:
++            continue
++        if isinstance(value, (list, tuple, set)):
++            patterns.update(check_ids(*value))
++        else:
++            patterns.update(detect(value))
++    if patterns:
++        # Never echo the matched value, even on an exception.
++        raise ValueError("public Post rejected credential-like content; "
++                         "pattern IDs: " + ",".join(sorted(patterns)))
++
++
++def check_ids(*values):
++    """Non-throwing helper for nested source/derivation arrays."""
++    result = set()
++    for value in values:
++        if value is None:
++            continue
++        if isinstance(value, (list, tuple, set)):
++            result.update(check_ids(*value))
++        else:
++            result.update(detect(value))
++    return sorted(result)
+diff --git a/tests/knowledge-post-outage-smoke.sh b/tests/knowledge-post-outage-smoke.sh
+index 8858baa2..bfa994be 100644
+--- a/tests/knowledge-post-outage-smoke.sh
++++ b/tests/knowledge-post-outage-smoke.sh
+@@ -12,7 +12,7 @@ printf 'Synthetic reporting policy fixture\n' > "$d/town/government/AGENT-REPORT
+ printf 'Synthetic governance fixture\n' > "$d/town/government/KNOWLEDGE-OFFICES.md"
+ printf '## Act 32 — Institutional Knowledge and Communications Act (enacted for test)\n' > "$d/town/government/LAWS.md"
+ printf 'Synthetic frozen baseline\n' > "$d/town/records/knowledge/baseline-20261119.json"
+-cp "$repo/government/post.py" "$repo/government/post-inbox-brief.sh" \
++cp "$repo/government/post.py" "$repo/government/post_guard.py" "$repo/government/post-inbox-brief.sh" \
+    "$repo/government/knowledge-activation-verify.sh" "$d/town/government/"
+ cat > "$d/town/government/branch-bootstrap.sh" <<'SH'
+ #!/bin/sh
+diff --git a/tests/post-guard-smoke.sh b/tests/post-guard-smoke.sh
+new file mode 100644
+index 00000000..e988ab2b
+--- /dev/null
++++ b/tests/post-guard-smoke.sh
+@@ -0,0 +1,4 @@
++#!/bin/sh
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++python3 tests/test_post_guard.py
+diff --git a/tests/post-pilot-mail-smoke.sh b/tests/post-pilot-mail-smoke.sh
+index bea16ecd..5b0b3f73 100644
+--- a/tests/post-pilot-mail-smoke.sh
++++ b/tests/post-pilot-mail-smoke.sh
+@@ -5,7 +5,7 @@ project=$(pwd -P)
+ tmp=$(mktemp -d)
+ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+ mkdir -p "$tmp/town/government"
+-cp "$project/government/post.py" "$tmp/town/government/post.py"
++cp "$project/government/post.py" "$project/government/post_guard.py" "$tmp/town/government/"
+ export VICHE_TOWN_ROOT="$tmp/town" VICHE_POST_DB="$tmp/state/post.sqlite3"
+ # No Act enacted, no institutional office activation.
+ printf '# No enacted knowledge Act\n' > "$tmp/town/government/LAWS.md"
+diff --git a/tests/test_post_guard.py b/tests/test_post_guard.py
+new file mode 100644
+index 00000000..230ae03f
+--- /dev/null
++++ b/tests/test_post_guard.py
+@@ -0,0 +1,122 @@
++#!/usr/bin/env python3
++"""Post public-data barrier: rejection, audit, archive quarantine and liveness."""
++import json
++import os
++from pathlib import Path
++import sqlite3
++import subprocess
++import tempfile
++import unittest
++
++POST=Path(__file__).resolve().parents[1]/"government/post.py"
++
++class PostGuardTest(unittest.TestCase):
++    def setUp(self):
++        self.tmp=tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        self.db=Path(self.tmp.name)/"post.sqlite3"
++        self.env=dict(os.environ,VICHE_POST_DB=str(self.db))
++
++    def cli(self,*args,ok=True):
++        result=subprocess.run(["python3",str(POST),*args],env=self.env,
++                              text=True,capture_output=True,timeout=25)
++        if ok:
++            self.assertEqual(result.returncode,0,result.stderr)
++            return json.loads(result.stdout)
++        self.assertNotEqual(result.returncode,0,result.stdout)
++        return result.stderr
++
++    def send(self,body="Ordinary public message"):
++        return self.cli("send","--public","--sender","office-a",
++                        "--to","office-b","--subject","Administrative note",
++                        "--body",body)
++
++    def test_secrets_rejected_without_echo_and_audited(self):
++        sample="sk-"+"A"*32
++        error=self.cli("send","--public","--sender","office-a",
++            "--to","office-b","--subject","Bad","--body",sample,ok=False)
++        self.assertIn("credential-like content",error)
++        self.assertNotIn(sample,error)
++        self.assertEqual(self.cli("health")["messages"],0)
++        with sqlite3.connect(self.db) as db:
++            event=db.execute("SELECT action,details FROM events").fetchone()
++        self.assertEqual(event[0],"credential-like-content-rejected")
++        self.assertNotIn(sample,event[1])
++        self.assertEqual(self.send()["delivered"],1)
++
++    def test_credential_like_sources_and_resolutions_rejected(self):
++        secret="AKIA"+"A"*16
++        err=self.cli("publish","--sender","office-a",
++            "--topic","statistics/test","--subject","Data",
++            "--kind","observation","--condition","measured daily",
++            "--source","file:ref?key="+secret,
++            "--body","Measurement",ok=False)
++        self.assertNotIn(secret,err)
++        self.assertEqual(self.cli("health")["messages"],0)
++        message=self.send()["id"]
++        err=self.cli("resolve","--office","office-b","--id",message,
++                     "--reason","credential="+secret,ok=False)
++        self.assertNotIn(secret,err)
++        self.assertEqual(self.cli("inbox","--office","office-b")[0]["status"],"new")
++
++    def test_archive_quarantine_masks_all_read_apis(self):
++        self.cli("health")
++        leaked="Bearer "+"Y"*32
++        raw="WARNING Authorization: "+leaked
++        with sqlite3.connect(self.db) as db:
++            db.execute("""INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
++                       ("legacy","mail","legacy-import","office-b",None,
++                        "letter","Sensitive legacy","Copied "+raw,123,
++                        "legacy-key",None,0,"normal","[]","[]","","","",""))
++            db.execute("""INSERT INTO deliveries(message_id,recipient,status,alert,created_at)
++                          VALUES(?,?,'new',0,?)""",("legacy","office-b",123))
++            db.commit()
++        first=self.cli("archive-scan")
++        self.assertEqual(first["newly_quarantined"],1)
++        self.assertFalse(first["disk_confidentiality"])
++        self.assertEqual(self.cli("archive-scan")["newly_quarantined"],0)
++        h=self.cli("health")
++        self.assertFalse(h["healthy"])
++        self.assertEqual(h["quarantined_messages"],1)
++        for entry in (self.cli("inbox","--office","office-b")[0],
++                      self.cli("trace","--id","legacy")["message"],
++                      self.cli("thread","--id","legacy")["messages"][0],
++                      self.cli("search","--text","Sensitive legacy")[0]):
++            self.assertTrue(entry["quarantined"])
++            self.assertNotIn(leaked,json.dumps(entry))
++            self.assertIn("REDACTED",entry["body"])
++        self.assertEqual(self.cli("lineage","--id","legacy")["count"],0)
++        with sqlite3.connect(self.db) as db:
++            original=db.execute("SELECT body FROM messages WHERE id='legacy'").fetchone()[0]
++            audit=db.execute("SELECT details FROM events WHERE action LIKE '%quarantined'").fetchone()[0]
++        self.assertIn(leaked,original)  # Explicit shared-UID limitation.
++        self.assertNotIn(leaked,audit)
++        self.assertEqual(self.send()["delivered"],1)  # No global mail outage.
++
++    def test_archive_scan_quarantines_legacy_resolution(self):
++        mid=self.send()["id"]
++        sample="sk-"+"Z"*35
++        with sqlite3.connect(self.db) as db:
++            db.execute("UPDATE deliveries SET resolution=?,status='resolved' WHERE message_id=?",
++                       ("Old unsafe receipt "+sample,mid))
++            db.commit()
++        self.assertEqual(self.cli("archive-scan")["newly_quarantined"],1)
++        entry=self.cli("inbox","--office","office-b")[0]
++        self.assertTrue(entry["quarantined"])
++        self.assertNotIn(sample,json.dumps(entry))
++        details=self.cli("trace","--id",mid)
++        self.assertNotIn(sample,json.dumps(details))
++        self.assertEqual(self.cli("archive-scan")["newly_quarantined"],0)
++
++    def test_placeholder_examples_do_not_block(self):
++        sample="Documentation: password=REDACTED, api_key=PLACEHOLDER"
++        self.assertEqual(self.send(sample)["delivered"],1)
++        path=Path(self.tmp.name)/"body.txt"
++        path.write_text("[REDACTED CREDENTIAL-LIKE TEXT]")
++        err=self.cli("send","--public","--sender","office-a","--to","office-b",
++                     "--subject","Bad","--body-file",str(path),ok=False)
++        self.assertIn("private-key",err)
++        self.assertEqual(self.cli("health")["messages"],1)
++
++if __name__=="__main__":
++    unittest.main()

@@ -1,0 +1,299 @@
+commit 40f9b10dd3e0be1e6dc82036f9a29f82b7671cdf
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 21:41:09 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 21:41:09 2026 +0000
+
+    Prioritize short deliveries and merge independent exact-SHA ballot appends
+
+diff --git a/government/AGENT-REPORTING-POLICY.md b/government/AGENT-REPORTING-POLICY.md
+index 22c618a8..717dc59d 100644
+--- a/government/AGENT-REPORTING-POLICY.md
++++ b/government/AGENT-REPORTING-POLICY.md
+@@ -273,3 +273,13 @@ creating a second agent on its worktree. Terminal failure recovery and
+ unsafe holds remain governed by the existing continuity rules. This policy
+ does not reset delegated research agents' sessions: their unfinished proof
+ work may genuinely need context continuity.
++
++### Test and delivery liveness
++From a source worktree, run manual tests through the canonical
++`/bin/sh /var/lib/lubko/wd/viche/government/suite-env.sh /bin/sh tests/YOUR-TEST.sh`
++(or `suite-env.sh python3 tests/YOUR-TEST.py`). Use the canonical
++`/bin/sh /var/lib/lubko/wd/viche/government/propose-delivery.sh --office OFFICE SLUG`.
++The ordinary exact-candidate full suite runs at integration; targeted source
++checks are useful, but a second mandatory full source suite is not needed.
++Never run historical unisolated tests against production agent/model state or
++read live credentials from a test fixture.
+diff --git a/government/DELIVERY.md b/government/DELIVERY.md
+index 22a9fccb..d87d6b86 100644
+--- a/government/DELIVERY.md
++++ b/government/DELIVERY.md
+@@ -68,3 +68,11 @@ For manual source tests, run from the source worktree using the canonical
+ `/bin/sh /var/lib/lubko/wd/viche/government/suite-env.sh /bin/sh tests/YOUR-TEST.sh`.
+ This disposable runtime protects normal tests from inherited live configuration;
+ it is not a security sandbox for arbitrary same-user code.
++
++The queue prioritizes ready short records before full-suite code deliveries;
++full-suite work that has waited an hour gets first priority, and at most one
++full-suite candidate is attempted per pass. Status is published after each
++landing. Concurrent ballot append conflicts may be resolved mechanically
++only for the proposing seat's own exact-digest row, preserving every prior
++row byte-for-byte and rejecting any different vote for the same seat. The
++ordinary exact merged-candidate suite, required review and tally remain in force.
+diff --git a/government/integrator.py b/government/integrator.py
+index 57484932..2e923a18 100755
+--- a/government/integrator.py
++++ b/government/integrator.py
+@@ -68,6 +68,8 @@ OFFICES = DELIVERY / "office"
+ EXPIRE_SECONDS = 14 * 86400
+ REVIEW_TIMEOUT = 24 * 3600
+ REVIEW_ATTEMPTS = 2
++# Prefer ready short deliveries, but allow an old full-suite candidate first.
++FULL_SUITE_PRIORITY_AGE = 3600
+ LANDED_VISIBLE = 3 * 86400
+ # Final for this exact head: a new proposal (a new head) starts again.
+ TERMINAL = {"landed", "no_delta", "refused", "rejected", "superseded", "expired", "red", "conflict"}
+@@ -301,6 +303,73 @@ def suite_for(paths):
+         else "tests/run-all.sh"
+ 
+ 
++def ballot_rows(blob, digest, seats):
++    """Validate exact newline-terminated rows; never normalize or invent votes."""
++    if blob and not blob.endswith(b"\n"):
++        raise ValueError("incomplete ballot row")
++    rows = {}
++    for row in blob.splitlines(keepends=True):
++        fields = row[:-1].split(b"\t")
++        if (len(fields) != 3 or fields[0] not in seats
++                or fields[1] not in (b"yes", b"no", b"abstain")
++                or fields[2] != digest or fields[0] in rows):
++            raise ValueError("invalid or conflicting ballot row")
++        rows[fields[0]] = row
++    return rows
++
++
++def resolve_ballot_append(wt, path, proposer):
++    """Merge only independent, exact-SHA append-only ballots.
++
++    An incoming auto-resolution may add only the proposing seat's own row.
++    All prior rows and current main rows stay byte-identical; a conflicting
++    same-seat vote or amended bill is never guessed at. The actual merged
++    candidate still runs the ordinary suite and any required tally.
++    """
++    match = re.fullmatch(r"records/ballots/([A-Za-z0-9_-]+)[.]tsv", path)
++    if not match:
++        return False
++    bill = wt / "records" / "bills" / (match[1] + ".md")
++    roster = wt / "government" / "seats.tsv"
++    if any(x.is_symlink() or not x.is_file() for x in (bill, roster)):
++        return False
++    target = wt / path
++    # Never interpret a symlink, gitlink, or non-regular conflict stage as
++    # ballot data or write through it. The merge worktree is disposable.
++    stages = git("ls-files", "-u", "--", path, cwd=wt).splitlines()
++    if target.is_symlink() or any(line.split()[0] != "100644" for line in stages):
++        return False
++    def stage(n):
++        result = subprocess.run(["git", "-C", str(wt), "show", ":%d:%s" % (n, path)],
++                                capture_output=True)
++        return result.stdout if result.returncode == 0 else None
++    old, ours, theirs = stage(1), stage(2), stage(3)
++    if ours is None or theirs is None:
++        return False  # deletion, not a concurrent append
++    old = old if old is not None else b""
++    if not ours.startswith(old) or not theirs.startswith(old):
++        return False
++    try:
++        digest = hashlib.sha256(bill.read_bytes()).hexdigest().encode("ascii")
++        seats = {line.split(b"\t", 1)[0] for line in roster.read_bytes().splitlines()}
++        before = ballot_rows(old, digest, seats)
++        current = ballot_rows(ours, digest, seats)
++        incoming = ballot_rows(theirs, digest, seats)
++        additions = {seat: row for seat, row in incoming.items() if seat not in before}
++        if set(additions) - {proposer.encode("ascii")}:
++            return False
++        for seat, row in additions.items():
++            if seat in current and current[seat] != row:
++                return False
++        combined = ours + b"".join(row for seat, row in additions.items() if seat not in current)
++        ballot_rows(combined, digest, seats)
++        target.write_bytes(combined)
++        git("add", "--", path, cwd=wt)
++        return True
++    except (OSError, ValueError, GitError):
++        return False
++
++
+ def canonical_preflight(base, candidate):
+     """The canonical checkout must be at base and hold no untracked or edited
+     file the landing would overwrite (same rule as reviewed-merge.sh)."""
+@@ -349,8 +418,10 @@ def land(p, entry, review):
+             conflicted = [f for f in git("diff", "--name-only", "--diff-filter=U", cwd=wt).splitlines() if f]
+             if not conflicted:
+                 raise GitError("merge failed without conflicts: " + merged.stderr.strip()[-200:])
+-            if conflicted != ["AGENTS.md"]:
+-                entry.update({"status": "conflict", "reason": "conflicts with main in " + ", ".join(conflicted[:8])})
++            unresolved = [path for path in conflicted if path != "AGENTS.md"
++                          and not resolve_ballot_append(wt, path, p["office"])]
++            if unresolved:
++                entry.update({"status": "conflict", "reason": "conflicts with main in " + ", ".join(unresolved[:8])})
+                 return False
+         # The canonical Founder policy always wins over a branch's old copy.
+         git("checkout", base, "--", "AGENTS.md", cwd=wt, check=False)
+@@ -549,20 +620,43 @@ def run_locked():
+                 continue
+         entry.update({"status": "approved", "reason": None,
+                       "reviewed_by": review["office"] if review else None})
+-        ready.append((p, entry, review))
++        ready.append((p, entry, review, suite_for(info["paths"])))
+     # A newer proposal on the same branch replaces every older unfinished one.
+     latest = {p["branch"]: p["head"] for p in proposals()}
+     for entry in state.values():
+         if (entry.get("status") not in TERMINAL and entry.get("branch") in latest
+                 and entry.get("head") != latest[entry["branch"]]):
+             entry.update({"status": "superseded", "reason": "a newer commit was proposed on this branch"})
+-    for p, entry, review in ready:
++    # Short ready records should not wait behind several full-suite candidates.
++    # A code proposal aged >= 1h gets first priority (oldest first); at most
++    # one full candidate is attempted per pass, so the next pass can discover
++    # newly arrived records rather than monopolizing the queue.
++    def priority(item):
++        p, _, _, suite = item
++        if suite != "tests/records-smoke.sh" and now() - p["at"] >= FULL_SUITE_PRIORITY_AGE:
++            return (0, p["at"])
++        return (1 if suite == "tests/records-smoke.sh" else 2, p["at"])
++
++    def persist():
++        publish(state)
++        atomic_write(ROOT / "state.json", json.dumps(state, sort_keys=True, indent=1) + "\n")
++
++    persist()
++    full_attempted = False
++    for p, entry, review, suite in sorted(ready, key=priority):
++        if entry.get("status") in TERMINAL:
++            continue
++        if suite != "tests/records-smoke.sh":
++            if full_attempted:
++                continue
++            full_attempted = True
+         try:
+             land(p, entry, review)
+         except (GitError, OSError, subprocess.SubprocessError) as error:
+             entry.update({"status": "approved", "reason": "landing error, retried next cycle: %s" % error})
+             log("landing %s failed: %s" % (p["branch"], error))
+         entry["updated_at"] = now()
++        persist()  # wake an office as soon as its record lands, before a full suite
+     for key, entry in state.items():
+         if entry.get("status") in TERMINAL and entry.get("head"):
+             review_wt = ROOT / "review" / entry["head"][:12]
+diff --git a/tests/integrator-smoke.sh b/tests/integrator-smoke.sh
+index be438ae5..8d66cf41 100755
+--- a/tests/integrator-smoke.sh
++++ b/tests/integrator-smoke.sh
+@@ -33,6 +33,12 @@ printf 'row1\n' > "$town/records/ledger.tsv"
+ printf '# Laws\n' > "$town/government/LAWS.md"
+ printf 'charter\n' > "$town/constitution/CONSTITUTION.md"
+ printf '#!/bin/sh\necho v1\n' > "$town/government/tool.sh"
++mkdir -p "$town/records/ballots" "$town/records/bills"
++printf 'c1a00001\tClerk\tfixture\nc1a00002\tA\tfixture\nc1a00003\tB\tfixture\nc1a00004\tC\tfixture\nc1a00005\tD\tfixture\n' > "$town/government/seats.tsv"
++printf 'Parallel vote fixture\n' > "$town/records/bills/parallel.md"
++printf 'New ballot fixture\n' > "$town/records/bills/parallel-new.md"
++digest=$(sha256sum "$town/records/bills/parallel.md" | cut -d ' ' -f1)
++printf 'c1a00001\tyes\t%s\n' "$digest" > "$town/records/ballots/parallel.tsv"
+ git -C "$town" add -A
+ git -C "$town" commit -qm baseline
+ git -C "$town" push -q -u origin main
+@@ -235,7 +241,92 @@ integrate
+ test "$(st red-code)" = red
+ test "$(git -C "$remote" rev-parse main)" = "$base_red"
+ 
+-# 11. Proposals from before Act 31 (no office column) are never picked up.
++# 11. Distinct concurrent votes append without rewriting existing evidence.
++seat vote_a
++seat vote_b
++printf 'c1a00002\tyes\t%s\n' "$digest" >> "$tmp/vote_a/records/ballots/parallel.tsv"
++printf 'c1a00003\tno\t%s\n' "$digest" >> "$tmp/vote_b/records/ballots/parallel.tsv"
++for v in vote_a vote_b; do git -C "$tmp/$v" add -A; git -C "$tmp/$v" commit -qm "$v"; done
++propose vote_a c1a00002 vote-a
++propose vote_b c1a00003 vote-b
++integrate
++test "$(st vote-a)" = landed
++test "$(st vote-b)" = landed
++git -C "$remote" show main:records/ballots/parallel.tsv > "$tmp/merged-ballots"
++printf 'c1a00001\tyes\t%s\nc1a00002\tyes\t%s\nc1a00003\tno\t%s\n' "$digest" "$digest" "$digest" > "$tmp/expected-ballots"
++cmp "$tmp/expected-ballots" "$tmp/merged-ballots"
++
++# An add/add conflict for the first two rows is also append-only.
++nd=$(sha256sum "$town/records/bills/parallel-new.md" | cut -d ' ' -f1)
++seat new_a
++seat new_b
++printf 'c1a00002\tyes\t%s\n' "$nd" > "$tmp/new_a/records/ballots/parallel-new.tsv"
++printf 'c1a00003\tno\t%s\n' "$nd" > "$tmp/new_b/records/ballots/parallel-new.tsv"
++for v in new_a new_b; do git -C "$tmp/$v" add -A; git -C "$tmp/$v" commit -qm "$v"; done
++propose new_a c1a00002 new-a
++propose new_b c1a00003 new-b
++integrate
++test "$(st new-a)" = landed
++test "$(st new-b)" = landed
++test "$(git -C "$remote" show main:records/ballots/parallel-new.tsv | wc -l)" -eq 2
++
++# Different votes by one seat cannot be reconciled automatically.
++seat conflict_a
++seat conflict_b
++printf 'c1a00004\tyes\t%s\n' "$digest" >> "$tmp/conflict_a/records/ballots/parallel.tsv"
++printf 'c1a00004\tno\t%s\n' "$digest" >> "$tmp/conflict_b/records/ballots/parallel.tsv"
++for v in conflict_a conflict_b; do git -C "$tmp/$v" add -A; git -C "$tmp/$v" commit -qm "$v"; done
++propose conflict_a c1a00004 conflict-a
++propose conflict_b c1a00004 conflict-b
++integrate
++test "$(st conflict-a)" = landed
++test "$(st conflict-b)" = conflict
++test "$(git -C "$remote" show main:records/ballots/parallel.tsv | grep -c '^c1a00004')" -eq 1
++
++# A branch attributed to another office cannot auto-resolve a new seat vote.
++seat wrong_a
++seat wrong_b
++printf 'c1a00004\tyes\t%s\n' "$nd" >> "$tmp/wrong_a/records/ballots/parallel-new.tsv"
++printf 'c1a00005\tyes\t%s\n' "$nd" >> "$tmp/wrong_b/records/ballots/parallel-new.tsv"
++for v in wrong_a wrong_b; do git -C "$tmp/$v" add -A; git -C "$tmp/$v" commit -qm "$v"; done
++propose wrong_a c1a00004 wrong-a
++propose wrong_b c1a00002 wrong-b
++integrate
++test "$(st wrong-a)" = landed
++test "$(st wrong-b)" = conflict
++
++# 12. Ready short records land before expensive code, and no more than one
++# full-suite candidate is attempted per pass. An aged candidate goes first.
++seat long_a
++seat long_b
++seat short_a
++printf 'a\n' > "$tmp/long_a/government/a-tool"
++printf 'b\n' > "$tmp/long_b/government/b-tool"
++printf 'record\n' > "$tmp/short_a/records/short-a.md"
++for v in long_a long_b short_a; do git -C "$tmp/$v" add -A; git -C "$tmp/$v" commit -qm "$v"; done
++propose long_a executive long-a
++propose long_b executive long-b
++integrate
++for v in long-a long-b; do
++  src=$(printf '%s' "$v" | tr - _)
++  /bin/sh "$town/government/review-delivery.sh" "delivery/$v" "$(git -C "$tmp/$src" rev-parse HEAD)" approve --office c1a00005 --reason 'fixture review' >/dev/null
++done
++propose short_a judiciary short-a
++integrate
++test "$(st short-a)" = landed
++test "$(st long-a)" = landed
++test "$(st long-b)" = approved
++test "$(tail -2 "$state/delivery/landed.jsonl" | jq -r .branch | tr '\n' ' ')" = 'delivery/short-a delivery/long-a '
++seat short_b
++printf 'record b\n' > "$tmp/short_b/records/short-b.md"
++git -C "$tmp/short_b" add -A; git -C "$tmp/short_b" commit -qm short-b
++propose short_b judiciary short-b
++VICHE_INTEGRATOR_NOW=$(( $(date +%s) + 3601 )) integrate
++test "$(st long-b)" = landed
++test "$(st short-b)" = landed
++test "$(tail -2 "$state/delivery/landed.jsonl" | jq -r .branch | tr '\n' ' ')" = 'delivery/long-b delivery/short-b '
++
++# 13. Proposals from before Act 31 (no office column) are never picked up.
+ printf '2026-11-10T00:00:00Z\twork-x\trefs/heads/delivery/legacy\t%s\ttree\ttests/run-all.sh\n' "$head" \
+   >> "$state/delivery/proposals.tsv"
+ integrate

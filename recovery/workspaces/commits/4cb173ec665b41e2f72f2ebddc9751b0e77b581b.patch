@@ -1,0 +1,490 @@
+commit 4cb173ec665b41e2f72f2ebddc9751b0e77b581b
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 20:47:57 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 22:00:36 2026 +0000
+
+    Follow-up H-1795551682-b28e: preserve all observed budget liability
+    
+    Keep independent token/CPU/cost maxima in merge_usage_snapshots instead of
+    losing the non-winning input's CPU/cost. Preserve measured debt when entering
+    held (including an unpersisted overrun snapshot) and tighten legacy holds on
+    reconcile. Initialise cpu baseline and prior meter at finalize entry, extend
+    wall liability through verified stop, and hold conservatively whenever the
+    current agent native_session_id differs from or is missing the pinned identity
+    at stop, monitor or reconcile. Add deterministic mock regressions; strengthen
+    the lifecycle failed-stop fixture to require retained overrun debt.
+    
+    No cap, config, permit, source-restriction or tool changes; no live dispatch.
+
+diff --git a/government/knowledge-budget.sh b/government/knowledge-budget.sh
+index c2cb48b9..035cfae9 100644
+--- a/government/knowledge-budget.sh
++++ b/government/knowledge-budget.sh
+@@ -133,6 +133,16 @@ refresh_aggregate() {
+ 
+ agent_status() { antonina agent status --id "$1" --json 2>/dev/null; }
+ 
++# The reservation is pinned to ONE authoritative native meter session. Antonina
++# may recover a different session between provider invocations; reading a stale
++# or replacement row must never release or merge across identities.
++agent_session_matches() {
++  _as_meta=$1; _as_expected=$2
++  [ -n "$_as_expected" ] || return 1
++  [ "$(printf '%s\n' "$_as_meta" | jq -r '.native_session_id // empty')" = "$_as_expected" ] || return 1
++  return 0
++}
++
+ stop_or_kill() {
+   _sk_agent=$1; _sk_action=$2
+   if [ "$_sk_action" = stop ]; then antonina agent stop --id "$_sk_agent" >/dev/null 2>&1 || :; fi
+@@ -147,13 +157,18 @@ merge_usage_snapshots() {
+   _ms_a=$1; _ms_b=$2
+   [ -n "$_ms_a" ] && [ "$_ms_a" != null ] || { printf '%s\n' "$_ms_b"; return 0; }
+   [ -n "$_ms_b" ] && [ "$_ms_b" != null ] || { printf '%s\n' "$_ms_a"; return 0; }
++  # Capture BOTH originals before selecting the token winner. Selecting first
++  # and then reading .cpu_seconds/.cost from the chosen object loses the other
++  # input's maxima whenever that input is not the token winner.
+   printf '%s\n' "$_ms_a" | jq -ce --argjson b "$_ms_b" '
+-    ((.tokens.total // 0)) as $at | (($b.tokens.total // 0)) as $bt |
++    (.tokens.total // 0) as $at | ($b.tokens.total // 0) as $bt |
++    (.cpu_seconds // 0) as $ac | ($b.cpu_seconds // 0) as $bc |
++    (.cost // 0) as $ao | ($b.cost // 0) as $bo |
+     (if $bt > $at then $b else . end)
+     | .tokens.total = (if $bt > $at then $bt else $at end)
+     | .tokens.delta_total = (if $bt > $at then $bt else $at end)
+-    | .cpu_seconds = ([.cpu_seconds // 0, $b.cpu_seconds // 0] | max)
+-    | .cost = ([.cost // 0, $b.cost // 0] | max)'
++    | .cpu_seconds = (if $bc > $ac then $bc else $ac end)
++    | .cost = (if $bo > $ao then $bo else $ao end)'
+ }
+ 
+ usage_from_snapshot() {
+@@ -228,7 +243,7 @@ wait_for_binding() {
+ # ---- terminal state transitions (all assume the lock is held) ----------------
+ 
+ hold_locked() {
+-  _h_id=$1; _h_reason=$2
++  _h_id=$1; _h_reason=$2; _h_obs=${3:-}; _h_wall=${4:-}
+   _h_cur=$(res_read "$_h_id")
+   case "$(printf '%s\n' "$_h_cur" | jq -r '.state')" in
+     held|closed|rolled_back|rejected) return 0;;
+@@ -236,14 +251,62 @@ hold_locked() {
+   _h_agent=$(printf '%s\n' "$_h_cur" | jq -r '.agent_id // ""')
+   [ -z "$_h_agent" ] || stop_or_kill "$_h_agent" kill
+   _h_caps=$(printf '%s\n' "$_h_cur" | jq -c '.caps')
++  # A hold must never ERASE debt already measured. Keep the caps as the floor
++  # and add any observed snapshot (an overrun reading may not be persisted yet)
++  # plus the reservation's own last committed meter as independent maxima.
++  _h_previous=$(printf '%s\n' "$_h_cur" | jq -c '.meter // null')
++  _h_snap=null
++  _h_usage=null
++  [ -n "$_h_obs" ] || _h_obs=$_h_previous
++  if [ -n "$_h_obs" ] && [ "$_h_obs" != null ]; then
++    if [ -z "$_h_wall" ]; then
++      _h_started=$(printf '%s\n' "$_h_cur" | jq -r '.started_at // 0')
++      if [ "$_h_started" -gt 0 ]; then
++        _h_wall=$(( $(date +%s) - _h_started ))
++      else
++        _h_wall=0
++      fi
++    fi
++    _h_snap=$(merge_usage_snapshots "$_h_obs" "$_h_previous")
++    _h_usage=$(usage_from_snapshot "$_h_snap" "$_h_wall")
++  fi
++  _h_charge=$(printf '%s\n' "$_h_cur" | jq -ce --argjson c "$_h_caps" \
++    --argjson u "$_h_usage" --argjson s "$_h_snap" \
++    '{tokens_total: ([$c.tokens_total, ($u.tokens_total // 0), ($s.tokens.total // 0)] | max),
++      cpu_seconds: ([$c.cpu_seconds, ($u.cpu_seconds // 0), ($s.cpu_seconds // 0)] | max),
++      wall_seconds: ([$c.wall_seconds, ($u.wall_seconds // 0), (.usage.wall_seconds // 0)] | max)}')
+   _h_now=$(date +%s)
+-  _h_new=$(printf '%s\n' "$_h_cur" | jq -c --arg r "$_h_reason" --argjson now "$_h_now" --argjson c "$_h_caps" \
++  _h_new=$(printf '%s\n' "$_h_cur" | jq -c --arg r "$_h_reason" --argjson now "$_h_now" \
++    --argjson c "$_h_charge" --argjson s "$_h_snap" --argjson u "$_h_usage" \
+     '.state="held" | .charge=$c | .held_at=$now | .held_reason=$r |
++     (if $s==null then . else .meter=$s | .usage=$u end) |
+      .history += [{at:$now,event:"held",reason:$r}]')
+   res_write "$_h_id" "$_h_new"
+   refresh_aggregate "$(printf '%s\n' "$_h_cur" | jq -r '.accounting_window_seconds // empty')"
+ }
+ 
++# A held reservation may predate the liability-preserving hold path. Upgrade
++# its charge to any debt already measured on its meter without re-stopping the
++# agent or changing the recorded hold reason.
++tighten_held_locked() {
++  _th_id=$1
++  _th_cur=$(res_read "$_th_id")
++  [ "$(printf '%s\n' "$_th_cur" | jq -r '.state')" = held ] || return 0
++  _th_caps=$(printf '%s\n' "$_th_cur" | jq -c '.caps')
++  _th_previous=$(printf '%s\n' "$_th_cur" | jq -c '.meter // null')
++  [ "$_th_previous" != null ] || return 0
++  _th_wall=$(printf '%s\n' "$_th_cur" | jq -r '.usage.wall_seconds // 0')
++  _th_usage=$(usage_from_snapshot "$_th_previous" "$_th_wall")
++  _th_charge=$(printf '%s\n' "$_th_cur" | jq -ce --argjson c "$_th_caps" \
++    --argjson u "$_th_usage" --argjson s "$_th_previous" \
++    '{tokens_total: ([$c.tokens_total, ($u.tokens_total // 0), ($s.tokens.total // 0)] | max),
++      cpu_seconds: ([$c.cpu_seconds, ($u.cpu_seconds // 0), ($s.cpu_seconds // 0)] | max),
++      wall_seconds: ([$c.wall_seconds, ($u.wall_seconds // 0)] | max)}')
++  _th_new=$(printf '%s\n' "$_th_cur" | jq -c --argjson c "$_th_charge" '.charge=$c')
++  res_write "$_th_id" "$_th_new"
++  refresh_aggregate "$(printf '%s\n' "$_th_cur" | jq -r '.accounting_window_seconds // empty')"
++}
++
+ finalize_locked() {
+   _f_id=$1; _f_reason=$2; _f_snap=${3:-}; _f_wall=${4:-}
+   _f_cur=$(res_read "$_f_id")
+@@ -251,13 +314,15 @@ finalize_locked() {
+   _f_db=$(printf '%s\n' "$_f_cur" | jq -r '.meter_db')
+   _f_sid=$(printf '%s\n' "$_f_cur" | jq -r '.native_session_id // ""')
+   _f_pid=$(printf '%s\n' "$_f_cur" | jq -r '.runner_pid // ""')
++  # Initialise the CPU baseline and last observed meter unconditionally, before
++  # any caller-supplied (possibly pre-adjusted) snapshot is used or merged.
++  _f_base=$(printf '%s\n' "$_f_cur" | jq -c '.cpu_baseline')
++  _f_previous=$(printf '%s\n' "$_f_cur" | jq -c '.meter // null')
+   if [ -z "$_f_snap" ]; then
+     if ! _f_snap=$(python3 "$TOOL" snapshot "$_f_db" "$_f_sid" "$_f_pid" 2>/dev/null); then
+       hold_locked "$_f_id" 'meter_unreadable_at_finalize'; return 0
+     fi
+   fi
+-  _f_base=$(printf '%s\n' "$_f_cur" | jq -c '.cpu_baseline')
+-  _f_previous=$(printf '%s\n' "$_f_cur" | jq -c '.meter')
+   if [ "$(printf '%s\n' "$_f_snap" | jq -r '.cpu_upper_bound // false')" != true ]; then
+     if ! _f_snap=$(cpu_adjust "$_f_base" "$_f_snap" "$_f_previous"); then
+       hold_locked "$_f_id" 'cpu_reboot_or_counter_invalid_at_finalize'; return 0
+@@ -271,13 +336,22 @@ finalize_locked() {
+     # A kill request is NOT proof that a detached backend session stopped.
+     # Never release the reserved cap while it might still be consuming work.
+     if ! _f_status=$(agent_status "$_f_agent"); then
+-      hold_locked "$_f_id" 'cannot_verify_agent_stopped'; return 0
++      hold_locked "$_f_id" 'cannot_verify_agent_stopped' "$_f_snap" "$_f_wall"; return 0
++    fi
++    # The pinned native session is the ONLY authoritative meter for this run.
++    # A recovered/changed/missing identity means the reading is not for this
++    # reservation: hold conservatively, never close or merge across sessions.
++    if ! agent_session_matches "$_f_status" "$_f_sid"; then
++      hold_locked "$_f_id" 'native_session_identity_changed_at_stop' "$_f_snap" "$_f_wall"; return 0
+     fi
+     _f_state=$(printf '%s\n' "$_f_status" | jq -r '.state // "unknown"')
+     case "$_f_state" in
+       running|starting|recovering|unknown)
+-        hold_locked "$_f_id" 'agent_still_active_or_unknown_after_stop'; return 0 ;;
++        hold_locked "$_f_id" 'agent_still_active_or_unknown_after_stop' "$_f_snap" "$_f_wall"; return 0 ;;
+     esac
++    # Wall liability runs through the VERIFIED stop, not the earlier snapshot.
++    _f_wall_end=$(( $(date +%s) - _f_started ))
++    if [ "$_f_wall_end" -gt "$_f_wall" ]; then _f_wall=$_f_wall_end; fi
+     # Stopping the agent is not proof that all usage was already committed:
+     # the provider can flush token accounting to the authoritative meter AFTER
+     # the process is gone. Re-read the pinned session now that termination is
+@@ -285,11 +359,11 @@ finalize_locked() {
+     # stop stays a full-cap hold, never an optimistic release.
+     _f_after=
+     if ! _f_after=$(python3 "$TOOL" snapshot "$_f_db" "$_f_sid" "$_f_pid" 2>/dev/null); then
+-      hold_locked "$_f_id" 'meter_unreadable_after_stop'; return 0
++      hold_locked "$_f_id" 'meter_unreadable_after_stop' "$_f_snap" "$_f_wall"; return 0
+     fi
+     if [ "$(printf '%s\n' "$_f_after" | jq -r '.cpu_upper_bound // false')" != true ]; then
+       if ! _f_after=$(cpu_adjust "$_f_base" "$_f_after" "$_f_previous"); then
+-        hold_locked "$_f_id" 'cpu_reboot_or_counter_invalid_after_stop'; return 0
++        hold_locked "$_f_id" 'cpu_reboot_or_counter_invalid_after_stop' "$_f_snap" "$_f_wall"; return 0
+       fi
+     fi
+     _f_snap=$(merge_usage_snapshots "$_f_snap" "$_f_after")
+@@ -478,13 +552,17 @@ monitor() {
+     if ! _mo_meta=$(agent_status "$_mo_agent"); then
+       hold "$_mo_id" 'status_unreadable'; exit 0
+     fi
++    _mo_sid=$(printf '%s\n' "$_mo_cur" | jq -r '.native_session_id // ""')
++    # Never meter or release a different session recovered by Antonina.
++    if ! agent_session_matches "$_mo_meta" "$_mo_sid"; then
++      hold "$_mo_id" 'native_session_identity_changed_on_monitor'; exit 0
++    fi
+     _mo_mstate=$(printf '%s\n' "$_mo_meta" | jq -r '.state // "unknown"')
+     case "$_mo_mstate" in
+       running) :;;
+       *) finalize "$_mo_id" "agent_terminal_$_mo_mstate"; exit 0;;
+     esac
+     _mo_db=$(printf '%s\n' "$_mo_cur" | jq -r '.meter_db')
+-    _mo_sid=$(printf '%s\n' "$_mo_cur" | jq -r '.native_session_id')
+     _mo_pid=$(printf '%s\n' "$_mo_cur" | jq -r '.runner_pid // ""')
+     if ! _mo_snap=$(python3 "$TOOL" snapshot "$_mo_db" "$_mo_sid" "$_mo_pid" 2>/dev/null); then
+       hold "$_mo_id" 'meter_unreadable'; exit 0
+@@ -497,7 +575,7 @@ monitor() {
+     _mo_caps=$(printf '%s\n' "$_mo_cur" | jq -c '.caps')
+     _mo_wall=$((_mo_now - $(printf '%s\n' "$_mo_cur" | jq -r '.started_at')))
+     if ! _mo_ov=$(python3 "$TOOL" overrun "$_mo_caps" "$_mo_snap" "$_mo_wall"); then
+-      hold "$_mo_id" 'usage_overrun_check_failed'; exit 0
++      hold "$_mo_id" 'usage_overrun_check_failed' "$_mo_snap" "$_mo_wall"; exit 0
+     fi
+     if [ "$(printf '%s\n' "$_mo_ov" | jq -r '.over')" = true ]; then
+       _mo_action=$(printf '%s\n' "$_mo_cur" | jq -r '.overrun_action')
+@@ -507,7 +585,7 @@ monitor() {
+       exit 0
+     fi
+     update_meter "$_mo_id" "$_mo_snap" "$_mo_wall" || {
+-      hold "$_mo_id" 'state_write_failed'; exit 0
++      hold "$_mo_id" 'state_write_failed' "$_mo_snap" "$_mo_wall"; exit 0
+     }
+   done
+ }
+@@ -591,6 +669,10 @@ reconcile_locked() {
+         if ! _rc_meta=$(agent_status "$_rc_agent"); then
+           hold_locked "$_rc_id" 'status_unreadable_on_reconcile'; continue
+         fi
++        _rc_sid=$(jq -r '.native_session_id // ""' "$_rc_f")
++        if ! agent_session_matches "$_rc_meta" "$_rc_sid"; then
++          hold_locked "$_rc_id" 'native_session_identity_changed_on_reconcile'; continue
++        fi
+         _rc_mstate=$(printf '%s\n' "$_rc_meta" | jq -r '.state // "unknown"')
+         case "$_rc_mstate" in
+           running)
+@@ -614,8 +696,15 @@ reconcile_locked() {
+         _rc_db=$(jq -r '.meter_db' "$_rc_f")
+         _rc_sid=$(jq -r '.native_session_id // ""' "$_rc_f")
+         _rc_pid=$(jq -r '.runner_pid // ""' "$_rc_f")
++        tighten_held_locked "$_rc_id"
+         if [ -n "$_rc_agent" ] && _rc_meta=$(agent_status "$_rc_agent"); then
+           [ "$(printf '%s\n' "$_rc_meta" | jq -r '.state // "unknown"')" = running ] && continue
++          # A held debt must not be released against a different/recovered
++          # session row; the hold stays until an operator resolves identity.
++          if ! agent_session_matches "$_rc_meta" "$_rc_sid"; then
++            log "held $_rc_id: native session identity changed; keeping full hold"
++            continue
++          fi
+           if _rc_snap=$(python3 "$TOOL" snapshot "$_rc_db" "$_rc_sid" "$_rc_pid" 2>/dev/null); then
+             res_write "$_rc_id" "$(jq -c '.state="active"' "$_rc_f")"
+             finalize_locked "$_rc_id" 'reconciled_terminal' "$_rc_snap" ''
+diff --git a/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md b/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md
+index 49f9e464..cec6d33f 100644
+--- a/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md
++++ b/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md
+@@ -76,3 +76,37 @@ new smoke, `knowledge-host-cpu-lifecycle-smoke.sh`, `knowledge-budget-smoke.sh`,
+ `knowledge-budget-negative-20261122.sh` T8 fails identically before and after
+ the patch: this worktree's config has `statistics.enabled=true`, while the
+ test's comment assumes disabled shipped defaults. Pre-existing, not touched.
++
++## Follow-up review (handoff H-1795551682-b28e)
++
++Further review of `bbbd8f49` found four remaining defects in the same engine;
++all repaired in an incremental commit on the same isolated branch:
++
++1. **Cross-metric maxima.** `merge_usage_snapshots` selected the token winner
++   before reading `.cpu_seconds`/`.cost` from the chosen object, so when the
++   second input won tokens the first input's CPU/cost maxima were lost. Both
++   inputs are now captured into `$ac/$bc/$ao/$bo` before selection.
++2. **Observed liability on entry to held.** `hold_locked` charged only caps and
++   dropped an overrun snapshot that had been measured but not yet persisted;
++   it also discarded the record's last committed meter. Holds now take the
++   component-wise max of caps, observed snapshot and prior meter, and persist
++   the observed meter/usage. `tighten_held_locked` upgrades legacy held records
++   on reconcile without re-stopping or changing the hold reason. The lifecycle
++   smoke's failed-stop assertion was strengthened from `==150` to `>=185` to
++   reflect the retained overrun debt.
++3. **Session identity at stop / monitor / reconcile.** Added
++   `agent_session_matches`; a recovered, changed or missing native session id
++   now holds conservatively at `finalize_locked` (at verified stop), `monitor`
++   and both `reconcile_locked` branches instead of closing or merging against
++   a different session row.
++4. **Wall through verified stop.** `finalize_locked` now extends wall liability
++   to `now - started_at` measured after termination is confirmed, taking the
++   max with any earlier (monitor-supplied) wall value.
++
++`_f_base`/`_f_previous` are initialised at function entry, before any caller
++supplied pre-adjusted snapshot is used or merged.
++
++No budgets, caps, config, permits, source restrictions, stop/expiry checks or
++`knowledge-budget-tool.py` were changed. No live state, credentials, agents or
++model dispatch were used; all fixtures are private temp directories behind the
++`suite-env.sh` barrier.
+diff --git a/tests/knowledge-budget-finalize-after-stop-smoke.sh b/tests/knowledge-budget-finalize-after-stop-smoke.sh
+index ef5ebe4b..c4e14bcd 100644
+--- a/tests/knowledge-budget-finalize-after-stop-smoke.sh
++++ b/tests/knowledge-budget-finalize-after-stop-smoke.sh
+@@ -17,12 +17,13 @@ mkdir -p "$town/government" "$tmp/bin"
+ cp "$repo/government/knowledge-budget.conf" "$town/government/config.template"
+ 
+ # Per-case authoritative meter with the exact session_v2 schema the tool reads.
+-mkdb() { # path, token count
+-  python3 - "$1" "$2" <<'PY'
++mkdb() { # path, token count, [reported cost]
++  python3 - "$1" "$2" "${3:-0.0}" <<'PY'
+ import sqlite3,sys
+ c=sqlite3.connect(sys.argv[1])
+ c.execute('create table session_v2 (id text primary key,tokens_input int,tokens_output int,tokens_reasoning int,tokens_cache_read int,tokens_cache_write int,cost real,time_updated int)')
+-c.execute("insert into session_v2 values ('sid',?,0,0,0,0,0.0,1795279700000)",(int(sys.argv[2]),))
++c.execute("insert into session_v2 values ('sid',?,0,0,0,0,?,1795279700000)",
++          (int(sys.argv[2]),float(sys.argv[3])))
+ c.commit()
+ PY
+ }
+@@ -78,7 +79,15 @@ cat > "$tmp/bin/antonina" <<'SH'
+ #!/bin/sh
+ case "$1 $2" in
+   'agent status')
+-    cat "$TEST_AGENT_STATE"
++    case "${TEST_MODE:-}" in
++      identity_change)
++        printf '{"state":"running","native_session_id":"other-session"}\n'
++        ;;
++      still_running)
++        printf '{"state":"running","native_session_id":"sid"}\n'
++        ;;
++      *) cat "$TEST_AGENT_STATE" ;;
++    esac
+     ;;
+   'agent kill'|'agent stop')
+     printf '%s\n' "$*" >> "$TEST_AGENT_KILLS"
+@@ -94,8 +103,14 @@ PY
+       unreadable_after_stop)
+         mv "$TEST_DB" "$TEST_DB.moved"
+         ;;
++      wall_marker)
++        sleep 2
++        date +%s > "$TEST_WALL_MARK"
++        ;;
+     esac
+-    printf '{"state":"clearexit","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++    if [ "${TEST_MODE:-}" != still_running ]; then
++      printf '{"state":"clearexit","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++    fi
+     ;;
+   *) exit 17 ;;
+ esac
+@@ -180,4 +195,117 @@ jq -e '.state=="held" and .charge.tokens_total==1000 and
+   fail 'missing session identity was not held at full cap'
+ echo 'T5 ok'
+ 
+-echo 'PASS: terminal accounting keeps late commits, fail-closed holds and observed overrun debt'
++echo '--- T6: cross-metric maxima survive token-winner selection ---'
++s6=$tmp/s6; db6=$tmp/m6.db
++mkdb "$db6" 100 7.0; mkcfg "$s6" "$db6" 1000
++export VICHE_STATE_ROOT="$s6" TEST_DB="$db6" TEST_MODE=late_commit
++rid=$(/bin/sh "$engine" reserve statistics cross-metric-agent)
++python3 "$tmp/mkactive.py" "$s6/knowledge/budget/reservations/$rid.json" "$tool" "$db6" sid cross-metric-agent 100 -1
++# The previously observed meter wins TOKENS (500 vs 180), while the current
++# post-stop snapshot wins CPU (via a zeroed baseline) and reported cost (7.0).
++# Selecting the token winner first would drop the other input's CPU and cost.
++host_cpu=$(python3 "$tool" snapshot "$db6" sid 123 | jq -r '.cpu_seconds')
++python3 - "$s6/knowledge/budget/reservations/$rid.json" <<'PY'
++import json,sys
++p=sys.argv[1]; a=json.load(open(p))
++a['cpu_baseline']['cpu_seconds']=0.0
++a['meter']['tokens']['total']=500
++a['meter']['tokens']['delta_total']=500
++a['meter']['cpu_seconds']=0.5
++a['meter']['cost']=0.0
++json.dump(a,open(p,'w'))
++PY
++/bin/sh "$engine" reconcile >/dev/null
++jq -e --argjson h "$host_cpu" '.state=="closed" and .usage.tokens_total>=500 and
++        .meter.cpu_seconds>=($h - 2) and .meter.cost>=7' \
++  "$s6/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'token-winner selection lost the other input CPU/cost maxima'
++echo 'T6 ok'
++
++echo '--- T7: changed native_session_id at verified stop holds conservatively ---'
++s7=$tmp/s7; db7=$tmp/m7.db
++mkdb "$db7" 100; mkcfg "$s7" "$db7" 1000
++export VICHE_STATE_ROOT="$s7" TEST_DB="$db7" TEST_MODE=identity_change
++rid=$(/bin/sh "$engine" reserve statistics changed-stop-agent)
++python3 "$tmp/mkactive.py" "$s7/knowledge/budget/reservations/$rid.json" "$tool" "$db7" sid changed-stop-agent 100 -1
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="held" and .held_reason=="native_session_identity_changed_at_stop" and
++        .charge.tokens_total>=100' \
++  "$s7/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'changed identity at stop released or merged across sessions'
++echo 'T7 ok'
++
++echo '--- T8: changed native_session_id on reconcile holds conservatively ---'
++s8=$tmp/s8; db8=$tmp/m8.db
++mkdb "$db8" 100; mkcfg "$s8" "$db8" 1000
++export VICHE_STATE_ROOT="$s8" TEST_DB="$db8" TEST_MODE=identity_change
++rid=$(/bin/sh "$engine" reserve statistics changed-reconcile-agent)
++python3 "$tmp/mkactive.py" "$s8/knowledge/budget/reservations/$rid.json" "$tool" "$db8" sid changed-reconcile-agent 100 3600
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="held" and .held_reason=="native_session_identity_changed_on_reconcile" and
++        .charge.tokens_total>=100' \
++  "$s8/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'changed identity on reconcile did not hold'
++echo 'T8 ok'
++
++echo '--- T9: changed native_session_id on monitor holds conservatively ---'
++s9=$tmp/s9; db9=$tmp/m9.db
++mkdb "$db9" 100; mkcfg "$s9" "$db9" 1000
++export VICHE_STATE_ROOT="$s9" TEST_DB="$db9" TEST_MODE=identity_change
++rid=$(/bin/sh "$engine" reserve statistics changed-monitor-agent)
++python3 "$tmp/mkactive.py" "$s9/knowledge/budget/reservations/$rid.json" "$tool" "$db9" sid changed-monitor-agent 100 3600
++jq '.monitor_interval_seconds=1' "$s9/knowledge/budget/reservations/$rid.json" > "$tmp/r9.json"
++mv "$tmp/r9.json" "$s9/knowledge/budget/reservations/$rid.json"
++/bin/sh "$engine" monitor "$rid" >/dev/null 2>&1 &
++held=no
++for attempt in 1 2 3 4 5 6 7 8; do
++  if [ "$(jq -r '.state' "$s9/knowledge/budget/reservations/$rid.json")" = held ]; then held=yes; break; fi
++  sleep 1
++done
++[ "$held" = yes ] || fail 'monitor did not hold on changed session identity'
++jq -e '.held_reason=="native_session_identity_changed_on_monitor" and .charge.tokens_total>=100' \
++  "$s9/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'monitor hold did not retain observed liability'
++echo 'T9 ok'
++
++echo '--- T10: held overrun is not released against a different session ---'
++s10=$tmp/s10; db10=$tmp/m10.db
++mkdb "$db10" 100; mkcfg "$s10" "$db10" 150
++export VICHE_STATE_ROOT="$s10" TEST_DB="$db10" TEST_MODE=identity_change
++rid=$(/bin/sh "$engine" reserve statistics held-identity-agent)
++python3 "$tmp/mkheld.py" "$s10/knowledge/budget/reservations/$rid.json" "$tool" "$db10" sid held-identity-agent 185
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="held" and .charge.tokens_total>=185 and
++        .held_reason=="agent_still_active_or_unknown_after_stop"' \
++  "$s10/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'held overrun was released against a changed session'
++echo 'T10 ok'
++
++echo '--- T11: an overrun snapshot not yet persisted survives entry to held ---'
++s11=$tmp/s11; db11=$tmp/m11.db
++mkdb "$db11" 1800; mkcfg "$s11" "$db11" 1000
++export VICHE_STATE_ROOT="$s11" TEST_DB="$db11" TEST_MODE=still_running
++rid=$(/bin/sh "$engine" reserve statistics unpersisted-overrun-agent)
++python3 "$tmp/mkactive.py" "$s11/knowledge/budget/reservations/$rid.json" "$tool" "$db11" sid unpersisted-overrun-agent 100 -1
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="held" and .charge.tokens_total>=1800 and .meter.tokens.total>=1800' \
++  "$s11/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'entering held erased an unpersisted overrun observation'
++echo 'T11 ok'
++
++echo '--- T12: wall time is measured through the verified stop ---'
++s12=$tmp/s12; db12=$tmp/m12.db
++mkdb "$db12" 100; mkcfg "$s12" "$db12" 1000
++export VICHE_STATE_ROOT="$s12" TEST_DB="$db12" TEST_MODE=wall_marker TEST_WALL_MARK="$tmp/wall.mark"
++rid=$(/bin/sh "$engine" reserve statistics wall-agent)
++python3 "$tmp/mkactive.py" "$s12/knowledge/budget/reservations/$rid.json" "$tool" "$db12" sid wall-agent 100 -1
++/bin/sh "$engine" reconcile >/dev/null
++mark=$(cat "$TEST_WALL_MARK")
++started=$(jq -r '.started_at' "$s12/knowledge/budget/reservations/$rid.json")
++min_wall=$((mark - started))
++jq -e --argjson w "$min_wall" '.state=="closed" and .usage.wall_seconds>=$w' \
++  "$s12/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'wall liability stopped at snapshot time instead of the verified stop'
++echo 'T12 ok'
++
++echo 'PASS: terminal accounting keeps late commits, cross-metric maxima, session identity, observed debt and wall through stop'
+diff --git a/tests/knowledge-host-cpu-lifecycle-smoke.sh b/tests/knowledge-host-cpu-lifecycle-smoke.sh
+index fb0334e2..e3d73c3a 100644
+--- a/tests/knowledge-host-cpu-lifecycle-smoke.sh
++++ b/tests/knowledge-host-cpu-lifecycle-smoke.sh
+@@ -110,10 +110,12 @@ for attempt in 1 2 3 4 5 6 7 8; do
+   sleep 1
+ done
+ [ "$held" = yes ] || { echo 'Failed termination released or stranded reservation' >&2; exit 1; }
+-jq -e '.state=="held" and .charge.tokens_total==150 and
++# The failed stop must retain the cap AND the 185-token overrun already
++# observed on the meter; entering held may never erase measured debt.
++jq -e '.state=="held" and .charge.tokens_total>=185 and
+         .held_reason=="agent_still_active_or_unknown_after_stop"' \
+         "$VICHE_STATE_ROOT/knowledge/budget/reservations/$r2.json" >/dev/null || {
+-  echo 'Failed stop did not retain full reservation' >&2; exit 1;
++  echo 'Failed stop did not retain full reservation and observed overrun' >&2; exit 1;
+ }
+ if /bin/sh "$engine" reserve statistics agent-3 >/dev/null 2>&1; then
+   echo 'Another agent was admitted over still-running held session' >&2; exit 1

@@ -1,0 +1,143 @@
+commit 46749c5fb3a4d18871b6aeea72924497ae3e6362
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 19:49:24 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 19:49:24 2026 +0000
+
+    Return before locking when no hold exists; release only our own lock
+    
+    Review found that moving the hold existence check under the lock made a
+    missing unsafe-holds directory spin the bounded wait and print errors in
+    institutional-recovery-smoke. Restore a read-only existence precheck before
+    locking and re-check after acquiring it.
+    
+    Also release the lock only when it still records this shell's PID, so a lock
+    reclaimed or replaced by another holder is never deleted by a stale owner.
+    
+    Add a regression that an absent hold directory is a silent, lock-free no-op.
+
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index efecdc73..06e3532b 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -144,6 +144,16 @@ oc_clear_failures() {
+   return 0
+ }
+ 
++# Remove an unsafe-hold archive lock only if it still belongs to this shell.
++# A lock reclaimed or replaced by another holder must never be deleted here.
++oc_release_lock() {
++  oc_lock_owner=$(cat "$1" 2>/dev/null || :)
++  if [ "$oc_lock_owner" = "$$" ]; then
++    rm -f "$1" 2>/dev/null || :
++  fi
++  return 0
++}
++
+ # Archive the unsafe-hold lines that belong to ONE failed agent before its
+ # appointment is replaced. Unlike a blind `mv`, this keeps holds belonging to
+ # other invocations and never loses or duplicates evidence if it is interrupted
+@@ -155,6 +165,10 @@ oc_archive_hold() {
+   [ -n "$oc_hold_id" ] || return 0
+   oc_hold_dir=$1/archived-unsafe-holds
+   oc_lock=$1/unsafe-holds/.archive-lock
++  # Fast, read-only precondition: no hold file means no work and no lock. The
++  # file is re-checked after acquiring the lock before anything is rewritten.
++  oc_hold_file=$1/unsafe-holds/$2
++  [ -s "$oc_hold_file" ] || return 0
+   # Serialize the whole read-archive-rewrite sequence. The lock is a FILE
+   # published atomically with a hard link, so it never exists without its
+   # holder PID. A dead holder's lock is reclaimed by atomic rename, so only one
+@@ -182,22 +196,21 @@ oc_archive_hold() {
+     fi
+     sleep 0.1 2>/dev/null || sleep 1
+   done
+-  oc_hold_file=$1/unsafe-holds/$2
+   if [ ! -s "$oc_hold_file" ]; then
+-    rm -f "$oc_lock" 2>/dev/null || :
++    oc_release_lock "$oc_lock"
+     return 0
+   fi
+   oc_extract=$oc_hold_file.extract.$$
+   if ! awk -F '\t' -v id="$oc_hold_id" '$2==id' "$oc_hold_file" > "$oc_extract"; then
+-    rm -f "$oc_extract" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
++    rm -f "$oc_extract" 2>/dev/null || :; oc_release_lock "$oc_lock"
+     return 1
+   fi
+   if [ ! -s "$oc_extract" ]; then
+-    rm -f "$oc_extract" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
++    rm -f "$oc_extract" 2>/dev/null || :; oc_release_lock "$oc_lock"
+     return 0
+   fi
+   mkdir -p "$oc_hold_dir" || {
+-    rm -f "$oc_extract" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :; return 1; }
++    rm -f "$oc_extract" 2>/dev/null || :; oc_release_lock "$oc_lock"; return 1; }
+   oc_hold_backup=$oc_hold_dir/$2-$oc_hold_id
+   if [ -s "$oc_hold_backup" ]; then
+     # A previous attempt may have archived these lines but been interrupted
+@@ -207,11 +220,11 @@ oc_archive_hold() {
+     oc_new=$oc_hold_file.new.$$
+     if ! awk 'FILENAME==ARGV[1] {seen[$0]=1; next} !seen[$0]' \
+          "$oc_hold_backup" "$oc_extract" > "$oc_new"; then
+-      rm -f "$oc_extract" "$oc_new" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
++      rm -f "$oc_extract" "$oc_new" 2>/dev/null || :; oc_release_lock "$oc_lock"
+       return 1
+     fi
+     if [ -s "$oc_new" ] && ! cat "$oc_new" >> "$oc_hold_backup"; then
+-      rm -f "$oc_extract" "$oc_new" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
++      rm -f "$oc_extract" "$oc_new" 2>/dev/null || :; oc_release_lock "$oc_lock"
+       return 1
+     fi
+     rm -f "$oc_new" 2>/dev/null || :
+@@ -222,7 +235,7 @@ oc_archive_hold() {
+     if ! ln "$oc_extract" "$oc_hold_backup" 2>/dev/null; then
+       oc_cp=$oc_hold_backup.tmp.$$
+       if ! cp "$oc_extract" "$oc_cp" || ! mv -f "$oc_cp" "$oc_hold_backup"; then
+-        rm -f "$oc_extract" "$oc_cp" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
++        rm -f "$oc_extract" "$oc_cp" 2>/dev/null || :; oc_release_lock "$oc_lock"
+         return 1
+       fi
+     fi
+@@ -230,18 +243,18 @@ oc_archive_hold() {
+   rm -f "$oc_extract" 2>/dev/null || :
+   oc_hold_tmp=$oc_hold_file.tmp.$$
+   if ! awk -F '\t' -v id="$oc_hold_id" '$2!=id' "$oc_hold_file" > "$oc_hold_tmp"; then
+-    rm -f "$oc_hold_tmp" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
++    rm -f "$oc_hold_tmp" 2>/dev/null || :; oc_release_lock "$oc_lock"
+     return 1
+   fi
+   if [ -s "$oc_hold_tmp" ]; then
+     if ! mv -f "$oc_hold_tmp" "$oc_hold_file"; then
+-      rm -f "$oc_hold_tmp" 2>/dev/null || :; rm -f "$oc_lock" 2>/dev/null || :
++      rm -f "$oc_hold_tmp" 2>/dev/null || :; oc_release_lock "$oc_lock"
+       return 1
+     fi
+   else
+     rm -f "$oc_hold_tmp" "$oc_hold_file" 2>/dev/null || :
+   fi
+-  rm -f "$oc_lock" 2>/dev/null || :
++  oc_release_lock "$oc_lock"
+   return 0
+ }
+ 
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index cb51406e..c90b6573 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -200,6 +200,16 @@ test -s "$holdtest/archived-unsafe-holds/executive-old-h" &&
+   { echo 'Concurrent archiving lost a hold' >&2; exit 1; }
+ test ! -e "$holdtest/unsafe-holds/executive" ||
+   { echo 'Concurrent archiving left the hold file behind' >&2; exit 1; }
++# A missing hold directory or file is a fast no-op: no lock is created, no
++# error is printed, and no bounded wait is burned.
++rm -rf "$holdtest/unsafe-holds"
++if ! oc_archive_hold "$holdtest" executive nobody 2>"$d/nohold.err"; then
++  echo 'Absent hold directory made archiving fail' >&2; exit 1
++fi
++test ! -s "$d/nohold.err" ||
++  { echo 'Absent hold directory produced error output' >&2; exit 1; }
++test ! -e "$holdtest/unsafe-holds" ||
++  { echo 'Archiving created a lock without a hold' >&2; exit 1; }
+ if MOCK_STOP_FAIL=yes oc_quiesce_for_reset "$oc_quiesce_for_reset_test_id"; then
+   echo 'Failed quiescence incorrectly reported success' >&2; exit 1
+ fi
