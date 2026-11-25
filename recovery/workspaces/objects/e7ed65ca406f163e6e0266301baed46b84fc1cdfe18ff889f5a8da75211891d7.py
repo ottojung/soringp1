@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Independent arithmetic and finite-poset referee audit of Antonina #301.
+
+The finite model is rebuilt from the FJ pair poset: beta_1 < ... < beta_W,
+alpha_i < beta_i.  A materialized boundary chain is a linear extension of
+the beta-chain together with the inserted alpha_i; pending alpha_i retain
+only alpha_i < beta_i.  Extension counts are computed by a bitmask DP, not
+by the hook formula being audited.  The DP is cross-checked against raw
+permutation enumeration on random small posets.
+
+The script also checks the single-insertion ceiling-loss formula and the
+continuous-log stage-count arithmetic reported in Antonina #301.  It does
+not model Sergeev's Lemma 2 modules or certify a comparison-tree reset.
+"""
+from collections import Counter
+from functools import lru_cache
+from itertools import permutations
+import math
+import random
+
+
+def linear_extensions(n, relations):
+    """Count topological orders. Each relation (a,b) means a precedes b."""
+    pred = [0] * n
+    for a, b in relations:
+        pred[b] |= 1 << a
+    # Transitive closure of predecessor masks.
+    for _ in range(n):
+        changed = False
+        for e in range(n):
+            old = pred[e]
+            p = old
+            while p:
+                bit = p & -p
+                pred[e] |= pred[bit.bit_length() - 1]
+                p ^= bit
+            changed |= pred[e] != old
+        if not changed:
+            break
+
+    @lru_cache(None)
+    def count(remaining):
+        if remaining == 0:
+            return 1
+        total = 0
+        for e in range(n):
+            bit = 1 << e
+            if remaining & bit and not (pred[e] & remaining):
+                total += count(remaining ^ bit)
+        return total
+
+    return count((1 << n) - 1)
+
+
+def validate_dp(trials=200):
+    random.seed(3012026)
+    for _ in range(trials):
+        n = random.randint(3, 7)
+        rels = {(a, b) for a in range(n) for b in range(a + 1, n)
+                if random.random() < 0.35}
+        dp = linear_extensions(n, rels)
+        brute = sum(
+            1 for order in permutations(range(n))
+            if all(order.index(a) < order.index(b) for a, b in rels)
+        )
+        assert dp == brute, (n, rels, dp, brute)
+
+
+def beta(W, i):
+    return i - 1
+
+
+def alpha(W, i):
+    return W + i - 1
+
+
+def materializations(W, inserted):
+    """Generate all linear extensions of beta-chain plus inserted alpha_i."""
+    elements = {beta(W, i) for i in range(1, W + 1)}
+    elements |= {alpha(W, i) for i in inserted}
+    predecessors = {e: set() for e in elements}
+    for i in range(1, W):
+        predecessors[beta(W, i + 1)].add(beta(W, i))
+    for i in inserted:
+        predecessors[beta(W, i)].add(alpha(W, i))
+    out = []
+
+    def visit(prefix, remaining):
+        if not remaining:
+            out.append(tuple(prefix))
+            return
+        available = sorted(e for e in remaining
+                           if not (predecessors[e] & remaining))
+        for e in available:
+            visit(prefix + [e], remaining - {e})
+
+    visit([], elements)
+    return out
+
+
+def frame_relations(W, inserted, order):
+    """Full 2W-element leaf poset for one materialized chain order."""
+    rels = list(zip(order, order[1:]))
+    inserted = set(inserted)
+    for i in range(1, W + 1):
+        if i not in inserted:
+            rels.append((alpha(W, i), beta(W, i)))
+    return rels
+
+
+def hook_suffix(W, J):
+    return math.prod(2 * i - 1 for i in range(J + 1, W + 1))
+
+
+def audit_R1_R2():
+    # R1: all materialized variants, W<=6, inserted prefix / pending suffix.
+    for W in range(1, 7):
+        for J in range(W + 1):
+            inserted = list(range(1, J + 1))
+            target = hook_suffix(W, J)
+            variants = materializations(W, inserted)
+            assert variants
+            for order in variants:
+                got = linear_extensions(2 * W,
+                                        frame_relations(W, inserted, order))
+                assert got == target, (W, J, order, got, target)
+                rank = {e: k + 1 for k, e in enumerate(order)}
+                for i in range(J + 1, W + 1):
+                    assert rank[beta(W, i)] == J + i
+
+    # Exhaust all inserted subsets through W=5.  In this model, a
+    # non-prefix inserted set never has outcome-invariant extension count.
+    for W in range(1, 6):
+        for mask in range(1 << W):
+            inserted = [i for i in range(1, W + 1)
+                        if mask & (1 << (i - 1))]
+            variants = materializations(W, inserted)
+            counts = {
+                linear_extensions(2 * W, frame_relations(W, inserted, order))
+                for order in variants
+            }
+            is_prefix = inserted == list(range(1, len(inserted) + 1))
+            assert (len(counts) == 1) == is_prefix, (W, inserted, counts)
+
+    # R2: non-prefix inserted set. Keep the full distribution, including 27.
+    W, inserted = 5, [1, 3, 4]
+    distribution = Counter(
+        linear_extensions(2 * W, frame_relations(W, inserted, order))
+        for order in materializations(W, inserted)
+    )
+    assert distribution == Counter({27: 3, 36: 9, 45: 12}), distribution
+    return distribution
+
+
+def ceil_log2_integer(x):
+    return (x - 1).bit_length()
+
+
+def single_loss(m):
+    """A(m)=sum_{j<=m}(ceil(log2(2j-1))-log2(2j-1))."""
+    ceil_sum = sum(ceil_log2_integer(2 * j - 1) for j in range(1, m + 1))
+    log_product = (math.lgamma(2 * m + 1) - math.lgamma(m + 1)) / math.log(2) - m
+    return ceil_sum - log_product
+
+
+def audit_R3():
+    c = math.log2(math.e) - 1
+    print("R3: c=log2(e)-1 =", format(c, ".12f"))
+    for q in (8, 12, 16, 20):
+        for label, m in (("dyadic", 1 << q), ("half-block", 3 << (q - 1))):
+            loss = single_loss(m)
+            remainder = loss - c * m
+            print(f"  m={m} ({label}): A/m={loss/m:.9f}, "
+                  f"A-c*m={remainder:.3f}, (A-c*m)/m={remainder/m:.9f}")
+
+
+def audit_R4():
+    print("R4: continuous base-2 stage-count approximations")
+    for k in (20, 30, 60):
+        n = float(2 ** k)
+        single_stages = 0.0
+        group_stages_paper = 0.0
+        group_stages_approx = 0.0
+        levels = 0
+        while n >= 2:
+            logn = math.log2(n)
+            n0 = n / logn
+            m = math.sqrt(n) / logn
+            single_stages += n0
+            # Theorem 3 has n/2-n0 remaining elements after its prefix.
+            group_stages_paper += max(0.0, n / 2 - n0) / m
+            # Antonina's stated arithmetic uses the simpler n/2 approximation.
+            group_stages_approx += (n / 2) / m
+            n /= 2
+            levels += 1
+        denominator = (2.0 ** k) / (k ** 0.2)
+        ratio_actual = (single_stages + group_stages_paper) / denominator
+        ratio_stated = (single_stages + group_stages_approx) / denominator
+        print(f"  2^{k}: levels={levels}, stated ratio={ratio_stated:.6f}, "
+              f"Theorem-3-prefix-corrected ratio={ratio_actual:.6f}")
+
+
+def main():
+    validate_dp()
+    print("DP validation: 200 random posets matched raw permutations")
+    dist = audit_R1_R2()
+    print("R1: every suffix leaf variant passed W<=6 (all J)")
+    print("Suffix discipline: all inserted subsets through W<=5 support the\n"
+          "  proved pattern; every non-prefix set has variant-dependent counts")
+    print("R2: W=5 inserted {1,3,4}; extension-count distribution:",
+          dict(sorted(dist.items())))
+    audit_R3()
+    audit_R4()
+
+
+if __name__ == "__main__":
+    main()
