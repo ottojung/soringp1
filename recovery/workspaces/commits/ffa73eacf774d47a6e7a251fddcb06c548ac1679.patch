@@ -1,0 +1,84 @@
+commit ffa73eacf774d47a6e7a251fddcb06c548ac1679
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Tue Nov 24 22:18:49 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Tue Nov 24 22:18:49 2026 +0000
+
+    Integrate delivery/pnp-reconcile-cwd-20261124 (operator): pnp: run gitctl commands from durable cwd
+    
+    Landed by the integration queue (Act 31) as one candidate on main a18d2c39e1ff.
+    
+    Delivery-Branch: delivery/pnp-reconcile-cwd-20261124
+    Delivery-Head: 989588edab61303df60af4ddc397fa4d4b49a46e
+    Proposed-By: operator
+    Reviewed-By: reviewer-utavwtmkb93b38ec2xq8vk-stage
+    Review-Reason: Correctly defaults gitctl.run to config.CACHE_DIR when no cwd is pinned, fixing the 'Unable to read current working directory' failure for remote-only git commands inherited from a deleted worktree, with regression tests covering both the default and explicit-cwd cases; all 50 pnp-pipeline tests pas
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index 084a597d..e81cd269 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -34,6 +34,14 @@ def check_commit_fields(fmt):
+ 
+ 
+ def run(argv, cwd=None, check=True):
++    if cwd is None:
++        # A publisher or reconciler may inherit the cwd of a worktree that was
++        # removed after publication. Git resolves its repository from the
++        # process cwd, so even remote-only commands such as `git ls-remote`
++        # then fail with "Unable to read current working directory". Run every
++        # git subprocess from a durable directory unless a caller pins one.
++        cwd = config.CACHE_DIR
++        os.makedirs(cwd, exist_ok=True)
+     p = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, timeout=90)
+     if check and p.returncode != 0:
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 14a3e1e6..9ee018f8 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -57,6 +57,43 @@ def candidate_file(content=GOOD):
+     return p
+ 
+ 
++class TestGitRunCwd(unittest.TestCase):
++    def test_remote_only_git_uses_durable_cwd_when_unspecified(self):
++        # A deleted launcher worktree must not break `git ls-remote`, which
++        # resolves its repository from the process cwd even for a remote URL.
++        captured = {}
++
++        class FakeResult:
++            returncode = 0
++            stdout = ""
++            stderr = ""
++
++        def fake_run(argv, cwd=None, **kw):
++            captured["cwd"] = cwd
++            return FakeResult()
++
++        with mock.patch.object(gitctl.subprocess, "run", fake_run):
++            gitctl.run(["git", "ls-remote", "--heads", "url", "refs/heads/x"])
++        self.assertEqual(captured["cwd"], config.CACHE_DIR)
++        self.assertTrue(os.path.isdir(config.CACHE_DIR))
++
++    def test_explicit_cwd_is_respected(self):
++        captured = {}
++
++        class FakeResult:
++            returncode = 0
++            stdout = ""
++            stderr = ""
++
++        def fake_run(argv, cwd=None, **kw):
++            captured["cwd"] = cwd
++            return FakeResult()
++
++        with mock.patch.object(gitctl.subprocess, "run", fake_run):
++            gitctl.run(["git", "rev-parse", "HEAD"], cwd="/example/worktree")
++        self.assertEqual(captured["cwd"], "/example/worktree")
++
++
+ class FakeDesk:
+     def __init__(self, beat=200):
+         self.beat_status = beat

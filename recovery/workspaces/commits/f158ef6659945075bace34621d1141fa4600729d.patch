@@ -1,0 +1,50 @@
+commit f158ef6659945075bace34621d1141fa4600729d
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 18:17:32 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 18:17:32 2026 +0000
+
+    Preserve explicit nontransient false in terminal failure evidence
+
+diff --git a/government/terminal-appointment-evidence.sh b/government/terminal-appointment-evidence.sh
+index 26534f97..3ade22d1 100644
+--- a/government/terminal-appointment-evidence.sh
++++ b/government/terminal-appointment-evidence.sh
+@@ -29,7 +29,7 @@ jq -cn --arg key "$key" --arg id "$id" --arg cwd "$cwd" \
+   '{at:$at, office:$key, agent_id:$id, cwd:$cwd, state:$m[0].state,
+     finished_at:($m[0].finished_at//null), prompts:($m[0].prompts//null),
+     failure_class:($m[0].backend_error.classification//null),
+-    transient:($m[0].backend_error.transient//null),
++    transient:($m[0].backend_error.transient),
+     automatic_retry_safe:($m[0].backend_error.automatic_retry_safe),
+     evidence:("terminal-evidence/" + $id)}' > "$tmp/event.json"
+ mv "$tmp" "$dest"
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+index ccec9491..ce709855 100644
+--- a/tests/appointments-smoke.sh
++++ b/tests/appointments-smoke.sh
+@@ -20,6 +20,8 @@ elif [ "$1" = agent ] && [ "$2" = status ]; then
+   status=$(cat "$MOCK/$id")
+   if [ "$status" = failed ]; then
+     printf '{"state":"failed","finished_at":1792775220.5,"prompts":2,"backend_error":{"classification":"upstream_endpoint_unavailable","transient":true,"automatic_retry_safe":false}}\n'
++  elif [ "$status" = failed-permanent ]; then
++    printf '{"state":"failed","finished_at":1792775230.25,"prompts":3,"backend_error":{"classification":"invalid_api_key","transient":false,"automatic_retry_safe":false}}\n'
+   else
+     printf '{"state":"%s","model":null,"variant":"low"}\n' "$status"
+   fi
+@@ -64,6 +66,15 @@ y=$(/bin/sh "$script" replace a1)
+ [ "$y" = fresh-4 ] || exit 1
+ e=$(/bin/sh "$script" ensure executive)
+ [ "$e" = fresh-5 ] || exit 1
++# A confirmed nontransient terminal failure must retain false, not be erased
++# into null by jq's alternative operator (false // null is null).
++printf failed-permanent > "$MOCK/$e"
++f=$(/bin/sh "$script" ensure executive)
++[ "$f" = fresh-6 ] || exit 1
++jq -e '.state=="failed" and .failure_class=="invalid_api_key" and
++        .transient==false and .automatic_retry_safe==false and
++        .prompts==3 and .finished_at==1792775230.25' \
++  "$tmp/state/appointments/terminal-evidence/fresh-5/event.json" >/dev/null
+ [ "$(wc -l < "$tmp/state/appointments/appointments.tsv")" -eq 2 ] || exit 1
+ # No secret powers granted by supplying an unknown role key.
+ if /bin/sh "$script" ensure a2 >/dev/null 2>&1; then exit 1; fi

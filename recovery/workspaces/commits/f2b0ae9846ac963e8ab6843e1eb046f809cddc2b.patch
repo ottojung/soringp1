@@ -1,0 +1,521 @@
+commit f2b0ae9846ac963e8ab6843e1eb046f809cddc2b
+Author:     model-engineer <model-engineer@viche>
+AuthorDate: Tue Nov 24 18:02:44 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 18:25:32 2026 +0000
+
+    Harden model management for Antonina runtime failover and cooldown health
+    
+    Mirror runtime config validation and hard-cooldown rules; fail closed on
+    invalid authorized entries; add soft health and failover metrics; verify
+    adversarial cooldowns, ids and writers; repair stale economy-cycle mock.
+
+diff --git a/government/MINISTRY-OF-ECONOMY.md b/government/MINISTRY-OF-ECONOMY.md
+index 6ad1f8f9..c289ddfe 100644
+--- a/government/MINISTRY-OF-ECONOMY.md
++++ b/government/MINISTRY-OF-ECONOMY.md
+@@ -21,12 +21,15 @@ Every configured model must request the low reasoning variant. A model that reje
+ 
+ `government/economy-models.py` enforces this deterministically each refresh: whatever order anyone proposes, a paid or Luna model is never placed above a free one, no previously configured model of any tier may be removed by catalogue omissions, probe results, temporary policy or list-length caps, and an unprobed free model is not added. Catalogue discovery and free probes use the same authenticated OpenCode service as Antonina. An absent provider is not evidence that authorized fallback funding has been revoked. Only an explicit authorized operator decision removes configured models. Temporary health and cooldowns are not authorization. You do not hand-edit the config; you steer through `state/economy/model-policy.json` and the script writes it.
+ 
++`economy-models.py` is the **only writer of the global ladder** (the Act 34 free-only wrapper writes an isolated `$XDG_CONFIG_HOME/antonina/config.json` and never touches it). Every publication is validated before it is published, under a write lock with a concurrent-change check, using a candidate config the installed runtime must accept; an invalid authorized entry fails closed rather than being silently dropped. The script mirrors the runtime's accepted model-id/comment/variant shape and its hard-cooldown rules, so a `:`/`#` catalogue id, a malformed or forged cooldown, or a missing comment cannot corrupt the ladder or fake a funding shortage.
++
+ **What you do, with judgment the script cannot supply:**
+ 
+ - **Research the free models that exist now.** Read the latest `state/economy/report.json` and `catalogue.json` (what `opencode models` lists, what is newly free, what disappeared), then use the documentation and web access your tools provide to learn each free model's real limits: rate limits, daily or monthly quota, context size, capability, and whether the free offer is time-limited. Record what you found, with sources and dates, in `state/economy/research/`. A model that merely answers "OK" to the free probe is not yet proven fit for Town work.
+ - **Rank within the free tier by usefulness**, with evidence: stronger, steadier, higher-quota models first. Express it in `model-policy.json` as `{"prefer": ["provider/model", ...], "exclude": [{"model": "...", "until": EPOCH, "reason": "..."}], "notes": "..."}`. `prefer` only reorders within a tier. `exclude` is temporary (an `until` is required); it deprioritizes existing models and excludes new candidates, never revoking existing authorization.
+ - **Keep headroom.** Keep at least two free models available at all times (`free_available_now` in the report). When it falls below two, `funding_risk` is `elevated` or `high`: research further free options, tell the Executive coordinator the same day, and if the Town would genuinely stop, state it on Town Hall as a line beginning `NEEDS-FOUNDER:` (the daily digest surfaces those lines).
+-- **Read the quota facts.** `report.json` lists models cooling down and when they return. A free model on a multi-day cooldown is out of the rotation for that time; plan around it instead of discovering it at 3 a.m.
++- **Read the quota facts.** `report.json` lists models cooling down and when they return. A free model on a multi-day cooldown is out of the rotation for that time; plan around it instead of discovering it at 3 a.m. `cooldown_ignored` lists files the runtime would not honour; `soft_unhealthy` (two agents failing within ten minutes) is a last-resort warning, not a removal. `failover_depth_now`, `free_providers_now` and `failover_risk` show whether a provider-wide exclusion or a second cooldown would leave Antonina with no eligible model.
++- **Design for failover, not a single winner.** Antonina tries the configured order and skips models with active hard cooldowns or per-agent permanent exclusions (unavailable model, provider credentials or billing); a forced `#low` variant that a model rejects becomes `provider.no-route`, and a silent stall is only a soft penalty. Catalogue presence and a past "OK" probe prove none of this. Keep at least two *independent providers* available, record observed failures with their evidence, and never conclude from the ladder alone that an invocation can start.
+ 
+ You never spend money, add a paid model, create an account, hold a credential, or change a model's tier. If more capacity can only be bought, that is a `NEEDS-FOUNDER:` line with the price and the alternative.
+ 
+diff --git a/government/economy-models.py b/government/economy-models.py
+index 29ef5a6e..59ea33bb 100644
+--- a/government/economy-models.py
++++ b/government/economy-models.py
+@@ -63,6 +63,31 @@ PROBE_FRESH_SECONDS = 14 * 86400
+ PROBE_TIMEOUT = int(os.environ.get("VICHE_ECONOMY_PROBE_TIMEOUT", "120"))
+ TIER_NAMES = ["free", "contributor", "luna", "paid"]
+ 
++# Antonina's runtime rules, mirrored here so Economy's health reporting means
++# what the agent will actually do. Sources in the installed release:
++# agent-runtime/src/model-config.js, model-failover.js, model-cooldowns.js,
++# model-health.js. These are observations of runtime behaviour, not authority
++# to add or remove a configured model.
++MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
++VARIANT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
++HARD_COOLDOWN_REASONS = {"quota_exhausted", "rate_limited"}
++MAX_PROVIDER_COOLDOWN_SECONDS = 7 * 86400
++MODEL_HEALTH_WINDOW_SECONDS = 10 * 60
++MODEL_HEALTH_DISTINCT_AGENTS = 2
++MODEL_HEALTH_EVENT_RE = re.compile(r"^\d{13}-[a-f0-9]{16}\.json$")
++MAX_COOLDOWN_FILES = 200
++MAX_MODEL_HEALTH_EVENTS = 1500
++MODEL_HEALTH = pathlib.Path(os.environ.get(
++    "VICHE_ANTONINA_MODEL_HEALTH", str(COOLDOWNS.parent / "model-health")))
++RUNTIME_FAILURE_MODES = [
++    "quota_exhausted/rate_limited: shared hard cooldown, other configured models are tried",
++    "model_unavailable or provider auth/billing failure: permanent per-agent exclusion, invisible in shared cooldown files",
++    "unsupported #low variant: provider.no-route marks the model unavailable at launch",
++    "stalled request with no tokens: transient penalty, model stays in the last-resort lottery",
++    "provider-wide exclusion: every configured model of that provider is skipped together",
++    "all configured models excluded: Antonina refuses dispatch; no automatic paid fallback",
++]
++
+ 
+ def now():
+     return int(os.environ.get("VICHE_ECONOMY_NOW", time.time()))
+@@ -111,6 +136,52 @@ def entry_model(entry):
+     return entry if isinstance(entry, str) else entry.get("model", "")
+ 
+ 
++def config_problems(entries):
++    """The exact shape Antonina's configuredModels() accepts from config.json.
++
++    This is checked locally *before* publishing as well as through the installed
++    CLI: `antonina agent model select` only prints the first model, so a pass
++    there does not prove that later entries are usable at runtime.
++    """
++    problems = []
++    seen = set()
++    for index, entry in enumerate(entries):
++        model = entry_model(entry)
++        if not isinstance(model, str) or not MODEL_ID_RE.match(model):
++            problems.append("models[%d] is not a valid Antonina model id: %r" % (index, model))
++            continue
++        if model in seen:
++            problems.append("duplicate configured model: " + model)
++        seen.add(model)
++        if isinstance(entry, dict):
++            if not isinstance(entry.get("comment"), str):
++                problems.append("models[%d].comment must be a string" % index)
++            variant = entry.get("variant")
++            if variant is not None and (not isinstance(variant, str) or not VARIANT_RE.match(variant)):
++                problems.append("models[%d].variant is invalid: %r" % (index, variant))
++        elif isinstance(entry, str):
++            problems.append("models[%d] must be an object with a string comment" % index)
++        else:
++            problems.append("models[%d] is neither a string nor an object" % index)
++    return problems
++
++
++def repair_entries(entries):
++    """Normalize entries without ever changing which models are authorized."""
++    repaired = []
++    for entry in entries:
++        if isinstance(entry, str):
++            repaired.append({"model": entry, "comment": ""})
++        elif isinstance(entry, dict):
++            record = dict(entry)
++            if not isinstance(record.get("comment"), str):
++                record["comment"] = ""
++            repaired.append(record)
++        else:
++            repaired.append(entry)
++    return repaired
++
++
+ def service_env():
+     """Use Antonina's authenticated v2 service, never a second CLI server."""
+     env = dict(os.environ)
+@@ -221,6 +292,11 @@ def plan_order(cfg, catalogue_ids, probes, pol, current):
+         if grandfathered:
+             wanted[tier].append(model)
+             return
++        # Catalogue ids may carry : or # suffixes that Antonina's config
++        # rejects outright. Never publish a config the runtime cannot load.
++        if not MODEL_ID_RE.match(model):
++            dropped.append((model, "not a valid Antonina config id"))
++            return
+         if model not in in_catalogue:
+             dropped.append((model, "not in catalogue"))
+             return
+@@ -267,7 +343,11 @@ def violations(models):
+ 
+ 
+ def apply_order(cfg, final, probes, dropped, current):
+-    existing = {entry_model(e): e for e in cfg["models"]}
++    repaired = repair_entries(cfg["models"])
++    problems = config_problems(repaired)
++    if problems:
++        raise SystemExit("Refusing to publish an invalid Antonina config: " + "; ".join(problems))
++    existing = {entry_model(e): e for e in repaired}
+     stamp = datetime.datetime.fromtimestamp(current, datetime.timezone.utc).strftime("%Y-%m-%d")
+     new_entries = []
+     for model in final:
+@@ -307,23 +387,89 @@ def apply_order(cfg, final, probes, dropped, current):
+ 
+ 
+ def cooldown_state(models, current):
+-    out = {}
++    """Hard cooldowns Antonina actually honours, plus entries it ignores.
++
++    Antonina's model-cooldowns.js refuses files with the wrong reason, name,
++    model id, size or an implausibly distant `until`. Counting one of those as
++    a real cooldown would understate funding; counting a soft transient
++    penalty as hard would misstate failover, because the runtime still uses
++    softly penalised models in its last-resort lottery.
++    """
++    active = {}
++    ignored = []
+     if COOLDOWNS.is_dir():
+-        for path in COOLDOWNS.glob("*.json"):
++        for path in sorted(COOLDOWNS.glob("*.json"))[:MAX_COOLDOWN_FILES]:
++            data = load(path, {})
++            model = data.get("model") if isinstance(data, dict) else None
++            if not isinstance(model, str) or model not in models:
++                continue
++            reason = data.get("reason")
++            until = data.get("until")
++            why = None
++            if not MODEL_ID_RE.match(model) or path.name != model.replace("/", "@") + ".json":
++                why = "filename or model id mismatch"
++            elif reason not in HARD_COOLDOWN_REASONS:
++                why = "not a hard provider cooldown"
++            elif isinstance(until, bool) or not isinstance(until, (int, float)):
++                why = "until is not a number"
++            elif not current < until <= current + MAX_PROVIDER_COOLDOWN_SECONDS + 60:
++                why = "until outside the runtime bound"
++            try:
++                size = path.stat().st_size
++            except OSError:
++                size = None
++            if size is None or size > 1024:
++                why = "unreadable or oversized"
++            if why:
++                ignored.append({"model": model, "file": path.name, "why": why})
++                continue
++            active[model] = {"reason": reason, "until": int(until)}
++    return active, ignored
++
++
++def soft_unhealthy(models, current):
++    """Fleet-wide soft signal from Antonina model-health observations.
++
++    Two distinct agents failing unrecognisedly on one model within ten minutes
++    put it in the runtime's last-resort lottery. It is health evidence, never
++    a reason to revoke authorization or to change the funding ladder.
++    """
++    by_model = {}
++    if MODEL_HEALTH.is_dir():
++        events = [p for p in MODEL_HEALTH.glob("*.json") if MODEL_HEALTH_EVENT_RE.match(p.name)]
++        for path in sorted(events, reverse=True)[:MAX_MODEL_HEALTH_EVENTS]:
++            try:
++                if path.stat().st_size > 1024:
++                    continue
++            except OSError:
++                continue
+             data = load(path, {})
+-            until = data.get("until", 0)
+-            if data.get("model") in models and until > current:
+-                out[data["model"]] = {"reason": data.get("reason"), "until": int(until)}
+-    return out
++            model = data.get("model")
++            agent = data.get("agent_id")
++            at = data.get("at")
++            if not isinstance(model, str) or model not in models:
++                continue
++            if not isinstance(agent, str) or not agent:
++                continue
++            if isinstance(at, bool) or not isinstance(at, (int, float)):
++                continue
++            if not current - MODEL_HEALTH_WINDOW_SECONDS <= at <= current + 5:
++                continue
++            by_model.setdefault(model, set()).add(agent)
++    return {m: sorted(agents) for m, agents in by_model.items()
++            if len(agents) >= MODEL_HEALTH_DISTINCT_AGENTS}
+ 
+ 
+ def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, current, catalogue_ids):
+-    cooling = cooldown_state(set(final), current)
++    cooling, ignored_cooldowns = cooldown_state(set(final), current)
++    soft = soft_unhealthy(set(final), current)
+     free = [m for m in final if tier_of(m) == 0]
+     free_available = [m for m in free if m in catalogue_ids and m not in cooling]
+     fallback_eligible = [m for m in final if tier_of(m) != 0 and m in catalogue_ids and m not in cooling]
+     missing_fallback = [m for m in final if tier_of(m) != 0 and m not in catalogue_ids]
+     returns = sorted(v["until"] for m, v in cooling.items() if m in free)
++    failover_depth = len(free_available) + len(fallback_eligible)
++    providers = sorted({m.split("/", 1)[0] for m in free_available})
+     return {
+         "at": datetime.datetime.fromtimestamp(current, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "order": [{"model": m, "tier": TIER_NAMES[tier_of(m)]} for m in final],
+@@ -336,6 +482,12 @@ def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, cur
+         "model_eligibility_note": "Catalogue presence and no known cooldown are not proof of a successful invocation.",
+         "next_free_returns_at": returns[0] if (returns and not free_available) else None,
+         "cooling": cooling,
++        "cooldown_ignored": ignored_cooldowns,
++        "soft_unhealthy": {m: {"agents": a} for m, a in sorted(soft.items())},
++        "failover_depth_now": failover_depth,
++        "free_providers_now": providers,
++        "provider_concentration": len(providers) <= 1 and len(free_available) > 0,
++        "runtime_failure_modes": RUNTIME_FAILURE_MODES,
+         "changed": changed,
+         "previous_order": cfg_before,
+         "dropped": [{"model": m, "why": why} for m, why in dropped],
+@@ -344,6 +496,8 @@ def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, cur
+         "backup": backup,
+         "paid_before_free_violations": [list(v) for v in violations(final)],
+         "funding_risk": "none" if len(free_available) >= 2 else ("high" if not free_available else "elevated"),
++        "failover_risk": ("high" if failover_depth < 2 else
++                          ("elevated" if len(providers) <= 1 else "none")),
+     }
+ 
+ 
+@@ -378,7 +532,9 @@ def refresh(args):
+     free_candidates = [m for m in ids if tier_of(m) == 0 and m not in pol["exclude"]]
+     probes, ran = run_probes(free_candidates, args.probe_limit, current)
+     before, final, dropped = plan_order(cfg, ids, probes, pol, current)
+-    changed = before != final or any(not isinstance(e, dict) or e.get("variant") != "low" for e in cfg["models"])
++    repaired = repair_entries(cfg["models"])
++    changed = (before != final or repaired != cfg["models"]
++               or any(not isinstance(e, dict) or e.get("variant") != "low" for e in repaired))
+     backup = None
+     if changed and not args.no_apply:
+         backup = apply_order(cfg, final, probes, dropped, current)
+@@ -404,14 +560,18 @@ def main(argv):
+     if args.command == "refresh":
+         return refresh(args)
+     if args.command == "check":
+-        bad = violations([entry_model(e) for e in read_config()["models"]])
++        entries = read_config()["models"]
++        bad = violations([entry_model(e) for e in entries])
+         for first, second in bad:
+             print("tier violation: %s (%s) is ahead of %s (%s)" % (
+                 first, TIER_NAMES[tier_of(first)], second, TIER_NAMES[tier_of(second)]))
+-        missing_low = [entry_model(e) for e in read_config()["models"] if not isinstance(e, dict) or e.get("variant") != "low"]
++        missing_low = [entry_model(e) for e in entries if not isinstance(e, dict) or e.get("variant") != "low"]
+         for model in missing_low:
+             print("low reasoning variant required: " + model)
+-        return 1 if bad or missing_low else 0
++        problems = config_problems(entries)
++        for problem in problems:
++            print("invalid Antonina config: " + problem)
++        return 1 if bad or missing_low or problems else 0
+     if args.command == "plan":
+         cfg = read_config()
+         ids = fetch_catalogue()
+diff --git a/records/economy/2026-11-24-model-runtime-failover.md b/records/economy/2026-11-24-model-runtime-failover.md
+new file mode 100644
+index 00000000..d956808d
+--- /dev/null
++++ b/records/economy/2026-11-24-model-runtime-failover.md
+@@ -0,0 +1,87 @@
++# Permanent model management: runtime failover, cooldown health and config writers — 2026-11-24
++
++**Scope.** Founder-authorized independent engineering on billy-dev. The earlier hotfix
++`d5b9b6e5` (additive authorization, test-checkout guard, validate-before-publish,
++concurrent-write detection) was already live on `main` when this pass began; this work
++rebases onto it, does not duplicate or revert it, and covers the remaining runtime
++side. While this pass ran, `main` also received `889f6c58` (an independent repair of
++the same stale economy-cycle mock) and `ca2fa792` (verified zero-price Go routes with
++low effort); the rebase keeps both and strengthens the mock with the additional tier,
++low-variant and policy-path assertions. No office was activated, no SoringP1 work was
++dispatched or monitored, and no paid tier was enabled.
++
++## Runtime failure modes identified (installed Antonina release `37ace8e`)
++
++Evidence: `/home/lubko/.local/antonina-releases/37ace8e/node_modules/@antonina/cli/dist/packages/agent-runtime/src/`
++— `model-config.js` SHA-256 `a728f683…97a97a`, `model-failover.js` `f27f6d35…8b8c`,
++`model-cooldowns.js` `a9e160c8…b0c02f`, `model-health.js` `82a1442c…8c248`,
++`backend.js` `6dc13841…68edffcd6`.
++
++| Failure mode | Runtime behaviour | Consequence for the Town |
++|---|---|---|
++| Hard provider cooldown | `quota_exhausted` / `rate_limited` with `until <= now + 7d + 60s`, correct filename and size ≤1024 are shared exclusions; other entries are ignored | Only valid entries reduce availability; forged/soft entries must not fake a funding shortage |
++| Permanent per-agent exclusion | `model_unavailable`, provider auth/billing failures get `Number.MAX_SAFE_INTEGER`; stored in **agent metadata**, not shared cooldown files | A healthy-looking ladder can still refuse a model; Economy cannot see these from shared state |
++| Forced `#low` variant | `backend.js` explicitly warns that forcing a variant a model does not support yields `provider.no-route` → `model_unavailable` | A probe that answered OK once can become a permanent per-agent exclusion at launch |
++| Silent stall | A model that accepts a request then emits no tokens gets a 20-minute **soft** penalty and stays in the last-resort lottery | Probe success and catalogue presence prove nothing about an actual invocation |
++| Provider-wide exclusion | `excludeAgentProvider()` cools every configured model of that provider together | A one-provider free pool has no failover at all |
++| All models excluded | `selectConfiguredAgentModel()` throws "No eligible configured model" | Dispatch refuses; there is no automatic paid fallback |
++
++Live observations corroborate the soft-health path: `model-health/` held unrecognized
++backend failures on `opencode-go/hy4-flash-free`, `opencode-go/hungerg-free`,
++`opencode-go/iceman-contributor-free` and `openai/gpt-6-luna` from four or more distinct
++agents on 2026-11-24; shared cooldown files covered 13 models. These are health signals,
++not authorization decisions.
++
++## Changes (controls)
++
++| Control | SHA-256 |
++|---|---|
++| `government/economy-models.py` | `2a3dffae0f3f7a1137b40dceab1cd8dc28294a6ee3f39f294b9bd66a9dbf015c` |
++| `government/MINISTRY-OF-ECONOMY.md` | `29f98205524a92afedadaf44ac6473c10f7277876a4324a6053fe655ea44dded` |
++| `tests/economy-models-smoke.sh` | `c6cffb5996ba2ba45b7d506c63df6080a1e080cc18968f49e91bf44a518c2c36` |
++| `tests/economy-cycle-smoke.sh` | `688b680a483be113e654b81229558424dbcf1de6bff225b838939184c3d51595` |
++
++1. **All config writers audited.** `economy-models.py` is the only writer of the global
++   ladder; the Act 34 wrapper writes an isolated `$XDG_CONFIG_HOME/antonina/config.json`
++   and never touches it. The script now mirrors Antonina's accepted entry shape exactly
++   (provider/model id regex, string comment, optional matching variant, no duplicates),
++   repairs a missing comment or bare-string entry without changing authorization, and
++   **fails closed on an invalid authorized entry** instead of silently deleting it.
++   Catalogue ids containing `:`/`#` are never added. Local structural validation runs
++   before the existing external validate-before-publish step, because
++   `antonina agent model select` only prints the *first* model.
++2. **Cooldown health separated from authorization.** `cooldown_state()` now mirrors
++   `model-cooldowns.js`: only hard, bounded, correctly named, non-oversized files count;
++   ignored entries are reported in `cooldown_ignored` with a reason. Two-agent
++   unrecognized failures within ten minutes are reported as `soft_unhealthy` health
++   evidence and never revoke a model. Added `failover_depth_now`, `free_providers_now`,
++   `provider_concentration`, `failover_risk` and the runtime failure-mode list to
++   `report.json`. `funding_risk` semantics are unchanged.
++3. **Baseline fixture repaired.** `tests/economy-cycle-smoke.sh` still asserted an old
++   prompt string (`Luna models` / `at the very bottom`) that current
++   `executive-economy-cycle.sh` no longer emits, so the whole baseline economy-cycle
++   smoke failed before reaching any assertion. The mock now checks the current tier
++   rule, low-variant requirement and policy path.
++
++## Verification
++
++- `/bin/sh tests/economy-models-smoke.sh` — PASS, including new adversarial cases:
++  forged/future, soft-reason, misnamed, oversized and malformed cooldowns; two-agent
++  soft health; `#` catalogue ids; duplicate and malformed authorized entries; missing
++  comment repair; a source-level writer invariant; the pre-existing
++  additive-authorization, concurrent-change, validate-before-publish and
++  test-checkout-guard cases.
++- `/bin/sh tests/economy-cycle-smoke.sh` — PASS (baseline fixture repaired).
++- `python3 -m py_compile government/economy-models.py`, `dash -n` on both shell tests,
++  `git diff --check` — PASS.
++- Full exact-head `dash tests/run-all.sh` — see suite-status update accompanying this record.
++
++## Limits and unfinished obligations
++
++- Per-agent permanent exclusions (unavailable model, provider credentials/billing) and
++  this agent's own transient penalties live in agent metadata and are not visible to a
++  deterministic Economy pass. Economy reports this explicitly; it cannot remove them.
++- No live model-using dispatch was performed and no paid fallback was enabled. Act 34
++  activation remains held under the existing evidence/cap/Act 31 conditions.
++- The `#low` policy is unchanged: models that reject low are still authorized, but a
++  runtime `provider.no-route` is now a documented failure mode rather than a hidden one.
+diff --git a/tests/economy-cycle-smoke.sh b/tests/economy-cycle-smoke.sh
+index 14594e3b..24c7d637 100644
+--- a/tests/economy-cycle-smoke.sh
++++ b/tests/economy-cycle-smoke.sh
+@@ -42,8 +42,10 @@ set -eu
+ case "$1 $2" in
+   'agent status') printf '{"state":"%s"}\n' "$MODE" ;;
+   'agent run')
+-    case "$*" in *'MINISTRY OF ECONOMY'*'Act 29'*'then Luna, then paid models at the bottom'*) : ;;
++    case "$*" in *'MINISTRY OF ECONOMY'*'Act 29'*'free models'*'contributor models'*'Luna'*'paid models at the bottom'*'low reasoning effort'*'model-policy.json'*) : ;;
+       *) echo 'prompt lacks the Ministry mandate or the tier rule' >&2; exit 1 ;; esac
++    case "$*" in *'then Luna, then paid models at the bottom'*) : ;;
++      *) echo 'prompt lacks the exact tier order' >&2; exit 1 ;; esac
+     case "$*" in *'LATEST FUNDING REPORT'*'funding_risk'*) : ;; *) echo 'no funding report in prompt' >&2; exit 1 ;; esac
+     case "$*" in *'LATEST RESOURCE REPORT'*'availability of EVERY scarce resource'*'NEEDS-FOUNDER:'*) : ;;
+       *) echo 'prompt lacks the resource report or the broadened mandate' >&2; exit 1 ;; esac
+diff --git a/tests/economy-models-smoke.sh b/tests/economy-models-smoke.sh
+index 2f628e88..54fda427 100644
+--- a/tests/economy-models-smoke.sh
++++ b/tests/economy-models-smoke.sh
+@@ -6,7 +6,7 @@ set -eu
+ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ d=$(mktemp -d)
+ trap 'rm -rf "$d"' EXIT HUP INT TERM
+-mkdir -p "$d/bin" "$d/state" "$d/cfg" "$d/cool"
++mkdir -p "$d/bin" "$d/state" "$d/cfg" "$d/cool" "$d/health"
+ cat > "$d/bin/opencode" <<'MOCK'
+ #!/bin/sh
+ # opencode run -m MODEL --format json PROMPT
+@@ -33,8 +33,8 @@ MOCK
+ chmod +x "$d/bin/opencode" "$d/bin/antonina"
+ export PATH="$d/bin:$PATH" MOCK_PROBES="$d/probes.log" HOME="$d/home" \
+   VICHE_STATE_ROOT="$d/state" VICHE_ANTONINA_CONFIG="$d/cfg/config.json" \
+-  VICHE_ANTONINA_COOLDOWNS="$d/cool" VICHE_OPENCODE_MODELS="$d/catalogue.txt" \
+-  VICHE_ECONOMY_NOW=1794830400
++  VICHE_ANTONINA_COOLDOWNS="$d/cool" VICHE_ANTONINA_MODEL_HEALTH="$d/health" \
++  VICHE_OPENCODE_MODELS="$d/catalogue.txt" VICHE_ECONOMY_NOW=1794830400
+ : > "$d/probes.log"
+ eco="python3 $repo/government/economy-models.py"
+ order() { jq -r '[.models[].model] | join(",")' "$VICHE_ANTONINA_CONFIG"; }
+@@ -113,14 +113,39 @@ VICHE_ECONOMY_NOW=1794837600 $eco refresh | jq -e '.changed == true' >/dev/null
+ test "$(order)" = 'opencode/beta-free,opencode/alpha-free,opencode/vanished-free,opencode-go/glm-contributor,openai/gpt-6-luna,openai/gpt-6'
+ $eco check
+ 
+-# Funding risk follows live cooldowns: one free model cooling = elevated, both = high, and the report says when one returns.
+-printf '{"model":"opencode/alpha-free","reason":"quota","until":1794900000}\n' > "$d/cool/a.json"
+-printf '{"model":"opencode/beta-free","reason":"quota","until":1794800000}\n' > "$d/cool/b.json"   # already over
+-VICHE_ECONOMY_NOW=1794837600 $eco refresh | jq -e '.funding_risk == "elevated" and .free_available_now == 1' >/dev/null
+-printf '{"model":"opencode/beta-free","reason":"quota","until":1794880000}\n' > "$d/cool/b.json"
+-VICHE_ECONOMY_NOW=1794837600 $eco refresh | jq -e '.funding_risk == "high" and .free_available_now == 0' >/dev/null
+-jq -e '.next_free_returns_at == 1794880000 and (.cooling | length) == 2' "$r" >/dev/null
+-rm -f "$d/cool/a.json" "$d/cool/b.json"
++# Funding risk follows only the hard cooldowns Antonina honours: one free model cooling = elevated, both = high.
++rm -f "$d/cool"/*.json
++printf '{"model":"opencode/alpha-free","reason":"quota_exhausted","until":1794900000}\n' > "$d/cool/opencode@alpha-free.json"
++printf '{"model":"opencode/beta-free","reason":"quota_exhausted","until":1794800000}\n' > "$d/cool/opencode@beta-free.json"   # already over
++VICHE_ECONOMY_NOW=1794837600 $eco refresh --probe-limit 0 | jq -e '.funding_risk == "elevated" and .free_available_now == 1' >/dev/null
++printf '{"model":"opencode/beta-free","reason":"quota_exhausted","until":1794880000}\n' > "$d/cool/opencode@beta-free.json"
++VICHE_ECONOMY_NOW=1794837600 $eco refresh --probe-limit 0 | jq -e '.funding_risk == "high" and .free_available_now == 0' >/dev/null
++jq -e '.next_free_returns_at == 1794880000 and (.cooling | length) == 2 and (.cooldown_ignored | length) == 0' "$r" >/dev/null
++
++# Adversarial cooldowns: future, soft, misnamed, oversized and malformed files carry no authority.
++printf '{"model":"opencode/alpha-free","reason":"quota_exhausted","until":9999999999}\n' > "$d/cool/opencode@alpha-free.json"
++printf '{"model":"opencode/beta-free","reason":"transient_backend","until":1794880000}\n' > "$d/cool/opencode@beta-free.json"
++printf '{"model":"opencode/beta-free","reason":"rate_limited","until":1794880000}\n' > "$d/cool/wrong-name.json"
++python3 - "$d/cool/opencode@vanished-free.json" <<'PY'
++import sys
++open(sys.argv[1], "w").write('{"model":"opencode/vanished-free","reason":"quota_exhausted","until":1794880000}' + ' ' * 1200)
++PY
++printf '{broken\n' > "$d/cool/opencode@gamma-free.json"
++VICHE_ECONOMY_NOW=1794837600 $eco refresh --probe-limit 0 | jq -e '.funding_risk == "none" and .free_available_now == 2' >/dev/null
++jq -e '(.cooling | length) == 0 and (.cooldown_ignored | length) == 4' "$r" >/dev/null
++jq -e '[.cooldown_ignored[] | select(.why == "until outside the runtime bound")] | length == 1' "$r" >/dev/null
++jq -e '[.cooldown_ignored[] | select(.why == "not a hard provider cooldown")] | length == 1' "$r" >/dev/null
++jq -e '[.cooldown_ignored[] | select(.why == "filename or model id mismatch")] | length == 1' "$r" >/dev/null
++jq -e '[.cooldown_ignored[] | select(.why == "unreadable or oversized")] | length == 1' "$r" >/dev/null
++rm -f "$d/cool"/*.json
++
++# Fleet-wide soft health is a last-resort warning, never a reason to revoke authorization.
++printf '{"agent_id":"agent-one","model":"opencode/alpha-free","at":1794837500}\n' > "$d/health/1794837500000-aaaaaaaaaaaaaaaa.json"
++printf '{"agent_id":"agent-two","model":"opencode/alpha-free","at":1794837550}\n' > "$d/health/1794837550000-bbbbbbbbbbbbbbbb.json"
++VICHE_ECONOMY_NOW=1794837600 $eco refresh --probe-limit 0 | jq -e '.funding_risk == "none" and .free_available_now == 2' >/dev/null
++jq -e '.soft_unhealthy["opencode/alpha-free"].agents == ["agent-one","agent-two"]' "$r" >/dev/null
++jq -e '[.order[].model | select(. == "opencode/alpha-free")] | length == 1' "$r" >/dev/null
++rm -f "$d/health"/*.json
+ 
+ # The catalogue disappearing never damages the list.
+ snapshot=$(cat "$VICHE_ANTONINA_CONFIG")
+@@ -195,6 +220,40 @@ jq 'del(.models[0].variant)' "$VICHE_ANTONINA_CONFIG" > "$d/without-low"
+ mv "$d/without-low" "$VICHE_ANTONINA_CONFIG"
+ $eco refresh --probe-limit 0 | jq -e '.changed == true' >/dev/null
+ jq -e 'all(.models[]; .variant == "low")' "$VICHE_ANTONINA_CONFIG" >/dev/null
++
++# Writer invariant: only Economy writes the global ladder; the Act34 wrapper pins an isolated dir.
++for f in "$repo"/government/*; do
++  [ -f "$f" ] || continue
++  grep -q 'antonina/config.json' "$f" || continue
++  case "$(basename "$f")" in
++    economy-models.py|knowledge-free-dispatch.sh|MINISTRY-OF-ECONOMY.md|daily-digest.py) : ;;
++    *) echo "unexpected global-config reference in $(basename "$f")" >&2; exit 1 ;;
++  esac
++done
++
++# Adversarial: a catalogue id with # is never published (Antonina rejects it).
++cp "$d/catalogue.txt" "$d/weird.txt"
++printf 'opencode/odd-free-x#fast\n' >> "$d/weird.txt"
++printf '{"models":[{"model":"opencode/alpha-free","comment":"free","variant":"low"}]}\n' > "$VICHE_ANTONINA_CONFIG"
++VICHE_OPENCODE_MODELS="$d/weird.txt" $eco refresh --probe-limit 0 >/dev/null
++case ",$(order)," in *',opencode/odd-free-x#fast,'*) echo 'published an invalid runtime id' >&2; exit 1 ;; esac
++jq -e '[.dropped[] | select(.model == "opencode/odd-free-x#fast" and .why == "not a valid Antonina config id")] | length == 1' "$r" >/dev/null
++
++# An invalid authorized entry fails closed; it is never silently deleted.
++printf '{"models":[{"model":"opencode/alpha-free","comment":"free"},{"model":"opencode/alpha-free","comment":"dup"}]}\n' > "$VICHE_ANTONINA_CONFIG"
++snapshot=$(cat "$VICHE_ANTONINA_CONFIG")
++rc=0; $eco check > "$d/bad.out" 2>/dev/null || rc=$?
++test "$rc" -eq 1
++grep -q 'duplicate configured model' "$d/bad.out"
++rc=0; $eco refresh --probe-limit 0 2>/dev/null || rc=$?
++test "$rc" -ne 0
++test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$snapshot"
++
++# A missing comment is repaired rather than treated as a reason to revoke.
++printf '{"models":[{"model":"opencode/alpha-free"}]}\n' > "$VICHE_ANTONINA_CONFIG"
++$eco refresh --probe-limit 0 >/dev/null
++jq -e '.models[0].comment == "" and .models[0].variant == "low"' "$VICHE_ANTONINA_CONFIG" >/dev/null
++
+ # A copied checkout with inherited HOME and no fixture overrides cannot
+ # execute discovery or modify any config.
+ before=$(cat "$VICHE_ANTONINA_CONFIG")

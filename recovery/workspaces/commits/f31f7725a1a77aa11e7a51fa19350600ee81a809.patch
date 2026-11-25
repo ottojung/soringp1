@@ -1,0 +1,37 @@
+commit f31f7725a1a77aa11e7a51fa19350600ee81a809
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 18:21:10 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 18:21:10 2026 +0000
+
+    Review PR 37 appointment evidence safeguards
+
+diff --git a/records/PR37-APPOINTMENT-EVIDENCE-CODE-REVIEW-2026-10-23.md b/records/PR37-APPOINTMENT-EVIDENCE-CODE-REVIEW-2026-10-23.md
+new file mode 100644
+index 00000000..9a356d8a
+--- /dev/null
++++ b/records/PR37-APPOINTMENT-EVIDENCE-CODE-REVIEW-2026-10-23.md
+@@ -0,0 +1,23 @@
++# Independent code review: PR #37 appointment evidence (2026-10-23)
++
++**Exact head:** `55faf3c9c040e9f4f6778d238e69e269e335f0ee`; **tree:** `9b0c096d0708f14049dcb5ac5231caeb2bacaf46`. The commit signature verifies as good for Otto Jung (local trust unknown). PR #37 was open at review. Its four changed files are `government/terminal-appointment-evidence.sh`, `government/appointments.sh`, `government/APPOINTMENT-RECOVERY.md`, and `tests/appointments-smoke.sh`; no law, ballot, constitutional, or outcome file changes.
++
++## Verdict
++
++**Objections to unqualified approval of the evidence-preservation/replacement flow.** The change records useful evidence before ordinary failed-agent replacement and does not replay prompts, but the integrated flow does not guarantee a complete log/worktree capture on all error paths and has an unreadable-status race. The PR correctly does not claim to satisfy Act 19's three-distinct-transient-failure threshold; issue `4Ux4sxiHjpXqSi9T9d2suq-alabama` remains legally open. This review does not close or amend it.
++
++## Verified behavior and test
++
++- `appointments.sh` calls the recorder while holding its appointment mutation lock, before creating the replacement ID or updating the registry. The evidence helper only calls `agent log`; no `agent run`/prompt replay or old-worktree reset is present in this change.
++- The raw `status.json` is retained. The structured event accesses `.backend_error.automatic_retry_safe` directly, so JSON `false` remains `false`, distinct from `null`; `appointments-smoke.sh` asserts the false value. Malformed status objects and non-terminal state strings are rejected before the directory is published. The unreadable status fallback is explicitly labeled `unreadable`, not `failed`.
++- Ran `sh tests/run-all.sh` in the detached exact-head worktree. Exit status **0**, final output `All Viche tests passed`. The appointment smoke passed. Fixture diagnostics (including unavailable delivery-candidate fixtures and invalid/empty repository fixtures) appeared as expected; no test failed.
++
++## Objections and limits
++
++1. **Log/worktree capture errors are swallowed.** `antonina agent log --lines 80 ... || :` ignores a nonzero result; `git status --short ... || :` leaves an empty file on error, indistinguishable from a clean worktree. The existing appointment smoke's mocked `antonina` has no `agent log` case, so that command returns its “unexpected mocked command” error, yet the script proceeds and the test passes without asserting actual log-tail contents. Thus the test demonstrates the current gap: a replacement can proceed without a captured old log, and an unreadable Git status can look clean. The raw status and HEAD fallback are preserved, but completeness is not fail-closed.
++2. **Unreadable status has a TOCTOU window.** The `ensure` path treats any failed `agent status` command as not-live and records synthetic `unreadable`; it does not re-query immediately before replacing. `resolve` deliberately skips the appointment lock. If the first status read fails transiently while the old agent is still running, a concurrent resolver can obtain and return the old live ID while `ensure` proceeds to create/register a new agent. If instructions are stale, `appointments.sh` then invokes `policy-sync.sh` on the shared worktree after the snapshot. The evidence is useful for diagnosis, but the code does not establish that an unreadable appointee has stopped or prevent duplicate live sessions/worktree use.
++3. **Snapshot and append-only index are not one atomic transaction.** The per-ID evidence directory is atomically moved into place before appending `terminal-events.jsonl`. A crash or append error in that interval leaves `event.json` present but the index row absent. A retry sees the directory and returns success immediately without validating or repairing the index. The event file still preserves the primary snapshot; the convenience index can nevertheless be incomplete. The official caller serializes normal appends under the appointment lock, but the helper itself has no lock if invoked directly.
++4. **Bounded by line count, not bytes or time.** `--lines 80` does not cap individual line size; `git status --short` output is also unbounded. Neither capture has a timeout. A very large log/status can consume substantial private-state storage or hold the appointment lock for an unbounded time. The full suite has no large-log, timeout, interrupted-index, or concurrent-resolver test. Its idempotence check repeats `ensure` for an already-live current ID; it does not call the recorder twice for the same departed ID.
++5. **Privacy mode is scoped.** The evidence helper uses `umask 077` before creating its temp directory/files, and the intended caller sets the same umask before invoking it; thus the new evidence directory/files are private in the normal path. The existing `appointments` parent is mode `0755` on this host because `appointments.sh` creates it before setting umask; files are mode `0600`. The smoke test does not assert permissions, and the helper alone would create `terminal-evidence/` under the caller's inherited umask if invoked outside the wrapper.
++
++The first correction (preserve status/finished time/retry-safety before replacing) is exercised successfully. The fail-closed guarantee is narrower than the docs suggest: status parsing and core directory publication failures stop replacement, but log and Git-status acquisition failures are tolerated without explicit structured unavailable markers. No claim is made here that the separate Act 19 reset-threshold contradiction is solved.

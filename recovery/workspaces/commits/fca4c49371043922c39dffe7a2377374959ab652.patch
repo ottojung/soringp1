@@ -1,0 +1,1429 @@
+commit fca4c49371043922c39dffe7a2377374959ab652
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Sun Nov 22 19:00:36 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Sun Nov 22 19:00:36 2026 +0000
+
+    Integrate delivery/exec-act33-first-trial-preflight-20261122 (executive): Executive: fail-closed first-trial preflight mode for enacted Act 33
+    
+    Landed by the integration queue (Act 31) as one candidate on main 6dfc4f4a5947.
+    
+    Delivery-Branch: delivery/exec-act33-first-trial-preflight-20261122
+    Delivery-Head: 24c35964732e798c93174a5df7094c5448920ab1
+    Proposed-By: executive
+    Reviewed-By: reviewer-anvgpw23xmaulreeqwzq3x-yourself
+    Review-Reason: Adds a dormant, fail-closed Act 33 first-trial verifier plus hermetic tests while preserving the legacy preflight gate and its callers verbatim; no LAWS.md/seats.tsv change, no office enablement or spending, and no existing records deleted or rewritten (the three new records are marked DRAFT/inactiv
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/statistics-first-trial.py b/government/statistics-first-trial.py
+new file mode 100644
+index 00000000..b7817959
+--- /dev/null
++++ b/government/statistics-first-trial.py
+@@ -0,0 +1,621 @@
++#!/usr/bin/env python3
++"""Fail-closed verifier for the enacted Act 33 FIRST Statistics trial preflight.
++
++This is the narrow exception to Act 32 amendments D/E/H/K and clause 9: for the
++FIRST reversible Statistics measurement trial only, a historical independently
++verified numerator and actual per-office CPU are NOT prerequisites. They must be
++declared UNAVAILABLE (never zero, never "verified"). Everything else is stricter,
++not looser: prospective design, frozen primary sources with reliable same-boot
++observations, an independently measured and genuinely ENFORCED hard cap, an
++explicit <=14-day Executive order and an independently corroborated Judiciary
++proceed bound to the exact frozen source bytes.
++
++Authority is never a bag of all-green JSON keys. Every gate must additionally
++carry a Git-anchored, officer-bound review artifact AND be corroborated by a
++separate institutional export (board review + officer comment + appointment
++registry). A forged officer, wrong Act, missing/expired order, unavailable cap,
++missing source, tampered source or absent corroboration fails closed.
++
++Deterministic: no network, no clock except the caller-supplied `at` epoch.
++POSIX-invocable from sh. This verifier never enables an office; it only decides
++whether the recorded evidence is sufficient WITHHOLDING authority.
++"""
++import hashlib
++import importlib.util
++import json
++import os
++import re
++import subprocess
++import sys
++from pathlib import Path
++
++SCHEMA = "viche-statistics-first-trial-preflight-1"
++RESULT_SCHEMA = "viche-statistics-first-trial-preflight-result-1"
++LEGACY_HELPER_NAME = "statistics-evidence.py"
++
++ACT = 33
++ACT_TITLE = "Prospective Statistics Trial Clarification"
++ACT_BILL_ID = "act32-prospective-statistics-trial-amendment"
++ACT_BILL_SHA256 = "65345025166713b43816b27ea2d982a87809df956c258ac022dca7a274528a9d"
++
++MAX_TRIAL_SECONDS = 14 * 24 * 3600
++OBSERVATION_SKEW_SECONDS = 24 * 3600
++
++GATE_SIGNERS = {
++    "prospective_design": "executive",
++    "frozen_sources_same_boot": "economy",
++    "economy_safety_hard_cap": "economy",
++    "executive_order_14d": "executive",
++    "judiciary_proceed": "judiciary",
++    "source_corroboration": "judiciary",
++}
++GATE_KEYS = frozenset(GATE_SIGNERS)
++
++SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
++COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
++PATH_RE = re.compile(r"^[A-Za-z0-9._-]+$")
++
++
++class VerifyError(Exception):
++    pass
++
++
++# ---- reuse the legacy helper's byte-pinning primitives -------------------
++def load_legacy_helper(town):
++    """Import the verified byte-pinning helpers by path; fail closed if absent."""
++    path = Path(town) / "government" / LEGACY_HELPER_NAME
++    if not path.is_file() or path.is_symlink():
++        raise VerifyError("legacy evidence helper missing")
++    try:
++        spec = importlib.util.spec_from_file_location("viche_legacy_evidence", str(path))
++        mod = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(mod)
++    except Exception as exc:  # pragma: no cover - defensive
++        raise VerifyError("legacy evidence helper unreadable: %s" % exc)
++    for name in ("sha256_of", "snapshot_path"):
++        if not callable(getattr(mod, name, None)):
++            raise VerifyError("legacy evidence helper lacks %s" % name)
++    return mod
++
++
++def sha256_bytes(data):
++    return hashlib.sha256(data).hexdigest()
++
++
++def load_json(path):
++    try:
++        with open(path, "r", encoding="utf-8") as fh:
++            return json.load(fh)
++    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
++        raise VerifyError("cannot read JSON %s: %s" % (path, exc))
++
++
++def is_int(value):
++    return isinstance(value, int) and not isinstance(value, bool)
++
++
++def nonempty(value):
++    return isinstance(value, str) and len(value.strip()) > 0
++
++
++class Verifier:
++    def __init__(self, town, at):
++        self.town = Path(town).resolve()
++        self.at = int(at)
++        self._legacy = None
++        self._registry = None
++
++    # ---- authoritative town sources -------------------------------------
++    def legacy(self):
++        if self._legacy is None:
++            self._legacy = load_legacy_helper(str(self.town))
++        return self._legacy
++
++    def read_laws(self):
++        path = self.town / "government" / "LAWS.md"
++        try:
++            return path.read_text(encoding="utf-8")
++        except (OSError, UnicodeError) as exc:
++            raise VerifyError("cannot read government/LAWS.md: %s" % exc)
++
++    def officers(self):
++        """Authoritative officer registry: role -> id and id -> role."""
++        if self._registry is not None:
++            return self._registry
++        path = self.town / "government" / "branch-officers.tsv"
++        try:
++            text = path.read_text(encoding="utf-8")
++        except (OSError, UnicodeError) as exc:
++            raise VerifyError("cannot read officer registry: %s" % exc)
++        by_role, by_id = {}, {}
++        for line in text.splitlines():
++            cols = line.split("\t")
++            if len(cols) >= 2 and cols[0] and cols[1]:
++                # branch-officers.tsv columns are: role <TAB> officer-id <TAB> name
++                by_role.setdefault(cols[0].strip(), cols[1].strip())
++                by_id.setdefault(cols[1].strip(), cols[0].strip())
++        if not by_role or not by_id:
++            raise VerifyError("empty officer registry")
++        self._registry = (by_role, by_id)
++        return self._registry
++
++    def git(self, *args):
++        try:
++            proc = subprocess.run(["git", "-C", str(self.town), *args],
++                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
++                                  timeout=60)
++        except (OSError, subprocess.SubprocessError) as exc:
++            raise VerifyError("git unavailable: %s" % exc)
++        if proc.returncode != 0:
++            raise VerifyError("git command failed: %s" % " ".join(args))
++        return proc.stdout
++
++    def git_object_is_commit(self, commit):
++        if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
++            return False
++        try:
++            kind = self.git("cat-file", "-t", commit).decode("ascii", "replace").strip()
++        except VerifyError:
++            return False
++        return kind == "commit"
++
++    def read_git_blob(self, commit, path):
++        """Read a blob by EXACT Git tree traversal (no path interpretation)."""
++        if not isinstance(path, str):
++            raise VerifyError("artifact path is not a string")
++        parts = path.split("/")
++        if (not path.startswith("records/") or ".." in parts
++                or any(not PATH_RE.fullmatch(p) for p in parts)):
++            raise VerifyError("unsafe artifact path (Git tree traversal required)")
++        out = self.git("ls-tree", "-z", commit, "--", path)
++        entries = [e for e in out.split(b"\0") if e]
++        if len(entries) != 1 or b"\t" not in entries[0]:
++            raise VerifyError("artifact path is not a unique Git tree entry")
++        meta, actual = entries[0].split(b"\t", 1)
++        fields = meta.split()
++        if (len(fields) != 3 or fields[0] not in (b"100644", b"100755")
++                or fields[1] != b"blob"):
++            raise VerifyError("artifact path is not a regular Git blob")
++        if actual.decode("utf-8", "replace") != path:
++            raise VerifyError("artifact tree entry path mismatch")
++        return self.git("cat-file", "blob", fields[2].decode("ascii"))
++
++    @staticmethod
++    def parse_kv(data):
++        try:
++            text = data.decode("utf-8")
++        except UnicodeError:
++            raise VerifyError("artifact not UTF-8")
++        kv = {}
++        for line in text.splitlines():
++            m = re.match(r"^\s*([a-z_]+)\s*:\s*(.*?)\s*$", line)
++            if m:
++                kv.setdefault(m.group(1), m.group(2).strip())
++        return kv
++
++    # ---- law recognition -------------------------------------------------
++    def check_law(self, problems):
++        """Require precisely ONE enacted Act 33, with the exact voted bill."""
++        try:
++            laws = self.read_laws()
++        except VerifyError as exc:
++            problems.append(str(exc))
++            return
++        pat = re.compile(r"^## Act (\d+) — ([^\n(]+)\(enacted ", re.MULTILINE)
++        enacted = [(int(n), t.strip()) for n, t in pat.findall(laws)]
++        acts33 = [(n, t) for n, t in enacted if n == ACT]
++        if len(acts33) != 1:
++            problems.append("expected exactly one enacted Act 33, found %d" % len(acts33))
++            return
++        title = acts33[0][1]
++        if ACT_TITLE not in title:
++            problems.append("Act 33 title is not the Prospective Statistics Trial Clarification")
++        # Section text spans from its heading to the next '## ' heading.
++        m = re.search(r"^## Act 33 — [^\n]*\(enacted .*?(?=^## |\Z)", laws,
++                      re.MULTILINE | re.DOTALL)
++        section = m.group(0) if m else ""
++        if "Historical enactments" in section or "SUPERSEDED" in section:
++            problems.append("Act 33 is historical/superseded, not operative law")
++        if ("bill " + ACT_BILL_ID) not in section:
++            problems.append("Act 33 does not bind the exact voted bill id")
++        if ACT_BILL_SHA256 not in section:
++            problems.append("Act 33 does not bind the exact voted bill sha256")
++        if not any(n == 32 for n, _ in enacted):
++            problems.append("Act 32 (amended base law) is not enacted")
++
++    # ---- evidence digest -------------------------------------------------
++    @staticmethod
++    def evidence_digest(sources):
++        norm = sorted(
++            ({"snapshot": s.get("snapshot"), "sha256": s.get("sha256"),
++              "size_bytes": s.get("size_bytes")} for s in sources),
++            key=lambda d: (str(d["snapshot"]), str(d["sha256"])),
++        )
++        blob = json.dumps(norm, sort_keys=True, separators=(",", ":"),
++                          ensure_ascii=False).encode("utf-8")
++        return "sha256:" + sha256_bytes(blob)
++
++    # ---- source pinning + same-boot -------------------------------------
++    def check_sources(self, att, design, problems):
++        legacy = self.legacy()
++        sources = att.get("sources")
++        if not isinstance(sources, list) or not sources:
++            problems.append("no pinned primary sources")
++            return []
++        source_dir = self.town / "records/knowledge/first-trial-sources-20261122"
++        if not source_dir.is_dir():
++            # The attestation may name an alternative in-town frozen source dir.
++            rel = att.get("source_dir")
++            if nonempty(rel):
++                candidate = self._safe_town_path(rel)
++                source_dir = candidate if candidate is not None and candidate.is_dir() else source_dir
++        if not source_dir.is_dir():
++            problems.append("frozen source directory missing")
++            return []
++        boot = design.get("same_boot")
++        if not isinstance(boot, dict):
++            problems.append("design.same_boot missing")
++            return []
++        boot_id = boot.get("boot_id")
++        observed_at = boot.get("observed_at")
++        if not nonempty(boot_id):
++            problems.append("same_boot.boot_id missing")
++        if not is_int(observed_at):
++            problems.append("same_boot.observed_at missing/malformed")
++        if boot.get("reliable") is not True:
++            problems.append("same_boot.reliable is not true")
++        if not nonempty(boot.get("observed_by")):
++            problems.append("same_boot.observed_by missing")
++        declared = []
++        for entry in sources:
++            if not isinstance(entry, dict):
++                problems.append("malformed source entry")
++                continue
++            name = entry.get("snapshot")
++            path = legacy.snapshot_path(source_dir, name)
++            if path is None:
++                problems.append("unsafe or missing snapshot name: %r" % (name,))
++                continue
++            declared.append(name)
++            if not path.is_file():
++                problems.append("missing source: %s" % name)
++                continue
++            if entry.get("sha256") != legacy.sha256_of(str(path)):
++                problems.append("source hash mismatch: %s" % name)
++            if not is_int(entry.get("size_bytes")) or entry["size_bytes"] != path.stat().st_size:
++                problems.append("source size mismatch: %s" % name)
++            if entry.get("boot_id") != boot_id:
++                problems.append("source observed under a different boot: %s" % name)
++            so = entry.get("observed_at")
++            if not is_int(so) or not is_int(observed_at) or abs(so - observed_at) > OBSERVATION_SKEW_SECONDS:
++                problems.append("source observation outside same-boot window: %s" % name)
++        present = {p.name for p in source_dir.iterdir()
++                   if p.is_file() and not p.is_symlink() and p.name != "MANIFEST.sha256"}
++        extra = sorted(present - set(declared))
++        if extra:
++            problems.append("unattested files present: %s" % ",".join(extra))
++        observed = boot.get("sources_observed")
++        if (not isinstance(observed, list) or len(observed) != len(declared)
++                or set(observed) != set(declared)):
++            problems.append("same_boot.sources_observed does not equal pinned sources")
++        manifest_path = source_dir / "MANIFEST.sha256"
++        if manifest_path.is_file() and not manifest_path.is_symlink():
++            declared_manifest = {}
++            for line in manifest_path.read_text(encoding="utf-8").splitlines():
++                parts = line.split("  ", 1)
++                if len(parts) == 2:
++                    declared_manifest[parts[1]] = parts[0]
++            for name, digest in sorted(declared_manifest.items()):
++                path = legacy.snapshot_path(source_dir, name)
++                if path is None or not path.is_file():
++                    problems.append("manifest file missing or unsafe: %s" % name)
++                elif legacy.sha256_of(str(path)) != digest:
++                    problems.append("manifest hash mismatch: %s" % name)
++        return sources
++
++    def _safe_town_path(self, rel):
++        if not isinstance(rel, str) or not rel or "\\" in rel:
++            return None
++        path = Path(rel)
++        if path.is_absolute() or ".." in path.parts:
++            return None
++        return self.town / path
++
++    # ---- design / UNAVAILABLE honesty -----------------------------------
++    def check_design(self, att, design, problems):
++        if not isinstance(design, dict):
++            problems.append("design block missing")
++            return
++        pro = design.get("prospective")
++        if not isinstance(pro, dict):
++            problems.append("design.prospective missing")
++        else:
++            for key in ("endpoint", "population", "selection", "missingness",
++                        "comparator", "observation_window"):
++                if not nonempty(pro.get(key)):
++                    problems.append("prospective.%s missing" % key)
++            for key in ("negative_controls", "falsifiers"):
++                val = pro.get(key)
++                if not isinstance(val, list) or not val or not all(nonempty(x) for x in val):
++                    problems.append("prospective.%s missing or empty" % key)
++        for key in ("historical_numerator", "per_office_cpu"):
++            item = design.get(key)
++            if not isinstance(item, dict) or item.get("status") != "UNAVAILABLE":
++                problems.append("%s must be explicitly UNAVAILABLE" % key)
++            elif not nonempty(item.get("reason")):
++                problems.append("%s lacks an unavailable reason" % key)
++            elif "value" in item and item["value"] is not None:
++                problems.append("%s carries an imputed value" % key)
++            elif item.get("verified") is True:
++                problems.append("%s is claimed verified" % key)
++        cpu = design.get("whole_host_cpu")
++        if (not isinstance(cpu, dict) or cpu.get("tag") != "UPPER_BOUND"
++                or cpu.get("status") not in ("MEASURED_UPPER_BOUND", "MEASURED")):
++            problems.append("whole_host_cpu must be a tagged UPPER_BOUND safety measure")
++
++    # ---- gates, artifacts and institutional corroboration ---------------
++    def check_gates(self, att, digest, sources, problems):
++        gates = att.get("gates")
++        if not isinstance(gates, dict) or frozenset(gates) != GATE_KEYS:
++            problems.append("gates must be exactly the six first-trial gates")
++            return
++        by_role, by_id = self.officers()
++        export_ref = att.get("corroboration_export")
++        export = None
++        if not nonempty(export_ref):
++            problems.append("corroboration_export missing")
++        else:
++            export_path = self._safe_town_path(export_ref)
++            if export_path is None or not export_path.is_file():
++                problems.append("corroboration_export unreadable")
++            else:
++                export = load_json(str(export_path))
++        reviews = export.get("reviews", {}) if isinstance(export, dict) else {}
++        comments = export.get("comments", []) if isinstance(export, dict) else []
++        appointments = export.get("appointments", {}) if isinstance(export, dict) else {}
++        if not isinstance(reviews, (dict, list)) or not isinstance(comments, list):
++            problems.append("corroboration export malformed")
++            reviews, comments = {}, []
++        source_hashes = sorted(str(s.get("sha256")) for s in sources if isinstance(s, dict))
++        for key in sorted(GATE_KEYS):
++            gate = gates[key]
++            if not isinstance(gate, dict):
++                problems.append("gate %s malformed" % key)
++                continue
++            if gate.get("status") != "green":
++                problems.append("gate %s is not green" % key)
++            if not nonempty(gate.get("owner")) or not nonempty(gate.get("evidence_ref")):
++                problems.append("gate %s lacks owner/evidence_ref" % key)
++            role = GATE_SIGNERS[key]
++            signer = gate.get("reviewer")
++            expected = by_role.get(role)
++            if not expected or signer != expected or by_id.get(str(signer)) != role:
++                problems.append("gate %s reviewer is not the registered %s officer" % (key, role))
++                continue
++            artifact = gate.get("artifact")
++            if not isinstance(artifact, dict):
++                problems.append("gate %s has no Git-anchored artifact" % key)
++                continue
++            commit = artifact.get("git_commit")
++            gpath = artifact.get("git_path")
++            adigest = artifact.get("sha256")
++            if not isinstance(adigest, str) or not SHA256_RE.fullmatch(adigest):
++                problems.append("gate %s artifact digest malformed" % key)
++                continue
++            if not self.git_object_is_commit(commit):
++                problems.append("gate %s artifact commit invalid" % key)
++                continue
++            try:
++                blob = self.read_git_blob(commit, gpath)
++            except VerifyError as exc:
++                problems.append("gate %s artifact unreadable: %s" % (key, exc))
++                continue
++            if sha256_bytes(blob) != adigest:
++                problems.append("gate %s artifact digest mismatch" % key)
++                continue
++            kv = self.parse_kv(blob)
++            bindings = {
++                "gate": key, "reviewer": str(signer), "role": role,
++                "decision": "proceed", "evidence_digest": digest,
++            }
++            for field, want in bindings.items():
++                if kv.get(field) != want:
++                    problems.append("gate %s artifact %s binding mismatch" % (key, field))
++            if not nonempty(kv.get("reviewed_at")):
++                problems.append("gate %s artifact lacks reviewed_at" % key)
++            if key in ("judiciary_proceed", "frozen_sources_same_boot", "source_corroboration"):
++                declared_hashes = [h.strip() for h in kv.get("source_hashes", "").split(",")
++                                   if h.strip()]
++                if sorted(declared_hashes) != source_hashes:
++                    problems.append("gate %s source_hashes do not match frozen sources" % key)
++            # Independent institutional corroboration of this exact artifact.
++            # The export may hold one review dict keyed by commit, or a list of
++            # reviews (each naming its commit) when several officers review the
++            # same commit. Require an approve by THIS gate's officer.
++            if isinstance(reviews, dict):
++                cand = [reviews.get(str(commit))]
++            elif isinstance(reviews, list):
++                cand = [r for r in reviews if isinstance(r, dict)
++                        and str(r.get("commit")) == str(commit)]
++            else:
++                cand = []
++            cand = [r for r in cand if isinstance(r, dict)]
++            approved = [r for r in cand if r.get("verdict") == "approve"
++                        and str(r.get("reviewer", "")) == str(signer)
++                        and nonempty(r.get("recordedAt"))]
++            if not approved:
++                problems.append("gate %s lacks an officer-attributed approve board review on the exact commit" % key)
++            prefix = str(commit)[:7]
++            if not any(isinstance(c, dict) and str(c.get("author", "")) == str(signer)
++                       and key in str(c.get("body", "")) and prefix in str(c.get("body", ""))
++                       for c in comments):
++                problems.append("gate %s lacks officer-attributed board comment" % key)
++            if appointments.get(role) != signer:
++                problems.append("gate %s appointment registry mismatch" % key)
++        return by_role
++
++    # ---- safety / order / judiciary / scope ------------------------------
++    def check_safety(self, att, by_role, problems):
++        safety = att.get("safety")
++        if not isinstance(safety, dict):
++            problems.append("safety block missing")
++            return
++        must_be_true = ("hard_cap", "strict_inflight", "enforced", "accumulate_across_trials")
++        for key in must_be_true:
++            if safety.get(key) is not True:
++                problems.append("safety.%s is not true" % key)
++        if safety.get("stop_on_detection") is not False:
++            problems.append("cap is stop-on-detection, not a strictly enforced hard cap")
++        for key in ("tokens_cap", "host_cpu_upper_bound"):
++            val = safety.get(key)
++            if not is_int(val) or val <= 0:
++                problems.append("safety.%s missing or non-positive" % key)
++        if safety.get("host_cpu_tag") != "UPPER_BOUND":
++            problems.append("host CPU is not tagged UPPER_BOUND")
++        if not nonempty(safety.get("negative_test_digest")):
++            problems.append("safety.negative_test_digest missing")
++
++    def check_order(self, att, by_role, problems):
++        order = att.get("order")
++        if not isinstance(order, dict):
++            problems.append("order block missing")
++            return
++        if order.get("office") != "statistics" or order.get("act") != ACT or order.get("host") != "billy-dev":
++            problems.append("order binds wrong office/act/host")
++        nb, exp = order.get("not_before"), order.get("expires_at")
++        if not is_int(nb) or not is_int(exp) or exp <= nb:
++            problems.append("order has no positive window")
++        else:
++            if exp - nb > MAX_TRIAL_SECONDS:
++                problems.append("order window exceeds 14 days")
++            if self.at < nb:
++                problems.append("order not yet effective")
++            if self.at >= exp:
++                problems.append("order expired; no new launch")
++        executive = by_role.get("executive")
++        if not executive or order.get("signer") != executive:
++            problems.append("order signer is not the registered Executive officer")
++        for key in ("cancellation", "reboot_recovery"):
++            if not nonempty(order.get(key)):
++                problems.append("order.%s missing" % key)
++
++    def check_judiciary(self, att, by_role, sources, problems):
++        jud = att.get("judiciary")
++        if not isinstance(jud, dict):
++            problems.append("judiciary block missing")
++            return
++        if jud.get("decision") != "proceed":
++            problems.append("judiciary decision is not proceed")
++        expected = by_role.get("judiciary")
++        if not expected or jud.get("reviewer") != expected:
++            problems.append("judiciary reviewer is not the registered Judiciary officer")
++        declared = jud.get("source_hashes")
++        want = sorted(str(s.get("sha256")) for s in sources if isinstance(s, dict))
++        if (not isinstance(declared, list) or len(declared) != len(want)
++                or sorted(str(x) for x in declared) != want):
++            problems.append("judiciary proceed is not tied to the exact frozen source hashes")
++        if not nonempty(jud.get("finding_ref")):
++            problems.append("judiciary finding_ref missing")
++
++    def check_scope(self, att, problems):
++        if att.get("schema") != SCHEMA:
++            problems.append("unsupported schema (legacy/efficacy records cannot authorize a first trial)")
++        if att.get("office") != "statistics" or att.get("host") != "billy-dev":
++            problems.append("wrong office/host")
++        if att.get("act") != ACT or att.get("act_bill_id") != ACT_BILL_ID:
++            problems.append("wrong act/bill")
++        if att.get("act_bill_sha256") != ACT_BILL_SHA256:
++            problems.append("wrong act bill sha256")
++        if att.get("readiness") != "ready":
++            problems.append("readiness is not ready")
++        if att.get("scope") != "first_trial_only":
++            problems.append("scope is not first_trial_only")
++        if att.get("successors_enabled") is not False:
++            problems.append("successors are not disabled")
++        if att.get("efficacy_claimed") is not False:
++            problems.append("an efficacy/value claim is present; first trial certifies none")
++        if not nonempty(att.get("authority")):
++            problems.append("authority/limitation statement missing")
++
++    # ---- top level -------------------------------------------------------
++    def result(self, decision, reasons, digest=""):
++        return {
++            "schema": RESULT_SCHEMA,
++            "decision": decision,
++            "ok": decision == "proceed",
++            "at": self.at,
++            "act": ACT,
++            "evidence_digest": digest,
++            "reasons": reasons,
++        }
++
++    def verify(self, attestation_path):
++        problems = []
++        try:
++            att = load_json(attestation_path)
++            if not isinstance(att, dict):
++                raise VerifyError("attestation is not an object")
++            self.check_law(problems)
++            self.check_scope(att, problems)
++            design = att.get("design", {})
++            self.check_design(att, design, problems)
++            sources = self.check_sources(att, design, problems)
++            digest = self.evidence_digest(sources)
++            if att.get("evidence_digest") != digest:
++                problems.append("evidence_digest does not match the pinned sources")
++            by_role, _ = self.officers()
++            self.check_gates(att, digest, sources, problems)
++            self.check_safety(att, by_role, problems)
++            self.check_order(att, by_role, problems)
++            self.check_judiciary(att, by_role, sources, problems)
++        except VerifyError as exc:
++            problems.append(str(exc))
++            return self.result("hold", problems)
++        except Exception as exc:  # unexpected input must never fail open
++            problems.append("unhandled verification error: %s" % exc)
++            return self.result("hold", problems)
++        if problems:
++            return self.result("hold", problems, digest)
++        return self.result("proceed", ["enacted Act 33 first-trial evidence independently corroborated"],
++                           digest)
++
++
++def now_epoch():
++    import time
++    return int(time.time())
++
++
++def main(argv):
++    if len(argv) < 3:
++        print("usage: statistics-first-trial.py verify|check|digest <town> <attestation> [at]",
++              file=sys.stderr)
++        return 2
++    cmd = argv[1]
++    if cmd == "digest":
++        # argv[2] is a JSON array file; print its canonical evidence digest.
++        try:
++            data = load_json(argv[2])
++            if not isinstance(data, list):
++                raise VerifyError("digest input must be a JSON array")
++            print(Verifier(".", 0).evidence_digest(data))
++            return 0
++        except Exception as exc:
++            print(str(exc), file=sys.stderr)
++            return 1
++    if cmd not in ("verify", "check"):
++        print("unknown command", file=sys.stderr)
++        return 2
++    if len(argv) < 4:
++        print("missing attestation path", file=sys.stderr)
++        return 2
++    at = int(argv[4]) if len(argv) >= 5 else now_epoch()
++    ver = Verifier(argv[2], at)
++    report = ver.verify(argv[3])
++    print(json.dumps(report, indent=2, sort_keys=True))
++    if cmd == "check":
++        return 0
++    return 0 if report["ok"] else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv))
+diff --git a/government/statistics-preflight.sh b/government/statistics-preflight.sh
+index 684a20b3..ded0ca9d 100644
+--- a/government/statistics-preflight.sh
++++ b/government/statistics-preflight.sh
+@@ -1,65 +1,101 @@
+ #!/bin/sh
+-# Fail-closed readiness gate for the Act 32 Statistics-only trial.
++# Fail-closed readiness gates for the Act 32 / enacted Act 33 Statistics trial.
+ #
+-# Exits 0 ONLY for the statistics office when a source-attested preflight record
+-# exists, every pinned snapshot is byte-identical, the design is honestly
+-# recorded (unavailable is not zero), and every preactivation gate is green:
+-#   - verified outcome numerator (Act 23 5.2),
+-#   - frozen Economy resource denominator with metered units and a hard cap,
+-#   - signed reversible Executive activation order,
+-#   - independent Judiciary factual determination.
+-# No artifact, tampered artifact, missing measure or unmet gate fails closed.
+-# This script never enables an office; it only withholds readiness. POSIX sh.
++# Two narrowly scoped modes (second argument, default "legacy"):
++#
++#   legacy       The original Act 32 comparator gate. Requires a historically
++#                verified outcome numerator AND a measured resource denominator.
++#                This remains the ONLY gate for any efficacy claim, renewal or
++#                successor office (Act 33 §§5-6). Unchanged behaviour; existing
++#                tests and attestations are preserved verbatim.
++#
++#   first-trial  The enacted Act 33 exception, for the FIRST reversible Statistics
++#                measurement trial only. Historical numerator and actual
++#                per-office CPU must be explicitly UNAVAILABLE (never zero, never
++#                "verified"); instead the mode strictly requires a preregistered
++#                prospective design, frozen primary sources with reliable
++#                same-boot observations, an independently measured and genuinely
++#                ENFORCED hard cap, an explicit <=14-day Executive order and an
++#                independently corroborated Judiciary proceed bound to the exact
++#                frozen source bytes. See government/statistics-first-trial.py.
++#
++# Both modes only WITHHOLD readiness; neither enables an office or spends money.
++# An absent, tampered, forged or uncorroborated artifact fails closed. POSIX sh.
+ set -eu
+ 
+ office=${1:-}
+ [ "$office" = "statistics" ] || exit 0
+-
++mode=${2:-legacy}
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+-att=$town/records/knowledge/statistics-trial-preflight-20261120.json
+-src=$town/records/knowledge/statistics-preflight-20261120-sources
+-helper=$town/government/statistics-evidence.py
+ 
+-[ -s "$att" ] || exit 1
+-[ -d "$src" ] || exit 1
+-[ -s "$helper" ] || exit 1
++case "$mode" in
++  legacy)
++    att=$town/records/knowledge/statistics-trial-preflight-20261120.json
++    src=$town/records/knowledge/statistics-preflight-20261120-sources
++    helper=$town/government/statistics-evidence.py
++
++    [ -s "$att" ] || exit 1
++    [ -d "$src" ] || exit 1
++    [ -s "$helper" ] || exit 1
+ 
+-# Tamper detection + missingness: pinned bytes must match and unmetered values
+-# must be declared unavailable rather than silently converted to zero.
+-python3 "$helper" verify "$att" "$src" >/dev/null 2>&1 || exit 1
+-python3 "$helper" missingness "$att" >/dev/null 2>&1 || exit 1
++    # Tamper detection + missingness: pinned bytes must match and unmetered values
++    # must be declared unavailable rather than silently converted to zero.
++    python3 "$helper" verify "$att" "$src" >/dev/null 2>&1 || exit 1
++    python3 "$helper" missingness "$att" >/dev/null 2>&1 || exit 1
+ 
+-# An arbitrary bag of all-green keys is not authority. Require the exact
+-# enumerated mandatory gates, each with a non-empty independent owner and an
+-# authenticated evidence link, plus a verified Judiciary-reviewed numerator and
+-# a metered denominator backed by a pinned source snapshot and numeric values.
+-jq -e '
+-    .schema == "viche-statistics-trial-preflight-1" and
+-    .office == "statistics" and
+-    .readiness == "ready" and
+-    (.gates | type == "object") and
+-    ((.gates | keys | sort) == ([
+-        "verified_numerator", "frozen_resource_denominator", "source_attestation",
+-        "budget_cap_enforcement", "executive_order", "judiciary_determination"
+-      ] | sort)) and
+-    ([.gates[] |
+-        (.status == "green") and
+-        (.owner | type == "string") and (.owner | length > 0) and
+-        (.evidence_ref | type == "string") and (.evidence_ref | length > 0)
+-      ] | all) and
+-    (.numerator.verified == true) and
+-    (.numerator.independent_verifier | type == "string") and
+-    (.numerator.independent_verifier | length > 0) and
+-    (.denominator_resource.meter_available == true) and
+-    (.denominator_resource.units | type == "string") and
+-    (.denominator_resource.units != "unavailable") and
+-    (.denominator_resource.reproducible == true) and
+-    (.denominator_resource.values | type == "object") and
+-    ([.denominator_resource.values.tokens,
+-      .denominator_resource.values.machine_time,
+-      .denominator_resource.values.wall_time | type == "number"] | all) and
+-    (.denominator_resource.source_snapshot as $snap |
+-      ([.sources[].snapshot] | index($snap) != null))
+-  ' "$att" >/dev/null 2>&1 || exit 1
++    # An arbitrary bag of all-green keys is not authority. Require the exact
++    # enumerated mandatory gates, each with a non-empty independent owner and an
++    # authenticated evidence link, plus a verified Judiciary-reviewed numerator and
++    # a metered denominator backed by a pinned source snapshot and numeric values.
++    jq -e '
++        .schema == "viche-statistics-trial-preflight-1" and
++        .office == "statistics" and
++        .readiness == "ready" and
++        (.gates | type == "object") and
++        ((.gates | keys | sort) == ([
++            "verified_numerator", "frozen_resource_denominator", "source_attestation",
++            "budget_cap_enforcement", "executive_order", "judiciary_determination"
++          ] | sort)) and
++        ([.gates[] |
++            (.status == "green") and
++            (.owner | type == "string") and (.owner | length > 0) and
++            (.evidence_ref | type == "string") and (.evidence_ref | length > 0)
++          ] | all) and
++        (.numerator.verified == true) and
++        (.numerator.independent_verifier | type == "string") and
++        (.numerator.independent_verifier | length > 0) and
++        (.denominator_resource.meter_available == true) and
++        (.denominator_resource.units | type == "string") and
++        (.denominator_resource.units != "unavailable") and
++        (.denominator_resource.reproducible == true) and
++        (.denominator_resource.values | type == "object") and
++        ([.denominator_resource.values.tokens,
++          .denominator_resource.values.machine_time,
++          .denominator_resource.values.wall_time | type == "number"] | all) and
++        (.denominator_resource.source_snapshot as $snap |
++          ([.sources[].snapshot] | index($snap) != null))
++      ' "$att" >/dev/null 2>&1 || exit 1
++    ;;
++  first-trial)
++    # Enacted Act 33 narrow exception. The verifier checks the enacted Act in
++    # canonical LAWS.md (old law / no Act 33 fails closed), corroborates every
++    # gate against an officer registry + Git-anchored artifact + separate
++    # institutional review export, and enforces the UNAVAILABLE/hard-cap/order/
++    # expiry/source-integrity rules. No single all-green JSON is authority.
++    att=$town/records/knowledge/statistics-first-trial-preflight-20261122.json
++    helper=$town/government/statistics-first-trial.py
++    [ -s "$att" ] || exit 1
++    [ -s "$helper" ] || exit 1
++    at=${VICHE_AT:-}
++    if [ -n "$at" ]; then
++      python3 "$helper" verify "$town" "$att" "$at" >/dev/null 2>&1 || exit 1
++    else
++      python3 "$helper" verify "$town" "$att" >/dev/null 2>&1 || exit 1
++    fi
++    ;;
++  *)
++    exit 1
++    ;;
++esac
+ 
+ exit 0
+diff --git a/records/knowledge/EXECUTIVE-ORDER-DRAFT-20261122.md b/records/knowledge/EXECUTIVE-ORDER-DRAFT-20261122.md
+new file mode 100644
+index 00000000..65492e2d
+--- /dev/null
++++ b/records/knowledge/EXECUTIVE-ORDER-DRAFT-20261122.md
+@@ -0,0 +1,60 @@
++# DRAFT — Executive activation order, first Act 33 Statistics trial
++
++**DRAFT ONLY. NOT SIGNED. NOT ACTIVE. This document activates no office,
++authorizes no dispatch, changes no `records/knowledge/activation.json` and
++spends nothing.** It is a source-attested template for the reversible order that
++may be signed only after (a) Economy proves a genuinely enforced strict
++in-flight hard cap and (b) the independent Judiciary records a source-linked
++`proceed` with institutional corroboration. Act 33 §§4 and 6; Act 32 clause 9.
++All four offices remain `enabled: false`.
++
++## Order fields (inert placeholders until lawfully completed)
++
++- `office`: `statistics`
++- `act`: `33` (enacted 2026-11-22; voted bill
++  `act32-prospective-statistics-trial-amendment`, sha256
++  `65345025166713b43816b27ea2d982a87809df956c258ac022dca7a274528a9d`)
++- `host`: `billy-dev`
++- `not_before`: **UNAVAILABLE — not yet lawfully set**
++- `expires_at`: **UNAVAILABLE — must be ≤ `not_before` + 14 days**
++- `signer`: `c1e00002` (registered Executive officer) — **signature NOT applied**
++- `cancellation`: single Statistics-only window; immediate fail-closed stop and
++  evidence preservation on any overrun, missing/reset counter, crash, reboot,
++  deadline, expiry or active backend ambiguity.
++- `reboot_recovery`: in-flight reservations fail closed across reboot; no
++  silent reauthorization; expiry ends new launches, in-flight wind-down only.
++- `caps`: per-office tokens 400000, wall 3600 s, host-CPU upper bound 1800 s
++  (tagged **UPPER_BOUND**, accumulated across trials, never actual office CPU);
++  aggregate tokens 1600000 / CPU 7200 / wall 14400; 45-day liability window.
++  These are the current `knowledge-budget.conf` values and are **not raised**.
++- `scope`: first reversible measurement trial only. No Foresight, Strategy or
++  Spying enablement; no renewal; no efficacy or value claim.
++
++## Conditions precedent (all currently UNMET)
++
++1. **Law:** Act 33 landed on canonical main at `e9719476` — MET.
++2. **Implementation review:** this code is proposed through Act 31 for
++   independent review — PENDING (not an Act 21 green landing yet).
++3. **Economy strict hard cap:** current cap is stop-on-detection; repair in
++   flight — **UNMET**.
++4. **Judiciary source-linked `proceed`** with board review + officer comment +
++   appointment corroboration — **UNMET**.
++5. **Signed 14-day order with exact dates** — **UNMET** (this is a draft).
++
++Until every condition is met, `government/statistics-preflight.sh statistics
++first-trial` must fail closed, and the legacy efficacy gate must continue to
++require a positive independently checked numerator and cost for any successor.
++
++## Source attestations (SHA-256 of exact bytes, this worktree)
++
++| Source | SHA-256 |
++|---|---|
++| `government/LAWS.md` | `807945f55212d0d49035e275844c6e035fdf53c696c95a5e9a8db2c7f8f89bad` |
++| `records/bills/act32-prospective-statistics-trial-amendment.md` | `65345025166713b43816b27ea2d982a87809df956c258ac022dca7a274528a9d` |
++| `records/knowledge/FIRST-TRIAL-DESIGN-DRAFT-20261122.md` | see that file |
++| `records/knowledge/ECONOMY-PRETRIAL-SAFETY-CLEARANCE-20261122.md` | `ac3cdfe94a758ebdbcff48afe3570360dc9c99945948c9bf615db366091959e8` |
++| `records/knowledge/2026-11-22-executive-act32-single-request-cap-finding.md` | `3d80a3622517f7612574dc64e6de913d517b376e77eeb7e0ba4b8984484d3044` |
++| `government/knowledge-budget.conf` | `4aeb7c89f6e38a9d7e0fbb0ea681325530c867df58106717d724687512edcf23` |
++
++Source hashes attest bytes reviewed; they are not a signature, a Judicial
++finding, a budget appropriation or an authorization to activate.
+diff --git a/records/knowledge/FIRST-TRIAL-DESIGN-DRAFT-20261122.md b/records/knowledge/FIRST-TRIAL-DESIGN-DRAFT-20261122.md
+new file mode 100644
+index 00000000..4f45bd0c
+--- /dev/null
++++ b/records/knowledge/FIRST-TRIAL-DESIGN-DRAFT-20261122.md
+@@ -0,0 +1,110 @@
++# DRAFT — Preregistered design for the FIRST Act 33 Statistics measurement trial
++
++**Status: DRAFT, NOT ACTIVE. Not an Act, ballot, activation order, Judiciary
++finding, Economy cap proof, office enablement or efficacy claim. It authorizes
++no dispatch, changes no `activation.json` and spends nothing.** Prepared by the
++Executive as source-attested design input for a later lawful, independently
++reviewed launch. All four knowledge offices remain `enabled: false`. This draft
++does not assert that Statistics has produced, or will produce, any benefit.
++
++Authority basis: enacted **Act 33** (`government/LAWS.md` §33, enacted
++2026-11-22; voted bill `act32-prospective-statistics-trial-amendment`,
++sha256 `65345025166713b43816b27ea2d982a87809df956c258ac022dca7a274528a9d`),
++which narrows Act 32 D/E/H/K and clause 9 **only** for the first reversible
++Statistics trial. `government/statistics-preflight.sh statistics first-trial`
++is the fail-closed readiness gate; the new-law requirement is checked against
++the canonical `government/LAWS.md`, never against a self-declared JSON flag.
++
++## 1. Genuine outcome event cohort (candidate, unmeasured)
++
++The counted unit is an **independently verified material operational-failure
++discovery event**, not a repair action and not any process output.
++
++An event enters the cohort only if **all** hold:
++
++1. a concrete, durably recorded failure blocked a statutory Viche function
++   (for example, a dispatch path that fatally rejected every request), with
++   primary evidence frozen by hash at first observation;
++2. an officer **other than** the discovering office independently verified,
++   under Act 23 §5.2, that the failure was genuine and material — a journal
++   entry, auto-clear, self-certification or clean health signal is not enough;
++3. durable re-observation confirmed the failure no longer blocks the function.
++   The repair is a **necessary precondition for verification**, not the benefit
++   and not the counted outcome. One event per distinct failure; overlapping
++   reports collapse to the earliest `first_independent_verification` in window.
++
++**Endpoint (prospective):** the *exposure time* — elapsed time from durable
++first observation to independent verification — and the verified-event rate per
++1000 agent-hours, each compared with the pre-registered business-as-usual
++counterfactual. Benefit, if any, can be claimed only from a positive,
++independently checked change in these genuine-outcome quantities.
++
++**Explicitly excluded from the numerator (never a benefit):** report or record
++counts, agent process exits, main-branch commits, forecasts registered,
++detector clears, Post/Gazette messages, readiness signals, case auto-closures,
++and the bare fact that a process or piece of Viche machinery was repaired.
++These are process outputs, not outcomes (Act 33 §5; Act 32 D/E).
++
++## 2. Stable negative control
++
++A **frozen process-count panel** drawn from `latest.json`,
++`institutional-cases/index.json`, `predictions/calibration.json` and the
++dashboard counters serves as a *stable negative control*: report counts, agent
++exits, commits, forecast registrations, detector clears and mail volume. It is
++frozen by hash before dispatch and re-measured over the same window. It must
++**not** be attributed as benefit. If an apparent "effect" appears only in the
++negative-control panel, the result is invalid. This is the guard against
++output-metric gaming and attention-as-preference confusion.
++
++## 3. Comparator, missingness, falsifiers
++
++- **Comparator:** interrupted time series with a difference-in-differences
++  check against an equal-length pre-activation business-as-usual window using
++  the same collectors and case sources, with no Statistics dispatch.
++- **Confounds:** concurrent non-Statistics agents, host reboots, collector
++  changes, case-schema changes; recorded, not assumed away.
++- **Missingness:** censored or unverifiable events are reported separately and
++  never imputed as zero; a missing or censored result is **inconclusive**, not
++  positive.
++- **Cost:** per-office CPU is **UNAVAILABLE** until actually metered; whole-host
++  busy CPU is charged pessimistically and tagged **UPPER_BOUND** for safety
++  only, never labelled actual office CPU or marginal cost. Tokens and wall time
++  are metered. Opportunity cost is reported against the preregistered
++  alternative.
++- **Falsifiers:** any benefit claim resting on process counts, report counts or
++  process repair; any unpaired/unmeterable cost denominator; any comparator
++  using the diagnostic `baseline-20261119.json` as a verified numerator; any
++  tampered or unattested source; any successor enabled without a separate,
++  independently checked positive outcome and cost finding.
++
++## 4. Source attestations (SHA-256 of exact bytes, this worktree)
++
++| Source | SHA-256 |
++|---|---|
++| `government/LAWS.md` (Act 33 codification landed `e9719476`) | `807945f55212d0d49035e275844c6e035fdf53c696c95a5e9a8db2c7f8f89bad` |
++| `records/bills/act32-prospective-statistics-trial-amendment.md` | `65345025166713b43816b27ea2d982a87809df956c258ac022dca7a274528a9d` |
++| `records/knowledge/ECONOMY-PRETRIAL-SAFETY-CLEARANCE-20261122.md` | `ac3cdfe94a758ebdbcff48afe3570360dc9c99945948c9bf615db366091959e8` |
++| `records/knowledge/2026-11-22-executive-act32-single-request-cap-finding.md` | `3d80a3622517f7612574dc64e6de913d517b376e77eeb7e0ba4b8984484d3044` |
++| `records/JUDICIARY-FACTUAL-DETERMINATION-2026-11-21-act32-e2big-repair.md` | `8144feaf048fa16b91073bb4f5cec1b3474f8e04ca5295bfd4590d474e872204` |
++| `records/knowledge/statistics-trial-preflight-20261120.json` (honest not_ready) | `2de408b772fd13c325b3bcf7e5e35c81a7f2e14bc6f25c4f6c457f44a8fa4c09` |
++| `government/knowledge-budget.conf` | `4aeb7c89f6e38a9d7e0fbb0ea681325530c867df58106717d724687512edcf23` |
++| `government/statistics-preflight.sh` (two-mode gate) | `92f62e9a786bca9c82573392e88f9ba0d31e1354bfe7b9a1a39562123bc991fa` |
++| `government/statistics-first-trial.py` (verifier) | `4e4ca79dce3d6f943e6439a95562489e1a62d3f24c32cf93756587b0e8f07bfc` |
++
++These hashes attest the bytes reviewed; they are **not** authority and do not
++substitute for the independent Economy cap proof, Judiciary proceed finding or
++signed Executive order.
++
++## 5. What is still blocking any launch
++
++1. **Strict in-flight token cap:** the current `knowledge-budget.sh` mechanism
++   is **stop-on-detection, not a strict hard cap** (Executive finding above).
++   Economy is independently repairing it; until a genuinely enforced cap is
++   proven by Economy's negative test, `safety.hard_cap` cannot honestly be true.
++2. **Independent Judiciary proceed:** required, tied to exact source hashes,
++   with institutional corroboration (board review + officer comment +
++   appointment record). None exists yet.
++3. **Signed Executive activation order:** the companion DRAFT is inert until
++   (1) and (2) are satisfied and it is signed, with a ≤14-day window.
++
++No office is enabled by this draft. See `EXECUTIVE-ORDER-DRAFT-20261122.md`.
+diff --git a/records/knowledge/FIRST-TRIAL-PREFLIGHT-IMPLEMENTATION-20261122.md b/records/knowledge/FIRST-TRIAL-PREFLIGHT-IMPLEMENTATION-20261122.md
+new file mode 100644
+index 00000000..47b004fd
+--- /dev/null
++++ b/records/knowledge/FIRST-TRIAL-PREFLIGHT-IMPLEMENTATION-20261122.md
+@@ -0,0 +1,80 @@
++# First-trial preflight implementation — Executive, billy-dev, 2026-11-22
++
++**Type:** ordinary implementation record under Acts 21, 31, 32 and enacted Act 33.
++**Not** a law, ballot, activation order, Judiciary finding, Economy cap proof or
++office enablement. No office is enabled by this work; all four remain
++`enabled: false`. No canonical dirty record was modified.
++
++## What changed (fresh worktree from main `2c7fb98d`, branch `executive/act33-first-trial-preflight-20261122`)
++
++- `government/statistics-preflight.sh` gains a `first-trial` mode (second
++  argument). Default/`legacy` behaviour is **verbatim unchanged**, so the
++  existing efficacy/successor gate and its tests are preserved. The new mode is
++  inert unless a valid, corroborated Act 33 attestation is filed.
++- `government/statistics-first-trial.py` — deterministic, fail-closed verifier.
++- `tests/statistics-first-trial-smoke.sh` — adversarial hermetic fixtures.
++- `records/knowledge/FIRST-TRIAL-DESIGN-DRAFT-20261122.md` and
++  `records/knowledge/EXECUTIVE-ORDER-DRAFT-20261122.md` — source-attested,
++  explicitly inactive drafts.
++
++## Security model — why an all-green JSON is not authority
++
++1. **Law binding, not a flag.** The verifier parses canonical
++   `government/LAWS.md` and requires exactly one enacted **Act 33**, its exact
++   voted bill id and sha256, and Act 32 as the amended base. Old law, no Act 33,
++   a historical/superseded Act 33 or a wrong bill hash fails closed.
++2. **UNAVAILABLE honesty.** Historical numerator and actual per-office CPU must
++   be `{"status":"UNAVAILABLE", "reason":...}`; a number, a `verified:true` or a
++   zero is rejected. Whole-host CPU must be tagged `UPPER_BOUND`.
++3. **Prospective design + same-boot sources.** Endpoint, population, selection,
++   missingness, negative controls, comparator, window and falsifiers must be
++   present. Every pinned source's hash, size, boot id and observation time is
++   checked; extra files, tampering, cross-boot observations and manifest
++   mismatches fail closed. The evidence digest binds all gates.
++4. **Corroborated officers, not self-certification.** Each of the six gates
++   needs a registered officer of the exact expected role (branch-officers.tsv),
++   a Git-anchored review artifact whose blob hash and binding lines are checked,
++   and an **independent institutional corroboration export** (board review
++   `approve` on the exact commit, an officer-attributed comment citing the gate
++   and commit, and the appointment registry). A forged officer, unregistered id,
++   missing/rejected review or reused/mismatched artifact fails closed.
++5. **True hard cap.** `hard_cap`, `strict_inflight`, `enforced` and
++   `accumulate_across_trials` must all be true and `stop_on_detection` false,
++   with positive token/CPU caps and a negative-test digest. A stop-on-detection
++   or unavailable cap fails closed.
++6. **Bounded order + expiry.** The order must name statistics/Act 33/billy-dev,
++   a positive window of at most 14 days, the registered Executive signer,
++   cancellation and reboot recovery. An expired or not-yet-effective order fails
++   closed at the evaluation epoch (`VICHE_AT`, default now).
++7. **Narrow scope.** `scope == first_trial_only`, `successors_enabled == false`,
++   `efficacy_claimed == false`. Any successor enablement or value claim fails
++   closed; efficacy/renewal/successors remain governed by the unchanged legacy
++   gate, which still demands a positive independently checked numerator and cost.
++
++## Honest limitations (not hidden)
++
++- The shared Unix UID cannot cryptographically authenticate board authorship,
++  appointments or Git commits (Act 32 clause 5). The corroboration export is an
++  **offline export** of institutional channels, the same trust model and
++  residual limitation as `government/knowledge-phase-verifier.py`'s
++  `VICHE_PHASE_ATTESTATION_JSON`. It raises forgery from one JSON to several
++  mutually consistent institutional actions; it is not a digital signature.
++  The existing phase verifier remains the stronger, live-channel mechanism and
++  should be used for the final launch check where viable.
++- No attestation is filed in canonical records. Therefore in production
++  `statistics first-trial` **fails closed today**, as required: there is no
++  strict cap, no Judiciary proceed and no signed order.
++- The dispatch runner (`knowledge-office-cycle.sh`) is deliberately **not
++  changed**; it keeps the legacy fail-closed gate. Switching the runner to the
++  new mode is a separate, independently reviewed change that must follow real
++  cap proof + Judiciary proceed.
++
++## Verification and unfinished obligations
++
++- `tests/run-all.sh` (full suite) passes on this exact branch; the new
++  adversarial smoke test covers all fail-closed cases above.
++- Proposed to Act 31 as `delivery/exec-act33-first-trial-preflight-20261122`
++  for **independent review**; not yet green-landed, not law-changing.
++- Outstanding: Economy strict in-flight cap proof; independent Judiciary
++  source-linked proceed; signed ≤14-day Executive order; runner wiring only
++  after those; no efficacy/value claim or successor activation.
+diff --git a/tests/statistics-first-trial-smoke.sh b/tests/statistics-first-trial-smoke.sh
+new file mode 100644
+index 00000000..1f630504
+--- /dev/null
++++ b/tests/statistics-first-trial-smoke.sh
+@@ -0,0 +1,352 @@
++#!/bin/sh
++# Hermetic adversarial tests for the enacted-Act 33 FIRST Statistics trial
++# preflight mode. Everything runs in a throwaway town + git repo fixture;
++# canonical records, state and the live town are never touched.
++#
++# Covers: precisely-enacted-law recognition, UNAVAILABLE honesty, prospective
++# design, frozen/same-boot sources, enforced hard cap, 14-day order, expiring,
++# officer-bound and independently corroborated Judiciary proceed; plus a wall of
++# fail-closed cases (old law, forged officer, all-green JSON without
++# corroboration, unavailable/stop-on-detection cap, expired order, missing or
++# tampered source, fabricated numerator, successors/efficacy, wrong act).
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++repo=$(pwd -P)
++helper=$repo/government/statistics-first-trial.py
++legacy=$repo/government/statistics-evidence.py
++preflight=$repo/government/statistics-preflight.sh
++[ -s "$helper" ] && [ -s "$legacy" ] && [ -s "$preflight" ]
++
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++town=$d/town
++art=$town/records/knowledge/first-trial-artifacts
++src=$town/records/knowledge/first-trial-sources-20261122
++corr=$town/records/knowledge/first-trial-corroboration
++att=$town/records/knowledge/statistics-first-trial-preflight-20261122.json
++mkdir -p "$town/government" "$art" "$src" "$corr" "$town/records/knowledge"
++cp "$helper" "$town/government/statistics-first-trial.py"
++cp "$legacy" "$town/government/statistics-evidence.py"
++
++git init -q "$town"
++git -C "$town" config user.email viche-test@invalid
++git -C "$town" config user.name viche-test
++
++# --- authoritative law and officer registry -------------------------------
++laws=$town/government/LAWS.md
++cat > "$laws" <<'EOF'
++## Act 32 — Institutional Knowledge and Communications Act (enacted 2026-11-20T07:33:00Z by recorded vote on bill institutional-knowledge-and-communications-act-v4)
++base law text; amended by Act 33 for the first trial only.
++
++## Act 33 — Prospective Statistics Trial Clarification (enacted 2026-11-22, bill act32-prospective-statistics-trial-amendment)
++Enacted by recorded vote present=6 yes=6 no=0 abstain=0 (quorum=6, required_yes=6).
++Definitive bill sha256 65345025166713b43816b27ea2d982a87809df956c258ac022dca7a274528a9d.
++This amendment applies only to the first reversible Statistics measurement trial.
++
++## Historical enactments (not operative)
++EOF
++cp "$laws" "$laws.good"
++printf 'executive\tc1e00002\tExecutive\njudiciary\tc1e00008\tJudiciary\neconomy\tc1e00012\tMinistry of Economy\nstatistics\tc1e00013\tStatistics Bureau\n' \
++  > "$town/government/branch-officers.tsv"
++
++# --- frozen primary sources with a single observed boot -------------------
++boot=boot-fixture-20261122
++printf 'primary source alpha\n' > "$src/alpha.json"
++printf 'primary source beta\n'  > "$src/beta.json"
++printf 'primary source gamma\n' > "$src/gamma.json"
++for f in alpha beta gamma; do cp "$src/$f.json" "$d/$f.json.good"; done
++observed=1795361000
++python3 - "$src" "$boot" "$observed" "$d/sources-array.json" <<'PY'
++import hashlib,json,os,sys
++d,boot,at,outpath=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]
++out=[]
++for name in ("alpha.json","beta.json","gamma.json"):
++    b=open(os.path.join(d,name),"rb").read()
++    out.append({"snapshot":name,"sha256":hashlib.sha256(b).hexdigest(),
++                "size_bytes":len(b),"boot_id":boot,"observed_at":at+7,
++                "role":"frozen primary source","path":"state/fixture/"+name})
++json.dump(out,open(outpath,"w"),sort_keys=True)
++PY
++sources_json=$d/sources-array.json
++digest=$(python3 "$helper" digest "$sources_json")
++src_hashes=$(python3 -c 'import json,sys; print(",".join(sorted(x["sha256"] for x in json.load(open(sys.argv[1])))))' "$sources_json")
++
++# --- Git-anchored, officer-bound review artifacts -------------------------
++python3 - "$art" "$digest" "$src_hashes" <<'PY'
++import os,sys
++d,digest,hashes=sys.argv[1:4]
++gates={
++ "prospective_design":("c1e00002","executive"),
++ "frozen_sources_same_boot":("c1e00012","economy"),
++ "economy_safety_hard_cap":("c1e00012","economy"),
++ "executive_order_14d":("c1e00002","executive"),
++ "judiciary_proceed":("c1e00008","judiciary"),
++ "source_corroboration":("c1e00008","judiciary"),
++}
++withhashes={"frozen_sources_same_boot","judiciary_proceed","source_corroboration"}
++for key,(reviewer,role) in gates.items():
++    text=("gate: %s\nreviewer: %s\nrole: %s\ndecision: proceed\n"
++          "evidence_digest: %s\n" % (key,reviewer,role,digest))
++    if key in withhashes:
++        text+="source_hashes: %s\n" % hashes
++    text+="reviewed_at: 2026-11-22T18:00:00Z\n"
++    open(os.path.join(d,key+".txt"),"w").write(text)
++PY
++git -C "$town" add government records
++git -C "$town" commit -q -m 'first trial hermetic fixtures'
++commit=$(git -C "$town" rev-parse HEAD)
++
++# --- separate institutional corroboration export (not the attestation) ----
++python3 - "$corr/20261122.json" "$commit" <<'PY'
++import json,sys
++path,commit=sys.argv[1:3]
++gates={
++ "prospective_design":"c1e00002","frozen_sources_same_boot":"c1e00012",
++ "economy_safety_hard_cap":"c1e00012","executive_order_14d":"c1e00002",
++ "judiciary_proceed":"c1e00008","source_corroboration":"c1e00008",
++}
++export={"schema":"viche-first-trial-corroboration-export-1",
++        "reviews":[{"commit":commit,"verdict":"approve","reviewer":who,
++                    "recordedAt":"2026-11-22T18:05:00Z"} for g,who in gates.items()],
++        "comments":[{"author":who,"body":"independently reviewed %s against %s" % (g,commit[:7])}
++                    for g,who in gates.items()],
++        "appointments":{"executive":"c1e00002","judiciary":"c1e00008","economy":"c1e00012"}}
++json.dump(export,open(path,"w"),sort_keys=True,indent=2)
++PY
++cp "$corr/20261122.json" "$d/corr.good"
++
++# --- the first-trial attestation (EVIDENCE, not authority by itself) ------
++not_before=1795362000
++expires=$((not_before + 1209600))
++at=1795370000
++python3 - "$att" "$sources_json" "$digest" "$commit" "$art" "$boot" "$observed" "$not_before" "$expires" "$corr/20261122.json" <<'PY'
++import hashlib,json,os,sys
++(path,sources_json,digest,commit,art,boot,observed,nb,exp,corr_ref)=sys.argv[1:11]
++sources=json.load(open(sources_json))
++arts={}
++for key in ("prospective_design","frozen_sources_same_boot","economy_safety_hard_cap",
++            "executive_order_14d","judiciary_proceed","source_corroboration"):
++    p=os.path.join(art,key+".txt")
++    arts[key]={"git_commit":commit,"git_path":"records/knowledge/first-trial-artifacts/"+key+".txt",
++               "sha256":hashlib.sha256(open(p,"rb").read()).hexdigest()}
++signers={"prospective_design":("c1e00002","Executive"),
++         "frozen_sources_same_boot":("c1e00012","Ministry of Economy"),
++         "economy_safety_hard_cap":("c1e00012","Ministry of Economy"),
++         "executive_order_14d":("c1e00002","Executive"),
++         "judiciary_proceed":("c1e00008","Judiciary"),
++         "source_corroboration":("c1e00008","Judiciary")}
++gates={k:{"status":"green","owner":signers[k][1],
++          "evidence_ref":"records/knowledge/first-trial-artifacts/%s.txt"%k,
++          "reviewer":signers[k][0],"artifact":arts[k]} for k in arts}
++record={
++ "schema":"viche-statistics-first-trial-preflight-1","office":"statistics",
++ "host":"billy-dev","act":33,"act_bill_id":"act32-prospective-statistics-trial-amendment",
++ "act_bill_sha256":"65345025166713b43816b27ea2d982a87809df956c258ac022dca7a274528a9d",
++ "readiness":"ready","decision":"proceed_first_trial_only","scope":"first_trial_only",
++ "successors_enabled":False,"efficacy_claimed":False,
++ "authority":"Evidence only; withholds readiness for the first reversible trial; enables no office.",
++ "design":{
++   "prospective":{
++     "endpoint":"rate of independently verified genuine operational-failure discoveries per 1000 agent-hours",
++     "population":"concrete failures blocking a statutory Viche function with a determinable status in the window",
++     "selection":"all such failures with first_independent_verification in the window; no selective suppression",
++     "missingness":"unverifiable or censored events reported separately, never imputed as zero",
++     "negative_controls":["report and record counts","agent process exits","main-branch commits","forecast registrations","detector clears"],
++     "comparator":"equal-length pre-activation business-as-usual window, same collectors, no Statistics dispatch",
++     "observation_window":"14 days spanning a host reboot",
++     "falsifiers":["any benefit claim from process counts","any unpaired cost denominator","any tampered source"]},
++   "historical_numerator":{"status":"UNAVAILABLE","reason":"no matched independently verified historical window"},
++   "per_office_cpu":{"status":"UNAVAILABLE","reason":"no per-office cgroup or telemetry on billy-dev"},
++   "whole_host_cpu":{"status":"MEASURED_UPPER_BOUND","tag":"UPPER_BOUND",
++                     "reason":"pessimistic whole-host charge for safety only, never marginal cost"},
++   "same_boot":{"boot_id":boot,"observed_by":"economy","observed_at":int(observed),
++                "reliable":True,"sources_observed":[s["snapshot"] for s in sources]}},
++ "sources":sources,"evidence_digest":digest,
++ "safety":{"hard_cap":True,"strict_inflight":True,"stop_on_detection":False,
++           "enforced":True,"accumulate_across_trials":True,
++           "tokens_cap":400000,"host_cpu_upper_bound":1800,"host_cpu_tag":"UPPER_BOUND",
++           "negative_test_digest":"sha256:fixture-negative-cap-test",
++           "meter":"opencode-session-v2 plus proc-stat-host-busy-upper-bound"},
++ "order":{"office":"statistics","act":33,"host":"billy-dev",
++          "not_before":int(nb),"expires_at":int(exp),"signer":"c1e00002",
++          "cancellation":"reversible order; single Statistics-only window; cancellation on any overrun",
++          "reboot_recovery":"in-flight reservations fail closed across reboot; no silent reauthorization"},
++ "judiciary":{"decision":"proceed","reviewer":"c1e00008",
++              "source_hashes":sorted(s["sha256"] for s in sources),
++              "finding_ref":"records/knowledge/first-trial-artifacts/judiciary_proceed.txt"},
++ "gates":gates,
++ "corroboration_export":"records/knowledge/first-trial-corroboration/20261122.json",
++}
++json.dump(record,open(path,"w"),sort_keys=True,indent=2)
++PY
++cp "$att" "$att.good"
++
++# --- small mutation helpers ------------------------------------------------
++set_field() { # dotted.path jsonValue
++  python3 - "$att" "$1" "$2" <<'PY'
++import json,sys
++p,dotted,raw=sys.argv[1:4]
++d=json.load(open(p)); cur=d; parts=dotted.split(".")
++for k in parts[:-1]:
++    cur = cur[int(k)] if k.isdigit() and isinstance(cur,list) else cur[k]
++k=parts[-1]
++cur[k]=json.loads(raw)
++json.dump(d,open(p,"w"),sort_keys=True,indent=2)
++PY
++}
++del_field() { # dotted.path
++  python3 - "$att" "$1" <<'PY'
++import json,sys
++p,dotted=sys.argv[1:3]
++d=json.load(open(p)); cur=d; parts=dotted.split(".")
++for k in parts[:-1]:
++    cur = cur[int(k)] if k.isdigit() and isinstance(cur,list) else cur[k]
++k=parts[-1]
++if isinstance(cur,dict): cur.pop(k,None)
++elif isinstance(cur,list): del cur[int(k)]
++json.dump(d,open(p,"w"),sort_keys=True,indent=2)
++PY
++}
++restore() { cp "$att.good" "$att"; }
++
++expect_pass() {
++  label=$1; shift
++  if ! "$@" >/dev/null 2>&1; then
++    echo "FAIL: $label was denied (should pass)" >&2; fail=1
++  fi
++}
++expect_deny() {
++  label=$1; shift
++  if "$@" >/dev/null 2>&1; then
++    echo "FAIL: $label passed (should fail closed)" >&2; fail=1
++  fi
++}
++fail=0
++run_preflight() { VICHE_TOWN_ROOT="$town" VICHE_AT="${AT:-$at}" /bin/sh "$preflight" "$1" "${2:-first-trial}"; }
++
++# --- the genuine all-evidence case ----------------------------------------
++expect_pass 'fully corroborated first-trial attestation' run_preflight statistics
++out=$(python3 "$helper" check "$town" "$att" "$at")
++printf '%s\n' "$out" | grep -q '"decision": "proceed"' || {
++  echo 'FAIL: check did not report proceed' >&2; fail=1; }
++# Other offices are a no-op, even in the new mode.
++expect_pass 'non-statistics office untouched' run_preflight foresight first-trial
++
++# --- old law / no Act 33 / wrong bill hash --------------------------------
++cat > "$laws" <<'EOF'
++## Act 32 — Institutional Knowledge and Communications Act (enacted 2026-11-20T07:33:00Z by recorded vote on bill institutional-knowledge-and-communications-act-v4)
++only the old law exists; no Amendment/Act 33.
++## Historical enactments (not operative)
++EOF
++expect_deny 'old law without Act 33' run_preflight statistics
++cp "$laws.good" "$laws"
++sed -i 's/65345025166713b43816b27ea2d982a87809df956c258ac022dca7a274528a9d/0000000000000000000000000000000000000000000000000000000000000000/' "$laws"
++expect_deny 'Act 33 with wrong bill sha256' run_preflight statistics
++cp "$laws.good" "$laws"
++
++# --- no external attestation / all-green JSON alone -----------------------
++del_field corroboration_export
++expect_deny 'all-green JSON without corroboration export' run_preflight statistics
++restore
++python3 - "$corr/20261122.json" <<'PY'
++import json,sys
++p=sys.argv[1]; d=json.load(open(p)); d["reviews"]={}; json.dump(d,open(p,"w"),sort_keys=True)
++PY
++expect_deny 'no institutional board review' run_preflight statistics
++python3 - "$corr/20261122.json" <<'PY'
++import json,sys
++p=sys.argv[1]; d=json.load(open(p))
++for r in d["reviews"]: r["verdict"]="reject"
++json.dump(d,open(p,"w"),sort_keys=True)
++PY
++expect_deny 'board review verdict reject' run_preflight statistics
++cp "$d/corr.good" "$corr/20261122.json"
++python3 - "$corr/20261122.json" <<'PY'
++import json,sys
++p=sys.argv[1]; d=json.load(open(p))
++for x in d["comments"]: x["author"]="c1e00002"
++json.dump(d,open(p,"w"),sort_keys=True)
++PY
++expect_deny 'forged officer (wrong comment author)' run_preflight statistics
++cp "$d/corr.good" "$corr/20261122.json"
++python3 - "$corr/20261122.json" <<'PY'
++import json,sys
++p=sys.argv[1]; d=json.load(open(p)); d["appointments"]["judiciary"]="c1e00002"; json.dump(d,open(p,"w"),sort_keys=True)
++PY
++expect_deny 'forged officer (appointment registry mismatch)' run_preflight statistics
++cp "$d/corr.good" "$corr/20261122.json"
++
++# --- unavailable / stop-on-detection cap, tampered artifacts --------------
++set_field safety.hard_cap false
++expect_deny 'unavailable hard cap' run_preflight statistics
++restore
++set_field safety.stop_on_detection true
++expect_deny 'stop-on-detection cap' run_preflight statistics
++restore
++set_field 'gates.economy_safety_hard_cap.artifact.git_commit' '"0000000000000000000000000000000000000000"'
++expect_deny 'non-existent artifact commit' run_preflight statistics
++restore
++set_field 'gates.judiciary_proceed.reviewer' '"c1e00002"'
++expect_deny 'judiciary gate signed by non-judiciary' run_preflight statistics
++restore
++
++# --- expiry / wrong act / scope creep -------------------------------------
++AT=$expires expect_deny 'expired Executive order' run_preflight statistics
++AT=$at
++set_field act 32
++expect_deny 'wrong act (32 instead of 33)' run_preflight statistics
++restore
++set_field successors_enabled true
++expect_deny 'successor enabled by first-trial mode' run_preflight statistics
++restore
++set_field efficacy_claimed true
++expect_deny 'efficacy claim in first-trial mode' run_preflight statistics
++restore
++
++# --- sources: missing, tampered, cross-boot, unattested -------------------
++rm "$src/gamma.json"
++expect_deny 'missing frozen source' run_preflight statistics
++cp "$d/gamma.json.good" "$src/gamma.json"
++printf 'TAMPERED\n' > "$src/alpha.json"
++expect_deny 'tampered frozen source' run_preflight statistics
++cp "$d/alpha.json.good" "$src/alpha.json"
++printf 'unattested\n' > "$src/extra.json"
++expect_deny 'unattested extra source' run_preflight statistics
++rm "$src/extra.json"
++set_field design.same_boot.boot_id '"different-boot"'
++expect_deny 'source observed under a different boot' run_preflight statistics
++restore
++set_field 'judiciary.source_hashes' '[]'
++expect_deny 'judiciary proceed not tied to source hashes' run_preflight statistics
++restore
++
++# --- UNAVAILABLE honesty and prospective design ---------------------------
++set_field design.historical_numerator.status '"VERIFIED"'
++expect_deny 'fabricated historical numerator' run_preflight statistics
++restore
++set_field design.per_office_cpu.value 0
++set_field design.per_office_cpu.status '"MEASURED"'
++expect_deny 'zero-filled per-office CPU' run_preflight statistics
++restore
++del_field design.prospective.negative_controls
++expect_deny 'prospective design without negative controls' run_preflight statistics
++restore
++del_field design.same_boot
++expect_deny 'no same-boot observation' run_preflight statistics
++restore
++set_field design.whole_host_cpu.tag '"ACTUAL_OFFICE_CPU"'
++expect_deny 'whole-host CPU mislabelled as actual office CPU' run_preflight statistics
++restore
++
++# --- the two modes must not be confused -----------------------------------
++cp "$att" "$town/records/knowledge/statistics-trial-preflight-20261120.json"
++if VICHE_TOWN_ROOT="$town" /bin/sh "$preflight" statistics legacy >/dev/null 2>&1; then
++  echo 'FAIL: first-trial record accepted by legacy efficacy gate' >&2; fail=1
++fi
++rm "$town/records/knowledge/statistics-trial-preflight-20261120.json"
++
++if [ "$fail" -ne 0 ]; then
++  echo 'statistics first-trial smoke: FAILED' >&2
++  exit 1
++fi
++echo 'statistics first-trial smoke: OK (Act 33 law binding, corroborated gates, UNAVAILABLE honesty, hard cap, 14d order, fail-closed)'

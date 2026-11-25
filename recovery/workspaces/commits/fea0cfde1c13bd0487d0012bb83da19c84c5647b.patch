@@ -1,0 +1,316 @@
+commit fea0cfde1c13bd0487d0012bb83da19c84c5647b
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Wed Oct 14 09:24:54 2026 -0700
+Commit:     GitHub <noreply@github.com>
+CommitDate: Wed Oct 14 09:24:54 2026 -0700
+
+    Make Founder intake timely, durable and independent of parliamentary sittings (#7)
+    
+    * Introduce durable, paginated Founder intake with urgent clerk dispatch
+    
+    * Fix shell parameter expansions in intake watcher
+    
+    * Add independent S6 Founder intake watcher
+    
+    * Add independent S6 Founder intake watcher
+    
+    * Test Founder intake despite busy clerk, dedupe and backend retry
+    
+    * Validate fast Founder intake in CI with POSIX dash
+    
+    * Include protected charter in urgent dispatch and keep requests general
+    
+    * Require prompt, durable Founder-message acknowledgement and assignment
+    
+    * Document separate S6 priority Founder-intake service and verification
+    
+    * Test Town Hall pagination and unacknowledged delivery watchdog
+
+diff --git a/.github/workflows/bootstrap.yml b/.github/workflows/bootstrap.yml
+index 62a44aea..b889ea50 100644
+--- a/.github/workflows/bootstrap.yml
++++ b/.github/workflows/bootstrap.yml
+@@ -15,7 +15,7 @@ jobs:
+       - uses: actions/checkout@v4
+       - name: Check shell syntax
+         run: |
+-          /bin/sh -n constitution/*.sh government/*.sh tests/*.sh deploy/s6/viche/run
++          /bin/sh -n constitution/*.sh government/*.sh tests/*.sh deploy/s6/viche/run deploy/s6/viche-intake/run
+           dash -n constitution/*.sh government/*.sh tests/*.sh deploy/s6/viche/run
+       - name: Check seat roster and constitutional model
+         run: |
+@@ -27,5 +27,7 @@ jobs:
+         run: dash tests/boot-smoke.sh
+       - name: Exercise legislative tally
+         run: dash tests/tally-smoke.sh
++      - name: Exercise urgent Founder intake independently of sittings
++        run: dash tests/intake-smoke.sh
+       - name: Check durable records carry no conflict markers
+         run: dash tests/records-smoke.sh
+diff --git a/AGENTS.md b/AGENTS.md
+index 36bf2d3c..37759c2a 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -19,3 +19,10 @@ There is no numerical cap on useful concurrent workers, invocation count or parl
+ The clerk owns Founder intake: inspect new Town Hall comments and relevant Antonina board issues and comments, paging older entries when needed, and persist its cursor. Treat issue or comment author **exactly `Vitalik`** as the Founder, without signatures or verification. Other seats should deliberate, research, cast individual ballots and preserve dissent rather than duplicate intake.
+ 
+ Document significant decisions, authorizations, evidence, audit outcomes, failures and unfinished obligations under `records/` and the Antonina board. A successful process exit is not substantive completion. Governance is an experiment; explore radical improvements to ordinary institutions while complying with the Founder-owned constitutional boundary.
++
++
++## High-priority Founder intake
++
++A separate POSIX-shell S6 watcher polls Town Hall and the Antonina activity feed every minute. Its durable queue lives at `/var/lib/lubko/wd/viche-state/founder-inbox/`, independent of the clerk's conversation or Git checkout. Founder messages are identified by the exact author `Vitalik`. It will restart or `--steer` a busy clerk and retry a dispatch with no acknowledgement after ten minutes. This is an **urgent preemption path**, not another legislative seat and not permission to work outside Viche and Kawun.
++
++The clerk must acknowledge each message by **doing meaningful triage**, promptly assigning an owner/next step, recording an actual mandate, and convening seats or delegating implementation. Only then create the corresponding empty receipt under `founder-inbox/ack/<event-key>`. A receipt does not mean that the task has been completed: later work must still be tracked and verified. No unsupported claim of progress, silence, or repeated agenda deferral counts as intake. Existing in-flight work should be preserved when steering.
+diff --git a/deploy/DEPLOYMENT.md b/deploy/DEPLOYMENT.md
+index 33de7b68..1e7792af 100644
+--- a/deploy/DEPLOYMENT.md
++++ b/deploy/DEPLOYMENT.md
+@@ -71,3 +71,12 @@ Repository checks: `/bin/sh -n constitution/*.sh government/*.sh tests/*.sh depl
+ Reuse the existing Antonina installation in the Lubko container rather than rebuilding an unpinned Antonina/OpenCode image. Pin the constitutional deployment to an exact Git commit. If rebuilding the overall container, pin dependencies in its existing source rather than automatically cloning `main` during every image build. Unlimited agent concurrency does not mean infinite physical RAM; do not invent a worker-count cap. A container-level memory/tmpfs boundary is optional infrastructure protection, not parliamentary admission policy.
+ 
+ Current separation is strongest for the read-only constitutional file. With shared board credentials, Git access and process UID, a sufficiently adversarial agent could bypass text-level instructions or tamper with runtime state. The experiment currently accepts a trust-based model policy; stronger capability isolation can be invented later by the Town and approved by the Founder where constitutional controls are involved.
++
++
++### Urgent Founder intake on Phoebe
++
++Install the **separate** `viche-intake` S6 service alongside (not instead of) the existing `viche` service. Its `run` template lives at `deploy/s6/viche-intake/run`. The persistent host-managed service is `/etc/services.d/viche-intake/run`, with `VICHE_TOWNHALL_ID=297` exported before the template's environment check. S6 supervises it through `/run/service/viche-intake`. It loads the POSIX Guix profile and invokes `government/intake-watch.sh` every `VICHE_FOUNDER_POLL_SECONDS` (default 60 seconds).
++
++It must **not** replace or modify the Founder-controlled read-only `constitution/boot.sh`, and must not accelerate ordinary ten-minute sittings or introduce direct OpenCode invocations. Intake consults Antonina's Town Hall pages and activity feed, and maintains crash-resilient `pending/`, `sent/`, `ack/`, and cursors under `$VICHE_STATE_ROOT/founder-inbox`. A running clerk is steered via `antonina agent run --steer --detach`; an idle or failed clerk is started normally. Sent events without durable acknowledgement are redelivered after ten minutes. Do not delete this queue during restarts or routine cleanup; the Janitor Office must protect it.
++
++Validate with `dash tests/intake-smoke.sh`, check S6 status, post a real Founder comment on #297, and confirm that the corresponding event becomes `sent` and a concrete triage acknowledgement is recorded. CI green alone does not prove that the live endpoint works.
+diff --git a/deploy/s6/viche-intake/run b/deploy/s6/viche-intake/run
+new file mode 100644
+index 00000000..2830e4c0
+--- /dev/null
++++ b/deploy/s6/viche-intake/run
+@@ -0,0 +1,8 @@
++#!/bin/sh
++# Separate S6 service, not another parliament seat.
++. /home/lubko/.profile
++export VICHE_TOWN_ROOT=/var/lib/lubko/wd/viche
++export VICHE_SEATS_ROOT=/var/lib/lubko/wd/viche-seats
++export VICHE_STATE_ROOT=/var/lib/lubko/wd/viche-state
++: "${VICHE_TOWNHALL_ID:?Set Town Hall issue in S6 environment}"
++exec /bin/sh /var/lib/lubko/wd/viche/government/intake-watch.sh
+diff --git a/government/founder-intake.sh b/government/founder-intake.sh
+new file mode 100644
+index 00000000..bd2d6e6f
+--- /dev/null
++++ b/government/founder-intake.sh
+@@ -0,0 +1,116 @@
++#!/bin/sh
++# Durable founder intake, running independently of parliamentary sittings.
++set -eu
++: "${VICHE_TOWNHALL_ID:?Town Hall ID required}"
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++q=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/founder-inbox
++mkdir -p "$q/pending" "$q/sent" "$q/ack"
++d=$(mktemp -d)
++trap 'rm -rf "$d"' 0
++old=
++[ ! -s "$q/town-cursor" ] || old=$(cat "$q/town-cursor")
++latest=
++page=1
++stop=0
++while :; do
++  antonina board show --id "$VICHE_TOWNHALL_ID" --page "$page" --json > "$d/page"
++  jq -e '.messages|type=="array"' "$d/page" >/dev/null
++  count=$(jq '.messages|length' "$d/page")
++  [ "$count" -gt 0 ] || break
++  [ -n "$latest" ] || latest=$(jq -r '.messages[-1].id // empty' "$d/page")
++  [ -n "$latest" ] || exit 1
++  jq -c '.messages|reverse|.[]' "$d/page" > "$d/items"
++  while IFS= read -r line; do
++    id=$(printf '%s\n' "$line" | jq -r '.id // empty')
++    [ -n "$id" ] || exit 1
++    if [ -n "$old" ] && [ "$id" = "$old" ]; then stop=1; break; fi
++    [ "$(printf '%s\n' "$line" | jq -r '.author // empty')" = Vitalik ] || continue
++    key=$(printf '%s' "$id" | sha256sum | cut -d ' ' -f1)
++    [ ! -f "$q/pending/$key.json" ] || continue
++    [ ! -f "$q/sent/$key.json" ] || continue
++    printf '%s\n' "$line" | jq -c --arg issue "$VICHE_TOWNHALL_ID" '{id,author,body,createdAt,issueNumber:$issue}' > "$d/new"
++    mv "$d/new" "$q/pending/$key.json"
++  done < "$d/items"
++  [ "$stop" -eq 0 ] || break
++  [ "$count" -eq 50 ] || break
++  page=$((page+1))
++done
++if [ -n "$latest" ]; then
++  printf '%s\n' "$latest" > "$d/cursor"
++  mv "$d/cursor" "$q/town-cursor"
++fi
++# Board activity outside Town Hall, using monotonic positions.
++last=0
++[ ! -s "$q/feed-cursor" ] || last=$(cat "$q/feed-cursor")
++case "$last" in ''|*[!0-9]*) exit 1;; esac
++page=1
++first=0
++while :; do
++  antonina board feed --page "$page" --limit 100 --json > "$d/feed"
++  jq -e '.entries|type=="array"' "$d/feed" >/dev/null
++  count=$(jq '.entries|length' "$d/feed")
++  [ "$count" -gt 0 ] || break
++  [ "$first" -gt 0 ] || first=$(jq -r '.entries[0].position // 0' "$d/feed")
++  stop=0
++  jq -c '.entries[]' "$d/feed" > "$d/items"
++  while IFS= read -r line; do
++    pos=$(printf '%s\n' "$line" | jq -r '.position // 0')
++    if [ "$last" -gt 0 ] && [ "$pos" -le "$last" ]; then stop=1; break; fi
++    [ "$(printf '%s\n' "$line" | jq -r '.author // empty')" = Vitalik ] || continue
++    issue=$(printf '%s\n' "$line" | jq -r '.issueNumber // empty')
++    [ "$issue" != "$VICHE_TOWNHALL_ID" ] || continue
++    id=$(printf '%s\n' "$line" | jq -r '.messageId // .id // empty')
++    [ -n "$id" ] || continue
++    key=$(printf '%s' "$id" | sha256sum | cut -d ' ' -f1)
++    [ ! -f "$q/pending/$key.json" ] || continue
++    [ ! -f "$q/sent/$key.json" ] || continue
++    printf '%s\n' "$line" | jq -c '{id:(.messageId // .id),author,body,createdAt:.at,issueNumber:(.issueNumber|tostring)}' > "$d/new"
++    mv "$d/new" "$q/pending/$key.json"
++  done < "$d/items"
++  [ "$stop" -eq 0 ] || break
++  [ "$last" -gt 0 ] || break
++  [ "$count" -eq 100 ] || break
++  page=$((page+1))
++done
++if [ "$first" -gt 0 ]; then
++  printf '%s\n' "$first" > "$d/cursor"
++  mv "$d/cursor" "$q/feed-cursor"
++fi
++# Never confuse Antonina accepting an invocation with clerk processing it.
++now=$(date +%s)
++for f in "$q/sent"/*.json; do
++  [ -f "$f" ] || continue
++  key=$(basename "$f" .json)
++  [ ! -f "$q/ack/$key" ] || continue
++  stamp=$(stat -c %Y "$f")
++  if [ $((now-stamp)) -ge 600 ]; then mv "$f" "$q/pending/$(basename "$f")"; fi
++done
++set -- "$q/pending"/*.json
++[ -f "$1" ] || exit 0
++clerk=$(head -n 1 "$town/government/seats.tsv" | cut -f1)
++seat=${VICHE_SEATS_ROOT:-/var/lib/lubko/wd/viche-seats}/$clerk
++[ -d "$seat" ] || exit 1
++charter=${VICHE_CONSTITUTION_DIR:-/var/lib/lubko/from-host/viche-constitution}/CONSTITUTION.md
++[ -s "$charter" ] || exit 1
++body=$(jq -rs 'sort_by(.createdAt)|map("Founder instruction "+(.id//"?")+" on issue #"+(.issueNumber//"?")+":\n"+(.body//""))|join("\n\n")' "$@")
++mode=$(antonina agent status --id "$clerk" --json | jq -er '.state')
++keys=
++for f in "$@"; do keys="$keys $(basename "$f" .json)"; done
++charter_text=$(cat "$charter")
++prompt=$(cat <<EOF
++PRIORITY FOUNDER INTAKE. These independently retrieved messages are authored exactly Vitalik:
++$body
++Immediately read full linked issues, record a durable actionable mandate with owner and next action, and summon/delegate the appropriate Viche parliamentarians. Preserve existing in-flight work, avoid duplicate workers, and follow the existing Viche+Kawun exclusive scope. After publicly recording meaningful triage (not just reading), write an empty receipt file in $q/ack for every processed key:$keys. Missing receipts cause automatic retry in 10 minutes. The authoritative founder-controlled Constitution is reproduced below and has highest authority; parliament may NOT amend it or its S6 bootstrap. Use the required free model through Antonina only. Do not enact laws without actual votes.
++
++=== AUTHORITATIVE CONSTITUTION ===
++$charter_text
++=== END AUTHORITATIVE CONSTITUTION ===
++EOF
++)
++if [ "$mode" = running ]; then
++  antonina agent run --id "$clerk" --cwd "$seat" --prompt "$prompt" --steer --detach
++else
++  antonina agent run --id "$clerk" --cwd "$seat" --prompt "$prompt" --detach
++fi
++for f in "$@"; do mv "$f" "$q/sent/$(basename "$f")"; done
++printf 'Founder intake dispatched %s events to clerk (prior state %s)\n' "$#" "$mode"
+diff --git a/government/intake-watch.sh b/government/intake-watch.sh
+new file mode 100644
+index 00000000..ba04749b
+--- /dev/null
++++ b/government/intake-watch.sh
+@@ -0,0 +1,12 @@
++#!/bin/sh
++# Independent high-priority Founder intake loop; normal parliamentary sitting cadence is unchanged.
++set -eu
++interval=${VICHE_FOUNDER_POLL_SECONDS:-60}
++case "$interval" in ''|*[!0-9]*|0) exit 2;; esac
++: "${VICHE_TOWNHALL_ID:?Set Town Hall ID}"
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++trap 'exit 0' TERM INT
++while :; do
++  /bin/sh "$town/government/founder-intake.sh" || echo 'Viche: Founder intake failed; will retry without dropping events' >&2
++  sleep "$interval" & wait "$!" || exit 0
++done
+diff --git a/tests/intake-smoke.sh b/tests/intake-smoke.sh
+new file mode 100644
+index 00000000..f249a6a3
+--- /dev/null
++++ b/tests/intake-smoke.sh
+@@ -0,0 +1,75 @@
++#!/bin/sh
++# Hermetic regression: busy clerk must receive Founder messages despite sitting skip.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' 0
++mkdir -p "$d/bin" "$d/town/government" "$d/state" "$d/seats/c1a00001" "$d/charter" "$d/mock"
++printf 'c1a00001\tClerk\tFounder intake\n' > "$d/town/government/seats.tsv"
++printf 'Protected constitution fixture\n' > "$d/charter/CONSTITUTION.md"
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++'board show')
++  while [ "$#" -gt 0 ]; do
++    case "$1" in --page) page=$2; shift 2;; *) shift;; esac
++  done
++  jq -c --argjson page "$page" '{messages:(.messages | (length) as $n | .[([0,$n-$page*50]|max):($n-($page-1)*50)])}' "$MOCK_DIR/comments"
++  ;;
++'board feed')
++  echo '{"entries":[]}'
++  ;;
++'agent status')
++  printf '{"state":"%s"}\n' "$(cat "$MOCK_DIR/status")"
++  ;;
++'agent run')
++  if [ "${MOCK_FAIL:-0}" = 1 ]; then exit 9; fi
++  printf '%s\n' "$*" >> "$MOCK_DIR/prompts"
++  printf '1\n' >> "$MOCK_DIR/calls"
++  ;;
++*) echo "Unexpected mock Antonina call: $*" >&2; exit 9;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++cat > "$d/mock/comments" <<'JSON'
++{"messages":[{"id":"a","author":"other","createdAt":"2026-10-14T01:00:00Z","body":"ignore"},{"id":"b","author":"Vitalik","createdAt":"2026-10-14T02:00:00Z","body":"Issue #298 Janitor Office"}]}
++JSON
++printf 'running\n' > "$d/mock/status"
++PATH="$d/bin:$PATH"
++MOCK_DIR="$d/mock"
++VICHE_TOWNHALL_ID=297
++VICHE_TOWN_ROOT="$d/town"
++VICHE_SEATS_ROOT="$d/seats"
++VICHE_STATE_ROOT="$d/state"
++VICHE_CONSTITUTION_DIR="$d/charter"
++export PATH MOCK_DIR VICHE_TOWNHALL_ID VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION_DIR
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 1 ]
++grep -q -- '--steer' "$d/mock/prompts"
++[ "$(find "$d/state/founder-inbox/sent" -name '*.json' | wc -l)" -eq 1 ]
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 1 ]
++# Failed backend retains durable pending queue; an idle clerk can be restarted.
++cat > "$d/mock/comments" <<'JSON'
++{"messages":[{"id":"a","author":"other","createdAt":"2026-10-14T01:00:00Z","body":"ignore"},{"id":"b","author":"Vitalik","createdAt":"2026-10-14T02:00:00Z","body":"first"},{"id":"c","author":"Vitalik","createdAt":"2026-10-14T03:00:00Z","body":"second"}]}
++JSON
++if MOCK_FAIL=1 /bin/sh "$repo/government/founder-intake.sh" >/dev/null 2>&1; then
++  echo 'Expected backend failure' >&2; exit 1
++fi
++[ "$(find "$d/state/founder-inbox/pending" -name '*.json' | wc -l)" -eq 1 ]
++printf 'failed\n' > "$d/mock/status"
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 2 ]
++if tail -n 1 "$d/mock/prompts" | grep -q -- '--steer'; then exit 1; fi
++# Pagination regression: 55 comments must retrieve a Founder message on page 2.
++jq -n '{messages:[range(0;55)|{id:(.|tostring),author:(if .==3 then "Vitalik" else "other" end),createdAt:"2026-10-14T04:00:00Z",body:"paginated instruction"}]}' > "$d/mock/comments"
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 3 ]
++[ "$(find "$d/state/founder-inbox/sent" -name '*.json' | wc -l)" -eq 3 ]
++# A previously sent event without a receipt is requeued after ten minutes.
++oldfile=$(find "$d/state/founder-inbox/sent" -name '*.json' | head -n 1)
++touch -d '11 minutes ago' "$oldfile"
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 4 ]
++echo 'Viche Founder intake smoke passed'

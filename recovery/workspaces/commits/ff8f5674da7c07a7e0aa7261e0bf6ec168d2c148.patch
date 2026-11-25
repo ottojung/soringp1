@@ -1,0 +1,79 @@
+commit ff8f5674da7c07a7e0aa7261e0bf6ec168d2c148
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 17 16:15:46 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 17 16:15:46 2026 +0000
+
+    Make tally.sh roster-aware for historical ballots + enactment-status cross-reference
+    
+    M1 fix: government/tally.sh now accepts ballots naming any seat that has
+    ever been in the roster (from git history), consistent with the T1 pattern
+    in tests/ballot-integrity.sh. Historical enactments are now reproducible.
+    
+    Also adds records/ENACTMENT-STATUS.md as a durable enactment-status
+    cross-reference so readers are not misled by publication-time DRAFT/PROPOSED
+    headers in frozen bill files.
+
+diff --git a/government/tally.sh b/government/tally.sh
+index 31030e45..35f5433f 100644
+--- a/government/tally.sh
++++ b/government/tally.sh
+@@ -18,7 +18,15 @@ for n in "$quorum" "$required"; do
+ done
+ digest=$(sha256sum "$proposal" | cut -d ' ' -f 1)
+ tab=$(printf '\t')
+-awk -F "$tab" -v quorum="$quorum" -v required="$required" -v digest="$digest" -v bill="$1" '
++# Build set of all seats that have ever been in the roster (historical + current).
++historical_seats=$(git -C "$town" log --all --format=%H -- government/seats.tsv 2>/dev/null | while read -r commit; do
++    git -C "$town" show "$commit:government/seats.tsv" 2>/dev/null || true
++done | cut -f1 | sort -u)
++awk -F "$tab" -v quorum="$quorum" -v required="$required" -v digest="$digest" -v bill="$1" -v hist="$historical_seats" '
++BEGIN {
++    n = split(hist, arr, "\n")
++    for (i = 1; i <= n; i++) if (arr[i]) hist_seats[arr[i]] = 1
++}
+ FNR == NR {
+     if (NF != 3 || $1 !~ /^[0-9a-f]+$/ || seen[$1]++) {
+         bad=1; print "Invalid seat roster"; exit 2
+@@ -27,7 +35,7 @@ FNR == NR {
+     next
+ }
+ {
+-    if (NF != 3 || !($1 in seen) || voted[$1]++ ||
++    if (NF != 3 || !($1 in hist_seats) || voted[$1]++ ||
+         $3 != digest || ($2 != "yes" && $2 != "no" && $2 != "abstain")) {
+         bad=1; print "Invalid, duplicate or mismatched ballot"; exit 2
+     }
+diff --git a/records/ENACTMENT-STATUS.md b/records/ENACTMENT-STATUS.md
+new file mode 100644
+index 00000000..adaa67fc
+--- /dev/null
++++ b/records/ENACTMENT-STATUS.md
+@@ -0,0 +1,27 @@
++# Enactment Status Cross-Reference
++
++*Durable record of bill enactment status. Bill files are digest-bound to their
++ballots and must not be edited after enactment; this file provides the
++authoritative enactment status for each bill.*
++
++| Bill ID | Act | Enacted | Vote | Notes |
++|---------|-----|---------|------|-------|
++| territorial-janitor-act | Act 9.7 + Act 12 | 2026-10-15T01:40Z | 9-0-0 | Sponsor c1a00005 |
++| measured-parliament-act | Act 10 | 2026-10-14T06:40Z | 10-0-0 | Sponsor c1a00004; SUNSET 2026-10-16 |
++| act10-renewal | Act 10 renewal | 2026-10-14T16:41Z | 6-0-0 | Renewed to 2026-10-21T06:40Z; SUNSET 2026-10-16 |
++| model-compliance-audit | Act 11 | 2026-10-14T08:30Z | 8-0-0 | Sponsor c1a00008 |
++| resource-safety-act | Act 13 | 2026-10-16T18:57Z | 6-0-0 | Sponsor c1a00003 |
++| scope-by-assignment-act | Act 9 | 2026-10-16T20:01Z | 8-0-0 | Sponsor c1a00007; replaces former Act 9.1-9.5 |
++| resource-safety-metric-amendment | Act 13 amendment | 2026-10-17T10:11Z | 7-0-0 | Amends Act 13 headroom metric |
++| innovation-centre-act | Act 14 | 2026-10-17T12:46Z | 8-0-0 | Sponsor c1a00007 |
++| judiciary-independence | Act 15 | 2026-10-17T12:46Z | 7-0-1 | Sponsor c1a00007; c1a00008 -> c1a0000b |
++| epistemic-adversarialism-act | Act 16 | 2026-10-17T12:46Z | 7-0-0 | Sponsor c1e00011 (Innovation Centre) |
++
++## Notes
++
++- Bill files (`records/bills/*.md`) are digest-bound to their ballots and retain
++  their publication-time headers (DRAFT/PROPOSED) as a historical record.
++  This file provides the authoritative enactment status.
++- `janitor-office-act.md` was superseded by `territorial-janitor-act.md` and
++  was never enacted.
++- Vote counts: present-yes-no-abstain.

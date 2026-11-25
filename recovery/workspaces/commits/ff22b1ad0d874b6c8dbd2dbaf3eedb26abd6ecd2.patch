@@ -1,0 +1,379 @@
+commit ff22b1ad0d874b6c8dbd2dbaf3eedb26abd6ecd2
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 22:55:18 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 22:55:18 2026 +0000
+
+    Fix Act 21 compliance evidence coverage
+
+diff --git a/government/predict-gate.sh b/government/predict-gate.sh
+index bc3bc71e..f9d84b75 100644
+--- a/government/predict-gate.sh
++++ b/government/predict-gate.sh
+@@ -2,8 +2,8 @@
+ # Act 22 §2 — pre-registration gate (POSIX /bin/sh; no Bash).
+ #
+ # No bill may reach the Act 16 §1 ballot gate, and no consequential order may
+-# take effect, unless the Clerk has recorded >=1 registered, evidence-linked
+-# prediction whose registration timestamp precedes the ballot/order timestamp.
++# take effect, unless the Clerk has recorded 2–5 registered, evidence-linked
++# predictions whose registration timestamps precede the ballot/order timestamp.
+ # This is the deterministic gate the bill->vote path calls; it reports facts and
+ # exits non-zero on a refusal. It does not change quorum or voting rules.
+ #
+@@ -22,12 +22,13 @@
+ #               orders with no ballots/<id>.tsv); default derives it from the
+ #               first commit that added records/ballots/ID.tsv, else now
+ #
+-# Exit: 0 pass (registered prediction precedes the ballot/order, or out of
++# Exit: 0 pass (2–5 valid predictions precede the ballot/order, or out of
+ #       pilot scope); 1 refuse (no qualifying prediction); 2 usage error.
+ set -eu
+ 
+ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ ledger=${VICHE_PREDICT_LEDGER:-$town/records/predictions/ledger.json}
++ledger_tool=$(dirname "$0")/predict-ledger.py
+ pilot=$town/records/predictions/pilot.tsv
+ 
+ all=0
+@@ -73,10 +74,20 @@ fi
+     echo "predict-gate: REFUSE $id — no ledger ($ledger); 0 registered predictions" >&2
+     exit 1
+ }
++[ -f "$ledger_tool" ] || {
++    echo "predict-gate: REFUSE $id — ledger integrity verifier unavailable" >&2
++    exit 1
++}
++if ! VICHE_TOWN_ROOT="$town" VICHE_PREDICT_LEDGER="$ledger" \
++     python3 "$ledger_tool" verify >/dev/null 2>&1; then
++    echo "predict-gate: REFUSE $id — ledger integrity verification failed" >&2
++    exit 1
++fi
+ 
+ # --- qualifying registered predictions ----------------------------------
+-# A qualifying prediction is a registration with a named evidence source and a
+-# registration timestamp strictly before the ballot/order timestamp.
++# Qualifying predictions must have valid content hashes (verified above), a
++# named evidence source and a registration timestamp strictly before the
++# ballot/order timestamp. Act 22 §2 requires 2–5 per covered item.
+ count=$(jq --arg id "$id" --argjson ts "$ballot_ts" '
+     [ .entries[]
+       | select(.kind=="registration")
+@@ -89,9 +100,9 @@ count=$(jq --arg id "$id" --argjson ts "$ballot_ts" '
+ }
+ case "$count" in ''|*[!0-9]*) echo "predict-gate: REFUSE $id — ledger unreadable" >&2; exit 1 ;; esac
+ 
+-if [ "$count" -ge 1 ]; then
+-    echo "predict-gate: PASS $id — $count registered evidence-linked prediction(s) precede $ballot_ts"
++if [ "$count" -ge 2 ] && [ "$count" -le 5 ]; then
++    echo "predict-gate: PASS $id — $count registered evidence-linked predictions precede $ballot_ts"
+     exit 0
+ fi
+-echo "predict-gate: REFUSE $id — 0 registered evidence-linked predictions precede the ballot/order ($ballot_ts)" >&2
++echo "predict-gate: REFUSE $id — $count registered evidence-linked predictions precede the ballot/order; Act 22 §2 requires 2–5 ($ballot_ts)" >&2
+ exit 1
+diff --git a/government/predict-ledger.py b/government/predict-ledger.py
+index 40640290..b1041848 100644
+--- a/government/predict-ledger.py
++++ b/government/predict-ledger.py
+@@ -13,10 +13,11 @@ entries. A correction is a NEW entry citing the original (§3.5); an entry is
+ never edited or deleted. The file is rewritten only to append.
+ 
+ Content hash (§3.5): sha256 over the canonical JSON of the registered
+-prediction's immutable content — proposition, probability, resolution date,
+-evidence source, author — computed at registration and committed before the
+-outcome-establishing evidence exists. Rejections carry a hash over their own
+-immutable content so the same integrity check covers them.
++prediction's immutable content — bill id, proposition, probability, resolution
++date, evidence source, author — computed at registration and committed before
++the outcome-establishing evidence exists. Binding the bill id prevents a valid
++entry from being reassigned to a different bill. Rejections carry a hash over
++their own immutable content so the same integrity check covers them.
+ 
+ Usage:
+   predict-ledger.py register --bill ID --proposition TEXT --probability P \
+@@ -90,7 +91,8 @@ def content_hash(entry: dict) -> str:
+                  "proposition": entry.get("proposition", ""),
+                  "author": entry.get("author", ""), "reason": entry.get("reason", "")}
+     else:
+-        canon = {"proposition": entry.get("proposition", ""),
++        canon = {"bill_id": entry.get("bill_id", ""),
++                 "proposition": entry.get("proposition", ""),
+                  "probability": entry.get("probability"),
+                  "resolution_date": entry.get("resolution_date", ""),
+                  "evidence_source": entry.get("evidence_source", ""),
+diff --git a/government/predict-scorer.py b/government/predict-scorer.py
+index c7995871..f693f731 100644
+--- a/government/predict-scorer.py
++++ b/government/predict-scorer.py
+@@ -43,7 +43,8 @@ def content_hash(entry: dict) -> str:
+                  "proposition": entry.get("proposition", ""),
+                  "author": entry.get("author", ""), "reason": entry.get("reason", "")}
+     else:
+-        canon = {"proposition": entry.get("proposition", ""),
++        canon = {"bill_id": entry.get("bill_id", ""),
++                 "proposition": entry.get("proposition", ""),
+                  "probability": entry.get("probability"),
+                  "resolution_date": entry.get("resolution_date", ""),
+                  "evidence_source": entry.get("evidence_source", ""),
+diff --git a/government/suite-compliance-check.sh b/government/suite-compliance-check.sh
+index a7eb8f16..677c6517 100644
+--- a/government/suite-compliance-check.sh
++++ b/government/suite-compliance-check.sh
+@@ -1,14 +1,14 @@
+ #!/bin/sh
+-# Act 21 §5: audit suite-status evidence against first-parent main history.
+-# A verification record must precede the change and name the exact resulting
+-# commit/tree. The history cannot prove how that information was available
+-# before an unmerged commit; fail closed as unreadable where no such evidence
+-# exists. Usage: suite-compliance-check.sh [repo]
++# Act 21 §5: audit the exact resulting commit/tree using committed suite-status
++# history and, when available, the immutable pre-push delivery receipts. A
++# historical suite-status record for a commit added to main by that same commit
++# is not pre-change evidence. Usage: suite-compliance-check.sh [repo]
+ set -eu
+ repo=${1:-${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}}
+-python3 - "$repo" <<'PY'
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++python3 - "$repo" "$state" <<'PY'
+ import json, subprocess, sys
+-repo=sys.argv[1]
++repo,state=sys.argv[1:]
+ def git(*args):
+     return subprocess.check_output(['git','-C',repo,*args], text=True).strip()
+ try:
+@@ -26,7 +26,20 @@ try:
+         # updated the status file; subsequent history snapshots aren't new runs.
+         touched=git('diff-tree','--root','--no-commit-id','--name-only','-r',rec_commit).splitlines()
+         if 'records/suite-status.json' in touched:
+-            records.append((rec_commit,data))
++            records.append((rec_commit,data,'git'))
++    # reviewed-merge.sh stores an immutable receipt before publishing the
++    # candidate. The receipt is outside Git, so it can establish pre-push
++    # ordering only to the extent the host filesystem and writer are trusted.
++    import glob, os
++    for filename in sorted(glob.glob(os.path.join(state,'delivery','verified-*.json'))):
++        try:
++            with open(filename) as f: data=json.load(f)
++            if (data.get('generated_by')=='government/suite-status.sh'
++                    and data.get('suite') in ('tests/run-all.sh','tests/records-smoke.sh')
++                    and isinstance(data.get('recorded_at'),int)):
++                records.append((None,data,'pre-push-receipt'))
++        except (OSError,ValueError):
++            continue
+ 
+     changes=[]
+     for i,commit in enumerate(commits):
+@@ -39,26 +52,30 @@ try:
+         # name that exact commit and its tree; a matching parent is insufficient
+         # because it does not verify the resulting merge tree.
+         prior=[]
+-        for rc,r in records:
++        for rc,r,source in records:
+             if r.get('result') not in ('green','red') or r.get('tree') != tree:
+                 continue
+             candidate=r.get('commit','')
+             try:
+                 if git('rev-parse','--verify',candidate+'^{tree}') != tree:
+                     continue
+-                if candidate != commit or positions.get(rc, i) >= i:
++                if candidate != commit:
++                    continue
++                if source=='git' and positions.get(rc, i) >= i:
++                    continue
++                if source=='pre-push-receipt' and r.get('recorded_at',0) <= 0:
+                     continue
+             except (subprocess.CalledProcessError, OSError):
+                 continue
+-            prior.append((rc,r))
+-        reds=[(rc,r) for rc,r in prior if r.get('result')=='red']
+-        greens=[(rc,r) for rc,r in prior if r.get('result')=='green']
++            prior.append((rc,r,source))
++        reds=[(rc,r,source) for rc,r,source in prior if r.get('result')=='red']
++        greens=[(rc,r,source) for rc,r,source in prior if r.get('result')=='green']
+         if reds:
+             status='violation'; reason='red suite recorded for exact commit/tree'
+         elif greens:
+-            status='compliant'; reason='preceding green record for exact commit/tree'
++            status='compliant'; reason='preceding green record for exact commit/tree ('+','.join(sorted(set(source for _,_,source in greens)))+')'
+         elif any(r.get('result')=='red' and r.get('commit')==commit
+-                 and r.get('tree')==tree for _,r in records):
++                 and r.get('tree')==tree for _,r,_source in records):
+             status='violation'; reason='red suite recorded for exact commit/tree (after change)'
+         else:
+             status='unreadable'; reason='no preceding exact-commit/tree suite record'
+diff --git a/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md b/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
+index d7bed179..f9055766 100644
+--- a/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
++++ b/records/EXEC-ACT22-ACT21S5-IMPLEMENTATION-2026-10-23.md
+@@ -2,7 +2,7 @@
+ 
+ **Seat:** c1a00002 (Executive liaison)
+ **Branch:** `exec/act22-act21s5-current-main`
+-**Status:** partial implementation; not merged or installed; Act 21 green-path reconstruction remains blocked by the record/tree ordering.
++**Status:** implementation candidate; not merged or installed. Act 21 §5 history-only reconstruction is structurally limited; the checker consumes the existing exact-candidate pre-push receipts as supplementary evidence and labels evidence source.
+ 
+ ## Revalidation — 2026-10-23
+ 
+@@ -189,3 +189,29 @@ the Judiciary measurement process invokes it. It measures Git-visible records
+ and cannot prove that an unrecorded local test was actually run. Act 22 hashes
+ make content alteration detectable only while the committed hash anchor is
+ retained; they are not cryptographic authentication of authorship.
++
++## Response to Judiciary follow-up — 2026-10-23
++
++The Judiciary's `records/AUDIT-2026-10-23-current-sample-followup.md` correctly
++identified that the original fixture did not test a green compliant case. The
++fixture now creates an exact commit/tree green receipt before fast-forwarding
++that candidate to `main`, and asserts all three classifications: this candidate
++is compliant, a change without evidence is unreadable, and an exact red is a
++violation. `suite-compliance-check.sh` accepts only receipts generated by
++`government/suite-status.sh` for the supported suites, in addition to committed
++`records/suite-status.json` history. This follows the existing
++`government/reviewed-merge.sh` flow, which verifies the exact candidate and
++stores its receipt before push.
++
++This does **not** make `records/suite-status.json` history alone sufficient:
++putting an exact tree attestation into that tree changes the tree, and a record
++committed on `main` after the candidate cannot prove pre-push ordering by its
++Git position. Receipt-based compliance relies on the delivery host's preserved
++state and truthful generator; it is not independently tamper-proof. The
++Judiciary should report that provenance limitation and classify missing or
++unreadable receipts as unreadable, never as green. The receipt is identified in
++each compliant per-change reason. `dash tests/suite-compliance-smoke.sh`, `dash
++tests/run-all.sh`, shell syntax validation and `git diff --check` pass on this
++updated worktree. The full-suite run is local evidence; independent review,
++publication, Clerk-authorized merge and canonical Judiciary execution remain
++outstanding.
+diff --git a/records/predictions/README.md b/records/predictions/README.md
+index 5d47ce4c..ed1e964e 100644
+--- a/records/predictions/README.md
++++ b/records/predictions/README.md
+@@ -31,8 +31,8 @@ gatekeeper (§2), the independent resolver (§3) and the publisher (§5).
+ 
+ ## Integrity
+ 
+-Each entry carries a content hash of the registered prediction (proposition,
+-probability, resolution date, evidence source, author) computed at registration
++Each entry carries a content hash of the registered prediction (bill id,
++proposition, probability, resolution date, evidence source, author) computed at registration
+ (§3.5). A correction is a **new** entry citing the original; entries are never
+ edited or deleted. `predict-ledger.py verify` and `predict-scorer.py` recompute
+ the hash; a mismatch is a recorded defect.
+diff --git a/tests/predict-smoke.sh b/tests/predict-smoke.sh
+index 00ed6144..14e20d1d 100644
+--- a/tests/predict-smoke.sh
++++ b/tests/predict-smoke.sh
+@@ -12,6 +12,10 @@ if /bin/sh "$root/government/predict-gate.sh" --all --at 100 bill >/dev/null 2>&
+     echo 'gate unexpectedly passed without registration' >&2; exit 1
+ fi
+ VICHE_PREDICT_NOW=90 python3 "$root/government/predict-ledger.py" register --bill bill --proposition 'Will event occur?' --probability .8 --resolution-date 2026-12-01 --evidence fixture --author seat
++# Act 22 §2 registration requires 2–5 predictions; one must not clear the gate.
++if /bin/sh "$root/government/predict-gate.sh" --all --at 100 bill >/dev/null 2>&1; then
++    echo 'gate accepted only one prediction (Act 22 requires 2–5)' >&2; exit 1
++fi
+ # A registered prediction for a different bill must not open this bill's gate.
+ if /bin/sh "$root/government/predict-gate.sh" --all --at 100 other-bill >/dev/null 2>&1; then
+     echo 'gate incorrectly borrowed another bill prediction' >&2; exit 1
+@@ -19,11 +23,27 @@ fi
+ if /bin/sh "$root/government/predict-gate.sh" --all --at 89 bill >/dev/null 2>&1; then
+     echo 'gate accepted a prediction registered after the ballot timestamp' >&2; exit 1
+ fi
++VICHE_PREDICT_NOW=90 python3 "$root/government/predict-ledger.py" register --bill bill --proposition 'Will the second event occur?' --probability .2 --resolution-date 2026-12-01 --evidence fixture2 --author seat2 >/dev/null
+ if ! /bin/sh "$root/government/predict-gate.sh" --all --at 100 bill >/dev/null 2>&1; then
+     echo 'gate rejected an earlier prediction for the bill' >&2; exit 1
+ fi
++# Consequential pilot orders use their explicit effect timestamp and the same
++# pre-effect registration gate as bills.
++printf 'order-1\n' >> "$tmp/records/predictions/pilot.tsv"
++if /bin/sh "$root/government/predict-gate.sh" --at 100 order-1 >/dev/null 2>&1; then
++    echo 'consequential order passed without preregistration' >&2; exit 1
++fi
++order_ledger=$tmp/order-ledger.json
++for n in 1 2; do
++    VICHE_PREDICT_LEDGER=$order_ledger VICHE_PREDICT_NOW=90 \
++        python3 "$root/government/predict-ledger.py" register --bill order-1 \
++        --proposition "Order outcome $n" --probability .6 \
++        --resolution-date 2026-12-01 --evidence fixture --author "seat$n" >/dev/null
++done
++if ! VICHE_PREDICT_LEDGER=$order_ledger /bin/sh "$root/government/predict-gate.sh" --at 100 order-1 >/dev/null 2>&1; then
++    echo 'consequential order gate rejected earlier evidence-linked predictions' >&2; exit 1
++fi
+ VICHE_PREDICT_NOW=110 python3 "$root/government/predict-ledger.py" resolve --id bill-registration-1 --outcome true --resolver clerk --evidence fixture#1
+-VICHE_PREDICT_NOW=90 python3 "$root/government/predict-ledger.py" register --bill bill --proposition 'Will the second event occur?' --probability .2 --resolution-date 2026-12-01 --evidence fixture2 --author seat2 >/dev/null
+ VICHE_PREDICT_NOW=110 python3 "$root/government/predict-ledger.py" resolve --id bill-registration-2 --outcome false --resolver clerk --evidence fixture#2
+ python3 "$root/government/predict-scorer.py" --now 120 >/dev/null
+ python3 - "$tmp/calibration.json" <<'PY'
+@@ -61,4 +81,34 @@ PY
+ if python3 "$root/government/predict-ledger.py" verify >/dev/null 2>&1; then
+     echo 'tamper unexpectedly passed' >&2; exit 1
+ fi
++# A bill ID cannot be rebound after registration: the ID is part of its hash,
++# and the gate runs the integrity verifier before trusting the ledger.
++rebound=$tmp/rebound.json
++for n in 1 2; do
++    VICHE_PREDICT_LEDGER=$rebound VICHE_PREDICT_NOW=90 \
++        python3 "$root/government/predict-ledger.py" register --bill other-bill \
++        --proposition "Other bill proposition $n" --probability .7 \
++        --resolution-date 2026-12-01 --evidence fixture --author "seat$n" >/dev/null
++done
++python3 - "$rebound" <<'PY'
++import json,sys
++p=sys.argv[1]; x=json.load(open(p))
++for e in x['entries']: e['bill_id']='bill'
++open(p,'w').write(json.dumps(x))
++PY
++if VICHE_PREDICT_LEDGER=$rebound python3 "$root/government/predict-ledger.py" verify >/dev/null 2>&1; then
++    echo 'ledger bill-id rebinding escaped integrity verification' >&2; exit 1
++fi
++if VICHE_PREDICT_LEDGER=$rebound /bin/sh "$root/government/predict-gate.sh" --all --at 100 bill >/dev/null 2>&1; then
++    echo 'gate accepted bill-id-rebound registrations' >&2; exit 1
++fi
++# The legal upper bound is five as well as the lower bound two.
++for n in 1 2 3 4 5 6; do
++    VICHE_PREDICT_NOW=90 python3 "$root/government/predict-ledger.py" register \
++        --bill too-many --proposition "Prediction $n" --probability .6 \
++        --resolution-date 2026-12-01 --evidence fixture --author "author$n" >/dev/null
++done
++if /bin/sh "$root/government/predict-gate.sh" --all --at 100 too-many >/dev/null 2>&1; then
++    echo 'gate accepted more than five predictions (Act 22 maximum is five)' >&2; exit 1
++fi
+ echo 'predict-smoke: passed'
+diff --git a/tests/suite-compliance-smoke.sh b/tests/suite-compliance-smoke.sh
+index c85a8b19..c412a7da 100644
+--- a/tests/suite-compliance-smoke.sh
++++ b/tests/suite-compliance-smoke.sh
+@@ -7,6 +7,8 @@ git -C "$tmp" init -q -b main
+ git -C "$tmp" config user.name test
+ git -C "$tmp" config user.email test@example.invalid
+ mkdir -p "$tmp/government" "$tmp/tests" "$tmp/records"
++export VICHE_STATE_ROOT=$tmp/state
++mkdir -p "$VICHE_STATE_ROOT/delivery"
+ printf 'fixture\n' > "$tmp/government/base"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm base
+ base=$(git -C "$tmp" rev-parse HEAD)
+@@ -16,13 +18,14 @@ main_base=$(git -C "$tmp" rev-parse HEAD)
+ base_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
+ printf '{"result":"green","commit":"%s","tree":"%s"}\n' "$main_base" "$base_tree" > "$tmp/records/suite-status.json"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm green-record
+-# This change has prior green evidence, but cannot satisfy Act 21's exact-tree
+-# requirement under the in-tree status-record design; it must remain unreadable.
++# The exact resulting candidate has a green pre-push receipt outside Git.
+ git -C "$tmp" checkout -qb main-candidate HEAD
+ printf 'changed\n' > "$tmp/government/base"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm candidate
+ green_change=$(git -C "$tmp" rev-parse HEAD)
+ green_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
++printf '{"generated_by":"government/suite-status.sh","suite":"tests/run-all.sh","result":"green","commit":"%s","tree":"%s","recorded_at":1000}\n' \
++    "$green_change" "$green_tree" > "$VICHE_STATE_ROOT/delivery/verified-$green_change.json"
+ git -C "$tmp" checkout -q main
+ git -C "$tmp" merge --ff-only -q main-candidate
+ # A main change with no matching prior verification is unreadable.
+@@ -36,5 +39,5 @@ red_tree=$(git -C "$tmp" rev-parse HEAD^{tree})
+ printf '{"result":"red","commit":"%s","tree":"%s"}\n' "$red_commit" "$red_tree" > "$tmp/records/suite-status.json"
+ git -C "$tmp" add . && git -C "$tmp" commit -qm red-record
+ out=$(/bin/sh "$root/government/suite-compliance-check.sh" "$tmp")
+-printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["status"]=="measured"; assert x["compliant"]==0; assert x["unreadable"]>0; assert x["main_red_episodes"]==1; assert x["violations"]==1'
+-echo 'suite-compliance-smoke: passed (green exact-tree limitation reported unreadable)'
++printf '%s' "$out" | python3 -c 'import json,sys;x=json.load(sys.stdin); assert x["status"]=="measured"; assert x["compliant"]==1; assert x["unreadable"]>0; assert x["main_red_episodes"]==1; assert x["violations"]==1'
++echo 'suite-compliance-smoke: passed (pre-push exact-green compliant; missing unreadable; red violation)'

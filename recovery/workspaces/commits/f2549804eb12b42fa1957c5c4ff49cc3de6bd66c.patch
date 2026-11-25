@@ -1,0 +1,471 @@
+commit f2549804eb12b42fa1957c5c4ff49cc3de6bd66c
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 05:35:43 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 05:35:43 2026 +0000
+
+    PnP: independently reclaim obsolete compiler subprocesses by exact assignment
+
+diff --git a/missions/pnp/compile.py b/missions/pnp/compile.py
+index dd7e7d14..41d835fd 100644
+--- a/missions/pnp/compile.py
++++ b/missions/pnp/compile.py
+@@ -1,12 +1,13 @@
+ """One supervised entry point for research and publisher Lean compilation."""
+ import argparse
+ import os
++from pathlib import Path
+ import signal
+ import subprocess
+ import sys
+ import time
+ 
+-from . import build_control as control
++from . import build_control as control, watchdog, state
+ 
+ 
+ def command(args):
+@@ -79,6 +80,19 @@ def main(argv=None):
+     p.add_argument("--timeout", type=int, default=600)
+     p.add_argument("args", nargs=argparse.REMAINDER)
+     ns = p.parse_args(argv)
++    local_gap = watchdog.assignment(Path.cwd().resolve())
++    if local_gap or ns.gap or ns.lease:
++        if (local_gap and ns.gap != local_gap) or not ns.gap or not ns.lease or not state.config.GAP_ID_RE.fullmatch(ns.gap):
++            print("RESOURCE DEFERRED: gap-local compilation requires its exact lease", file=sys.stderr)
++            return 75
++        try:
++            rec = state.load(ns.gap)
++            if not isinstance(rec, dict) or rec.get("lease") != ns.lease:
++                print("RESOURCE DEFERRED: assignment unavailable or superseded", file=sys.stderr)
++                return 75
++        except (OSError, ValueError):
++            print("RESOURCE DEFERRED: assignment unavailable", file=sys.stderr)
++            return 75
+     if ns.gap:
+         os.environ["PNP_PUBLISH_GAP"] = ns.gap
+     if ns.lease:
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 87e3b290..456689de 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -6,6 +6,8 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
+ [ -r "$town/missions/pnp/cli.py" ] || exit 0
+ cd "$town"
++# Start independent local resource reclamation before any network I/O.
++python3 -m missions.pnp.watchdog || :
+ # Renew leases and recover queued publications before the optional score poll.
+ python3 -m missions.pnp.frontier || :
+ python3 missions/pnp/cli.py reconcile
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index e2cddad5..82c601f4 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -152,3 +152,17 @@ Research admission waits only briefly (at most 15 seconds) before returning
+ Legacy raw PnP compiler processes are recognized as an admission constraint.
+ The Executive must retire or cooperatively reassign obsolete workers rather
+ than allow them to restart unnecessary full checkers.
++
++## Revocable computation (Founder priority)
++
++The deterministic mission watchdog runs independently of Executive sessions.
++It revokes only identifiable Lean/lake/checklemma subprocesses in canonical
++gap worktrees whose durable assignment has ended (STALE, RELEASED, ACCEPTED,
++PR_OPEN). It never terminates or launches agent sessions, touches unrelated
++worktrees, or acts on missing/unreadable state. Exact gap state and process
++identity are checked under the assignment lock; a fresh reacquisition is
++not cancelled on old evidence. Research commands must use their own exact
++gap and lease with the shared compiler entry point. The Executive remains
++sole authority for researcher reassignment and must do it early, before
++lengthy deliberation. Preserve proof files; no repeated compilation of a
++settled gap. Computational cancellation is not a mathematical verdict.
+diff --git a/missions/pnp/watchdog.py b/missions/pnp/watchdog.py
+new file mode 100644
+index 00000000..383eafd7
+--- /dev/null
++++ b/missions/pnp/watchdog.py
+@@ -0,0 +1,205 @@
++"""Revoke only obsolete gap-local compiler processes, never agent sessions.
++
++No remote calls, no model invocation, no process-group signals. A pidfd pins
++the actual process; the gap lock serializes the terminal check with reacquire.
++"""
++import ctypes
++import fcntl
++import os
++from pathlib import Path
++import signal
++import subprocess
++import sys
++import time
++
++from . import config, state
++
++COMPILERS = {"lean", "lake", "checklemma"}
++TERMINAL = {"STALE", "RELEASED", "ACCEPTED", "PR_OPEN"}
++INTERVAL = 2
++GRACE = 3
++PROC = Path("/proc")
++
++
++def pidfd_open(pid):
++    if hasattr(os, "pidfd_open"):
++        return os.pidfd_open(pid, 0)
++    libc = ctypes.CDLL(None, use_errno=True)
++    func = getattr(libc, "pidfd_open", None)
++    if func is None:
++        raise OSError("pidfd_open unavailable")
++    fd = func(ctypes.c_int(pid), ctypes.c_uint(0))
++    if fd < 0:
++        err = ctypes.get_errno()
++        raise OSError(err, os.strerror(err))
++    return fd
++
++
++def send(fd, sig):
++    if hasattr(signal, "pidfd_send_signal"):
++        return signal.pidfd_send_signal(fd, sig)
++    libc = ctypes.CDLL(None, use_errno=True)
++    func = getattr(libc, "pidfd_send_signal", None)
++    if func is None:
++        raise OSError("pidfd_send_signal unavailable")
++    if func(ctypes.c_int(fd), ctypes.c_int(sig), None, ctypes.c_uint(0)) < 0:
++        err = ctypes.get_errno()
++        raise OSError(err, os.strerror(err))
++
++
++def assignment(cwd):
++    """Only exact canonical gap worktrees; no loose process-title matching."""
++    for root, research in ((config.GAPS_DIR, True), (config.WORKTREES_DIR, False)):
++        try:
++            parts = cwd.relative_to(Path(root).resolve()).parts
++        except ValueError:
++            continue
++        if not parts or not config.GAP_ID_RE.fullmatch(parts[0]):
++            continue
++        if research and (len(parts) < 2 or parts[1] != "path"):
++            continue
++        return parts[0]
++    return None
++
++
++def identity(entry):
++    """Confirm executable, working tree, UID and start identity."""
++    try:
++        if entry.stat().st_uid != os.getuid():
++            return None
++        if (entry / "comm").read_text().strip() not in COMPILERS:
++            return None
++        if (entry / "exe").resolve(strict=True).name not in COMPILERS:
++            return None
++        gap = assignment((entry / "cwd").resolve(strict=True))
++        if gap is None:
++            return None
++        fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
++        if fields[0] == "Z":
++            return None
++        return gap, int(fields[19])
++    except (OSError, ValueError, IndexError, RuntimeError):
++        return None
++
++
++def managed_lease(entry, gap):
++    """Recover the exact lease inherited by a managed compiler, not a guess."""
++    try:
++        env = dict(part.split(b"=", 1) for part in
++                   (entry / "environ").read_bytes().split(b"\0") if b"=" in part)
++        if env.get(b"PNP_MANAGED_COMPILER") != b"1" or env.get(b"PNP_PUBLISH_GAP") != gap.encode():
++            return None
++        return env.get(b"PNP_PUBLISH_LEASE", b"").decode() or None
++    except (OSError, ValueError):
++        return None
++
++
++def stop_if_terminal(entry, expected, pending, now):
++    pid = int(entry.name)
++    fd = pidfd_open(pid)
++    try:
++        if identity(entry) != expected:
++            return None
++        gap, start = expected
++        lock = os.open(os.path.join(state.gap_dir(gap), ".lock"), os.O_RDWR)
++        try:
++            try:
++                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            except BlockingIOError:
++                return None
++            rec = state.load(gap)
++            if not isinstance(rec, dict) or rec.get("gap_id") != gap:
++                return None
++            current = rec.get("lease")
++            if not isinstance(current, str) or not current:
++                return None
++            previous = managed_lease(entry, gap)
++            superseded = previous is not None and previous != current
++            if rec.get("state") not in TERMINAL and not superseded:
++                return None
++            # Recheck after acquiring the gap lock. A replaced PID or cwd
++            # cannot be used to authorize sending a signal to another job.
++            if identity(entry) != expected:
++                return None
++            key = pid, start, gap, previous or current
++            first = pending.get(key)
++            if first is not None and now - first < GRACE:
++                return key, first
++            sig = signal.SIGTERM if first is None else signal.SIGKILL
++            send(fd, sig)
++            print("obsolete compiler", pid, gap, "SUPERSEDED" if superseded else rec["state"], sig.name, flush=True)
++            return key, now if first is None else first
++        finally:
++            os.close(lock)
++    finally:
++        os.close(fd)
++
++
++def scan(pending=None, proc=PROC, now=None):
++    pending = pending or {}
++    now = time.monotonic() if now is None else now
++    result = {}
++    try:
++        entries = list(proc.iterdir())
++    except OSError:
++        return result
++    for entry in entries:
++        if not entry.name.isdigit():
++            continue
++        item = identity(entry)
++        if item is None:
++            continue
++        try:
++            killed = stop_if_terminal(entry, item, pending, now)
++            if killed:
++                key, first = killed
++                result[key] = first
++        except (OSError, ValueError, TypeError, KeyError):
++            # A disappearing process, malformed state or unsupported pidfd
++            # never licenses a less precise fallback signal.
++            continue
++    return result
++
++
++def lock_path():
++    return os.path.join(config.CACHE_DIR, "compiler-watchdog.lock")
++
++
++def ensure():
++    """Start only this deterministic local watchdog; kernel lock owns lifetime."""
++    os.makedirs(config.CACHE_DIR, exist_ok=True)
++    fd = os.open(lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        try:
++            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            return
++        log = os.path.join(config.CACHE_DIR, "compiler-watchdog.log")
++        with open(log, "a", encoding="utf-8") as out:
++            subprocess.Popen([sys.executable, "-m", "missions.pnp.watchdog",
++                              "--serve", str(fd)],
++                             cwd=str(Path(__file__).resolve().parents[2]),
++                             stdin=subprocess.DEVNULL, stdout=out, stderr=out,
++                             start_new_session=True, pass_fds=(fd,))
++    finally:
++        os.close(fd)
++
++
++def serve(fd):
++    # Exit on replacement of our implementation; ordinary lifecycle restarts.
++    source = Path(__file__).resolve()
++    version = source.stat().st_mtime_ns, source.stat().st_ino
++    pending = {}
++    try:
++        while (source.stat().st_mtime_ns, source.stat().st_ino) == version:
++            pending = scan(pending)
++            time.sleep(INTERVAL)
++    finally:
++        os.close(fd)
++
++
++if __name__ == "__main__":
++    if len(sys.argv) == 3 and sys.argv[1] == "--serve":
++        serve(int(sys.argv[2]))
++    else:
++        ensure()
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index f7213297..7c2bee0b 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -5,3 +5,4 @@ cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
+ /bin/sh -n missions/pnp/git-auth.sh
+ python3 tests/pnp-pipeline.py
+ python3 tests/pnp-real-smoke.py
++python3 tests/pnp-watchdog-smoke.py
+diff --git a/tests/pnp-watchdog-smoke.py b/tests/pnp-watchdog-smoke.py
+new file mode 100644
+index 00000000..ea4c4531
+--- /dev/null
++++ b/tests/pnp-watchdog-smoke.py
+@@ -0,0 +1,163 @@
++#!/usr/bin/env python3
++"""Hermetic tests for exact, lease-scoped compiler reclamation."""
++import fcntl
++import os
++from pathlib import Path
++import shutil
++import signal
++import subprocess
++import sys
++import tempfile
++import time
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from missions.pnp import config, state, watchdog, compile as compiler
++
++GAP = "L-meta-1662"
++LIVE = "L-meta-1665"
++
++
++class WatchdogTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.root = Path(self.temp.name)
++        self.patches = patch.multiple(config, GAPS_DIR=str(self.root / "gaps"),
++                                      WORKTREES_DIR=str(self.root / "worktrees"),
++                                      CACHE_DIR=str(self.root / "cache"))
++        self.patches.start()
++        self.addCleanup(self.patches.stop)
++        self.stale = self.worktree(GAP, "STALE")
++        self.live = self.worktree(LIVE, "RESEARCHING")
++        self.unrelated = self.root / "unrelated"
++        self.unrelated.mkdir()
++        self.binary = self.root / "checklemma"
++        shutil.copyfile(shutil.which("sleep"), self.binary)
++        self.binary.chmod(0o700)
++
++    def worktree(self, gap, status):
++        state.create(gap, state=status, lease="lease-" + gap)
++        cwd = Path(state.gap_dir(gap), "path", "lean")
++        cwd.mkdir(parents=True)
++        return cwd
++
++    def spawn(self, cwd, executable=None, env=None):
++        p = subprocess.Popen([str(executable or self.binary), "90"], cwd=cwd, env=env)
++        def cleanup():
++            if p.poll() is None:
++                p.terminate()
++                try:
++                    p.wait(timeout=2)
++                except subprocess.TimeoutExpired:
++                    p.kill()
++                    p.wait()
++        self.addCleanup(cleanup)
++        end = time.monotonic() + 3
++        while time.monotonic() < end:
++            try:
++                if Path("/proc", str(p.pid), "exe").resolve(strict=True) == (executable or self.binary):
++                    break
++            except OSError:
++                pass
++            time.sleep(.02)
++        return p
++
++    def test_exact_stale_compiler_only(self):
++        stale = self.spawn(self.stale)
++        live = self.spawn(self.live)
++        unrelated = self.spawn(self.unrelated)
++        ordinary = self.spawn(self.stale, Path(shutil.which("sleep")).resolve())
++        watchdog.scan()
++        self.assertEqual(stale.wait(timeout=3), -signal.SIGTERM)
++        for child in (live, unrelated, ordinary):
++            self.assertIsNone(child.poll())
++
++    def test_reacquisition_before_signal(self):
++        p = self.spawn(self.stale)
++        entry = Path("/proc", str(p.pid))
++        ident = watchdog.identity(entry)
++        self.assertEqual(ident[0], GAP)
++        state.reacquire(GAP, lease="new-lease")
++        with patch.object(watchdog, "send") as send:
++            self.assertIsNone(watchdog.stop_if_terminal(entry, ident, {}, 0))
++            send.assert_not_called()
++        self.assertIsNone(p.poll())
++
++    def test_orphaned_managed_compiler_on_superseded_lease(self):
++        env = dict(os.environ, PNP_MANAGED_COMPILER="1",
++                   PNP_PUBLISH_GAP=GAP, PNP_PUBLISH_LEASE="lease-" + GAP)
++        old = self.spawn(self.stale, env=env)
++        state.reacquire(GAP, lease="new-lease")
++        current = self.spawn(self.stale, env=dict(env, PNP_PUBLISH_LEASE="new-lease"))
++        watchdog.scan()
++        self.assertEqual(old.wait(timeout=3), -signal.SIGTERM)
++        self.assertIsNone(current.poll())
++
++    def test_unreadable_state_and_busy_lock(self):
++        p = self.spawn(self.stale)
++        lock = os.open(Path(state.gap_dir(GAP), ".lock"), os.O_RDWR)
++        try:
++            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            self.assertEqual(watchdog.scan(), {})
++            self.assertIsNone(p.poll())
++        finally:
++            os.close(lock)
++        Path(state.state_path(GAP)).write_text("{broken")
++        self.assertEqual(watchdog.scan(), {})
++        self.assertIsNone(p.poll())
++
++    def test_term_grace_and_kill_only_if_still_obsolete(self):
++        p = self.spawn(self.stale)
++        entry = Path("/proc", str(p.pid))
++        ident = watchdog.identity(entry)
++        with patch.object(watchdog, "send") as send:
++            first = watchdog.stop_if_terminal(entry, ident, {}, 10)
++            self.assertEqual(send.call_args.args[1], signal.SIGTERM)
++            send.reset_mock()
++            watchdog.stop_if_terminal(entry, ident, dict([first]), 11)
++            send.assert_not_called()
++            watchdog.stop_if_terminal(entry, ident, dict([first]), 14)
++            self.assertEqual(send.call_args.args[1], signal.SIGKILL)
++            send.reset_mock()
++            state.reacquire(GAP, lease="new-lease")
++            watchdog.stop_if_terminal(entry, ident, dict([first]), 15)
++            send.assert_not_called()
++
++    def test_mismatched_identity_never_signalled(self):
++        p = self.spawn(self.stale)
++        entry = Path("/proc", str(p.pid))
++        gap, start = watchdog.identity(entry)
++        with patch.object(watchdog, "send") as send:
++            self.assertIsNone(watchdog.stop_if_terminal(entry, (gap, start + 1), {}, 0))
++            send.assert_not_called()
++
++    def test_requires_exact_local_assignment_for_managed_build(self):
++        original = Path.cwd()
++        try:
++            os.chdir(self.live)
++            with patch.object(compiler, "run") as run:
++                self.assertEqual(compiler.main(["--", "lean", "test.lean"]), 75)
++                self.assertEqual(compiler.main(["--gap", GAP, "--lease", "lease-" + GAP,
++                                                "--", "lean", "test.lean"]), 75)
++                self.assertEqual(compiler.main(["--gap", LIVE, "--lease", "wrong",
++                                                "--", "lean", "test.lean"]), 75)
++                run.assert_not_called()
++        finally:
++            os.chdir(original)
++
++    def test_singleton_ensure(self):
++        os.makedirs(config.CACHE_DIR, exist_ok=True)
++        lock = os.open(watchdog.lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
++        try:
++            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            with patch.object(watchdog.subprocess, "Popen") as launch:
++                watchdog.ensure()
++                launch.assert_not_called()
++        finally:
++            os.close(lock)
++
++
++if __name__ == "__main__":
++    unittest.main()

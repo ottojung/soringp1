@@ -1,0 +1,126 @@
+commit f3d60f3c36e6e2afe0a7d55c1f4c51e877fa793a
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Sat Nov 21 17:19:57 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Sat Nov 21 17:19:57 2026 +0000
+
+    Act22: route entire due backlog to correct independent resolver
+
+diff --git a/government/predict-due.py b/government/predict-due.py
+index 915707f4..bbbdaca4 100644
+--- a/government/predict-due.py
++++ b/government/predict-due.py
+@@ -22,8 +22,13 @@ def iso(epoch):
+ def main():
+     ap=argparse.ArgumentParser(description=__doc__)
+     ap.add_argument("--now",type=int,default=int(time.time()))
+-    ap.add_argument("--limit",type=int,default=12)
++    ap.add_argument("--limit",type=int,default=50)
++    ap.add_argument("--offset",type=int,default=0)
++    ap.add_argument("--resolver",choices=("all","c1a00001","c1a0000b"),
++                    default="all")
+     args=ap.parse_args()
++    if args.offset < 0:
++        raise SystemExit("predict-due: offset cannot be negative")
+     if not 1 <= args.limit <= 50:
+         raise SystemExit("predict-due: limit must be between 1 and 50")
+     town=Path(os.environ.get("VICHE_TOWN_ROOT","/var/lib/lubko/wd/viche"))
+@@ -53,19 +58,26 @@ def main():
+             if r["id"] not in resolutions:
+                 pending.append(r)
+         pending.sort(key=lambda r:(r["resolution_date"],r["id"]))
++        def resolver(r):
++            return "c1a0000b" if r["author"]=="c1a00001" else "c1a00001"
++        assigned=[r for r in pending if args.resolver=="all" or
++                  resolver(r)==args.resolver]
++        page=assigned[args.offset:args.offset+args.limit]
+         items=[]
+-        for r in pending[:args.limit]:
++        for r in page:
+             bill=town/"records/bills"/(r["bill_id"]+".md")
+             withdrawn=False
+             if bill.is_file() and not bill.is_symlink():
+                 withdrawn="WITHDRAWN" in bill.read_text(errors="replace")[:200]
+             items.append({
+                 "id":r["id"],"author":r["author"],
+-                "required_resolver":"c1a0000b" if r["author"]=="c1a00001" else "c1a00001",
++                "required_resolver":resolver(r),
+                 "due_utc":r["resolution_date"],
+                 "days_past_due":(day-datetime.date.fromisoformat(r["resolution_date"])).days,
+-                "proposition":r["proposition"],
+-                "evidence_source":r["evidence_source"],
++                "proposition":r["proposition"][:240],
++                "evidence_source":r["evidence_source"][:180],
++                "full_evidence_must_be_read_from_ledger":(
++                    len(r["proposition"])>240 or len(r["evidence_source"])>180),
+                 "conditional_withdrawn_bill":withdrawn,
+                 "caution":"Examine exact primary evidence. If unavailable or counterfactual, resolve UNRESOLVED with reason, not an invented Brier score."
+             })
+@@ -77,9 +89,13 @@ def main():
+             "as_of_utc":iso(args.now),"integrity":"clean",
+             "due":len(due),"scored":scored,"unresolved":unable,
+             "awaiting_independent_resolution":len(pending),
++            "awaiting_assigned_resolution":len(assigned),
++            "resolver_filter":args.resolver,"offset":args.offset,
+             "future_registered":len(future),
+             "next_due_utc":min(future).isoformat() if future else None,
+-            "items":items,"truncated":len(pending)>len(items),
++            "items":items,"truncated":args.offset+len(items)<len(assigned),
++            "next_offset":args.offset+len(items)
++                if args.offset+len(items)<len(assigned) else None,
+             "no_auto_resolution":True,
+             "review_note":"Clerk is Act 22 resolver except its own predictions; those require independent Audit c1a0000b. Report calibration coverage even when all cases are unresolved."
+         },ensure_ascii=False,sort_keys=True))
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 2605760b..fb1733e2 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -357,7 +357,7 @@ fi
+ # evidence, not wishful calibration, controls the independent disposition.
+ if [ "$seat" = "$clerk" ] || [ "$seat" = c1a0000b ]; then
+     if [ -f "$town/government/predict-due.py" ]; then
+-        if due=$(timeout 15 python3 "$town/government/predict-due.py" 2>/dev/null); then
++        if due=$(timeout 15 python3 "$town/government/predict-due.py" --resolver "$seat" --limit 50 2>/dev/null); then
+             printf '%s\n%s\n%s\n' \
+                 '=== ACT 22 PREDICTIONS REQUIRING INDEPENDENT RESOLUTION ===' \
+                 "$due" \
+diff --git a/tests/predict-due-smoke.sh b/tests/predict-due-smoke.sh
+index 1d7e90ae..c9bec32f 100644
+--- a/tests/predict-due-smoke.sh
++++ b/tests/predict-due-smoke.sh
+@@ -39,4 +39,34 @@ if python3 "$tmp/government/predict-due.py" --now 90002 > "$tmp/agenda" 2>/dev/n
+ fi
+ jq -e '.integrity=="failed"' "$tmp/agenda" >/dev/null
+ grep -q 'government/predict-due.py' "$repo/government/sitting.sh"
+-echo 'Act22 due agenda: independent resolver, withdrawn plan, honest unresolved and integrity fail-closed passed'
++grep -q -- '--resolver "$seat"' "$repo/government/sitting.sh"
++# Tomorrow 17 come due: 15 authored by c1a00004 are Clerk-owned,
++# two authored by Clerk require Audit. No silently dropped twelfth+ items.
++export VICHE_PREDICT_LEDGER="$tmp/cohort.json"
++for n in $(seq 1 17); do
++  if [ "$n" -le 15 ]; then author=c1a00004; else author=c1a00001; fi
++  VICHE_PREDICT_NOW=90 python3 "$tmp/government/predict-ledger.py" register \
++    --bill "cohort-$n" --proposition "Check future cohort event $n" \
++    --resolution-date 1970-01-02 --probability 0.6 \
++    --evidence "independent:cohort-event-$n" --author "$author" >/dev/null
++done
++python3 "$tmp/government/predict-due.py" --now 90000 \
++  --resolver c1a00001 > "$tmp/clerk"
++python3 "$tmp/government/predict-due.py" --now 90000 \
++  --resolver c1a0000b > "$tmp/audit"
++jq -e '.awaiting_independent_resolution==17 and
++       .awaiting_assigned_resolution==15 and
++       (.items|length)==15 and .truncated==false and
++       (.items|all(.required_resolver=="c1a00001"))' "$tmp/clerk" >/dev/null
++jq -e '.awaiting_independent_resolution==17 and
++       .awaiting_assigned_resolution==2 and
++       (.items|length)==2 and .truncated==false and
++       (.items|all(.required_resolver=="c1a0000b"))' "$tmp/audit" >/dev/null
++python3 "$tmp/government/predict-due.py" --now 90000 \
++  --resolver c1a00001 --limit 8 --offset 0 > "$tmp/page1"
++python3 "$tmp/government/predict-due.py" --now 90000 \
++  --resolver c1a00001 --limit 8 --offset 8 > "$tmp/page2"
++jq -e '(.items|length)==8 and .truncated==true and .next_offset==8' "$tmp/page1" >/dev/null
++jq -e '(.items|length)==7 and .truncated==false and .next_offset==null' "$tmp/page2" >/dev/null
++test "$(wc -c < "$tmp/clerk")" -lt 32768
++echo 'Act22 due queue: independent resolver routing, all 17 due, pagination, withdrawn evidence and integrity pass'

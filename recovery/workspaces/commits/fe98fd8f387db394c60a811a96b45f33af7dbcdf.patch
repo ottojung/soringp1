@@ -1,0 +1,164 @@
+commit fe98fd8f387db394c60a811a96b45f33af7dbcdf
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Sat Nov 7 21:05:14 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Sat Nov 7 21:05:14 2026 +0000
+
+    Fail closed on malformed continuity terminal evidence
+
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index a133649b..a284d348 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -9,6 +9,7 @@ import argparse
+ import datetime
+ import hashlib
+ import json
++import math
+ import os
+ import pathlib
+ import stat
+@@ -77,11 +78,27 @@ def continuity_receipt(office):
+         verified_epoch = verified_time.timestamp()
+     except (ValueError, OverflowError):
+         return None
+-    terminal = read(ROOT / "appointments/terminal-evidence" / successor / "status.json")
+-    if terminal.get("state") == "failed":
+-        finished_at = terminal.get("finished_at")
+-        if isinstance(finished_at, (int, float)) and finished_at <= verified_epoch:
++    status_ref = "appointments/terminal-evidence/{}/status.json".format(successor)
++    event_ref = "appointments/terminal-evidence/{}/event.json".format(successor)
++    status_present, status_valid, status = _terminal_record(status_ref)
++    event_present, event_valid, event = _terminal_record(event_ref)
++    if ((status_present and not status_valid) or (event_present and not event_valid)):
++        return None
++    failure_times = []
++    if status.get("state") == "failed":
++        failed_at = _epoch(status.get("finished_at"))
++        if failed_at is None:
++            failed_at = _epoch(event.get("finished_at", event.get("at")))
++        if failed_at is None:
++            return None
++        failure_times.append(failed_at)
++    if event.get("state") == "failed":
++        failed_at = _epoch(event.get("finished_at", event.get("at")))
++        if failed_at is None:
+             return None
++        failure_times.append(failed_at)
++    if any(failed_at <= verified_epoch for failed_at in failure_times):
++        return None
+     ref = verified.get("evidence_ref")
+     if not isinstance(ref, str) or not ref.strip():
+         return None
+@@ -174,6 +191,39 @@ def _within_root(ref):
+     return stat.S_ISREG(info.st_mode) and info.st_size <= MAX_EVIDENCE_BYTES
+ 
+ 
++def _terminal_record(ref):
++    """Read an optional, regular terminal record confined beneath ROOT."""
++    path = ROOT / ref
++    present = path.exists() or path.is_symlink()
++    if not present:
++        return False, True, {}
++    if not _within_root(ref):
++        return True, False, {}
++    try:
++        item = json.loads(path.read_text())
++    except (OSError, ValueError):
++        return True, False, {}
++    if not isinstance(item, dict):
++        return True, False, {}
++    return True, True, item
++
++
++def _epoch(value):
++    """Parse a finite numeric epoch or timezone-aware ISO-8601 timestamp."""
++    if type(value) in (int, float):
++        return float(value) if math.isfinite(value) else None
++    if not isinstance(value, str):
++        return None
++    try:
++        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
++        if parsed.tzinfo is None:
++            return None
++        result = parsed.timestamp()
++    except (ValueError, OverflowError):
++        return None
++    return result if math.isfinite(result) else None
++
++
+ def verification_artifact(case, now):
+     """Validate the case-bound verification artifact, or None.
+ 
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index b44d2717..1a64bb5e 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -143,9 +143,43 @@ jq -e '.state=="open" and .clear_observations==2 and .awaiting_independent_verif
+ printf '{"case_id":"continuity_unverified_innovation-centre:1000","verified_by":"judiciary","verified_at":1500,"evidence":{"ref":"evidence/repair.txt","sha256":"%s"}}\n' "$digest" > "$d/state/verification/continuity_unverified_innovation-centre.json"
+ VICHE_CASE_NOW=1510 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="verified_closed" and .closure_evidence.verified_by=="judiciary" and .closure_evidence.continuity_receipt.previous_agent=="old-agent"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++# A successor failure after verification does not contradict the receipt.
++mkdir -p "$d/state/appointments/terminal-evidence/new-agent"
++printf '{"state":"failed","finished_at":1600}\n' > "$d/state/appointments/terminal-evidence/new-agent/status.json"
++VICHE_CASE_NOW=1520 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="verified_closed" and .verified_at==1510' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++cp "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" "$d/continuity-closed.json"
++
++# Present-but-malformed terminal evidence must fail closed, not be mistaken
++# for absence of a contradiction.
++reject_terminal_record() {
++  cp "$d/continuity-closed.json" "$d/state/institutional-cases/continuity_unverified_innovation-centre.json"
++  VICHE_CASE_NOW=1520 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++  jq -e '.state=="open" and .id=="continuity_unverified_innovation-centre:1000"' \
++    "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++}
++printf '{"state":"failed"}\n' > "$d/state/appointments/terminal-evidence/new-agent/status.json"
++reject_terminal_record
++printf '{"state":"failed","finished_at":true}\n' > "$d/state/appointments/terminal-evidence/new-agent/status.json"
++reject_terminal_record
++printf '{"state":"failed","finished_at":NaN}\n' > "$d/state/appointments/terminal-evidence/new-agent/status.json"
++reject_terminal_record
++printf '["failed",1400]\n' > "$d/state/appointments/terminal-evidence/new-agent/status.json"
++reject_terminal_record
++printf '{"state":"failed","at":"1970-01-01T00:23:20Z"}\n' > "$d/state/appointments/terminal-evidence/new-agent/event.json"
++rm "$d/state/appointments/terminal-evidence/new-agent/status.json"
++VICHE_CASE_NOW=1520 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++rm "$d/state/appointments/terminal-evidence/new-agent/event.json"
++printf 'outside terminal evidence\n' > "$d/mock/unsafe-status.json"
++ln -s "$d/mock/unsafe-status.json" "$d/state/appointments/terminal-evidence/new-agent/status.json"
++VICHE_CASE_NOW=1520 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++rm "$d/state/appointments/terminal-evidence/new-agent/status.json"
++
+ # A successor failure that predates its claimed verification invalidates the
+ # continuity receipt. Re-signalling must reopen the original object in place.
+-mkdir -p "$d/state/appointments/terminal-evidence/new-agent"
++cp "$d/continuity-closed.json" "$d/state/institutional-cases/continuity_unverified_innovation-centre.json"
+ printf '{"state":"failed","finished_at":1400}\n' > "$d/state/appointments/terminal-evidence/new-agent/status.json"
+ original_id=$(jq -r '.id' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json")
+ original_first_seen=$(jq -r '.first_seen' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json")
+@@ -165,6 +199,22 @@ printf '{"signals":["innovation_stale"],"observed_at":1600}\n' > "$d/state/branc
+ VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .id=="innovation_stale:900" and .first_seen==900 and .verified_at==950 and .closure_history[0].verified_at==950 and .observations==8 and .reopened_at==1600 and .reopen_count==1' \
+   "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++# Verify eventual re-closure and a second re-signal preserve both closure
++# timestamps instead of replacing the first historic closure.
++rm "$d/state/branches/incident.json"
++printf '1650\tclear\n' >> "$d/state/branches/observations.tsv"
++printf '{"case_id":"innovation_stale:900","verified_by":"clerk","verified_at":1700,"evidence":{"ref":"evidence/repair.txt","sha256":"%s"}}\n' "$digest" > "$d/state/verification/innovation_stale.json"
++VICHE_CASE_NOW=1650 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++printf '1700\tclear\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1700 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="verified_closed" and .first_seen==900 and .verified_at==1700 and .closure_history[0].verified_at==950' \
++  "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++printf '{"signals":["innovation_stale"],"observed_at":1750}\n' > "$d/state/branches/incident.json"
++VICHE_CASE_NOW=1750 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .first_seen==900 and .verified_at==1700 and (.closure_history|length)==2' \
++  "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.closure_history[0].verified_at==950 and .closure_history[1].verified_at==1700' \
++  "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ # Withdrawing the case-specific receipt must keep a fresh case open: generic
+ # healthy probes are not continuity evidence, and even a matching artifact
+ # cannot substitute for the missing reconciliation receipt.

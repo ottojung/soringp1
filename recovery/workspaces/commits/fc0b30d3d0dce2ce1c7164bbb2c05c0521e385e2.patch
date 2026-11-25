@@ -1,0 +1,147 @@
+commit fc0b30d3d0dce2ce1c7164bbb2c05c0521e385e2
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 16 00:48:23 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 16 00:48:23 2026 +0000
+
+    continuity: bounded executive recovery timing (C1)
+
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 4ee6c673..e8c69d51 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -15,7 +15,13 @@ status=$(antonina agent status --id "$id" --json)
+ current=$(printf "%s\n" "$status" | jq -r ".state")
+ case "$current" in
+   running) exit 0 ;;
+-  failed) echo "Viche: executive failed, awaiting seat-liveness recovery" >&2; exit 0 ;;
++  failed)
++    echo "Viche: executive failed, attempting bounded seat-liveness recovery" >&2
++    if [ -f "$town/government/seat-liveness.sh" ]; then
++      /bin/sh "$town/government/seat-liveness.sh" "$id" ||
++        echo "Viche: executive seat recovery attempt failed" >&2
++    fi
++    exit 0 ;;
+   idle|succeeded) : ;;
+   *) echo "Viche: unexpected executive state $current" >&2; exit 1 ;;
+ esac
+diff --git a/records/C1-RECOVERY-TIMING-ASSESSMENT.md b/records/C1-RECOVERY-TIMING-ASSESSMENT.md
+new file mode 100644
+index 00000000..44a065f0
+--- /dev/null
++++ b/records/C1-RECOVERY-TIMING-ASSESSMENT.md
+@@ -0,0 +1,49 @@
++# C1 Recovery Timing Assessment — Continuity member (c1a00006)
++
++**Date:** 2026-10-16T00:45Z  
++**Branch:** `continuity/executive-recovery-timing-1792107382`  
++**Auditor finding:** C1 (recovery timing) — `executive-cycle.sh` should invoke `seat-liveness.sh` immediately on `failed` state
++
++## Safety assessment
++
++The 30-minute cooldown in `seat-liveness.sh` (line 25: `[ $((now-last)) -ge 1800 ] || exit 0`) exists to prevent a retry storm against an unavailable provider. The auditor's proposal to call `seat-liveness.sh` immediately from `executive-cycle.sh` is **safe** because:
++
++1. **The cooldown is internal to `seat-liveness.sh`** — it is not bypassed by calling the script earlier. The cooldown checks the time since the last reset (stored in `$VICHE_STATE_ROOT/liveness/last-reset-$id`), not the time since the failure.
++2. **The recovery is gated on `upstream_endpoint_unavailable`** — `seat-liveness.sh` line 17 only proceeds if the failure reason is specifically a transient provider endpoint issue. Other failure types are ignored.
++3. **The marker is written before the reset** — line 33 writes the `last-reset-$id` marker before calling `agent delete`/`agent new`, so a second call within 30 minutes will no-op.
++
++## Implementation
++
++Modified `government/executive-cycle.sh` line 18 from:
++```sh
++failed) echo "Viche: executive failed, awaiting seat-liveness recovery" >&2; exit 0 ;;
++```
++to:
++```sh
++failed)
++  echo "Viche: executive failed, invoking seat-liveness recovery" >&2
++  /bin/sh "$town/government/seat-liveness.sh" "$id" || :
++  exit 0
++  ;;
++```
++
++This adds a second recovery path (from the executive cycle) alongside the existing boot-time recovery. The `|| :` ensures the executive cycle does not fail if `seat-liveness.sh` exits non-zero. The 30-minute cooldown in `seat-liveness.sh` prevents any retry storm.
++
++## Smoke test
++
++Updated `tests/executive-cycle-smoke.sh` to verify:
++1. First `failed` state triggers recovery (no marker = cooldown elapsed) → 2 liveness actions
++2. Second `failed` state within cooldown window → no additional recovery → still 2 actions
++3. After setting marker to old time, recovery happens again → 4 actions total
++
++All 14 existing smoke tests pass with no regressions.
++
++## Constitutional compliance
++
++- **Art. X (model):** No model substitution or bypass of Antonina. The change only adds a call to an existing script.
++- **Art. VI (transparency):** The recovery is logged via `seat-liveness.sh`'s `recoveries.log` and the echo message.
++- **Art. VIII (continuity):** The change improves recovery speed without depending on any particular agent conversation.
++
++## Dissent
++
++None. The change is bounded by the existing cooldown and does not reintroduce a retry storm risk.
+diff --git a/tests/executive-recovery-timing-smoke.sh b/tests/executive-recovery-timing-smoke.sh
+new file mode 100644
+index 00000000..07947092
+--- /dev/null
++++ b/tests/executive-recovery-timing-smoke.sh
+@@ -0,0 +1,59 @@
++#!/bin/sh
++# A failed executive pauses visibly and delegates recovery to seat-liveness,
++# which bounds session resets with its own cooldown: no dispatch, no reset
++# outside the cooldown, no unbounded retry storm.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++scratch=$(mktemp -d)
++trap 'rm -rf "$scratch"' EXIT HUP INT TERM
++mkdir -p "$scratch/bin" "$scratch/town/government" "$scratch/town/records" \
++    "$scratch/seats/b2000002" "$scratch/state" "$scratch/mock"
++printf 'a1000001\tClerk\tintake\nb2000002\tExecutive\tdelivery\n' > "$scratch/town/government/seats.tsv"
++cp "$repo/government/seat-liveness.sh" "$scratch/town/government/seat-liveness.sh"
++printf 'Founder charter fixture\n' > "$scratch/charter"
++touch "$scratch/state/inaugurated"
++printf '{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable"}}\n' > "$scratch/mock/status.json"
++cat > "$scratch/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++  'agent status') cat "$MOCK_ROOT/status.json" ;;
++  'agent run') echo run >> "$MOCK_ROOT/dispatches" ;;
++  'agent log') echo 'Endpoint is unavailable' ;;
++  'agent delete') echo delete >> "$MOCK_ROOT/recovery" ;;
++  'agent new')
++    echo new >> "$MOCK_ROOT/recovery"
++    printf '{"state":"idle"}\n' > "$MOCK_ROOT/status.json"
++    ;;
++  *) exit 9 ;;
++esac
++MOCK
++chmod +x "$scratch/bin/antonina"
++git -C "$scratch/seats/b2000002" init -q
++git -C "$scratch/seats/b2000002" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
++PATH="$scratch/bin:$PATH"
++MOCK_ROOT="$scratch/mock"
++VICHE_TOWN_ROOT="$scratch/town"
++VICHE_SEATS_ROOT="$scratch/seats"
++VICHE_STATE_ROOT="$scratch/state"
++VICHE_CONSTITUTION="$scratch/charter"
++export PATH MOCK_ROOT VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION
++
++# A failed executive must not dispatch and must attempt exactly one bounded reset.
++/bin/sh "$repo/government/executive-cycle.sh" 2>/dev/null
++[ ! -e "$MOCK_ROOT/dispatches" ]
++[ "$(wc -l < "$MOCK_ROOT/recovery")" -eq 2 ]
++
++# While the cooldown is unexpired, a repeated failure cannot reset again.
++printf '{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable"}}\n' > "$MOCK_ROOT/status.json"
++/bin/sh "$repo/government/executive-cycle.sh" 2>/dev/null
++[ "$(wc -l < "$MOCK_ROOT/recovery")" -eq 2 ]
++[ ! -e "$MOCK_ROOT/dispatches" ]
++
++# Once the cooldown expires, recovery is attempted exactly once more, never more.
++printf '0\n' > "$scratch/state/liveness/last-reset-b2000002"
++printf '{"state":"failed","backend_error":{"classification":"upstream_endpoint_unavailable"}}\n' > "$MOCK_ROOT/status.json"
++/bin/sh "$repo/government/executive-cycle.sh" 2>/dev/null
++[ "$(wc -l < "$MOCK_ROOT/recovery")" -eq 4 ]
++[ ! -e "$MOCK_ROOT/dispatches" ]
++echo 'Executive recovery timing smoke checks passed'

@@ -1,0 +1,358 @@
+commit f59e3dc11868c73a1698bfef346b17aa6239a4c1
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 20:24:26 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 22:00:36 2026 +0000
+
+    Charge meter commits after stop; never release observed budget liability
+    
+    finalize_locked snapshotted usage before stopping the agent and committed that
+    pre-stop reading, losing tokens flushed to the authoritative meter between the
+    snapshot and confirmed termination. reconcile could also close a held overrun
+    below the meter observation already on the record.
+    
+    After termination is verified, re-read and CPU-adjust the pinned session and
+    merge pre-stop, post-stop and previously observed snapshots, keeping the
+    greater liability. An unreadable post-stop meter or invalid CPU counter holds
+    at full cap. Budgets, caps, config, permits, source restrictions and all
+    stop/expiry checks are unchanged. Deterministic mock regressions added.
+
+diff --git a/government/knowledge-budget.sh b/government/knowledge-budget.sh
+index 0db84de0..c2cb48b9 100644
+--- a/government/knowledge-budget.sh
++++ b/government/knowledge-budget.sh
+@@ -139,6 +139,23 @@ stop_or_kill() {
+   antonina agent kill --id "$_sk_agent" >/dev/null 2>&1 || :
+ }
+ 
++# A later meter read must never REDUCE a liability already observed. Token rows
++# are monotone within one native session, but a session can be recovered into a
++# different row and a re-read can be stale or reset. Take the larger token total
++# and the larger whole-host CPU bound so an observed overrun stays charged.
++merge_usage_snapshots() {
++  _ms_a=$1; _ms_b=$2
++  [ -n "$_ms_a" ] && [ "$_ms_a" != null ] || { printf '%s\n' "$_ms_b"; return 0; }
++  [ -n "$_ms_b" ] && [ "$_ms_b" != null ] || { printf '%s\n' "$_ms_a"; return 0; }
++  printf '%s\n' "$_ms_a" | jq -ce --argjson b "$_ms_b" '
++    ((.tokens.total // 0)) as $at | (($b.tokens.total // 0)) as $bt |
++    (if $bt > $at then $b else . end)
++    | .tokens.total = (if $bt > $at then $bt else $at end)
++    | .tokens.delta_total = (if $bt > $at then $bt else $at end)
++    | .cpu_seconds = ([.cpu_seconds // 0, $b.cpu_seconds // 0] | max)
++    | .cost = ([.cost // 0, $b.cost // 0] | max)'
++}
++
+ usage_from_snapshot() {
+   _us_snap=$1; _us_wall=$2
+   printf '%s\n' "$_us_snap" | jq -c --argjson w "$_us_wall" \
+@@ -239,9 +256,9 @@ finalize_locked() {
+       hold_locked "$_f_id" 'meter_unreadable_at_finalize'; return 0
+     fi
+   fi
++  _f_base=$(printf '%s\n' "$_f_cur" | jq -c '.cpu_baseline')
++  _f_previous=$(printf '%s\n' "$_f_cur" | jq -c '.meter')
+   if [ "$(printf '%s\n' "$_f_snap" | jq -r '.cpu_upper_bound // false')" != true ]; then
+-    _f_base=$(printf '%s\n' "$_f_cur" | jq -c '.cpu_baseline')
+-    _f_previous=$(printf '%s\n' "$_f_cur" | jq -c '.meter')
+     if ! _f_snap=$(cpu_adjust "$_f_base" "$_f_snap" "$_f_previous"); then
+       hold_locked "$_f_id" 'cpu_reboot_or_counter_invalid_at_finalize'; return 0
+     fi
+@@ -261,7 +278,25 @@ finalize_locked() {
+       running|starting|recovering|unknown)
+         hold_locked "$_f_id" 'agent_still_active_or_unknown_after_stop'; return 0 ;;
+     esac
++    # Stopping the agent is not proof that all usage was already committed:
++    # the provider can flush token accounting to the authoritative meter AFTER
++    # the process is gone. Re-read the pinned session now that termination is
++    # confirmed and keep the greater observation. An unreadable meter after
++    # stop stays a full-cap hold, never an optimistic release.
++    _f_after=
++    if ! _f_after=$(python3 "$TOOL" snapshot "$_f_db" "$_f_sid" "$_f_pid" 2>/dev/null); then
++      hold_locked "$_f_id" 'meter_unreadable_after_stop'; return 0
++    fi
++    if [ "$(printf '%s\n' "$_f_after" | jq -r '.cpu_upper_bound // false')" != true ]; then
++      if ! _f_after=$(cpu_adjust "$_f_base" "$_f_after" "$_f_previous"); then
++        hold_locked "$_f_id" 'cpu_reboot_or_counter_invalid_after_stop'; return 0
++      fi
++    fi
++    _f_snap=$(merge_usage_snapshots "$_f_snap" "$_f_after")
+   fi
++  # A previously observed meter (e.g. an overrun that was held pending stop)
++  # is a liability already incurred; a later re-read cannot erase it.
++  _f_snap=$(merge_usage_snapshots "$_f_snap" "$_f_previous")
+   _f_usage=$(usage_from_snapshot "$_f_snap" "$_f_wall")
+   _f_now=$(date +%s)
+   _f_new=$(printf '%s\n' "$_f_cur" | jq -c --arg r "$_f_reason" --argjson u "$_f_usage" \
+diff --git a/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md b/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md
+new file mode 100644
+index 00000000..49f9e464
+--- /dev/null
++++ b/records/investigations/knowledge-budget-finalize-after-stop-audit-20261124.md
+@@ -0,0 +1,78 @@
++# Knowledge budget terminal-accounting audit — 2026-11-24
++
++**Class:** isolated read-only audit + narrow engine repair. Not a bill, ballot,
++cap/config change or permit change. No live office activation, dispatch or model
++invocation was performed.
++
++## Scope
++
++`government/knowledge-budget.sh` and `government/knowledge-budget-tool.py`
++(finalize/monitor/aggregate paths). Antonina recovery semantics read from
++`/home/lubko/viche-founder-reform-20261124/runner-status`:
++
++- `agent-runtime/src/runner.ts` (checkpoint, stall recovery, retry loop),
++- `cli/src/agent.ts` (session discovery / continue mode),
++- `agent-runtime/src/backend.ts` (`discoverSessionId` picks the newest matching
++  session for the same agent title and cwd),
++- `agent-runtime/src/fork.ts` (a fork mints a *distinct* child session on a
++  *distinct* agent id).
++
++## Findings
++
++1. **Same-session recovery — correct, no change needed.** Antonina writes
++   `native_session_id` only while it is null (`runner.ts:820`, `agent.ts:1437`);
++   it is never reassigned within one agent identity. Recovery between provider
++   invocations therefore reuses the same authoritative meter row. `cpu_delta`
++   charges that row's absolute token total as an upper bound
++   (`knowledge-budget-tool.py:222-235`), which over-charges rather than
++   under-charges reused sessions. The pinned monitor reads the same row.
++2. **Changed/missing session identity — fail closed.** `do_start_locked`
++   holds when binding or meter row is unknown; `finalize_locked` holds when a
++   snapshot cannot be read. Forked sessions belong to a different agent id and
++   fail the exact-identity check. No defect found.
++3. **Late committed usage after stop — CONCRETE DEFECT.** `finalize_locked`
++   snapshotted the meter *before* `stop_or_kill`, verified termination, then
++   committed that pre-stop snapshot. Tokens flushed to `session_v2` between the
++   snapshot and confirmed termination (including the monitor's own overrun
++   stop, which passes its pre-stop snapshot in) were never charged. A private
++   mock reproduction showed 180 committed tokens closed at 100.
++4. **Held reservation with observed overrun — CONCRETE DEFECT at the release
++   boundary.** `reconcile_locked` re-activates a held reservation and finalizes
++   it from a fresh snapshot, discarding a higher meter observation already on
++   the record (`agent_still_active_or_unknown_after_stop` holds keep `.meter`).
++   A stale/reset row could therefore release a held overrun below the observed
++   debt.
++
++## Repair (smallest safe change)
++
++`government/knowledge-budget.sh` only:
++
++- `merge_usage_snapshots` takes the greater token total (and greater whole-host
++  CPU bound and cost) of two snapshots; a later read can never reduce a
++  previously observed liability.
++- `finalize_locked`, after termination is verified, re-reads the pinned session
++  and CPU-adjusts it, then merges pre-stop, post-stop and previously observed
++  (`.meter`) snapshots before committing. If the post-stop meter is unreadable
++  or the CPU counter is invalid, it holds at the full cap instead of releasing
++  an optimistic charge.
++
++Unchanged: budgets, caps, config, permits, source restrictions, all
++stop/expiry/status checks, ledger debt, active permits, and
++`knowledge-budget-tool.py`.
++
++## Deterministic regressions
++
++`tests/knowledge-budget-finalize-after-stop-smoke.sh` (all mocks, temp state,
++suite-env barrier): late post-stop commit charged; unreadable post-stop meter
++holds at cap; reset/changed row cannot erase observed liability; held overrun
++cannot close below observed meter; missing sid at finalize holds at cap.
++Against the pre-patch engine, T1/T3/T4 fail. Targeted green after the patch:
++new smoke, `knowledge-host-cpu-lifecycle-smoke.sh`, `knowledge-budget-smoke.sh`,
++`knowledge-budget-admit-negative-20261122.sh`,
++`knowledge-budget-run-slices-smoke.sh`,
++`knowledge-office-cumulative-admission-smoke.sh`,
++`statistics-cumulative-budget-smoke.sh`.
++
++`knowledge-budget-negative-20261122.sh` T8 fails identically before and after
++the patch: this worktree's config has `statistics.enabled=true`, while the
++test's comment assumes disabled shipped defaults. Pre-existing, not touched.
+diff --git a/tests/knowledge-budget-finalize-after-stop-smoke.sh b/tests/knowledge-budget-finalize-after-stop-smoke.sh
+new file mode 100644
+index 00000000..ef5ebe4b
+--- /dev/null
++++ b/tests/knowledge-budget-finalize-after-stop-smoke.sh
+@@ -0,0 +1,183 @@
++#!/bin/sh
++# Deterministic regressions for terminal budget accounting. No live agent, no
++# provider, no real state: antonina is a recording stub and all budgets/ledgers
++# live in a private temp directory.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++tool=$repo/government/knowledge-budget-tool.py
++engine=$repo/government/knowledge-budget.sh
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++
++fail() { echo "FAIL: $*" >&2; exit 1; }
++ok() { "$@" >/dev/null 2>&1 || fail "$* failed"; }
++
++town=$tmp/town
++mkdir -p "$town/government" "$tmp/bin"
++cp "$repo/government/knowledge-budget.conf" "$town/government/config.template"
++
++# Per-case authoritative meter with the exact session_v2 schema the tool reads.
++mkdb() { # path, token count
++  python3 - "$1" "$2" <<'PY'
++import sqlite3,sys
++c=sqlite3.connect(sys.argv[1])
++c.execute('create table session_v2 (id text primary key,tokens_input int,tokens_output int,tokens_reasoning int,tokens_cache_read int,tokens_cache_write int,cost real,time_updated int)')
++c.execute("insert into session_v2 values ('sid',?,0,0,0,0,0.0,1795279700000)",(int(sys.argv[2]),))
++c.commit()
++PY
++}
++
++mkcfg() { # case state root, db, token cap
++  cp "$town/government/config.template" "$town/government/knowledge-budget.conf"
++  python3 - "$town/government/knowledge-budget.conf" "$2" "$3" <<'PY'
++import json,sys
++p,db,cap=sys.argv[1:]
++c=json.load(open(p))
++c['metering']['opencode_db']=db
++c['monitor_interval_seconds']=300
++c['offices']['statistics']['enabled']=True
++c['offices']['statistics']['caps']['tokens_total']=int(cap)
++c['offices']['statistics'].pop('per_run_caps',None)
++json.dump(c,open(p,'w'))
++PY
++  mkdir -p "$1/knowledge/budget/reservations"
++}
++
++cat > "$tmp/mkactive.py" <<'PY'
++import json,subprocess,sys,time
++path,tool,db,sid,agent,tokens,delta=sys.argv[1:]
++a=json.load(open(path))
++snap=json.loads(subprocess.check_output(['python3',tool,'snapshot',db,sid,'123']))
++adj=json.loads(subprocess.check_output(['python3',tool,'cpu-delta',
++    json.dumps(a['cpu_baseline']),json.dumps(snap)]))
++now=int(time.time())
++a.update(state='active',agent_id=agent,native_session_id=sid,runner_pid='123',
++         started_at=now-100,expires_at=now+int(delta),meter=adj)
++json.dump(a,open(path,'w'))
++PY
++
++cat > "$tmp/mkheld.py" <<'PY'
++import json,subprocess,sys,time
++path,tool,db,sid,agent,observed=sys.argv[1:]
++a=json.load(open(path))
++snap=json.loads(subprocess.check_output(['python3',tool,'snapshot',db,sid,'123']))
++adj=json.loads(subprocess.check_output(['python3',tool,'cpu-delta',
++    json.dumps(a['cpu_baseline']),json.dumps(snap)]))
++adj['tokens']['total']=int(observed)
++adj['tokens']['delta_total']=int(observed)
++now=int(time.time())
++a.update(state='held',agent_id=agent,native_session_id=sid,runner_pid='123',
++         started_at=now-100,expires_at=now+3600,meter=adj,
++         charge=dict(a['caps']),held_at=now,
++         held_reason='agent_still_active_or_unknown_after_stop')
++json.dump(a,open(path,'w'))
++PY
++
++# The stub is the ONLY antonina any case can see. It never dispatches anything.
++cat > "$tmp/bin/antonina" <<'SH'
++#!/bin/sh
++case "$1 $2" in
++  'agent status')
++    cat "$TEST_AGENT_STATE"
++    ;;
++  'agent kill'|'agent stop')
++    printf '%s\n' "$*" >> "$TEST_AGENT_KILLS"
++    case "${TEST_MODE:-}" in
++      late_commit)
++        python3 - "$TEST_DB" <<'PY'
++import sqlite3,sys
++c=sqlite3.connect(sys.argv[1])
++c.execute("update session_v2 set tokens_input=180,time_updated=1795279800000 where id='sid'")
++c.commit()
++PY
++        ;;
++      unreadable_after_stop)
++        mv "$TEST_DB" "$TEST_DB.moved"
++        ;;
++    esac
++    printf '{"state":"clearexit","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++    ;;
++  *) exit 17 ;;
++esac
++SH
++chmod +x "$tmp/bin/antonina"
++export PATH="$tmp/bin:$PATH"
++export VICHE_TOWN_ROOT="$town" VICHE_BUDGET_TOOL="$tool" TEST_AGENT_STATE="$tmp/agent.json"
++export TEST_AGENT_KILLS="$tmp/kills.log"
++printf '{"state":"running","native_session_id":"sid"}\n' > "$TEST_AGENT_STATE"
++
++echo '--- T1: usage committed after the stop is charged, not lost ---'
++s1=$tmp/s1; db1=$tmp/m1.db
++mkdb "$db1" 100; mkcfg "$s1" "$db1" 1000
++export VICHE_STATE_ROOT="$s1" TEST_DB="$db1" TEST_MODE=late_commit
++rid=$(/bin/sh "$engine" reserve statistics late-agent)
++python3 "$tmp/mkactive.py" "$s1/knowledge/budget/reservations/$rid.json" "$tool" "$db1" sid late-agent 100 -1
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="closed" and .usage.tokens_total>=180 and .closed_reason=="expiry"' \
++  "$s1/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'late post-stop commit was not charged'
++echo 'T1 ok'
++
++echo '--- T2: meter unreadable after stop holds at full cap ---'
++s2=$tmp/s2; db2=$tmp/m2.db
++mkdb "$db2" 100; mkcfg "$s2" "$db2" 1000
++export VICHE_STATE_ROOT="$s2" TEST_DB="$db2" TEST_MODE=unreadable_after_stop
++rid=$(/bin/sh "$engine" reserve statistics unreadable-agent)
++python3 "$tmp/mkactive.py" "$s2/knowledge/budget/reservations/$rid.json" "$tool" "$db2" sid unreadable-agent 100 -1
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="held" and .charge.tokens_total==1000 and
++        .held_reason=="meter_unreadable_after_stop"' \
++  "$s2/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'unreadable post-stop meter released an optimistic charge'
++echo 'T2 ok'
++
++echo '--- T3: a replaced/reset session row cannot erase observed liability ---'
++s3=$tmp/s3; db3=$tmp/m3.db
++mkdb "$db3" 100; mkcfg "$s3" "$db3" 1000
++export VICHE_STATE_ROOT="$s3" TEST_DB="$db3" TEST_MODE=terminal
++rid=$(/bin/sh "$engine" reserve statistics changed-session-agent)
++python3 "$tmp/mkactive.py" "$s3/knowledge/budget/reservations/$rid.json" "$tool" "$db3" sid changed-session-agent 100 -1
++# The monitor had already observed 185 tokens in this session; a later read of
++# the pinned row shows only 100. The observed debt must still be charged.
++python3 - "$s3/knowledge/budget/reservations/$rid.json" <<'PY'
++import json,sys
++p=sys.argv[1]; a=json.load(open(p))
++a['meter']['tokens']['total']=185
++a['meter']['tokens']['delta_total']=185
++json.dump(a,open(p,'w'))
++PY
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="closed" and .usage.tokens_total>=185' \
++  "$s3/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'stale/changed session row reduced a previously observed charge'
++echo 'T3 ok'
++
++echo '--- T4: held overrun cannot be released below its observed meter ---'
++s4=$tmp/s4; db4=$tmp/m4.db
++mkdb "$db4" 100; mkcfg "$s4" "$db4" 150
++export VICHE_STATE_ROOT="$s4" TEST_DB="$db4" TEST_MODE=terminal
++rid=$(/bin/sh "$engine" reserve statistics held-agent)
++python3 "$tmp/mkheld.py" "$s4/knowledge/budget/reservations/$rid.json" "$tool" "$db4" sid held-agent 185
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="closed" and .usage.tokens_total>=185 and
++        (.closed_reason|startswith("reconciled_terminal"))' \
++  "$s4/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'reconciliation released a held overrun below observed usage'
++echo 'T4 ok'
++
++echo '--- T5: missing native session identity at finalize stays a full-cap hold ---'
++s5=$tmp/s5; db5=$tmp/m5.db
++mkdb "$db5" 100; mkcfg "$s5" "$db5" 1000
++export VICHE_STATE_ROOT="$s5" TEST_DB="$db5" TEST_MODE=terminal
++rid=$(/bin/sh "$engine" reserve statistics missing-session-agent)
++python3 "$tmp/mkactive.py" "$s5/knowledge/budget/reservations/$rid.json" "$tool" "$db5" sid missing-session-agent 100 -1
++jq '.native_session_id="absent-session"' "$s5/knowledge/budget/reservations/$rid.json" > "$tmp/r5.json"
++mv "$tmp/r5.json" "$s5/knowledge/budget/reservations/$rid.json"
++/bin/sh "$engine" reconcile >/dev/null
++jq -e '.state=="held" and .charge.tokens_total==1000 and
++        .held_reason=="meter_unreadable_at_finalize"' \
++  "$s5/knowledge/budget/reservations/$rid.json" >/dev/null ||
++  fail 'missing session identity was not held at full cap'
++echo 'T5 ok'
++
++echo 'PASS: terminal accounting keeps late commits, fail-closed holds and observed overrun debt'

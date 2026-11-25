@@ -1,0 +1,272 @@
+commit f57a7ec7df2c2b04705632b58083edbbc4691374
+Author:     Founder (via Claude) <founder@viche.local>
+AuthorDate: Wed Nov 25 07:27:35 2026 +0000
+Commit:     Founder (via Claude) <founder@viche.local>
+CommitDate: Wed Nov 25 07:27:35 2026 +0000
+
+    pnp lbcert: sibling transfer service, monotone-equals-general family
+    
+    - relay op `sibling` (patch_relay2.py; handler on marceline-dev): prove a held step with a merged
+      same-skeleton theorem (statement swap, consistent numeral remap), compiled against current upstream.
+      Corpus test: 7 of 14 tried pairs compiled, most < 40 s. autosolve retries it every 5 min per held step.
+    - monotone-equals-general family (83 open steps): exact general complexity by lb_cert plus an explicit
+      AND/OR circuit of that size; routed through the lb-cert op (marceline monofam.py, compiled first).
+      L-meta-8680 published end to end by the fast lane (PR 12919).
+    - lbparse.family(); fastlane treats both families as concrete.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01BbLKVJCr1wULmJfnFKd1Ju
+
+diff --git a/missions/pnp/fastlane.py b/missions/pnp/fastlane.py
+index c69c67b2..8bdd1df8 100644
+--- a/missions/pnp/fastlane.py
++++ b/missions/pnp/fastlane.py
+@@ -54,7 +54,7 @@ def cand_ready(gap):
+ 
+ def concrete(rec):
+     s = rec.get("statement") or ""
+-    return bool(lbparse.classify(s) or re.fullmatch(r"¬ ?\((.*)\)", lbparse.norm(s)) and
++    return bool(lbparse.family(s) or re.fullmatch(r"¬ ?\((.*)\)", lbparse.norm(s)) and
+                 lbparse.classify(re.fullmatch(r"¬ ?\((.*)\)", lbparse.norm(s)).group(1)))
+ 
+ 
+diff --git a/missions/pnp/lbcert/autosolve.py b/missions/pnp/lbcert/autosolve.py
+index 5002fa85..82d6ae91 100644
+--- a/missions/pnp/lbcert/autosolve.py
++++ b/missions/pnp/lbcert/autosolve.py
+@@ -103,6 +103,56 @@ def generate(g, engines):
+     log('generated', gid, st, where, r.get('states'), '%.0fs' % (time.time() - t0))
+ 
+ 
++SIB_RETRY = 300
++SIB_STATE = os.path.join(WORK, 'sibling.json')
++
++
++def sibling_pass():
++    """Sibling transfer for held steps with no candidate (relay op `sibling`, compiled on marceline-dev).
++    Retried every SIB_RETRY seconds while held: merged siblings appear in bursts."""
++    gaps_dir = os.path.join(STATE, 'gaps')
++    try:
++        tried = json.load(open(SIB_STATE))
++    except (OSError, ValueError):
++        tried = {}
++    now = time.time()
++    for gid in os.listdir(gaps_dir):
++        try:
++            rec = json.load(open(os.path.join(gaps_dir, gid, 'state.json')))
++        except (OSError, ValueError):
++            continue
++        if rec.get('state') not in ('LEASED', 'RESEARCHING') or rec.get('candidate_digest') or status(gid):
++            continue
++        if now - tried.get(gid, 0) < SIB_RETRY:
++            continue
++        tried[gid] = now
++        sf = os.path.join(CANDS, gid + '.sib.stmt')
++        open(sf, 'w').write(rec['statement'])
++        out = os.path.join(CANDS, gid + '.lean')
++        p = subprocess.run([sys.executable, os.path.join(HERE, 'sibremote.py'), sf, rec['module'], out,
++                            '--imports', ','.join(rec.get('imports') or ['PEqualNP.Defs']), '--max-tries', '6'],
++                           capture_output=True, text=True, timeout=2000)
++        try:
++            r = json.loads(p.stdout.strip().split('\n')[-1])
++        except Exception:
++            r = {}
++        if p.returncode == 0:
++            write_status(gid, 'ok sibling %s %s marceline compiled tried=%s' % (r.get('source'), r.get('variant'), r.get('tried')))
++        log('sibling', gid, r.get('status'), 'source', r.get('source'), 'tried', r.get('tried'), 'siblings', r.get('siblings'))
++    tmp = SIB_STATE + '.tmp'
++    json.dump(tried, open(tmp, 'w'))
++    os.replace(tmp, SIB_STATE)
++
++
++def sibling_loop():
++    while not os.path.exists(os.path.join(WORK, 'STOP')):
++        try:
++            sibling_pass()
++        except Exception as e:
++            log('sibling error', type(e).__name__, str(e)[:200])
++        time.sleep(30)
++
++
+ def main():
+     lock = open(os.path.join(WORK, 'autosolve.lock'), 'w')
+     try:
+@@ -110,16 +160,22 @@ def main():
+     except BlockingIOError:
+         return 0
+     engines = ensure_engines()
++    import threading
++    threading.Thread(target=sibling_loop, daemon=True).start()
+     pool = ThreadPoolExecutor(REMOTE_WORKERS)
+     queued = set()
+     while not os.path.exists(os.path.join(WORK, 'STOP')):
+         try:
+             gaps = json.loads(get(DESK))['gaps']
+             pos, twins, desk = {}, {}, {}
++            fam = {}
+             for g in gaps:
+-                if lbparse.classify(g['statement']):
+-                    pos[lbparse.norm(g['statement'])] = g['id']
++                f = lbparse.family(g['statement'])
++                if f:
++                    fam[g['id']] = f
+                     desk[g['id']] = g.get('pr_open', 0)
++                if f == 'lb':
++                    pos[lbparse.norm(g['statement'])] = g['id']
+             for g in gaps:
+                 m = re.fullmatch(r'¬ ?\((.*)\)', lbparse.norm(g['statement']))
+                 if m and m.group(1) in pos:
+@@ -130,7 +186,7 @@ def main():
+                 json.dump(obj, open(tmp, 'w'))
+                 os.replace(tmp, os.path.join(WORK, name))
+             # newest first: fresh batches are where the races are
+-            for g in sorted((g for g in gaps if g['id'] in pos.values()),
++            for g in sorted((g for g in gaps if g['id'] in fam),
+                             key=lambda g: (g.get('pr_open', 0) > 0, -int(re.sub(r'\D', '', g['id']) or 0))):
+                 if g['id'] not in queued and status(g['id']) is None:
+                     queued.add(g['id'])
+diff --git a/missions/pnp/lbcert/lbparse.py b/missions/pnp/lbcert/lbparse.py
+index 9218433e..6d30c7cf 100644
+--- a/missions/pnp/lbcert/lbparse.py
++++ b/missions/pnp/lbcert/lbparse.py
+@@ -108,3 +108,17 @@ def py_truth_table(n, fun):
+ 
+ def truth_table(n, fun):
+     return py_truth_table(n, fun), 'py'
++
++
++MONO_RE = re.compile(r'^∀ (\w+) : ℕ, PEqualNP\.MetaComplexity\.HasCircuitSize \d+ \(fun .*?\) \1 → ∃ (\w+) : '
++                     r'PEqualNP\.CircuitLowerBounds\.Circuit, PEqualNP\.MetaComplexity\.Monotone2 \2 ∧ \2\.size ≤ \1 ∧ ∀ ')
++
++
++def family(stmt):
++    """'lb' (lower bound / its ¬ form), 'mono' (monotone-equals-general, built by monofam.py on
++    marceline-dev) or None."""
++    if classify(stmt):
++        return 'lb'
++    if MONO_RE.match(norm(stmt)):
++        return 'mono'
++    return None
+diff --git a/missions/pnp/lbcert/patch_relay2.py b/missions/pnp/lbcert/patch_relay2.py
+new file mode 100644
+index 00000000..ea55cd03
+--- /dev/null
++++ b/missions/pnp/lbcert/patch_relay2.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python3
++"""Add the `sibling` operation to relay.mjs (requires the lb-cert patch; idempotent)."""
++import sys
++p = sys.argv[1]
++s = open(p).read()
++if "'sibling'" in s:
++    print('already patched'); sys.exit(0)
++assert "'lb-cert'" in s, 'apply patch_relay.py first'
++
++
++def rep(old, new):
++    global s
++    assert s.count(old) == 1, 'anchor not unique: ' + old[:70]
++    s = s.replace(old, new)
++
++
++rep("const ops=new Set(['ping','lean-check','lb-cert']);",
++    "const ops=new Set(['ping','lean-check','lb-cert','sibling']);")
++rep("    if(x.op==='lb-cert'&&!lbOK(x.payload))throw Error();",
++    "    if(x.op==='lb-cert'&&!lbOK(x.payload))throw Error();\n"
++    "    if(x.op==='sibling'&&!sibOK(x.payload))throw Error();")
++rep("function open(c,box,raw){",
++    "// sibling: transfer of a merged same-skeleton proof (data only: statement, module, imports, a bound).\n"
++    "function sibOK(p){return !!p&&typeof p==='object'&&typeof p.statement==='string'&&Buffer.byteLength(p.statement)<=16384&&\n"
++    " /^PEqualNP\\.Outside\\.[A-Za-z0-9_]{1,80}$/.test(p.module)&&Array.isArray(p.imports)&&p.imports.length<=16&&\n"
++    " p.imports.every(i=>typeof i==='string'&&/^[A-Za-z][A-Za-z0-9_.]{0,120}$/.test(i))&&\n"
++    " Number.isSafeInteger(p.max_tries)&&p.max_tries>=1&&p.max_tries<=16;}\n"
++    "function open(c,box,raw){")
++rep("function launchLb(req){",
++    "function launchLb(req){return launchHandler(req,'lb-handler.py');}\n"
++    "function launchHandler(req,script){")
++rep("[path.join(HERE,'lb-handler.py')],{", "[path.join(HERE,script)],{")
++rep("    if(req.op==='lb-cert'&&[...active.values()].filter(a=>a.op==='lb-cert'&&!a.finished).length>=MAX_LB)continue;",
++    "    if(req.op==='lb-cert'&&[...active.values()].filter(a=>a.op==='lb-cert'&&!a.finished).length>=MAX_LB)continue;\n"
++    "    if(req.op==='sibling'&&[...active.values()].filter(a=>a.op==='sibling'&&!a.finished).length>=4)continue;")
++rep("     const job=req.op==='lb-cert'?launchLb(req):launchLean(req)",
++    "     const job=req.op==='lb-cert'?launchLb(req):req.op==='sibling'?launchHandler(req,'sib-handler.py'):launchLean(req)")
++rep(" if(op==='lb-cert'){",
++    " if(op==='sibling'){\n"
++    "  if(args.length!==1)throw Error('sibling requires one request JSON file');\n"
++    "  const st=fs.statSync(args[0]);if(!st.isFile()||st.size>65536)throw Error('invalid sibling request file');\n"
++    "  const value=JSON.parse(fs.readFileSync(args[0],'utf8'));\n"
++    "  if(!sibOK(value))throw Error('invalid sibling request: statement, module, imports, max_tries');\n"
++    "  return value;\n"
++    " }\n"
++    " if(op==='lb-cert'){")
++rep("lb_cert:fs.existsSync(path.join(HERE,'lb-handler.py')),",
++    "lb_cert:fs.existsSync(path.join(HERE,'lb-handler.py')),sibling:fs.existsSync(path.join(HERE,'sib-handler.py')),")
++rep("(OP: ping, lean-check, lb-cert REQ.json)", "(OP: ping, lean-check, lb-cert REQ.json, sibling REQ.json)")
++open(p, 'w').write(s)
++print('patched')
+diff --git a/missions/pnp/lbcert/sibremote.py b/missions/pnp/lbcert/sibremote.py
+new file mode 100644
+index 00000000..be3192a5
+--- /dev/null
++++ b/missions/pnp/lbcert/sibremote.py
+@@ -0,0 +1,60 @@
++#!/usr/bin/env python3
++"""Sibling transfer on marceline-dev through the relay op `sibling`.
++
++Finds merged upstream theorems with the same statement skeleton (numerals and binder names abstracted;
++see sibling.py on marceline-dev), substitutes this statement, and compiles each candidate with
++`lake env lean` against current upstream main. Measured on the merged corpus: 7 of 14 tried pairs
++compiled with a plain statement swap, most within 40 s.
++
++usage: sibremote.py STATEMENT.txt PEqualNP.Outside.L_meta_N OUT.lean [--imports PEqualNP.Defs,...]
++                    [--max-tries 6] [--timeout SECONDS]
++exit: 0 written (sha256 verified; compiled on marceline-dev), 5 no compiling sibling, 1 relay error.
++Prints one JSON summary line (source, variant, tried, siblings, corpus, secs).
++"""
++import base64, gzip, hashlib, json, os, subprocess, sys, tempfile
++
++REQ = os.path.expanduser('~/.local/bin/marceline-request')
++
++
++def arg(name, default):
++    return type(default)(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else default
++
++
++def main():
++    stmt_f, module, out = sys.argv[1:4]
++    req = {'statement': open(stmt_f).read().strip(), 'module': module,
++           'imports': [i for i in arg('--imports', 'PEqualNP.Defs').split(',') if i],
++           'max_tries': arg('--max-tries', 6)}
++    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
++        json.dump(req, f)
++        rf = f.name
++    try:
++        sub = subprocess.run([REQ, 'submit', 'sibling', rf], capture_output=True, text=True, timeout=60)
++        rid = sub.stdout.strip().split('\n')[-1]
++        if sub.returncode != 0 or len(rid) != 36:
++            print(json.dumps({'status': 'relay_error', 'detail': sub.stderr[-300:]})); return 1
++        t = arg('--timeout', 1500)
++        w = subprocess.run([REQ, 'wait', rid, str(t)], capture_output=True, text=True, timeout=t + 60)
++    finally:
++        os.unlink(rf)
++    try:
++        e = json.loads(w.stdout.strip().split('\n')[-1])
++    except Exception:
++        print(json.dumps({'status': 'relay_error', 'id': rid, 'detail': w.stderr[-300:]})); return 1
++    r = e.get('result') or {}
++    summary = {k: r.get(k) for k in ('status', 'source', 'variant', 'tried', 'siblings', 'corpus', 'secs', 'sha256')}
++    summary['id'] = rid
++    if r.get('status') == 'ok':
++        data = gzip.decompress(base64.b64decode(r['file_gz_b64']))
++        if hashlib.sha256(data).hexdigest() != r['sha256']:
++            summary['status'] = 'digest_mismatch'; print(json.dumps(summary)); return 1
++        open(out + '.tmp', 'wb').write(data)
++        os.replace(out + '.tmp', out)
++        print(json.dumps(summary)); return 0
++    summary['log'] = (r.get('log') or '')[-200:]
++    print(json.dumps(summary))
++    return 5 if r.get('status') == 'none' else 1
++
++
++if __name__ == '__main__':
++    sys.exit(main())
