@@ -1,0 +1,3003 @@
+commit 6f902b00fea1a819b246c1bee9fc7facd86beca8
+Merge: 7f8cacb c778d34
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Oct 17 23:28:51 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Oct 17 23:28:51 2026 +0000
+
+    Merge A24: exact minimax characterization S n = adv univ
+
+diff --git a/SoringP1/Bounds.lean b/SoringP1/Bounds.lean
+new file mode 100644
+index 0000000..b877070
+--- /dev/null
++++ b/SoringP1/Bounds.lean
+@@ -0,0 +1,63 @@
++import SoringP1.LowerBound
++
++/-!
++# Elementary general bounds for `S`
++
++Additional general consequences of the information bound `n! ≤ 2 ^ S n`
++(`SoringP1.LowerBound`) and the monotonicity `S n ≤ S (n+1)`
++(`SoringP1.Monotone`).
++-/
++
++namespace SoringP1
++
++/-- `2 ^ n ≤ (n + 1)!`. -/
++lemma two_pow_le_factorial (n : ℕ) : 2 ^ n ≤ (n + 1).factorial := by
++  induction n with
++  | zero => norm_num
++  | succ k ih =>
++    calc 2 ^ (k + 1) = 2 * 2 ^ k := by ring
++      _ ≤ 2 * (k + 1).factorial := Nat.mul_le_mul_left 2 ih
++      _ ≤ (k + 2) * (k + 1).factorial :=
++            Nat.mul_le_mul_right _ (by omega)
++      _ = (k + 2).factorial := (Nat.factorial_succ (k + 1)).symm
++
++/-- `2 ^ (n - 1) ≤ n!`. -/
++lemma two_pow_pred_le_factorial (n : ℕ) : 2 ^ (n - 1) ≤ n.factorial := by
++  rcases Nat.eq_zero_or_pos n with hn | hn
++  · subst hn; norm_num
++  · have h := two_pow_le_factorial (n - 1)
++    rwa [Nat.sub_add_cancel (Nat.succ_le_of_lt hn)] at h
++
++/-- `S n ≥ n - 1`: a correct tree performs at least `n - 1` comparisons. -/
++theorem n_sub_one_le_S (n : ℕ) : n - 1 ≤ S n := by
++  have h1 : 2 ^ (n - 1) ≤ n.factorial := two_pow_pred_le_factorial n
++  have h2 : n.factorial ≤ 2 ^ S n := factorial_le_two_pow_S n
++  exact (Nat.pow_le_pow_iff_right (by norm_num : 1 < 2)).1 (le_trans h1 h2)
++
++theorem log2_factorial_le_S (n : ℕ) : Nat.log2 n.factorial ≤ S n := by
++  by_contra h
++  have hle : S n + 1 ≤ Nat.log2 n.factorial := by omega
++  have h2 : 2 ^ (S n + 1) ≤ n.factorial :=
++    (Nat.le_log2 (Nat.factorial_ne_zero n)).1 hle
++  have h3 : n.factorial ≤ 2 ^ S n := factorial_le_two_pow_S n
++  have hlt : 2 ^ S n < 2 ^ (S n + 1) :=
++    Nat.pow_lt_pow_right (by norm_num) (Nat.lt_succ_self _)
++  exact absurd (le_trans h2 h3) (not_le.mpr hlt)
++
++/-- A usable form of the information lower bound: if `2 ^ (k-1) < n!` then
++`k ≤ S n`. (Take `k` a lower bound on `log₂ n!`.) -/
++lemma le_S_of_pow_lt (n k : ℕ) (h : 2 ^ (k - 1) < n.factorial) : k ≤ S n := by
++  by_contra hlt
++  have h2 : S n ≤ k - 1 := by omega
++  have h3 : n.factorial ≤ 2 ^ S n := factorial_le_two_pow_S n
++  have h4 : 2 ^ S n ≤ 2 ^ (k - 1) := Nat.pow_le_pow_right (by norm_num) h2
++  omega
++
++theorem sixteen_le_S_eight : 16 ≤ S 8 := le_S_of_pow_lt 8 16 (by norm_num)
++
++/-- The information lower bound in ceiling-logarithm form:
++`S n ≥ ⌈log₂ n!⌉`. -/
++theorem clog_factorial_le_S (n : ℕ) : Nat.clog 2 n.factorial ≤ S n :=
++  (Nat.clog_le_iff_le_pow (by norm_num : 1 < 2)).2 (factorial_le_two_pow_S n)
++
++end SoringP1
+diff --git a/SoringP1/Minimax.lean b/SoringP1/Minimax.lean
+new file mode 100644
+index 0000000..c1e73c4
+--- /dev/null
++++ b/SoringP1/Minimax.lean
+@@ -0,0 +1,361 @@
++import SoringP1.Attainment
++
++/-!
++# The partial-order minimax evaluator
++
++`S n` is an infimum over (infinitely many) trees. This file sets up the
++partial-order minimax recurrence `adv` (the standard exact evaluator): the least
++worst-case comparison count for sorting a set of rankings, computable by
++recursion on the cardinality of that set.
++-/
++
++namespace SoringP1
++
++open scoped Classical
++
++/-- Comparison pairs `(i, j)`, `i ≠ j`, that split `S` into two nonempty parts. -/
++def splitPairs {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) : Finset (Fin n × Fin n) :=
++  Finset.univ.filter (fun p =>
++    p.1 ≠ p.2 ∧
++    (S.filter (fun r => r p.1 < r p.2)).Nonempty ∧
++    (S.filter (fun r => r p.2 < r p.1)).Nonempty)
++
++lemma card_filter_lt {n : ℕ} (k : Fin n) :
++    (Finset.univ.filter (fun v : Fin n => v < k)).card = k.val := by
++  rw [show (Finset.univ.filter (fun v : Fin n => v < k)) = Finset.Iio k by
++        ext v; simp [Finset.mem_Iio]]
++  simp
++
++lemma split_of_lt {n : ℕ} {S : Finset (Equiv.Perm (Fin n))}
++    {r1 r2 : Equiv.Perm (Fin n)} (h1 : r1 ∈ S) (h2 : r2 ∈ S) {a : Fin n}
++    (hlt : r1 a < r2 a) : (splitPairs S).Nonempty := by
++  set A := Finset.univ.filter (fun c : Fin n => r1 c < r1 a) with hA
++  set B := Finset.univ.filter (fun c : Fin n => r2 c < r2 a) with hB
++  have hAcard : A.card = (r1 a).val := by
++    rw [hA, show (Finset.univ.filter (fun c : Fin n => r1 c < r1 a)) =
++        (Finset.Iio (r1 a)).image r1.symm by
++      ext c
++      simp only [Finset.mem_filter, Finset.mem_univ, true_and, Finset.mem_image, Finset.mem_Iio]
++      constructor
++      · intro hc; exact ⟨r1 c, hc, by simp⟩
++      · rintro ⟨v, hv, rfl⟩; simpa using hv]
++    rw [Finset.card_image_of_injective (Finset.Iio (r1 a)) r1.symm.injective]; simp
++  have hBcard : B.card = (r2 a).val := by
++    rw [hB, show (Finset.univ.filter (fun c : Fin n => r2 c < r2 a)) =
++        (Finset.Iio (r2 a)).image r2.symm by
++      ext c
++      simp only [Finset.mem_filter, Finset.mem_univ, true_and, Finset.mem_image, Finset.mem_Iio]
++      constructor
++      · intro hc; exact ⟨r2 c, hc, by simp⟩
++      · rintro ⟨v, hv, rfl⟩; simpa using hv]
++    rw [Finset.card_image_of_injective (Finset.Iio (r2 a)) r2.symm.injective]; simp
++  have hcard : A.card < B.card := by rw [hAcard, hBcard]; exact hlt
++  obtain ⟨b, hbB, hbA⟩ := Finset.exists_mem_notMem_of_card_lt_card hcard
++  have hbB' : r2 b < r2 a := (Finset.mem_filter.mp hbB).2
++  have hbA' : ¬ r1 b < r1 a := fun hc => hbA (Finset.mem_filter.mpr ⟨Finset.mem_univ _, hc⟩)
++  have hbne : b ≠ a := fun hc => by subst hc; exact absurd hbB' (lt_irrefl _)
++  have hbgt : r1 a < r1 b := by
++    rcases lt_trichotomy (r1 b) (r1 a) with h' | h' | h'
++    · exact absurd h' hbA'
++    · exact absurd (r1.injective h') hbne
++    · exact h'
++  refine ⟨(b, a), ?_⟩
++  simp only [splitPairs, Finset.mem_filter, Finset.mem_univ, true_and]
++  exact ⟨hbne, ⟨r2, Finset.mem_filter.mpr ⟨h2, hbB'⟩⟩,
++    ⟨r1, Finset.mem_filter.mpr ⟨h1, hbgt⟩⟩⟩
++
++/-- If `S` has at least two rankings, some comparison splits it. -/
++lemma splitPairs_nonempty {n : ℕ} {S : Finset (Equiv.Perm (Fin n))} (h : 2 ≤ S.card) :
++    (splitPairs S).Nonempty := by
++  obtain ⟨r1, h1, r2, h2, hne⟩ := Finset.one_lt_card.mp (by omega : 1 < S.card)
++  obtain ⟨a, ha⟩ : ∃ a, r1 a ≠ r2 a := by
++    by_contra hc; simp only [not_exists, not_not] at hc; exact hne (Equiv.ext hc)
++  rcases lt_or_gt_of_ne ha with hlt | hlt
++  · exact split_of_lt h1 h2 hlt
++  · exact split_of_lt h2 h1 hlt
++
++lemma filter_card_lt {n : ℕ} {S : Finset (Equiv.Perm (Fin n))}
++    {q : Equiv.Perm (Fin n) → Prop} [DecidablePred q] {r : Equiv.Perm (Fin n)}
++    (hrS : r ∈ S) (hrq : ¬ q r) : (S.filter q).card < S.card :=
++  Finset.card_lt_card (Finset.filter_ssubset.mpr ⟨r, hrS, hrq⟩)
++
++/-- The partial-order minimax value for a set of rankings. -/
++noncomputable def adv {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) : ℕ :=
++  if h : S.card ≤ 1 then 0
++  else
++    1 + ((splitPairs S).attach.image (fun pp =>
++          max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
++              (adv (S.filter (fun r => r pp.1.2 < r pp.1.1))))).min'
++        (by
++          rw [Finset.image_nonempty, Finset.attach_nonempty_iff]
++          exact splitPairs_nonempty (by omega : 2 ≤ S.card))
++termination_by S.card
++decreasing_by
++  · have hpred := pp.property
++    unfold splitPairs at hpred
++    rw [Finset.mem_filter] at hpred
++    obtain ⟨r, hr⟩ := hpred.2.2.2
++    exact filter_card_lt (Finset.mem_filter.mp hr).1
++      (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
++  · have hpred := pp.property
++    unfold splitPairs at hpred
++    rw [Finset.mem_filter] at hpred
++    obtain ⟨r, hr⟩ := hpred.2.2.1
++    exact filter_card_lt (Finset.mem_filter.mp hr).1
++      (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
++
++/-- `T` sorts every ranking in `S`. -/
++def Sorts {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) (T : ComparisonTree n) : Prop :=
++  ∀ r ∈ S, ComparisonTree.run r T = r.symm
++
++/-- Adversary lower bound: any tree sorting `S` has height at least `adv S`. -/
++theorem adv_le_height {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) (T : ComparisonTree n)
++    (hT : Sorts S T) : adv S ≤ ComparisonTree.height T := by
++  induction T generalizing S with
++  | leaf π =>
++      have hcard : S.card ≤ 1 := by
++        rw [Finset.card_le_one]
++        intro r1 h1 r2 h2
++        have h : r1.symm = r2.symm := (hT r1 h1) ▸ (hT r2 h2)
++        have h2' := congrArg Equiv.symm h
++        rwa [Equiv.symm_symm r1, Equiv.symm_symm r2] at h2'
++      rw [adv, dite_eq_left hcard]
++      simp [ComparisonTree.height]
++  | compare i j yes no ihyes ihno =>
++      by_cases hcard : S.card ≤ 1
++      · rw [adv, dite_eq_left hcard]; simp [ComparisonTree.height]
++      · rcases eq_or_ne i j with hij | hne
++        · subst hij
++          refine le_trans (ihno S ?_) (le_trans (le_max_right _ _) (Nat.le_add_left _ _))
++          intro r hr
++          simpa [ComparisonTree.run] using hT r hr
++        · rcases Finset.eq_empty_or_nonempty (S.filter (fun r => r j < r i)) with hno | hno
++          · refine le_trans (ihyes S ?_) (le_trans (le_max_left _ _) (Nat.le_add_left _ _))
++            intro r hr
++            have h := hT r hr
++            have hrj : ¬ (r j < r i) := fun hc => by
++              have hm : r ∈ S.filter (fun r => r j < r i) := Finset.mem_filter.mpr ⟨hr, hc⟩
++              rw [hno] at hm; exact Finset.notMem_empty r hm
++            have hlt : r i < r j := lt_of_le_of_ne (not_lt.mp hrj) (fun he => hne (r.injective he))
++            simpa [ComparisonTree.run, hlt] using h
++          · rcases Finset.eq_empty_or_nonempty (S.filter (fun r => r i < r j)) with hy | hy
++            · refine le_trans (ihno S ?_) (le_trans (le_max_right _ _) (Nat.le_add_left _ _))
++              intro r hr
++              have h := hT r hr
++              have hri : ¬ (r i < r j) := fun hc => by
++                have hm : r ∈ S.filter (fun r => r i < r j) := Finset.mem_filter.mpr ⟨hr, hc⟩
++                rw [hy] at hm; exact Finset.notMem_empty r hm
++              have hlt : r j < r i := lt_of_le_of_ne (not_lt.mp hri) (fun he => (Ne.symm hne) (r.injective he))
++              simpa [ComparisonTree.run, not_lt.mpr (le_of_lt hlt)] using h
++            · rw [adv, dite_eq_right hcard]
++              set m := ((splitPairs S).attach.image (fun pp =>
++                    max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
++                        (adv (S.filter (fun r => r pp.1.2 < r pp.1.1))))).min' _ with hm
++              have hsplit : (i, j) ∈ splitPairs S := by
++                simp only [splitPairs, Finset.mem_filter, Finset.mem_univ, true_and]
++                exact ⟨hne, hy, hno⟩
++              have hmem : max (adv (S.filter (fun r => r i < r j)))
++                    (adv (S.filter (fun r => r j < r i)))
++                  ∈ (splitPairs S).attach.image (fun pp =>
++                    max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
++                        (adv (S.filter (fun r => r pp.1.2 < r pp.1.1)))) := by
++                refine Finset.mem_image.mpr ⟨⟨(i, j), hsplit⟩, Finset.mem_attach _ _, ?_⟩
++                rfl
++              have hmin : m ≤ max (adv (S.filter (fun r => r i < r j)))
++                                  (adv (S.filter (fun r => r j < r i))) := by
++                rw [hm]; exact Finset.min'_le _ _ hmem
++              have h1 := ihyes (S.filter (fun r => r i < r j)) (fun r hr => by
++                have h := hT r (Finset.mem_filter.mp hr).1
++                rw [ComparisonTree.run, ite_eq_left (Finset.mem_filter.mp hr).2] at h
++                exact h)
++              have h2 := ihno (S.filter (fun r => r j < r i)) (fun r hr => by
++                have h := hT r (Finset.mem_filter.mp hr).1
++                rw [ComparisonTree.run,
++                  ite_eq_right (not_lt.mpr (le_of_lt (Finset.mem_filter.mp hr).2))] at h
++                exact h)
++              have hmax : max (adv (S.filter (fun r => r i < r j)))
++                    (adv (S.filter (fun r => r j < r i)))
++                  ≤ max (ComparisonTree.height yes) (ComparisonTree.height no) :=
++                max_le (le_trans h1 (le_max_left _ _)) (le_trans h2 (le_max_right _ _))
++              calc 1 + m ≤ 1 + max (adv (S.filter (fun r => r i < r j)))
++                                    (adv (S.filter (fun r => r j < r i))) :=
++                    Nat.add_le_add_left hmin 1
++                _ ≤ 1 + max (ComparisonTree.height yes) (ComparisonTree.height no) :=
++                    Nat.add_le_add_left hmax 1
++                _ = ComparisonTree.height (ComparisonTree.compare i j yes no) := rfl
++
++/-- The adversary bound for a correct tree. -/
++theorem adv_le_height_correct {n : ℕ} (T : ComparisonTree n) (h : Correct T) :
++    adv (Finset.univ : Finset (Equiv.Perm (Fin n))) ≤ ComparisonTree.height T :=
++  adv_le_height _ T (fun r _ => h r)
++
++/-- A comparison pair achieving the minimax value at `S`. -/
++noncomputable def bestPair {n : ℕ} (S : Finset (Equiv.Perm (Fin n)))
++    (hne : (splitPairs S).Nonempty) : {p : Fin n × Fin n // p ∈ splitPairs S} :=
++  ⟨Classical.choose (Finset.exists_min_image (splitPairs S)
++      (fun p => max (adv (S.filter (fun r => r p.1 < r p.2)))
++                    (adv (S.filter (fun r => r p.2 < r p.1)))) hne),
++   (Classical.choose_spec (Finset.exists_min_image (splitPairs S)
++      (fun p => max (adv (S.filter (fun r => r p.1 < r p.2)))
++                    (adv (S.filter (fun r => r p.2 < r p.1)))) hne)).1⟩
++
++lemma bestPair_le {n : ℕ} {S : Finset (Equiv.Perm (Fin n))} {hne} {p : Fin n × Fin n}
++    (hp : p ∈ splitPairs S) :
++    max (adv (S.filter (fun r => r (bestPair S hne).1.1 < r (bestPair S hne).1.2)))
++        (adv (S.filter (fun r => r (bestPair S hne).1.2 < r (bestPair S hne).1.1)))
++    ≤ max (adv (S.filter (fun r => r p.1 < r p.2))) (adv (S.filter (fun r => r p.2 < r p.1))) :=
++  (Classical.choose_spec (Finset.exists_min_image (splitPairs S)
++    (fun p => max (adv (S.filter (fun r => r p.1 < r p.2)))
++                  (adv (S.filter (fun r => r p.2 < r p.1)))) hne)).2 p hp
++
++/-- The minimax sorting tree for a set of rankings: compare an optimal pair, recurse. -/
++noncomputable def minimaxTree {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) : ComparisonTree n :=
++  if h : S.card ≤ 1 then
++    .leaf (if hne : S.Nonempty then (Classical.choose hne).symm else 1)
++  else
++    let p := (bestPair S (splitPairs_nonempty (by omega))).1
++    .compare p.1 p.2 (minimaxTree (S.filter (fun r => r p.1 < r p.2)))
++                      (minimaxTree (S.filter (fun r => r p.2 < r p.1)))
++termination_by S.card
++decreasing_by
++  · have hp := (bestPair S (splitPairs_nonempty (by omega))).2
++    unfold splitPairs at hp
++    rw [Finset.mem_filter] at hp
++    obtain ⟨r, hr⟩ := hp.2.2.2
++    exact filter_card_lt (Finset.mem_filter.mp hr).1
++      (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
++  · have hp := (bestPair S (splitPairs_nonempty (by omega))).2
++    unfold splitPairs at hp
++    rw [Finset.mem_filter] at hp
++    obtain ⟨r, hr⟩ := hp.2.2.1
++    exact filter_card_lt (Finset.mem_filter.mp hr).1
++      (fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq)))
++
++/-- The adversary lower bound in infimum form: `adv univ ≤ S n`. -/
++theorem adv_univ_le_S (n : ℕ) :
++    adv (Finset.univ : Finset (Equiv.Perm (Fin n))) ≤ S n := by
++  rw [S]
++  apply le_csInf
++  · exact ⟨_, sortTree n, sortTree_correct n, le_refl _⟩
++  · rintro k ⟨T, hcorr, hheight⟩
++    exact le_trans (adv_le_height_correct T hcorr) hheight
++
++/-- `minimaxTree S` sorts every ranking in `S`. -/
++theorem minimaxTree_sorts {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) :
++    Sorts S (minimaxTree S) := by
++  induction S using Finset.strongInductionOn with
++  | _ S ih =>
++  rw [minimaxTree]
++  by_cases h : S.card ≤ 1
++  · rw [dite_eq_left h]
++    by_cases hS : S.Nonempty
++    · rw [dite_eq_left hS]
++      intro r hr
++      rw [ComparisonTree.run,
++        Finset.card_le_one.mp h r hr (Classical.choose hS) (Classical.choose_spec hS)]
++    · rw [dite_eq_right hS]
++      have hempty : S = ∅ := Finset.not_nonempty_iff_eq_empty.mp hS
++      intro r hr
++      rw [hempty] at hr
++      exact (Finset.notMem_empty r hr).elim
++  · rw [dite_eq_right h]
++    set bp := bestPair S (splitPairs_nonempty (by omega)) with hbp
++    have hpmem : bp.1 ∈ splitPairs S := bp.2
++    have hpne : bp.1.1 ≠ bp.1.2 := by
++      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.1
++    have hnne : (S.filter (fun r => r bp.1.2 < r bp.1.1)).Nonempty := by
++      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.2.2
++    have hyne : (S.filter (fun r => r bp.1.1 < r bp.1.2)).Nonempty := by
++      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.2.1
++    have hssub1 : S.filter (fun r => r bp.1.1 < r bp.1.2) ⊂ S :=
++      Finset.filter_ssubset.mpr (let ⟨r, hr⟩ := hnne
++        ⟨r, (Finset.mem_filter.mp hr).1,
++          fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq))⟩)
++    have hssub2 : S.filter (fun r => r bp.1.2 < r bp.1.1) ⊂ S :=
++      Finset.filter_ssubset.mpr (let ⟨r, hr⟩ := hyne
++        ⟨r, (Finset.mem_filter.mp hr).1,
++          fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq))⟩)
++    intro r hr
++    rcases lt_or_gt_of_ne (fun he => hpne (r.injective he)) with hlt | hlt
++    · rw [ComparisonTree.run, ite_eq_left hlt]
++      exact ih _ hssub1 r (Finset.mem_filter.mpr ⟨hr, hlt⟩)
++    · rw [ComparisonTree.run, ite_eq_right (not_lt.mpr (le_of_lt hlt))]
++      exact ih _ hssub2 r (Finset.mem_filter.mpr ⟨hr, hlt⟩)
++
++/-- `adv S = 0` exactly when `S` has at most one ranking. -/
++theorem adv_eq_zero_iff {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) : adv S = 0 ↔ S.card ≤ 1 := by
++  rw [adv]
++  by_cases h : S.card ≤ 1
++  · rw [dite_eq_left h]; exact ⟨fun _ => h, fun _ => rfl⟩
++  · rw [dite_eq_right h]
++    exact ⟨fun hc => absurd hc (by omega), fun hc => absurd hc h⟩
++
++set_option maxHeartbeats 0 in
++theorem minimaxTree_height {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) :
++    ComparisonTree.height (minimaxTree S) ≤ adv S := by
++  induction S using Finset.strongInductionOn with
++  | _ S ih =>
++  rw [minimaxTree]
++  by_cases h : S.card ≤ 1
++  · rw [dite_eq_left h, adv, dite_eq_left h]; simp [ComparisonTree.height]
++  · rw [dite_eq_right h, adv, dite_eq_right h]
++    set bp := bestPair S (splitPairs_nonempty (by omega)) with hbp
++    have hpmem : bp.1 ∈ splitPairs S := bp.2
++    have hyne : (S.filter (fun r => r bp.1.1 < r bp.1.2)).Nonempty := by
++      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.2.1
++    have hnne : (S.filter (fun r => r bp.1.2 < r bp.1.1)).Nonempty := by
++      have := hpmem; unfold splitPairs at this; rw [Finset.mem_filter] at this; exact this.2.2.2
++    have hssub1 : S.filter (fun r => r bp.1.1 < r bp.1.2) ⊂ S :=
++      Finset.filter_ssubset.mpr (let ⟨r, hr⟩ := hnne
++        ⟨r, (Finset.mem_filter.mp hr).1,
++          fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq))⟩)
++    have hssub2 : S.filter (fun r => r bp.1.2 < r bp.1.1) ⊂ S :=
++      Finset.filter_ssubset.mpr (let ⟨r, hr⟩ := hyne
++        ⟨r, (Finset.mem_filter.mp hr).1,
++          fun hq => absurd (Finset.mem_filter.mp hr).2 (not_lt.mpr (le_of_lt hq))⟩)
++    have h1 := ih _ hssub1
++    have h2 := ih _ hssub2
++    have hne2 : ((splitPairs S).attach.image (fun pp =>
++          max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
++              (adv (S.filter (fun r => r pp.1.2 < r pp.1.1))))).Nonempty := by
++      rw [Finset.image_nonempty, Finset.attach_nonempty_iff]
++      exact splitPairs_nonempty (by omega)
++    have hle : max (adv (S.filter (fun r => r bp.1.1 < r bp.1.2)))
++          (adv (S.filter (fun r => r bp.1.2 < r bp.1.1)))
++        ≤ ((splitPairs S).attach.image (fun pp =>
++            max (adv (S.filter (fun r => r pp.1.1 < r pp.1.2)))
++                (adv (S.filter (fun r => r pp.1.2 < r pp.1.1))))).min' hne2 := by
++      apply Finset.le_min'
++      intro y hy
++      obtain ⟨pp, _, rfl⟩ := Finset.mem_image.mp hy
++      exact bestPair_le pp.2
++    have hmax : max (ComparisonTree.height (minimaxTree (S.filter (fun r => r bp.1.1 < r bp.1.2))))
++                    (ComparisonTree.height (minimaxTree (S.filter (fun r => r bp.1.2 < r bp.1.1))))
++        ≤ max (adv (S.filter (fun r => r bp.1.1 < r bp.1.2)))
++              (adv (S.filter (fun r => r bp.1.2 < r bp.1.1))) :=
++      max_le (le_trans h1 (le_max_left _ _)) (le_trans h2 (le_max_right _ _))
++    simp only [ComparisonTree.height]
++    exact le_trans (Nat.add_le_add_left hmax 1) (Nat.add_le_add_left hle 1)
++
++/-- The minimax tree sorts `S` and has height at most `adv S`. -/
++theorem minimaxTree_spec {n : ℕ} (S : Finset (Equiv.Perm (Fin n))) :
++    Sorts S (minimaxTree S) ∧ ComparisonTree.height (minimaxTree S) ≤ adv S :=
++  ⟨minimaxTree_sorts S, minimaxTree_height S⟩
++
++/-- The minimax value is a feasible budget for `n` keys. -/
++theorem hasBudget_adv_univ (n : ℕ) :
++    HasBudget n (adv (Finset.univ : Finset (Equiv.Perm (Fin n)))) :=
++  ⟨minimaxTree _, fun r => minimaxTree_sorts _ r (Finset.mem_univ r), minimaxTree_height _⟩
++
++/-- The upper half: `S n ≤ adv univ`. -/
++theorem S_le_adv_univ (n : ℕ) :
++    S n ≤ adv (Finset.univ : Finset (Equiv.Perm (Fin n))) :=
++  (S_le_iff (n := n)).2 (hasBudget_adv_univ n)
++
++/-- **Exact minimax characterisation of the sorting number**:
++`S n` equals the partial-order minimax value `adv univ`. -/
++theorem S_eq_adv_univ (n : ℕ) :
++    S n = adv (Finset.univ : Finset (Equiv.Perm (Fin n))) :=
++  le_antisymm (S_le_adv_univ n) (adv_univ_le_S n)
++
++end SoringP1
+diff --git a/SoringP1/Monotone.lean b/SoringP1/Monotone.lean
+new file mode 100644
+index 0000000..d9942bf
+--- /dev/null
++++ b/SoringP1/Monotone.lean
+@@ -0,0 +1,229 @@
++import SoringP1.Attainment
++
++/-!
++# Monotonicity of the sorting number `S`
++
++Milestone A8: `S n ≤ S (n + 1)`.
++
++Given an optimal correct decision tree on `n + 1` keys, we prune it to a
++correct decision tree on `n` keys of no greater height. The extra key
++`Fin.last n` is treated as the largest, so every comparison against it has a
++known outcome. This yields `HasBudget n (height T)` for any correct `T` on
++`n + 1`, hence `S n ≤ S (n + 1)`.
++-/
++
++namespace SoringP1
++
++open ComparisonTree
++
++/-- Extend a ranking of `Fin n` to a ranking of `Fin (n + 1)` that fixes the
++last position and agrees with `r` on the first `n` positions. -/
++noncomputable def ext {n : ℕ} (r : Equiv.Perm (Fin n)) : Equiv.Perm (Fin (n + 1)) :=
++  Equiv.ofBijective
++    (fun i => Fin.lastCases (Fin.last n) (fun k => Fin.castSucc (r k)) i)
++    (by
++      constructor
++      · intro a b hab
++        cases a using Fin.lastCases with
++        | last =>
++          cases b using Fin.lastCases with
++          | last => rfl
++          | cast j =>
++            simp only [Fin.lastCases_last, Fin.lastCases_castSucc] at hab
++            exact absurd hab.symm (Fin.castSucc_ne_last (r j))
++        | cast i =>
++          cases b using Fin.lastCases with
++          | last =>
++            simp only [Fin.lastCases_last, Fin.lastCases_castSucc] at hab
++            exact absurd hab (Fin.castSucc_ne_last (r i))
++          | cast j =>
++            simp only [Fin.lastCases_castSucc] at hab
++            exact congrArg Fin.castSucc (r.injective (Fin.castSucc_inj.1 hab))
++      · intro b
++        cases b using Fin.lastCases with
++        | last => exact ⟨Fin.last n, by simp⟩
++        | cast k => exact ⟨Fin.castSucc (r.symm k), by simp⟩)
++
++@[simp] lemma ext_last {n : ℕ} (r : Equiv.Perm (Fin n)) :
++    ext r (Fin.last n) = Fin.last n := by
++  change Fin.lastCases (Fin.last n) (fun k => Fin.castSucc (r k)) (Fin.last n) = Fin.last n
++  simp
++
++@[simp] lemma ext_castSucc {n : ℕ} (r : Equiv.Perm (Fin n)) (k : Fin n) :
++    ext r (Fin.castSucc k) = Fin.castSucc (r k) := by
++  change Fin.lastCases (Fin.last n) (fun k => Fin.castSucc (r k)) (Fin.castSucc k) =
++    Fin.castSucc (r k)
++  simp
++
++/-- Restrict a permutation of `Fin (n + 1)` that fixes the last position to a
++permutation of `Fin n`. If it does not fix the last position, return the
++identity. -/
++noncomputable def stripMax {n : ℕ} (σ : Equiv.Perm (Fin (n + 1))) : Equiv.Perm (Fin n) :=
++  if h : σ (Fin.last n) = Fin.last n then
++    Equiv.ofBijective
++      (fun k : Fin n =>
++        ⟨(σ (Fin.castSucc k)).val, by
++          have hsymm : σ.symm (Fin.last n) = Fin.last n := by
++            calc σ.symm (Fin.last n) = σ.symm (σ (Fin.last n)) := by rw [h]
++              _ = Fin.last n := Equiv.symm_apply_apply σ _
++          have hne : σ (Fin.castSucc k) ≠ Fin.last n := by
++            intro hc
++            have hcl : Fin.castSucc k = Fin.last n := by
++              rw [← Equiv.symm_apply_apply σ (Fin.castSucc k), hc, hsymm]
++            exact Fin.castSucc_ne_last k hcl
++          exact Fin.val_lt_last hne⟩)
++      (by
++        constructor
++        · intro a b hab
++          have h1 : σ (Fin.castSucc a) = σ (Fin.castSucc b) := by
++            apply Fin.ext
++            have hv := congrArg Fin.val hab
++            simpa only [] using hv
++          exact Fin.castSucc_injective n (σ.injective h1)
++        · intro b
++          have hne : σ.symm (Fin.castSucc b) ≠ Fin.last n := by
++            intro hc
++            have hcl : Fin.castSucc b = Fin.last n := by
++              rw [← Equiv.apply_symm_apply σ (Fin.castSucc b), hc, h]
++            exact Fin.castSucc_ne_last b hcl
++          refine ⟨Fin.castPred (σ.symm (Fin.castSucc b)) hne, ?_⟩
++          apply Fin.ext
++          change (σ (Fin.castSucc (Fin.castPred (σ.symm (Fin.castSucc b)) hne))).val = b.val
++          rw [Fin.castSucc_castPred, Equiv.apply_symm_apply]
++          rfl)
++  else 1
++
++/-- Restricting `(ext r).symm` recovers `r.symm`. -/
++lemma stripMax_symm_ext {n : ℕ} (r : Equiv.Perm (Fin n)) :
++    stripMax ((ext r).symm) = r.symm := by
++  unfold stripMax
++  have hfix : (ext r).symm (Fin.last n) = Fin.last n := by
++    rw [Equiv.symm_apply_eq, ext_last]
++  rw [dite_eq_left hfix]
++  apply Equiv.ext
++  intro k
++  apply Fin.ext
++  have h1 : ext r (Fin.castSucc (r.symm k)) = Fin.castSucc k := by
++    rw [ext_castSucc, Equiv.apply_symm_apply]
++  have h2 : (ext r).symm (Fin.castSucc k) = Fin.castSucc (r.symm k) := by
++    rw [← h1, Equiv.symm_apply_apply]
++  change ((ext r).symm (Fin.castSucc k)).val = (r.symm k).val
++  rw [h2]
++  rfl
++
++/-- Prune an `(n + 1)`-key decision tree to an `n`-key tree by treating the
++last key as the largest: comparisons against it have a known outcome. -/
++noncomputable def prune {n : ℕ} : ComparisonTree (n + 1) → ComparisonTree n
++  | .leaf σ => .leaf (stripMax σ)
++  | .compare i j yes no =>
++      if hi : i = Fin.last n then prune no
++      else if hj : j = Fin.last n then prune yes
++      else .compare (Fin.castPred i hi) (Fin.castPred j hj) (prune yes) (prune no)
++
++lemma height_prune {n : ℕ} (U : ComparisonTree (n + 1)) :
++    height (prune U) ≤ height U := by
++  induction U with
++  | leaf σ => simp only [prune, height]; exact le_refl 0
++  | compare i j yes no ihyes ihno =>
++      by_cases hi : i = Fin.last n
++      · subst i
++        have hp : prune (.compare (Fin.last n) j yes no) = prune no := by
++          simp only [prune]
++          rw [dite_eq_left trivial]
++        rw [hp]
++        simp only [height]
++        omega
++      · by_cases hj : j = Fin.last n
++        · subst j
++          have hp : prune (.compare i (Fin.last n) yes no) = prune yes := by
++            simp only [prune]
++            rw [dite_eq_right hi, dite_eq_left trivial]
++          rw [hp]
++          simp only [height]
++          omega
++        · have hp : prune (.compare i j yes no) =
++              .compare (Fin.castPred i hi) (Fin.castPred j hj) (prune yes) (prune no) := by
++            simp only [prune]
++            rw [dite_eq_right hi, dite_eq_right hj]
++          rw [hp]
++          simp only [height]
++          exact Nat.add_le_add_left (max_le_max ihyes ihno) 1
++
++/-- Running the pruned tree on `r` mirrors running the original tree on the
++extension `ext r`, as long as the original run is correct. -/
++lemma run_prune {n : ℕ} (U : ComparisonTree (n + 1)) (r : Equiv.Perm (Fin n))
++    (h : run (ext r) U = (ext r).symm) : run r (prune U) = r.symm := by
++  induction U with
++  | leaf σ =>
++      simp only [run] at h
++      simp only [prune, run]
++      rw [h]
++      exact stripMax_symm_ext r
++  | compare i j yes no ihyes ihno =>
++      by_cases hi : i = Fin.last n
++      · subst i
++        have hp : prune (.compare (Fin.last n) j yes no) = prune no := by
++          simp only [prune]
++          rw [dite_eq_left trivial]
++        rw [hp]
++        have hlt : ¬ (ext r (Fin.last n) < ext r j) := by
++          rw [ext_last]
++          exact not_lt_of_ge (Fin.le_last _)
++        have hh := h
++        simp only [run] at hh
++        rw [ite_eq_right hlt] at hh
++        exact ihno hh
++      · by_cases hj : j = Fin.last n
++        · subst j
++          have hp : prune (.compare i (Fin.last n) yes no) = prune yes := by
++            simp only [prune]
++            rw [dite_eq_right hi, dite_eq_left trivial]
++          rw [hp]
++          have hlt : ext r i < ext r (Fin.last n) := by
++            rw [← Fin.castSucc_castPred i hi, ext_castSucc, ext_last]
++            exact Fin.castSucc_lt_last _
++          have hh := h
++          simp only [run] at hh
++          rw [ite_eq_left hlt] at hh
++          exact ihyes hh
++        · have hp : prune (.compare i j yes no) =
++              .compare (Fin.castPred i hi) (Fin.castPred j hj) (prune yes) (prune no) := by
++            simp only [prune]
++            rw [dite_eq_right hi, dite_eq_right hj]
++          rw [hp]
++          simp only [run]
++          have hi' : ext r i = Fin.castSucc (r (Fin.castPred i hi)) := by
++            conv_lhs => rw [← Fin.castSucc_castPred i hi]
++            rw [ext_castSucc]
++          have hj' : ext r j = Fin.castSucc (r (Fin.castPred j hj)) := by
++            conv_lhs => rw [← Fin.castSucc_castPred j hj]
++            rw [ext_castSucc]
++          have hcond : (ext r i < ext r j) ↔
++              (r (Fin.castPred i hi) < r (Fin.castPred j hj)) := by
++            rw [hi', hj', Fin.castSucc_lt_castSucc_iff]
++          by_cases hc : r (Fin.castPred i hi) < r (Fin.castPred j hj)
++          · rw [ite_eq_left hc]
++            have hh := h
++            simp only [run] at hh
++            rw [ite_eq_left (hcond.mpr hc)] at hh
++            exact ihyes hh
++          · rw [ite_eq_right hc]
++            have hh := h
++            simp only [run] at hh
++            rw [ite_eq_right (fun hx => hc (hcond.mp hx))] at hh
++            exact ihno hh
++
++/-- Feasibility is monotone in `n`: a budget feasible for `n + 1` keys is
++feasible for `n` (prune the extra key). -/
++lemma hasBudget_prune {n k : ℕ} (h : HasBudget (n + 1) k) : HasBudget n k := by
++  obtain ⟨T, hcorr, hheight⟩ := h
++  exact ⟨prune T, fun r => run_prune T r (hcorr (ext r)), le_trans (height_prune T) hheight⟩
++
++/-- The sorting number is monotone: `S n ≤ S (n + 1)`. -/
++theorem S_mono (n : ℕ) : S n ≤ S (n + 1) := by
++  obtain ⟨T, hTcorr, hTheight⟩ := exists_tree_S (n + 1)
++  have hbudget : HasBudget n (height T) :=
++    ⟨prune T, fun r => run_prune T r (hTcorr (ext r)), height_prune T⟩
++  exact le_trans ((S_le_iff (n := n) (k := height T)).2 hbudget) hTheight
++
++end SoringP1
+diff --git a/SoringP1/SmallValues.lean b/SoringP1/SmallValues.lean
+new file mode 100644
+index 0000000..4809b51
+--- /dev/null
++++ b/SoringP1/SmallValues.lean
+@@ -0,0 +1,110 @@
++import SoringP1.Attainment
++import SoringP1.LowerBound
++
++/-!
++# Exact small values of the sorting number S(n)
++
++We pin the first values of `S` against the reference evaluator
++(`scripts/evaluate.py`, which reports S(0..6) = 0,0,1,3,5,7):
++
++* `S 0 = 0`, `S 1 = 0`, `S 2 = 1` (exact);
++* `3 ≤ S 3` (the lower half of `S 3 = 3`).
++
++Upper bounds come from explicit correct decision trees; lower bounds come from
++the information bound `n! ≤ 2 ^ S n` (`SoringP1.LowerBound`).
++-/
++
++namespace SoringP1
++
++/-! ## n = 0 and n = 1: a single leaf suffices. -/
++
++theorem correct_leaf_zero :
++    Correct (ComparisonTree.leaf (Equiv.refl (Fin 0)) : ComparisonTree 0) := by
++  intro ranking
++  exact Subsingleton.elim _ _
++
++theorem hasBudget_zero : HasBudget 0 0 :=
++  ⟨_, correct_leaf_zero, by simp [ComparisonTree.height]⟩
++
++theorem S_zero : S 0 = 0 := by
++  apply le_antisymm
++  · rw [S_le_iff]; exact hasBudget_zero
++  · exact Nat.zero_le _
++
++theorem correct_leaf_one :
++    Correct (ComparisonTree.leaf (Equiv.refl (Fin 1)) : ComparisonTree 1) := by
++  intro ranking
++  exact Subsingleton.elim _ _
++
++theorem hasBudget_one : HasBudget 1 0 :=
++  ⟨_, correct_leaf_one, by simp [ComparisonTree.height]⟩
++
++theorem S_one : S 1 = 0 := by
++  apply le_antisymm
++  · rw [S_le_iff]; exact hasBudget_one
++  · exact Nat.zero_le _
++
++/-! ## n = 2: one comparison. -/
++
++/-- The single-comparison sorting tree on two keys: compare positions `0` and `1`. -/
++def treeTwo : ComparisonTree 2 :=
++  .compare 0 1 (.leaf (Equiv.refl (Fin 2))) (.leaf (Equiv.swap 0 1))
++
++theorem treeTwo_correct : Correct treeTwo := by
++  intro ranking
++  fin_cases ranking <;> decide
++
++theorem hasBudget_two : HasBudget 2 1 :=
++  ⟨treeTwo, treeTwo_correct, by decide⟩
++
++theorem S_two : S 2 = 1 := by
++  apply le_antisymm
++  · rw [S_le_iff]; exact hasBudget_two
++  · have h := factorial_le_two_pow_S 2
++    by_contra hlt
++    have h0 : S 2 = 0 := by omega
++    rw [h0] at h
++    norm_num at h
++
++/-! ## n = 3: the lower bound half of `S 3 = 3`. -/
++
++theorem three_le_S_three : 3 ≤ S 3 := by
++  have h := factorial_le_two_pow_S 3
++  norm_num at h
++  by_contra hlt
++  have h2 : S 3 ≤ 2 := by omega
++  have hlt6 : 2 ^ S 3 < 6 := by
++    calc 2 ^ S 3 ≤ 2 ^ 2 := Nat.pow_le_pow_right (by norm_num) h2
++      _ = 4 := by norm_num
++      _ < 6 := by norm_num
++  omega
++
++/-! ## n = 3: three comparisons, attaining the information bound. -/
++
++/-- The optimal three-comparison sorting tree on three keys. -/
++def treeThree : ComparisonTree 3 :=
++  .compare 0 1
++    (.compare 1 2
++      (.leaf (Equiv.refl (Fin 3)))
++      (.compare 0 2
++        (.leaf (Equiv.swap 1 2))
++        (.leaf (finRotate 3).symm)))
++    (.compare 0 2
++      (.leaf (Equiv.swap 0 1))
++      (.compare 1 2
++        (.leaf (finRotate 3))
++        (.leaf (Equiv.swap 0 2))))
++
++theorem treeThree_correct : Correct treeThree := by
++  intro ranking
++  fin_cases ranking <;> decide
++
++theorem hasBudget_three : HasBudget 3 3 :=
++  ⟨treeThree, treeThree_correct, by decide⟩
++
++theorem S_three : S 3 = 3 := by
++  apply le_antisymm
++  · rw [S_le_iff]; exact hasBudget_three
++  · exact three_le_S_three
++
++end SoringP1
+diff --git a/SoringP1/SmallValues4.lean b/SoringP1/SmallValues4.lean
+new file mode 100644
+index 0000000..038ed34
+--- /dev/null
++++ b/SoringP1/SmallValues4.lean
+@@ -0,0 +1,86 @@
++import SoringP1.SmallValues
++import SoringP1.LowerBound
++
++/-!
++# `S 4 = 5`, via a machine-generated optimal decision tree
++
++The tree below is an optimal 4-key comparison tree (worst-case 5 comparisons),
++produced by a minimax search over partial orders and emitted mechanically.
++Leaves are computable permutation expressions, so correctness is closed by
++`decide`.
++-/
++
++namespace SoringP1
++
++/-- If a budget `v` is feasible for `n` and `2^(v-1) < n!`, then `S n = v`. -/
++theorem S_eq_of {n v : ℕ} (hup : HasBudget n v) (hlo : 2 ^ (v - 1) < n.factorial) :
++    S n = v := by
++  apply le_antisymm
++  · rw [S_le_iff]; exact hup
++  · have h := factorial_le_two_pow_S n
++    by_contra hlt
++    have hle : S n ≤ v - 1 := by omega
++    have hpow : 2 ^ S n ≤ 2 ^ (v - 1) := Nat.pow_le_pow_right (by norm_num) hle
++    omega
++
++/-- Optimal 4-key sorting tree (5 comparisons), generated by minimax. -/
++def treeFour : ComparisonTree 4 :=
++  (.compare 0 1
++    (.compare 0 2
++      (.compare 1 2
++        (.compare 1 3
++          (.compare 2 3
++            (.leaf (Equiv.refl (Fin 4)))
++            (.leaf (Equiv.swap 2 3)))
++          (.compare 0 3
++            (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 3)))
++            (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))
++        (.compare 2 3
++          (.compare 1 3
++            (.leaf (Equiv.swap 1 2))
++            (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 2))))
++          (.compare 0 3
++            (.leaf (Equiv.swap 1 3))
++            (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))
++      (.compare 0 3
++        (.compare 1 3
++          (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))
++          (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++        (.compare 2 3
++          (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))
++          (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))))
++    (.compare 0 2
++      (.compare 0 3
++        (.compare 2 3
++          (.leaf (Equiv.swap 0 1))
++          (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 1))))
++        (.compare 1 3
++          (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++          (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 3)))))
++      (.compare 1 2
++        (.compare 2 3
++          (.compare 0 3
++            (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))
++            (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++          (.compare 1 3
++            (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))
++            (.leaf (Equiv.swap 0 3))))
++        (.compare 1 3
++          (.compare 0 3
++            (.leaf (Equiv.swap 0 2))
++            (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 2))))
++          (.compare 2 3
++            (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))
++            (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))))
++
++theorem treeFour_correct : Correct treeFour := by
++  intro ranking
++  fin_cases ranking <;> decide
++
++theorem hasBudget_four : HasBudget 4 5 :=
++  ⟨treeFour, treeFour_correct, by decide⟩
++
++theorem S_four : S 4 = 5 :=
++  S_eq_of hasBudget_four (by norm_num)
++
++end SoringP1
+diff --git a/SoringP1/SmallValues5.lean b/SoringP1/SmallValues5.lean
+new file mode 100644
+index 0000000..56cdfa3
+--- /dev/null
++++ b/SoringP1/SmallValues5.lean
+@@ -0,0 +1,260 @@
++import SoringP1.SmallValues4
++
++/-! # `S 5 = 7`, via a machine-generated optimal decision tree -/
++
++namespace SoringP1
++
++/-- Optimal 5-key sorting tree (7 comparisons), generated by minimax. -/
++def treeFive : ComparisonTree 5 :=
++  (.compare 0 1
++    (.compare 2 3
++      (.compare 0 2
++        (.compare 2 4
++          (.compare 3 4
++            (.compare 1 3
++              (.compare 1 2
++                (.leaf (Equiv.refl (Fin 5)))
++                (.leaf (Equiv.swap 1 2)))
++              (.compare 1 4
++                (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 2)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 2))))))
++            (.compare 1 4
++              (.compare 1 2
++                (.leaf (Equiv.swap 3 4))
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 1 2))))
++              (.compare 1 3
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 2))))
++                (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 1 2))))))
++          (.compare 0 4
++            (.compare 1 2
++              (.compare 1 4
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 2 4)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 4)))))
++              (.compare 1 3
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 1 4)))
++                (.leaf (Equiv.swap 1 4))))
++            (.compare 1 2
++              (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))
++              (.compare 1 3
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))
++                (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))))
++        (.compare 0 4
++          (.compare 1 4
++            (.compare 1 3
++              (.compare 3 4
++                (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++              (.compare 0 3
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))
++                (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++            (.compare 3 4
++              (.compare 0 3
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++              (.compare 1 3
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))))
++          (.compare 0 3
++            (.compare 1 3
++              (.compare 2 4
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))
++              (.compare 2 4
++                (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))
++            (.compare 2 4
++              (.compare 3 4
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++              (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))))))
++      (.compare 0 3
++        (.compare 3 4
++          (.compare 2 4
++            (.compare 1 2
++              (.compare 1 3
++                (.leaf (Equiv.swap 2 3))
++                (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 3))))
++              (.compare 1 4
++                (.leaf (Equiv.swap 1 3))
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 1 3)))))
++            (.compare 1 4
++              (.compare 1 3
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 2 3)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 3)))))
++              (.compare 1 2
++                (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 1 3)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 3)))))))
++          (.compare 0 4
++            (.compare 1 3
++              (.compare 1 4
++                (.leaf (Equiv.swap 2 4))
++                (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 1 4))))
++              (.compare 1 2
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 4))))
++                (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 4)))))
++            (.compare 1 2
++              (.compare 1 3
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))
++              (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))))
++        (.compare 0 4
++          (.compare 1 4
++            (.compare 1 2
++              (.compare 2 4
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))
++              (.compare 0 2
++                (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))
++            (.compare 2 4
++              (.compare 0 2
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))
++              (.compare 1 2
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))))
++          (.compare 0 2
++            (.compare 1 2
++              (.compare 3 4
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))
++              (.compare 3 4
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))))
++            (.compare 2 4
++              (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))
++              (.compare 3 4
++                (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))))))
++    (.compare 2 3
++      (.compare 0 3
++        (.compare 0 4
++          (.compare 0 2
++            (.compare 2 4
++              (.compare 3 4
++                (.leaf (Equiv.swap 0 1))
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 1))))
++              (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 1)))))
++            (.compare 1 2
++              (.compare 3 4
++                (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++              (.compare 3 4
++                (.leaf (Equiv.swap 0 2))
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 2))))))
++          (.compare 1 4
++            (.compare 2 4
++              (.compare 1 2
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 2)))))
++              (.compare 0 2
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++            (.compare 1 2
++              (.compare 0 2
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 4))))
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 4))))
++              (.compare 2 4
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))))
++        (.compare 3 4
++          (.compare 0 4
++            (.compare 1 2
++              (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))
++              (.compare 1 3
++                (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 2)))
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))
++            (.compare 1 3
++              (.compare 1 2
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 2)))))
++              (.compare 1 4
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))))
++          (.compare 2 4
++            (.compare 1 4
++              (.compare 1 2
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))
++                (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 2))))
++              (.compare 1 3
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))))
++            (.compare 1 2
++              (.compare 1 4
++                (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))
++                (.leaf (Equiv.swap 0 4)))
++              (.compare 1 3
++                (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))))))
++      (.compare 0 2
++        (.compare 0 4
++          (.compare 0 3
++            (.compare 2 4
++              (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 1)))
++              (.compare 3 4
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 1))))
++                (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 1)))))
++            (.compare 1 3
++              (.compare 2 4
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))))
++              (.compare 2 4
++                (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 3)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 3)))))))
++          (.compare 1 4
++            (.compare 3 4
++              (.compare 1 3
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++                (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 3))))
++              (.compare 0 3
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))))
++            (.compare 1 3
++              (.compare 0 3
++                (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 4)))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 4)))))
++              (.compare 3 4
++                (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))))))
++        (.compare 2 4
++          (.compare 0 4
++            (.compare 1 2
++              (.compare 1 3
++                (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))
++                (.leaf (Equiv.swap 0 3)))
++              (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))
++            (.compare 1 2
++              (.compare 1 3
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++                (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 3))))
++              (.compare 1 4
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))))
++          (.compare 3 4
++            (.compare 1 4
++              (.compare 1 3
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 3)))))
++              (.compare 1 2
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))))
++            (.compare 1 3
++              (.compare 1 4
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))
++                (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 4))))
++              (.compare 1 2
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))
++                (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))))))
++
++set_option maxHeartbeats 4000000 in
++theorem treeFive_correct : Correct treeFive := by
++  intro ranking
++  fin_cases ranking <;> decide
++
++theorem hasBudget_five : HasBudget 5 7 :=
++  ⟨treeFive, treeFive_correct, by decide⟩
++
++theorem S_five : S 5 = 7 :=
++  S_eq_of hasBudget_five (by norm_num)
++
++end SoringP1
+diff --git a/SoringP1/SmallValues6.lean b/SoringP1/SmallValues6.lean
+new file mode 100644
+index 0000000..726c680
+--- /dev/null
++++ b/SoringP1/SmallValues6.lean
+@@ -0,0 +1,1461 @@
++import SoringP1.SmallValues4
++
++/-! # `S 6 = 10`, via a machine-generated optimal decision tree -/
++
++namespace SoringP1
++
++/-- Optimal 6-key sorting tree (10 comparisons), generated by minimax. -/
++def treeSix : ComparisonTree 6 :=
++  (.compare 0 1
++    (.compare 2 3
++      (.compare 0 2
++        (.compare 1 4
++          (.compare 0 5
++            (.compare 1 2
++              (.compare 2 5
++                (.compare 3 5
++                  (.compare 3 4
++                    (.compare 4 5
++                      (.leaf (Equiv.refl (Fin 6)))
++                      (.leaf (Equiv.swap 4 5)))
++                    (.compare 2 4
++                      (.leaf (Equiv.swap 3 4))
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 2 4)))))
++                  (.compare 4 5
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 3 4)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 2 4)))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 3 5)))
++                      (.leaf (Equiv.swap 3 5)))))
++                (.compare 1 5
++                  (.compare 2 4
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 2 5))))
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 2 5))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 2 4)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 2 5))))))
++                  (.compare 2 4
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 5)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 5)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 5))))))))
++              (.compare 1 5
++                (.compare 4 5
++                  (.compare 3 4
++                    (.compare 1 3
++                      (.leaf (Equiv.swap 1 2))
++                      (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 2))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 1 2)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 1 2))))))
++                  (.compare 3 5
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 1 2)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 2)))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 1 2))))
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 1 2))))))
++                (.compare 1 3
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 2)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 2)))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 1 5))))
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 1 5)))))
++                  (.compare 2 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 2)))))
++                    (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 1 5)))))))
++            (.compare 1 2
++              (.compare 2 4
++                (.compare 3 4
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))))
++                  (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))))
++                (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))))
++              (.compare 1 3
++                (.compare 3 4
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))
++                  (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))
++                (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))))
++          (.compare 2 5
++            (.compare 2 4
++              (.compare 1 3
++                (.compare 1 5
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 2))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 2))))))
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 2))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 2)))))))
++                (.compare 3 4
++                  (.compare 4 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 2))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 2))))
++                      (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 1 2)))))
++                  (.compare 3 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 1 2)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 2)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 2)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 2))))))))
++              (.compare 0 4
++                (.compare 3 5
++                  (.compare 1 3
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 4))))
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 1 4))))
++                    (.compare 1 5
++                      (.leaf (Equiv.swap 1 4))
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 1 4)))))
++                  (.compare 1 5
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 1 4)))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 1 4)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 1 4)))))))
++                (.compare 3 5
++                  (.compare 1 3
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))
++                  (.compare 1 5
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))))))
++            (.compare 0 5
++              (.compare 4 5
++                (.compare 0 4
++                  (.compare 1 2
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 4))))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 4)))))))
++                  (.compare 1 2
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))))))
++                (.compare 1 3
++                  (.compare 1 2
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 5))))
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 1 5))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 5)))))))
++                  (.compare 2 4
++                    (.compare 3 4
++                      (.leaf (Equiv.swap 1 5))
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 1 5))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 5)))))))
++              (.compare 0 4
++                (.compare 1 3
++                  (.compare 1 2
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))))))
++                  (.compare 2 4
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))))
++                (.compare 1 2
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))
++                  (.compare 1 3
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))))))))
++        (.compare 0 4
++          (.compare 0 5
++            (.compare 1 4
++              (.compare 1 3
++                (.compare 3 4
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))))
++                  (.compare 4 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))))
++                (.compare 0 3
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))))
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))))
++              (.compare 3 4
++                (.compare 0 3
++                  (.compare 4 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))
++                  (.compare 1 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))))
++                (.compare 1 3
++                  (.compare 1 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))))
++                  (.compare 3 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 2))))))))))
++            (.compare 0 3
++              (.compare 1 3
++                (.compare 1 4
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))))
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))))
++                (.compare 1 4
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))))))
++              (.compare 1 4
++                (.compare 2 5
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))))
++                (.compare 2 5
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                    (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))
++                  (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))))))
++          (.compare 0 3
++            (.compare 0 5
++              (.compare 1 3
++                (.compare 1 5
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))))
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))))
++                (.compare 1 5
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))
++                    (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))))))
++              (.compare 1 3
++                (.compare 2 4
++                  (.compare 2 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))
++                (.compare 2 4
++                  (.compare 2 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))))
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))))))
++            (.compare 0 5
++              (.compare 1 5
++                (.compare 2 4
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                    (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++                  (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))
++                (.compare 2 4
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))))
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))))
++              (.compare 2 4
++                (.compare 3 4
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))))
++                  (.compare 4 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))))
++                (.compare 2 5
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))
++                    (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))))))
++      (.compare 0 3
++        (.compare 1 4
++          (.compare 0 5
++            (.compare 1 3
++              (.compare 3 5
++                (.compare 2 5
++                  (.compare 2 4
++                    (.compare 4 5
++                      (.leaf (Equiv.swap 2 3))
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 2 3))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 2 3)))
++                      (.leaf (Equiv.swap 2 4))))
++                  (.compare 4 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 2 3))))
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 2 4))))
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 2 3))))
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 2 3))))))
++                (.compare 1 5
++                  (.compare 3 4
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 2 5)))
++                      (.leaf (Equiv.swap 2 5)))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 2 4))))
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 2 5)))))
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 5))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 1 5)))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 5))))))))
++              (.compare 1 5
++                (.compare 4 5
++                  (.compare 2 4
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 3)))
++                      (.leaf (Equiv.swap 1 3)))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 3)))))))
++                  (.compare 2 5
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 3))))
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 1 3))))
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 3)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 3)))))))
++                (.compare 1 2
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 5))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 1 3)))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 5))))))
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 1 3))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 5)))))))))
++            (.compare 1 3
++              (.compare 2 4
++                (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))
++                (.compare 3 4
++                  (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))
++                  (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))))
++              (.compare 1 2
++                (.compare 2 4
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))))
++                  (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))))
++                (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))))))
++          (.compare 3 5
++            (.compare 2 5
++              (.compare 3 4
++                (.compare 1 5
++                  (.compare 1 2
++                    (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 1 3)))
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 1 3)))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 3))))))
++                  (.compare 2 4
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 1 3))))
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 1 3))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 3)))))))
++                (.compare 0 4
++                  (.compare 1 2
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 1 4)))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 4)))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 4)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 4))))))
++                  (.compare 1 2
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))))))
++              (.compare 3 4
++                (.compare 1 2
++                  (.compare 1 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 3))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 3)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 3))))))
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 3))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 3))))))))
++                (.compare 0 4
++                  (.compare 1 5
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 4))))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 4)))))))
++                  (.compare 1 5
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4)))))))))))
++            (.compare 0 5
++              (.compare 4 5
++                (.compare 0 4
++                  (.compare 1 3
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 4)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 4)))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 1 4)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 1 4))))))
++                  (.compare 1 3
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 4))))))))
++                (.compare 1 2
++                  (.compare 1 3
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 5)))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 5)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 1 5))))))
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 1 5)))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 1 5))))
++                      (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 1 5)))))))
++              (.compare 0 4
++                (.compare 1 2
++                  (.compare 1 3
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))))
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 5)))))))
++                (.compare 1 2
++                  (.compare 1 3
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))))))
++        (.compare 0 4
++          (.compare 0 5
++            (.compare 1 4
++              (.compare 1 2
++                (.compare 2 4
++                  (.compare 2 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))))
++                  (.compare 4 5
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))))
++                (.compare 0 2
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))))
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))))))
++              (.compare 2 4
++                (.compare 0 2
++                  (.compare 4 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))))
++                  (.compare 1 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))))
++                (.compare 1 2
++                  (.compare 1 5
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))))
++                  (.compare 2 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 3)))))))))))
++            (.compare 0 2
++              (.compare 1 2
++                (.compare 1 4
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++                (.compare 1 4
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))))))))
++              (.compare 1 4
++                (.compare 2 5
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++                (.compare 2 5
++                  (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))))
++          (.compare 0 2
++            (.compare 0 5
++              (.compare 1 2
++                (.compare 1 5
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))))
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))))
++                (.compare 1 5
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))))))
++              (.compare 1 2
++                (.compare 3 4
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))))
++                (.compare 3 4
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))))))
++            (.compare 0 5
++              (.compare 1 5
++                (.compare 2 4
++                  (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++                (.compare 2 4
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))))
++              (.compare 2 4
++                (.compare 2 5
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++                (.compare 3 4
++                  (.compare 4 5
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))))))
++                  (.compare 3 5
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))))))))))
++    (.compare 2 3
++      (.compare 0 3
++        (.compare 0 4
++          (.compare 0 2
++            (.compare 0 5
++              (.compare 2 4
++                (.compare 3 4
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf (Equiv.swap 0 1))
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 0 1))))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 1)))))))
++                  (.compare 4 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 1)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 0 1)))))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 0 1)))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 1)))))))
++                (.compare 2 5
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 1))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 1))))))
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 1))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 1))))))))
++              (.compare 1 5
++                (.compare 2 4
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))))
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))))
++                (.compare 2 4
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 5)))))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 5)))))
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 5))))))))
++            (.compare 0 5
++              (.compare 1 2
++                (.compare 3 4
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))))
++                (.compare 3 4
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf (Equiv.swap 0 2))
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 0 2))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 0 2)))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 2)))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 0 2)))))))
++              (.compare 1 2
++                (.compare 1 5
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))))
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 0 5))))
++                    (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 0 5)))))
++                (.compare 1 5
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 2)))))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 2)))))
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))))))
++          (.compare 0 5
++            (.compare 0 2
++              (.compare 1 4
++                (.compare 2 5
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))))
++                  (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                (.compare 2 5
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 4))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 4))))))
++                  (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 4))))))
++              (.compare 1 2
++                (.compare 1 4
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 4)))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 0 4))))))
++                (.compare 1 4
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 2))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 2))))))
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))))))
++            (.compare 1 4
++              (.compare 2 4
++                (.compare 1 2
++                  (.compare 2 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 0 5))))))
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 2))))))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))))
++                (.compare 0 2
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 5)))))
++                  (.compare 4 5
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 5)))))))))
++              (.compare 1 2
++                (.compare 0 2
++                  (.compare 1 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 4)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))
++                  (.compare 1 5
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 0 4)))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 4)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))))
++                (.compare 2 4
++                  (.compare 4 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))))
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))))
++                  (.compare 2 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))))))))
++        (.compare 1 4
++          (.compare 3 5
++            (.compare 0 5
++              (.compare 0 4
++                (.compare 1 2
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                  (.compare 1 3
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 2)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 2)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))))
++                (.compare 1 2
++                  (.compare 2 4
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                    (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))
++                  (.compare 1 3
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 2))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))))
++              (.compare 4 5
++                (.compare 1 2
++                  (.compare 2 4
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))
++                  (.compare 1 3
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 2)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))))
++                (.compare 0 4
++                  (.compare 1 3
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 2))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))))
++                  (.compare 1 3
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 2)))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))))))
++            (.compare 2 5
++              (.compare 3 4
++                (.compare 0 4
++                  (.compare 1 5
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 2)))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))))
++                  (.compare 1 5
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 0 2))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))))
++                (.compare 1 2
++                  (.compare 2 4
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 1))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 2)))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))))
++              (.compare 3 4
++                (.compare 0 4
++                  (.compare 1 2
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 0 5))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))))
++                  (.compare 1 2
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))
++                      (.leaf (Equiv.swap 0 5)))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))))
++                (.compare 1 5
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))))
++                  (.compare 1 2
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 5)))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 5)))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))))))
++          (.compare 0 5
++            (.compare 1 3
++              (.compare 1 2
++                (.leaf (Equiv.swap 0 4))
++                (.compare 2 4
++                  (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))
++                  (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))
++              (.compare 2 4
++                (.compare 3 4
++                  (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))
++                  (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))))
++                (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))
++            (.compare 1 3
++              (.compare 1 5
++                (.compare 1 2
++                  (.compare 2 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 0 4)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 0 4)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 4))))))
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))))
++                (.compare 4 5
++                  (.compare 2 5
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))))
++                  (.compare 2 4
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5))))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))))
++              (.compare 3 5
++                (.compare 1 5
++                  (.compare 2 4
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))
++                  (.compare 3 4
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 2))))))
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4)))))))))
++                (.compare 2 5
++                  (.compare 4 5
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 2))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 4))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 2)))))))
++                  (.compare 2 4
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 5)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))))))
++      (.compare 0 2
++        (.compare 0 4
++          (.compare 0 3
++            (.compare 0 5
++              (.compare 2 4
++                (.compare 2 5
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 1)))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 1)))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 1)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 1))))))
++                (.compare 3 4
++                  (.compare 4 5
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 1))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 0 1)))))
++                  (.compare 3 5
++                    (.compare 2 5
++                      (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 1)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 1)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 1))))))))
++              (.compare 1 5
++                (.compare 2 4
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))))
++                (.compare 2 4
++                  (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 5))))
++                  (.compare 3 4
++                    (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 0 5)))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 5))))))))
++            (.compare 0 5
++              (.compare 1 3
++                (.compare 2 4
++                  (.compare 2 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))))
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))))))
++                (.compare 2 4
++                  (.compare 2 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 3)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 3)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 3))))))
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 3))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 3))))))))
++              (.compare 1 3
++                (.compare 1 5
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))))
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 5)))))
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 5))))))
++                (.compare 1 5
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 3))))
++                    (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 0 3))))
++                  (.compare 2 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))))))
++          (.compare 0 5
++            (.compare 0 3
++              (.compare 1 4
++                (.compare 2 5
++                  (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))))
++                (.compare 2 5
++                  (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 4)))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 4))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 4))))))))
++              (.compare 1 3
++                (.compare 1 4
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))))
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 4))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 4)))))))
++                (.compare 1 4
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 3)))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 3)))))
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))))))))
++            (.compare 1 4
++              (.compare 3 4
++                (.compare 1 3
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 5)))))))
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 3)))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))))
++                (.compare 0 3
++                  (.compare 1 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 5))))))
++                  (.compare 4 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 5))))))))
++              (.compare 1 3
++                (.compare 0 3
++                  (.compare 1 5
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 4))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))))
++                  (.compare 1 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 2 5).trans (Equiv.swap 0 4))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))))
++                (.compare 3 4
++                  (.compare 4 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++                  (.compare 3 5
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))))))))
++        (.compare 1 4
++          (.compare 2 5
++            (.compare 0 5
++              (.compare 0 4
++                (.compare 1 2
++                  (.compare 1 3
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                    (.compare 4 5
++                      (.leaf (Equiv.swap 0 3))
++                      (.leaf ((Equiv.swap 4 5).trans (Equiv.swap 0 3)))))
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))
++                (.compare 1 3
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                  (.compare 1 2
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 3 4).trans (Equiv.swap 0 3)))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 3)))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))))
++              (.compare 4 5
++                (.compare 1 3
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1)))))))
++                  (.compare 1 2
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 3))))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))))
++                (.compare 0 4
++                  (.compare 1 2
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans (Equiv.swap 0 3)))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))))
++                  (.compare 1 2
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 3 5).trans (Equiv.swap 0 3))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))))))
++            (.compare 2 4
++              (.compare 0 4
++                (.compare 3 5
++                  (.compare 1 5
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 3))))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))))
++                  (.compare 1 3
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 5)))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++                (.compare 3 5
++                  (.compare 1 5
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 3)))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))))
++                  (.compare 1 3
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 5))))
++                    (.compare 1 2
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))
++                      (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))))
++              (.compare 1 3
++                (.compare 3 4
++                  (.compare 3 5
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 1)))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1)))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 5))))))
++                  (.compare 4 5
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 1))))))
++                    (.compare 1 5
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 1))))
++                      (.leaf ((Equiv.swap 2 4).trans (Equiv.swap 0 5))))))
++                (.compare 1 5
++                  (.compare 4 5
++                    (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans (Equiv.swap 0 3))))
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 3))))))
++                  (.compare 3 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))))
++                    (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))))))))
++          (.compare 0 5
++            (.compare 1 2
++              (.compare 1 3
++                (.leaf ((Equiv.swap 2 3).trans (Equiv.swap 0 4)))
++                (.compare 3 4
++                  (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                  (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++              (.compare 2 4
++                (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))
++                (.compare 3 4
++                  (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))
++                  (.leaf ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++            (.compare 1 2
++              (.compare 1 5
++                (.compare 1 3
++                  (.compare 2 5
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 4))))
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans (Equiv.swap 0 4))))))
++                  (.compare 2 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))))))
++                (.compare 4 5
++                  (.compare 3 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4))))))))
++                  (.compare 3 4
++                    (.compare 3 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5)))))
++                    (.compare 1 3
++                      (.leaf ((Equiv.swap 2 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5)))))))))
++              (.compare 2 5
++                (.compare 1 5
++                  (.compare 2 4
++                    (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))
++                  (.compare 2 4
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 2).trans (Equiv.swap 0 3)))))))
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4))))))))
++                (.compare 3 5
++                  (.compare 4 5
++                    (.compare 3 4
++                      (.leaf ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 5).trans ((Equiv.swap 2 5).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 4)))))))
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3)))))
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 3))))))))
++                  (.compare 3 4
++                    (.compare 2 4
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))
++                      (.leaf ((Equiv.swap 3 4).trans ((Equiv.swap 2 4).trans ((Equiv.swap 1 3).trans (Equiv.swap 0 5))))))
++                    (.compare 4 5
++                      (.leaf ((Equiv.swap 4 5).trans ((Equiv.swap 2 3).trans ((Equiv.swap 1 5).trans (Equiv.swap 0 4)))))
++                      (.leaf ((Equiv.swap 2 3).trans ((Equiv.swap 1 4).trans (Equiv.swap 0 5))))))))))))))
++
++set_option maxHeartbeats 40000000 in
++set_option maxRecDepth 100000 in
++theorem treeSix_correct : Correct treeSix := by
++  intro ranking
++  fin_cases ranking <;> decide
++
++theorem hasBudget_six : HasBudget 6 10 :=
++  ⟨treeSix, treeSix_correct, by decide⟩
++
++theorem S_six : S 6 = 10 :=
++  S_eq_of hasBudget_six (by norm_num)
++
++end SoringP1
+diff --git a/SoringP1/SmallValues7.lean b/SoringP1/SmallValues7.lean
+new file mode 100644
+index 0000000..6f11411
+--- /dev/null
++++ b/SoringP1/SmallValues7.lean
+@@ -0,0 +1,34 @@
++import SoringP1.TightBound
++import SoringP1.Bounds
++
++/-!
++# A bracket for `S 7`
++
++`S 7` is beyond the range the reference evaluator and the minimax generator
++reach, but the general bounds still pin it: the information lower bound gives
++`S 7 ≥ 13` (`2^12 = 4096 < 7! = 5040`), and the tight insertion upper bound
++(A10) gives `S 7 ≤ 21`.
++-/
++
++namespace SoringP1
++
++theorem thirteen_le_S_seven : 13 ≤ S 7 := by
++  have h : (7 : ℕ).factorial ≤ 2 ^ S 7 := factorial_le_two_pow_S 7
++  norm_num at h
++  by_contra hlt
++  have h2 : S 7 ≤ 12 := by omega
++  have hle : 2 ^ S 7 ≤ 2 ^ 12 := Nat.pow_le_pow_right (by norm_num) h2
++  have hlt' : (2 : ℕ) ^ 12 < 2 ^ S 7 :=
++    lt_of_lt_of_le (show (2 : ℕ) ^ 12 < 5040 by norm_num) h
++  omega
++
++theorem S_seven_le : S 7 ≤ 21 := by
++  have h := S_le_tight 7
++  norm_num at h
++  exact h
++
++/-- `13 ≤ S 7 ≤ 21`. -/
++theorem S_seven_bracket : 13 ≤ S 7 ∧ S 7 ≤ 21 :=
++  ⟨thirteen_le_S_seven, S_seven_le⟩
++
++end SoringP1
+diff --git a/SoringP1/TightBound.lean b/SoringP1/TightBound.lean
+new file mode 100644
+index 0000000..fb2bfb3
+--- /dev/null
++++ b/SoringP1/TightBound.lean
+@@ -0,0 +1,97 @@
++import SoringP1.Existence
++import SoringP1.Attainment
++
++/-!
++# A tight upper bound: `S n ≤ n (n - 1) / 2`
++
++The insertion tree `sortTree` inserts positions `0, 1, …, n-1` one at a time;
++inserting position `i` costs at most `i` comparisons, so the true height is at
++most `0 + 1 + … + (n-1) = n(n-1)/2`. The existing `height_go` only gives
++`height ≤ fuel` (counting structural steps too); here we prove the
++comparison-exact bound with a length-only invariant (so both children of a
++comparison node satisfy it).
++-/
++
++namespace SoringP1
++
++/-- Comparisons to insert positions `m, m+1, …, n-1`: their sum. -/
++def Hinto (n m : ℕ) : ℕ := ∑ i ∈ Finset.range (n - m), (m + i)
++
++/-- Comparison budget for an `aux` state: scan `suf`, then insert `x+1`. -/
++def Haux (n : ℕ) (x : Fin n) (suf : List (Fin n)) : ℕ :=
++  suf.length + Hinto n (x.val + 1)
++
++lemma Hinto_self (n : ℕ) : Hinto n n = 0 := by
++  simp [Hinto]
++
++lemma Hinto_succ (n m : ℕ) (hm : m < n) : Hinto n m = m + Hinto n (m + 1) := by
++  have h : n - m = (n - (m + 1)) + 1 := by omega
++  simp only [Hinto]
++  conv_lhs => rw [h, Finset.sum_range_succ']
++  rw [show (∑ i ∈ Finset.range (n - (m + 1)), (m + (i + 1)))
++        = (∑ i ∈ Finset.range (n - (m + 1)), ((m + 1) + i)) from
++      Finset.sum_congr rfl (fun i _ => by omega)]
++  omega
++
++lemma Hinto_zero (n : ℕ) : Hinto n 0 = n * (n - 1) / 2 := by
++  rw [Hinto]
++  simp only [Nat.sub_zero, Nat.zero_add]
++  exact Finset.sum_range_id n
++
++/-- Comparison-exact height bound for the fuel-driven insertion sort. -/
++lemma height_go_tight (n : ℕ) : ∀ fuel,
++    (∀ (m : ℕ) (hm : m ≤ n) (sp : List (Fin n)),
++        sp.length = m → ComparisonTree.height (go n fuel (.into m hm sp)) ≤ Hinto n m) ∧
++    (∀ (x : Fin n) (pre suf : List (Fin n)),
++        pre.length + suf.length = x.val →
++        ComparisonTree.height (go n fuel (.aux x pre suf)) ≤ Haux n x suf) := by
++  intro fuel
++  induction fuel with
++  | zero =>
++      refine ⟨?_, ?_⟩
++      · intro m hm sp _; rw [go.eq_1]; simp [ComparisonTree.height]
++      · intro x pre suf _; rw [go.eq_1]; simp [ComparisonTree.height]
++  | succ k ih =>
++      refine ⟨?_, ?_⟩
++      · intro m hm sp hlen
++        by_cases hmn : m = n
++        · subst hmn
++          rw [go.eq_2, dite_eq_left rfl]
++          simp [ComparisonTree.height, Hinto_self]
++        · rw [go.eq_2, dite_eq_right hmn]
++          have hlt : m < n := by omega
++          have h := ih.2 ⟨m, hlt⟩ [] sp (by simp only [List.length_nil, Nat.zero_add]; exact hlen)
++          refine le_trans h ?_
++          rw [Haux, hlen]
++          exact le_of_eq (Hinto_succ n m hlt).symm
++      · intro x pre suf hlen
++        cases suf with
++        | nil =>
++            rw [go.eq_3]
++            simp only [List.length_nil, Nat.add_zero] at hlen
++            have h := ih.1 (x.val + 1) (by have := x.isLt; omega) (pre ++ [x])
++              (by simp only [List.length_append, List.length_cons, List.length_nil]; omega)
++            refine le_trans h ?_
++            simp [Haux]
++        | cons q tl =>
++            rw [go.eq_4]
++            simp only [ComparisonTree.height]
++            simp only [List.length_cons] at hlen
++            have h1 := ih.1 (x.val + 1) (by have := x.isLt; omega) (pre ++ [x] ++ q :: tl)
++              (by simp only [List.length_append, List.length_cons, List.length_nil]; omega)
++            have h2 := ih.2 x (pre ++ [q]) tl
++              (by simp only [List.length_append, List.length_cons, List.length_nil]; omega)
++            simp only [Haux, List.length_cons] at h2 ⊢
++            omega
++
++theorem sortTree_height_tight (n : ℕ) :
++    ComparisonTree.height (sortTree n) ≤ n * (n - 1) / 2 := by
++  unfold sortTree
++  have h := (height_go_tight n (n * (n + 2) + (n + 1) + 1)).1 0 (Nat.zero_le n) [] (by simp)
++  exact le_trans h (le_of_eq (Hinto_zero n))
++
++/-- The tight upper bound on the sorting number. -/
++theorem S_le_tight (n : ℕ) : S n ≤ n * (n - 1) / 2 :=
++  (S_le_iff (n := n)).2 ⟨sortTree n, sortTree_correct n, sortTree_height_tight n⟩
++
++end SoringP1
+diff --git a/SoringP1/TightSmall.lean b/SoringP1/TightSmall.lean
+new file mode 100644
+index 0000000..fcf01e5
+--- /dev/null
++++ b/SoringP1/TightSmall.lean
+@@ -0,0 +1,26 @@
++import SoringP1.SmallValues
++import SoringP1.SmallValues4
++import SoringP1.SmallValues5
++import SoringP1.SmallValues6
++import SoringP1.Bounds
++
++/-!
++# The information bound is tight for `n ≤ 6`
++
++For `n ≤ 6` the exact value equals `⌈log₂ n!⌉`; the lower bound is A15/A2 and the
++upper bound is the explicit optimal trees of A4/A5/A7.
++-/
++
++namespace SoringP1
++
++theorem S_eq_clog_of_le_six (n : ℕ) (h : n ≤ 6) : S n = Nat.clog 2 n.factorial := by
++  interval_cases n
++  · rw [S_zero]; decide
++  · rw [S_one]; decide
++  · rw [S_two]; decide
++  · rw [S_three]; decide
++  · rw [S_four]; decide
++  · rw [S_five]; decide
++  · rw [S_six]; decide
++
++end SoringP1
+diff --git a/docs/formalization-plan.md b/docs/formalization-plan.md
+index 9883e1c..c35dabe 100644
+--- a/docs/formalization-plan.md
++++ b/docs/formalization-plan.md
+@@ -6,8 +6,12 @@ Inspired by AssemblyP1's exploration-first methodology.
+ model and make feasible budgets and the minimum value meaningful.
+ The initial Lean model already has the basic tree, interpreter, correctness
+ predicate, feasibility predicate, and minimization specification.
+-Outstanding: a proved existence/attainment lemma for S, model correspondence
+-with ordinary adaptive comparison algorithms, and small reference instances.
++**Status: largely complete.** Existence (`exists_hasBudget`), attainment and
++minimality (`hasBudget_S`, `S_le_iff`, `S_is_minimal`), the information lower
++bound (`n! ≤ 2^(S n)`), and small reference instances (`S(0..3) = 0,0,1,3`)
++are kernel-checked. See `docs/kernel-results.md` for the exact theorem
++inventory and the remaining open fronts (tight upper bound, `S 4`, a checked
++executable evaluator, and the machine-model/complexity bridge).
+ 
+ **Exploration (default).** Prefer informal mathematical arguments, executable
+ experiments, adversarial examples, and connections to optimal decision-tree
+diff --git a/docs/kernel-results.md b/docs/kernel-results.md
+new file mode 100644
+index 0000000..2c3392f
+--- /dev/null
++++ b/docs/kernel-results.md
+@@ -0,0 +1,126 @@
++# Kernel-checked results
++
++Inventory of the machine-checked (Lean 4 + Mathlib) results for the sorting
++number `S(n)`, the exact statement each proves, and the open fronts. Every
++theorem below is kernel-checked with no `sorry`/`admit`/`axiom`/`native_decide`;
++all modules build with `lake build --wfail` and replay under `leanchecker`.
++
++Model (`SoringP1/Model.lean`): a deterministic adaptive comparison algorithm is
++`ComparisonTree n` (`leaf (Equiv.Perm (Fin n)) | compare i j yes no`); `height`
++is the worst-case comparison count; `run ranking tree` returns the leaf reached;
++`Correct tree` means `∀ ranking, run ranking tree = ranking.symm`;
++`HasBudget n k` means some correct tree has height `≤ k`; and
++`S n := sInf {k | HasBudget n k}`.
++
++## Achieved
++
++### A0 — existence (`SoringP1/Existence.lean`)
++- `exists_hasBudget (n) : ∃ k, HasBudget n k` — a correct sorting tree exists
++  for every `n`, via an explicit fuel-driven insertion-sort tree `sortTree`.
++  This makes `S n` a genuine (nonempty) infimum.
++- `sortTree_correct`, `sortTree_height : height (sortTree n) ≤ n*(n+2)+(n+1)+1`.
++
++### A1 — attainment and minimality (`SoringP1/Attainment.lean`)
++- `hasBudget_S (n) : HasBudget n (S n)` — the infimum is attained.
++- `S_le_iff {n k} : S n ≤ k ↔ HasBudget n k` — `S n` is exactly the minimum
++  feasible budget.
++- `S_is_minimal`, `S_le_explicit (n) : S n ≤ n*(n+2)+(n+1)+1`,
++  `exists_tree_S (n) : ∃ tree, Correct tree ∧ height tree ≤ S n`.
++
++### A2 — information lower bound (`SoringP1/LowerBound.lean`)
++- `factorial_le_two_pow_height {n} (tree) (h : Correct tree) :
++    n.factorial ≤ 2 ^ height tree`
++- `factorial_le_two_pow_S (n) : n.factorial ≤ 2 ^ S n`
++  (the classic `S(n) ≥ log₂ n!` bound, kernel-checked against the model).
++- Supporting: `numLeaves_le_two_pow_height`, `leafSet_card_le_numLeaves`,
++  `run_mem_leafSet`, `factorial_le_numLeaves`.
++
++### A4 / A5 — exact small values (`SoringP1/SmallValues.lean`)
++- `S_zero : S 0 = 0`, `S_one : S 1 = 0`, `S_two : S 2 = 1`, `S_three : S 3 = 3`.
++- Explicit optimal trees `treeTwo` (1 comparison) and `treeThree`
++  (3 comparisons), each proven `Correct`; lower bounds from A2.
++
++### A7 — exact values `S 4 = 5`, `S 5 = 7`, `S 6 = 10`
++  (`SoringP1/SmallValues4.lean`, `SmallValues5.lean`, `SmallValues6.lean`)
++- Optimal trees `treeFour`/`treeFive`/`treeSix` of heights 5/7/10, **generated by
++  a minimax search over partial orders** (`scripts/generate_optimal_tree.py`) and
++  emitted mechanically with computable swap-composition leaves, so `Correct` is
++  closed by `fin_cases … <;> decide`.
++- `S_four : S 4 = 5`, `S_five : S 5 = 7`, `S_six : S 6 = 10`, via the helper
++  `S_eq_of {n v} (hup : HasBudget n v) (hlo : 2^(v-1) < n!) : S n = v` and the
++  lower bounds from A2.
++- Hence **`S(0..6) = 0, 0, 1, 3, 5, 7, 10` are all exact and kernel-checked**,
++  matching `scripts/evaluate.py`. Each value equals `⌈log₂ n!⌉` for `n ≤ 6`.
++- `SoringP1/SmallValues7.lean`: `thirteen_le_S_seven : 13 ≤ S 7`,
++  `S_seven_le : S 7 ≤ 21` (and `S_seven_bracket`) — `S 7` is beyond the
++  evaluator/generator range but is bracketed by the general bounds.
++- `SoringP1/TightSmall.lean`: `S_eq_clog_of_le_six (n) (h : n ≤ 6) :
++  S n = Nat.clog 2 n.factorial` — the information bound is tight for `n ≤ 6`.
++
++### A8 — monotonicity (`SoringP1/Monotone.lean`)
++- `S_mono (n) : S n ≤ S (n + 1)` — the optimal comparison count is
++  nondecreasing in `n`.
++- Built by pruning an `(n+1)`-tree to an `n`-tree (`ext`, `stripMax`, `prune`,
++  `stripMax_symm_ext`, `height_prune`, `run_prune`): comparisons against the
++  largest element are fixed and the element is stripped from leaves, so the
++  pruned tree is correct with no greater height.
++
++### A9 — elementary general bounds (`SoringP1/Bounds.lean`)
++- `n_sub_one_le_S (n) : n - 1 ≤ S n` — at least `n - 1` comparisons are needed,
++  via `two_pow_pred_le_factorial : 2 ^ (n - 1) ≤ n!` and the information bound.
++- `log2_factorial_le_S (n) : Nat.log2 n.factorial ≤ S n` — the information
++  bound in logarithmic form.
++- `le_S_of_pow_lt (n k) (h : 2 ^ (k-1) < n!) : k ≤ S n` — a usable lower-bound
++  form; instances `thirteen_le_S_seven : 13 ≤ S 7`, `sixteen_le_S_eight : 16 ≤ S 8`.
++- `clog_factorial_le_S (n) : Nat.clog 2 n.factorial ≤ S n` — the information
++  bound in ceiling-logarithm form (`S n ≥ ⌈log₂ n!⌉`).
++
++### A10 — tight upper bound (`SoringP1/TightBound.lean`)
++- `S_le_tight (n) : S n ≤ n * (n - 1) / 2` — the insertion tree's true
++  comparison count (insert position `i` costs ≤ `i`), via the comparison-exact
++  height invariant `height_go_tight` (`Hinto`, `Haux`; a length-only invariant so
++  both children of a comparison node satisfy it). Supersedes the loose
++  `n(n+2)+(n+1)+1`.
++
++### Evaluator (`SoringP1/Minimax.lean`)
++- `splitPairs (S) : Finset (Fin n × Fin n)` — comparison pairs that split a
++  ranking set into two nonempty parts; `splitPairs_nonempty : 2 ≤ S.card →
++  (splitPairs S).Nonempty` (the combinatorial core).
++- `adv (S) : ℕ` — the partial-order minimax value (least worst-case comparison
++  count for sorting every ranking in `S`), **computable** by recursion on
++  `S.card`; `filter_card_lt` gives the termination measure.
++- `Sorts S T` — `T` sorts every ranking in `S`.
++- `adv_le_height : Sorts S T → adv S ≤ height T` — the adversary lower bound.
++- `adv_le_height_correct : Correct T → adv univ ≤ height T`.
++- `adv_univ_le_S (n) : adv univ ≤ S n` — the adversary bound in infimum form.
++- `adv_eq_zero_iff (S) : adv S = 0 ↔ S.card ≤ 1`.
++- `bestPair S` — an optimal comparison pair (argmin of the minimax cost), and
++  `bestPair_le`; `minimaxTree S` — the minimax sorting tree (compare the optimal
++  pair, recurse); `minimaxTree_sorts : Sorts S (minimaxTree S)`. The height half
++  of the specification (`height (minimaxTree S) ≤ adv S`) is **not yet proven**:
++  its natural proof hits a definitional-equality/whnf loop unfolding the
++  recursive `adv` (e.g. in `Finset.le_min'`), which does not terminate; the fix
++  requires restructuring `adv` (e.g. an opaque `WellFounded.fix` wrapper).
++
++## Open fronts
++
++1. **Tighter upper bound — DONE (A10).** `S_le_tight : S n ≤ n(n-1)/2` is
++   proven via the comparison-exact height invariant `height_go_tight`.
++2. **Exact value `S 4 = 5`** (and beyond): requires an explicit height-5 tree on
++   four keys (up to 24 leaves); best generated programmatically rather than by
++   hand.
++3. **Evaluator correspondence (general).** A checked executable minimax /
++   partial-order evaluator and a proof that it computes `S` on its domain.
++   Done: `SoringP1/Minimax.lean` defines the computable recurrence `adv` and
++   proves the adversary lower bound `adv S ≤ height T` (and `adv univ ≤ height T`
++   for correct `T`). Remaining: construct the achieving minimax tree and prove
++   `S n = adv univ`.
++4. **Complexity classes.** Encode `S` (or its threshold language) against a
++   Turing-machine/resource model and prove an upper bound under a fixed
++   encoding — distinguishing unary (`2^{O(n²)}` in `n`, i.e. EXPTIME) from
++   binary input (`2^{O(2^m)}`, 2-EXPTIME). No `NP` membership or separation is
++   claimed; the model is a decision-tree model, not yet a machine model.
++5. **Structural characterization** of `S(n)` avoiding partial-order enumeration.
++
++A theorem about a surrogate problem is not a theorem about `S`; each result
++above states its exact object.
+diff --git a/scripts/generate_optimal_tree.py b/scripts/generate_optimal_tree.py
+new file mode 100644
+index 0000000..eade864
+--- /dev/null
++++ b/scripts/generate_optimal_tree.py
+@@ -0,0 +1,50 @@
++import itertools, sys
++from functools import lru_cache
++
++def perms(n): return list(itertools.permutations(range(n)))
++def sorted_positions(r): return tuple(sorted(range(len(r)), key=lambda p: r[p]))
++
++def solve(n):
++    allp = perms(n)
++    @lru_cache(maxsize=None)
++    def best(state):
++        if len(state) <= 1: return (0, ('leaf', next(iter(state))))
++        bestv = None
++        for i in range(n):
++            for j in range(n):
++                if i == j: continue
++                yes = frozenset(p for p in state if p[i] < p[j])
++                no  = frozenset(p for p in state if p[i] > p[j])
++                if not yes or not no: continue
++                dy, ty = best(yes); dn, tn = best(no)
++                v = 1 + max(dy, dn)
++                if bestv is None or v < bestv[0]:
++                    bestv = (v, ('node', i, j, ty, tn))
++        return bestv
++    return best(frozenset(allp))
++
++def swap_expr(l, n):
++    tau = list(range(n)); swaps = []
++    for i in range(n):
++        target = l[i]
++        j = tau.index(target)
++        if j != i:
++            swaps.append((i, j)); tau[i], tau[j] = tau[j], tau[i]
++    if not swaps: return f"(Equiv.refl (Fin {n}))"
++    expr = f"(Equiv.swap {swaps[0][0]} {swaps[0][1]})"
++    for (a, b) in swaps[1:]:
++        expr = f"((Equiv.swap {a} {b}).trans {expr})"
++    return expr
++
++def emit(tree, n, ind):
++    pad = '  ' * ind
++    if tree[0] == 'leaf':
++        return f"{pad}(.leaf {swap_expr(sorted_positions(tree[1]), n)})"
++    _, i, j, yes, no = tree
++    return (f"{pad}(.compare {i} {j}\n" + emit(yes, n, ind+1) + "\n" + emit(no, n, ind+1) + ")")
++
++if __name__ == '__main__':
++    n = int(sys.argv[1])
++    depth, tree = solve(n)
++    print(f"-- n={n} depth={depth}", file=sys.stderr)
++    print(emit(tree, n, 1))

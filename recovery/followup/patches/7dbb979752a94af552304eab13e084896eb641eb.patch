@@ -1,0 +1,519 @@
+commit 7dbb979752a94af552304eab13e084896eb641eb
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 17:25:30 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 17:25:30 2026 +0000
+
+    Implement claim-once autonomous SoringP1 research frontier
+
+diff --git a/docs/operations.md b/docs/operations.md
+index 0ed5d13..4895e75 100644
+--- a/docs/operations.md
++++ b/docs/operations.md
+@@ -24,104 +24,63 @@ Do not print the whole board into an agent's context; use the digest:
+ When posting with `--json`, redirect the output to a file. Post only when
+ something changed: a result, a falsification, or a precise obstacle.
+ 
+-## How many agents to run
+-
+-Run one agent per **distinct, curated research question**, up to a target
+-of five. The number of questions decides the number of agents, not the
+-other way round: if only three questions are worth asking, three agents
+-run. Never invent work to fill a slot. Agent count is not a measure of
+-progress.
+-
+-Each packet must state a precise all-`n` question, its consequence for the
+-uniform complexity of `S(n)`, permitted assumptions, non-goals, how it
+-could be falsified, and when to stop.
+-
+-## The pool keeper
+-
+-`scripts/agent_pool_keeper.py` runs on billy-dev (it refuses to run
+-elsewhere) and enforces the rule above:
+-
+-- Every 10 seconds it counts running SoringP1 agents (title prefix
+-  `SoringP1` or a worktree under `/home/lubko/soring301`).
+-- If fewer than the target (default 5, `--target N` to change) are
+-  running, it relaunches roster agents with their **next curated packet**
+-  from [`research-packets.json`](research-packets.json), oldest first.
+-- An agent that finished in the last 4 minutes is not relaunched yet, so
+-  quick completions do not flood the board.
+-- An agent whose curated packets are all used is **awaiting curation**: it
+-  is not relaunched and not given a made-up task. The keeper logs how many
+-  tracks are waiting. The running count may stay below the target. **This
+-  does not complete or pause Viche's standing SoringP1 research mandate.**
+-- A running agent with no output for 30 minutes, or one that can return to
+-  the preferred model after a quota cooldown, is steered in place with its
+-  next curated packet (at most one per tick). Exhausted tracks are not
+-  steered.
+-
+-Agents are reused by ID in the worktree they were created for; the keeper
+-refuses agents whose declared worktree is missing or different.
+-
+-State lives in `/home/lubko/.local/state/soringp1/` (`agent-pool.json`
+-for last-launch times, `packet-cursors.json` for each agent's position in
+-its packet list). A lock file prevents two keepers from running.
+-
+-Merging a keeper change to `main` does not update the running process:
+-pull on billy-dev and restart the keeper.
+-
+-## Continuous research mandate (Founder, 2026-10-22)
+-
+-Viche's Executive must continue work on SoringP1 until its final mathematical
+-theorems are actually proved, independently checked and published, and all
+-authorized SoringP1 work is genuinely resolved. A finished agent, exhausted
+-packet list, or temporarily empty keeper pool is **never** evidence of project
+-completion. The keeper is only an execution convenience for previously curated
+-questions, not a definition of the research frontier or its end.
+-
+-The Executive shall regularly inspect the newest `main`, open issues,
+-`#301`, mathematical gaps and research results. It must actively identify
+-and commission nonredundant, falsifiable new mathematical approaches, including
+-after the keeper exhausts its finite plan, using the current research plan and
+-literature. Neither a fixed agent number nor adding duplicate packets is an
+-acceptable substitute for substantive progress. Formalization follows mature,
+-relevant theorems rather than becoming the main objective.
+-
+-The current Antonina CLI requires `agent run --cwd <declared-worktree>` on
+-**every** run, including resuming an existing agent and `--steer`. The keeper
+-uses the verified declaration to specify that directory explicitly.
+-
+-## Curating packets
+-
+-To give a track new work, append a question to that agent's list in
+-`docs/research-packets.json` (format version 2: a shared `common`
+-preamble plus a list of packets per agent ID; each packet at least 60
+-characters, no duplicates). The keeper picks it up on its next tick
+-without a restart. To add a new agent, add it to `ROSTER` in the keeper
+-and give it packets.
+-
+-Good packet sources: open obstacles reported on #301, the open questions
+-in [research-plan.md](research-plan.md), and independent review of a
+-recent central claim. Examples of distinct question families:
+-
+-- tightness of the gap between computable lower and upper bounds;
+-- algorithms that avoid enumerating winning partial-order states;
+-- structural classification or compression without counting every
+-  isomorphism class;
+-- lower-bound mechanisms and the `n = 12` obstruction;
+-- threshold certificates and the cost of verifying them;
+-- encoding-faithful reductions for the fixed antichain `S(n)`;
+-- recurrences and subproblem composition;
+-- literature and model audits, and independent falsification of central
+-  arguments.
+-
+-## Orchestrator's loop
+-
+-1. Check `main` and open PRs, board #301, the agent pool, and recent
+-   results and failures.
+-2. Reconstruct the set of materially different open questions.
+-3. Curate packets only for questions that are distinct and falsifiable
+-   and have an explicit consequence for computing `S(n)`.
+-4. Collect results without waiting for every agent. Retry infrastructure
+-   failures without treating them as mathematical refutations.
+-5. Compare conflicting claims proposition by proposition; an independent
+-   review or bounded counterexample search beats voting.
+-6. Record durable findings on #301. Repository changes go through the
+-   publication gate in `AGENTS.md`; the orchestrator does final review.
++## Continuous research frontier
++
++The production keeper is `scripts/research_frontier.py`, invoked through
++the existing `scripts/agent_pool_keeper.py` service entrypoint. The prior
++finite per-agent packet mechanism is retained for historical tests only.
++
++The plan is a **durable claim-once ledger** at
++`~/.local/state/soringp1/frontier-ledger.json`, initially populated from
++[research-frontier.json](research-frontier.json). Each front has a stable
++ID, falsifiable all-n question, proposed falsifier, complexity implication,
++and concrete research basis. Entries move through `ready` ->
++`launching` -> `running` -> `investigated` or `blocked`.
++
++The keeper launches **every independent ready question** in an isolated
++checkout under `~/soring-fronts/ID`, using an independently created
++Antonina agent. No numerical concurrency quota, old fixed roster, or
++arbitrary filler work. Each front is claimed durably before execution:
++restarts recover incomplete launches and never silently discard a result.
++A process exit is explicitly only a recorded investigation, not a proof
++or a verified final theorem.
++
++When no fronts are ready or working, the keeper commissions one independent
++research **curator**. It studies recent results, the board #301, and the
++primary literature, and proposes precise nonredundant next fronts in
++`~/soring-fronts/curator/frontier-candidates.json`. The deterministic
++keeper checks the proposed schema, stable IDs, and exact textual duplicates
++before importing them as `ai_proposal_unverified`; this is **not** a
++mathematical novelty or quality guarantee. Weak or redundant fronts must
++be challenged by research agents and Viche, not inflated into success.
++If the curator cannot identify a useful front, an explicit empty outcome
++is recorded and the next curation attempt is delayed, rather than
++running repetitive work. Curators never create proofs by declaration.
++
++The existing Viche Executive independently examines research quality and
++commissioning. The Legislature and Judiciary remain independent; they
++can read the ledger but do not need to authorize ordinary research.
++
++## Operation
++
++The `soringp1-agent-pool` s6 service runs on **billy-dev only**.
++Its established entrypoint now invokes the continuous keeper. Restart
++the service after merging code changes; a running Python interpreter
++does not load updated code automatically.
++
++    python3 scripts/research_frontier.py --once --dry-run
++
++The dry run shows how many independent fronts are ready without launching
++them. For actual operation use `python3 scripts/agent_pool_keeper.py`
++(or let s6 supervise it). The exclusive lock prevents duplicate keepers.
++
++The legacy `docs/research-packets.json` and finite-keeper helper functions
++remain readable for historical tests, but their exhausted cursors no longer
++constrain the live research frontier.
++
++## Continuous mandate
++
++Research continues until the actual founder-defined theorems have been
++proved, independently checked, published, and the issues closed.
++Neither an empty frontier nor a successful agent exit is completion.
++No routine Lean formalization without a mature relevant theorem.
+diff --git a/docs/research-frontier.json b/docs/research-frontier.json
+new file mode 100644
+index 0000000..f65dbf6
+--- /dev/null
++++ b/docs/research-frontier.json
+@@ -0,0 +1,40 @@
++{
++  "version": 1,
++  "fronts": [
++    {
++      "id": "fo-tc-policy-interpreter",
++      "question": "Determine whether uniform FO(TC) policy descriptions admit a polynomially checkable proof of worst-case comparison depth at the antichain root, rather than just polynomial evaluation on a single input order.",
++      "falsifier": "Construct an explicit FO(TC)-expressible policy whose worst-case comparison budget is hard to check or whose all-n expressive completeness provably fails.",
++      "implication": "A sound, complete and polynomial-size proof-carrying FO(TC) normal form would establish SORT-BOUND-U membership in NP; execution alone does not.",
++      "basis": "Founder-selected Antonina issue JTsW4AnxTLzN18IBQibXea-fervor and SoringP1 issue #301; previous certificate soundness-versus-completeness gap."
++    },
++    {
++      "id": "root-reachable-certified-quotient",
++      "question": "Test a candidate exact root-reachable equivalence of optimal comparison histories stronger than relabelled-poset isomorphism, with an explicitly checkable two-outcome congruence and a polynomial bound on distinct classes for all n.",
++      "falsifier": "Exhibit an infinite family of root-optimal decision strategies for which any such equivalence requires superpolynomially many distinct verified classes, or prove a concrete simpler class fails.",
++      "implication": "A correct polynomial root-optimal quotient plus a locally checkable height certificate would yield a polynomial NP certificate for the unary decision threshold.",
++      "basis": "Framed DAG checker in scripts/check_framed_strategy.py; prior work distinguishes a valid local checker from an all-n completeness theorem."
++    },
++    {
++      "id": "root-composition-exact-recurrence",
++      "question": "Seek a compositional exact recurrence for optimal sorting from chain or ordinal-product interfaces that preserves the adversarial root and both sibling branches, not merely the post-transcript minimax F(P).",
++      "falsifier": "Supply a small but extensible family in which all candidate interface summaries agree but the exact antichain root optimum differs, or show an explicit sibling-incompatibility obstruction.",
++      "implication": "A uniform polynomial-state exact root recurrence would improve the time bound for computing S(n) and perhaps place SORT-BOUND-U in P.",
++      "basis": "docs/problem.md, established root-prefix sibling obstruction and prior failed naive direct-sum transfer in the research ledger."
++    },
++    {
++      "id": "compress-exact-space-evaluator",
++      "question": "Construct and rigorously analyze a uniform exact evaluation algorithm for S(n) with asymptotically smaller workspace than the existing recurrence, explicitly accounting for representation and branch recomputation.",
++      "falsifier": "Give a concrete state family forcing the proposed compact representation to store superpolynomial independent decisions, or find a hidden recursive stack-space violation.",
++      "implication": "A verified uniform smaller-space bound would strengthen the known upper bound for SORT-BOUND-U even without proving P or NP membership.",
++      "basis": "docs/problem.md established unary PSPACE membership and prior recomputation analyses; focus on a genuinely improved bound."
++    },
++    {
++      "id": "quantified-root-adversary-proof",
++      "question": "Construct a sound, polynomial-time checkable adversary invariant that forces a comparison obstruction from the initial n-element antichain under EVERY sorting strategy, not only from an arbitrary reachable partial order.",
++      "falsifier": "Construct a uniform sorter counterstrategy defeating a proposed local forcing invariant even though isolated reachable gadget states remain hard.",
++      "implication": "A verified all-n antichain lower-bound theorem can improve numerical bounds on S(n), but would not alone separate unary computation complexity classes.",
++      "basis": "Root quantifier distinction in GitHub issues #47 and #48 and previously established small-poset lower-bound gadgets."
++    }
++  ]
++}
+diff --git a/scripts/agent_pool_keeper.py b/scripts/agent_pool_keeper.py
+index 216dd62..5003095 100644
+--- a/scripts/agent_pool_keeper.py
++++ b/scripts/agent_pool_keeper.py
+@@ -284,4 +284,8 @@ def main():
+     return 0
+ 
+ if __name__ == "__main__":
+-    sys.exit(main())
++    # Legacy finite-packet helpers are retained for existing tests and
++    # migration inspection. The live keeper now consumes the open, durable
++    # research frontier and automatically commissions independent curation.
++    from research_frontier import main as continuous_main
++    continuous_main()
+diff --git a/scripts/research_frontier.py b/scripts/research_frontier.py
+new file mode 100644
+index 0000000..49cec23
+--- /dev/null
++++ b/scripts/research_frontier.py
+@@ -0,0 +1,190 @@
++#!/usr/bin/env python3
++"""Durable claim-once research fronts; independent curator replenishes on depletion."""
++import fcntl, json, os, re, subprocess, tempfile, time
++from pathlib import Path
++HOME=Path('/home/lubko')
++REPO=HOME/'soring301'
++SOURCE=Path(os.getenv('SORING_FRONTIER_SOURCE',str(REPO/'docs/research-frontier.json')))
++STATE=Path(os.getenv('SORING_FRONTIER_STATE',str(HOME/'.local/state/soringp1/frontier-ledger.json')))
++WORK=Path(os.getenv('SORING_FRONTIER_WORK',str(HOME/'soring-fronts')))
++CLI=str(HOME/'.local/bin/antonina')
++BASE=('On billy-dev ONLY, study AGENTS.md, docs/problem.md and current board #301. '
++      'Study the primary literature, attack a precise all-n falsifiable mathematical '
++      'claim about complexity of EXACT unary S(n), and try seriously to DISPROVE it. '
++      'Distinguish general-poset results and certificate SOUNDNESS from completeness. '
++      'Do not create Lean or repository changes without a genuinely substantive, '
++      'independently checkable new theorem or counterexample. Report honest limits. ')
++def call(args,timeout=50):
++    return subprocess.run(list(map(str,args)),capture_output=True,text=True,timeout=timeout)
++def save(d):
++    STATE.parent.mkdir(parents=True,exist_ok=True)
++    fd,tmp=tempfile.mkstemp(dir=STATE.parent,prefix='.frontier-')
++    try:
++        with os.fdopen(fd,'w') as f:
++            json.dump(d,f,indent=2,sort_keys=True)
++            f.write('\n');f.flush();os.fsync(f.fileno())
++        os.replace(tmp,STATE)
++    finally:
++        if os.path.exists(tmp):os.unlink(tmp)
++def valid(x):
++    return isinstance(x,dict) and bool(re.fullmatch('[a-z][a-z0-9-]{5,62}',str(x.get('id','')))) and all(
++        isinstance(x.get(k),str) and len(x[k])>=n for k,n in
++        [('question',75),('falsifier',40),('implication',40),('basis',35)])
++def load():
++    if STATE.exists():
++        d=json.loads(STATE.read_text())
++    else:
++        x=json.loads(SOURCE.read_text())
++        assert x['version']==1 and all(valid(y) for y in x['fronts'])
++        d={'version':1,'fronts':[dict(y,status='ready',origin='reviewed_seed') for y in x['fronts']],
++           'curator':{}}
++        save(d)
++    assert d['version']==1 and all(valid(x) for x in d['fronts'])
++    ids=[x['id'] for x in d['fronts']]
++    assert len(ids)==len(set(ids))
++    return d
++def live():
++    p=call([CLI,'agent','list','--running','--page',1,'--limit',500,'--json'])
++    if p.returncode:raise RuntimeError(p.stderr[-300:])
++    obj=json.loads(p.stdout)
++    if obj.get('unreadable'):raise RuntimeError('incomplete inventory')
++    return {x['id'] for x in obj['agents']}
++def status(aid):
++    p=call([CLI,'agent','status','--id',aid,'--json'])
++    return json.loads(p.stdout).get('state') if p.returncode==0 else 'unavailable'
++def excerpt(aid):
++    p=HOME/'.local/state/antonina/agents'/aid/'output.log'
++    if not p.exists():return 'No readable output; no verified result'
++    pieces=[]
++    for line in p.open(errors='replace'):
++        try:x=json.loads(line)
++        except ValueError:continue
++        part=x.get('part')
++        if x.get('type')=='text' and isinstance(part,dict) and isinstance(part.get('text'),str):
++            pieces.append(part['text'])
++            if len(pieces)>8:pieces.pop(0)
++    return '\n'.join(pieces)[-3500:] or 'No final text; audit needed'
++def workspace(slug):
++    p=WORK/slug
++    if p.exists():
++        if not (p/'.git').exists():raise RuntimeError('unowned path '+str(p))
++    else:
++        WORK.mkdir(parents=True,exist_ok=True)
++        r=call(['git','clone','--local','--shared','--quiet',REPO,p],90)
++        if r.returncode:raise RuntimeError(r.stderr[-250:])
++        call(['git','-C',p,'remote','set-url','origin','git@github.com:ottojung/soringp1.git'])
++    return p
++def new(path,title):
++    r=call([CLI,'agent','new','--cwd',path,'--title',title,'--json'])
++    if r.returncode:raise RuntimeError(r.stderr[-250:])
++    x=json.loads(r.stdout)
++    aid=x.get('id') or x.get('agent_id')
++    if not aid:raise RuntimeError('missing agent id')
++    return aid
++def run(aid,path,prompt):
++    r=call([CLI,'agent','run','--id',aid,'--cwd',path,'--prompt',prompt,'--detach','--json'],65)
++    if r.returncode:raise RuntimeError(r.stderr[-300:])
++def reconcile(d,active):
++    for q in d['fronts']:
++        if q['status'] not in ('running','launching') or q.get('agent_id') in active:continue
++        s=status(q['agent_id']) if q.get('agent_id') else 'unavailable'
++        if s=='idle' and q['status']=='launching':
++            q['status']='ready'  # interrupted launch, reuse the reserved agent id
++            continue
++        if s not in ('succeeded','failed','stopped','killed'):continue
++        q.update(status='investigated' if s=='succeeded' else 'blocked',
++                 exit_state=s,finished_at=time.time(),finding_unverified=excerpt(q['agent_id']))
++        print('research result',q['id'],s,flush=True)
++def curate_done(d,active):
++    c=d.get('curator',{})
++    if not c.get('agent_id') or c['agent_id'] in active:return
++    s=status(c['agent_id'])
++    if s not in ('succeeded','failed','stopped','killed'):return
++    path=WORK/'curator'/'frontier-candidates.json'
++    try:
++        proposals=json.loads(path.read_text()).get('fronts',[]) if s=='succeeded' else []
++    except (OSError,ValueError):proposals=[]
++    known={q['id'] for q in d['fronts']}
++    questions={re.sub(r'\W+','',q['question'].lower()) for q in d['fronts']}
++    added=0
++    for q in proposals if isinstance(proposals,list) else []:
++        if not valid(q) or q['id'] in known:continue
++        fingerprint=re.sub(r'\W+','',q['question'].lower())
++        if fingerprint in questions:continue
++        d['fronts'].append(dict({k:q[k] for k in ('id','question','falsifier','implication','basis')},
++                                status='ready',origin='ai_proposal_unverified'))
++        known.add(q['id']);questions.add(fingerprint);added+=1
++    d['curator']={'last_finished_at':time.time(),'added':added,'exit_state':s}
++    print('curator',s,'new fronts',added,flush=True)
++def dispatch(d,q):
++    path=workspace(q['id'])
++    if not q.get('agent_id'):
++        q['agent_id']=new(path,'SoringP1 frontier: '+q['id'])
++        q['status']='launching'
++        save(d)
++    prompt=(BASE+'\nFRONT: '+q['question']+'\nFALSIFIER: '+q['falsifier']+
++            '\nCOMPLEXITY IMPLICATION: '+q['implication']+'\nEVIDENCE: '+q['basis']+
++            '\nOn completion report a mathematical finding, concrete failed '
++            'approach or exact obstruction; do not confuse process success with a proof.')
++    run(q['agent_id'],path,prompt)
++    q.update(status='running',started_at=time.time())
++    save(d)
++    print('dispatched',q['id'],q['agent_id'],flush=True)
++def curate(d):
++    path=workspace('curator')
++    output=path/'frontier-candidates.json'
++    if output.exists():output.unlink()
++    aid=new(path,'SoringP1 autonomous research-frontier curator')
++    d['curator']={'agent_id':aid,'started_at':time.time()}
++    save(d)
++    old=[{'id':q['id'],'status':q['status'],'finding':q.get('finding_unverified','')[-600:]}
++         for q in d['fronts'][-20:]]
++    prompt=(BASE+'\nCURATOR ROLE: propose genuinely NEW independent all-n falsifiable '
++            'research questions grounded in newest board #301, repository docs and '
++            'independently checked mathematical evidence. Refuse duplicate investigations. '
++            'If no defensible new direction is available, output an empty list. '
++            'Write ONLY a JSON object with fronts array to '+str(output)+'. '
++            'Each front has id (6..63 character lowercase slug), question (>=75 chars), '
++            'falsifier (>=40 chars), implication (>=40 chars), basis (>=35 chars). '
++            'Never claim proof or verification. PREVIOUS: '+json.dumps(old)[-15000:])
++    run(aid,path,prompt)
++    print('curation started',aid,flush=True)
++def tick(d,dry=False):
++    active=live()
++    reconcile(d,active)
++    curate_done(d,active)
++    ready=[q for q in d['fronts'] if q['status']=='ready']
++    if dry:
++        print('dry-run ready',len(ready),'active',len(active));return
++    for q in ready:
++        try:dispatch(d,q)
++        except Exception as exc:
++            q['launch_error']=str(exc)[-300:]
++            print('launch failed',q['id'],q['launch_error'],flush=True)
++    save(d)
++    useful=any(q['status'] in ('ready','running','launching') for q in d['fronts'])
++    c=d.get('curator',{})
++    if not useful and not c.get('agent_id') and time.time()-c.get('last_finished_at',0)>=1800:
++        try:curate(d)
++        except Exception as exc:print('curation failed',str(exc)[-300:],flush=True)
++    print('frontier ready',sum(q['status']=='ready' for q in d['fronts']),
++          'active',sum(q['status'] in ('running','launching') for q in d['fronts']),
++          'curator_running',bool(d.get('curator',{}).get('agent_id')),flush=True)
++def main():
++    import argparse
++    a=argparse.ArgumentParser()
++    a.add_argument('--once',action='store_true')
++    a.add_argument('--dry-run',action='store_true')
++    args=a.parse_args()
++    if os.uname().nodename!='billy-dev' and not args.dry_run:raise SystemExit('billy-dev only')
++    STATE.parent.mkdir(parents=True,exist_ok=True)
++    with (STATE.parent/'frontier.lock').open('w') as lock:
++        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        while True:
++            try:tick(load(),args.dry_run)
++            except Exception as exc:
++                print('frontier error',repr(exc),flush=True)
++                if args.once:raise
++            if args.once or args.dry_run:break
++            time.sleep(30)
++if __name__=='__main__':main()
+diff --git a/tests/test_research_frontier.py b/tests/test_research_frontier.py
+new file mode 100644
+index 0000000..2343d62
+--- /dev/null
++++ b/tests/test_research_frontier.py
+@@ -0,0 +1,80 @@
++"""Frontier tests: durable exactly-once questions, no quotas, honest results."""
++import importlib.util
++import json
++from pathlib import Path
++import tempfile
++import unittest
++from unittest import mock
++
++ROOT=Path(__file__).resolve().parents[1]
++SPEC=importlib.util.spec_from_file_location('frontier',ROOT/'scripts/research_frontier.py')
++F=importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(F)
++
++class FrontierTests(unittest.TestCase):
++    def sample(self):
++        return json.loads((ROOT/'docs/research-frontier.json').read_text())['fronts']
++
++    def test_seed_has_independent_specific_falsifiable_questions(self):
++        entries=self.sample()
++        self.assertGreaterEqual(len(entries),4)
++        self.assertEqual(len({x['id'] for x in entries}),len(entries))
++        for x in entries:self.assertTrue(F.valid(x),x)
++
++    def test_duplicate_proposals_rejected_without_claiming_theorems(self):
++        with tempfile.TemporaryDirectory() as temp:
++            p=Path(temp)/'frontier.json'
++            existing=[dict(self.sample()[0],status='investigated')]
++            d={'version':1,'fronts':existing,
++               'curator':{'agent_id':'curator123'}}
++            f=Path(temp)/'curator'/'frontier-candidates.json'
++            f.parent.mkdir();f.write_text(json.dumps({'fronts':[
++                self.sample()[0],
++                dict(self.sample()[1],id='distinct-curated-front'),
++            ]}))
++            with (mock.patch.object(F,'STATE',p),mock.patch.object(F,'WORK',Path(temp)),
++                  mock.patch.object(F,'status',return_value='succeeded')):
++                F.curate_done(d,set())
++                self.assertEqual(len(d['fronts']),2)
++                self.assertEqual(d['fronts'][1]['origin'],'ai_proposal_unverified')
++                self.assertEqual(d['curator']['added'],1)
++
++    def test_entire_ready_frontier_dispatched_no_fixed_slots(self):
++        d={'version':1,'fronts':[dict(x,status='ready') for x in self.sample()],
++           'curator':{}}
++        seen=[]
++        def fake(d,row):
++            seen.append(row['id']);row['status']='running'
++        with (mock.patch.object(F,'live',return_value=set()),
++              mock.patch.object(F,'dispatch',side_effect=fake),
++              mock.patch.object(F,'save')):
++            F.tick(d)
++        self.assertEqual(set(seen),{x['id'] for x in self.sample()})
++
++    def test_exhaustion_commissions_curator_not_filler(self):
++        d={'version':1,'fronts':[dict(x,status='investigated') for x in self.sample()],
++           'curator':{}}
++        with (mock.patch.object(F,'live',return_value=set()),
++              mock.patch.object(F,'curate') as curator,
++              mock.patch.object(F,'save')):
++            F.tick(d)
++            curator.assert_called_once()
++
++    def test_interrupted_launch_returns_to_ready(self):
++        d={'version':1,'fronts':[dict(self.sample()[0],status='launching',agent_id='reserved')],
++           'curator':{}}
++        with mock.patch.object(F,'status',return_value='idle'):
++            F.reconcile(d,set())
++        self.assertEqual(d['fronts'][0]['status'],'ready')
++
++    def test_successful_run_means_investigation_not_theorem(self):
++        d={'version':1,'fronts':[dict(self.sample()[0],status='running',agent_id='agent123')],
++           'curator':{}}
++        with (mock.patch.object(F,'status',return_value='succeeded'),
++              mock.patch.object(F,'excerpt',return_value='no conclusive proof')):
++            F.reconcile(d,set())
++        row=d['fronts'][0]
++        self.assertEqual(row['status'],'investigated')
++        self.assertIn('unverified',next(k for k in row if k=='finding_unverified'))
++
++if __name__=='__main__':unittest.main()
