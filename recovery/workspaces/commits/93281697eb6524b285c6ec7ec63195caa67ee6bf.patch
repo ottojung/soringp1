@@ -1,0 +1,191 @@
+commit 93281697eb6524b285c6ec7ec63195caa67ee6bf
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 16 17:04:53 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 16 17:04:53 2026 +0000
+
+    Executive 2026-10-16: residual C investigated (locked rule, Founder-reserved) and escalated; #195 landing assessed
+
+diff --git a/records/KAWUN-RESIDUAL-C-2026-10-16.md b/records/KAWUN-RESIDUAL-C-2026-10-16.md
+new file mode 100644
+index 00000000..c74397c1
+--- /dev/null
++++ b/records/KAWUN-RESIDUAL-C-2026-10-16.md
+@@ -0,0 +1,152 @@
++# Kawun residual C — locked ESLint rule gap, Founder authorization required
++
++**Seat:** c1a00002 (Executive liaison)
++**Date:** 2026-10-16
++**Issue:** Kawun #155 review blocker; also cited as the #195 landing blocker.
++**Verdict:** REAL gap. Fix requires modifying a **Founder-locked** ESLint rule. Viche must not do this without an explicit direct Founder instruction. Authorization requested.
++
++## 1. The gap (reproduced)
++
++`source/kawunapp/tools/eslint-plugin-kawun/rules/directory-imports.js` handles only
++`ImportDeclaration` (static `import ... from '...'`). It has **no** handler for
++`ImportExpression` (dynamic `import('...')`). Therefore a cross-directory deep
++import written as `await import('.../internal/file.ts')` draws **no report** and
++all gates stay green.
++
++This matters beyond style: Kawun's capability model uses *reachability* for module
++visibility (see #155), so a deep dynamic import can reach an internal module (and
++its authority) that the index-only rule is supposed to keep unreachable.
++
++Reproduction (2026-10-16, on `origin/main` @ `a30afa45`): adding an
++`ImportExpression` handler to the rule and running `npm run lint` surfaces
++**8 real violations** that the current rule misses:
++
++| File | Specifier |
++|---|---|
++| `src/backend/features/pickleball/service/tests/defaults.test.tsx:20` | `../../../../../../tests/pwa/a11y/harness.ts` |
++| `src/backend/features/pickleball/service/tests/wiring.test.tsx:16` | `../../../../../../tests/pwa/a11y/harness.ts` |
++| `src/modules/views/admin/tests/defaults.test.tsx:20` | `../../../../../tests/pwa/a11y/harness.ts` |
++| `src/modules/views/admin/tests/defaultsSeam.test.tsx:23` | `../../../../../tests/pwa/a11y/harness.ts` |
++| `tests/pwa/entry/entryBrowser.ts:27` | `../../../src/main.tsx` |
++| `tests/pwa/entry/open.test.ts:21` | `../a11y/harness.ts` |
++| `tests/pwa/entry/optionality.test.ts:22` | `../a11y/harness.ts` |
++| `tests/pwa/entry/wiring.test.ts:21` | `../a11y/harness.ts` |
++
++The rule change was applied, measured, and **reverted**; no locked file is modified
++in the tree.
++
++## 2. Why Viche cannot self-execute this
++
++Two Founder-owned records forbid it:
++
++- `source/kawunapp/docs/intent-record/engineering.md`, id `1327469051846307`
++  (title "ESLint and policy rules are locked", `source: @ottojung`):
++  *"Agents and ordinary repository work must not modify, weaken, disable, remove,
++  relax, replace, or bypass them. Changing this policy requires a new direct
++  trusted user instruction explicitly authorizing the policy change."*
++- `source/kawunapp/AGENTS.md`: *"Changing locked policy requires an explicit
++  direct user-authorized intent change."*
++
++`rules/directory-imports.js` is inside the locked surface
++(`policy/locked-surface.mjs`, `pluginDirectory = 'tools/eslint-plugin-kawun'`),
++so the `check-locked` hash gate must be re-pinned after any change.
++
++## 3. Prepared patch (unapplied; for immediate use on authorization)
++
++Rule (`rules/directory-imports.js`) — factor the check and add the dynamic case:
++
++```js
++'use strict';
++
++const path = require('node:path');
++const { INDEX_BASENAMES, resolveImportTarget } = require('../lib');
++
++module.exports = {
++  meta: {
++    type: 'suggestion',
++    docs: {
++      description: 'Import across directories only through their index.',
++    },
++    schema: [],
++    messages: {
++      deep: 'Import "{{specifier}}" through the directory index, not an'
++        + ' internal file.',
++    },
++  },
++  create(context) {
++    const current = path.dirname(context.filename);
++
++    function reportDeep(node, specifier) {
++      const target = resolveImportTarget(context.filename, specifier);
++      if (!target) return;
++      if (path.dirname(target) === current) return;
++      if (INDEX_BASENAMES.includes(path.basename(target))) return;
++      context.report({ node, messageId: 'deep', data: { specifier } });
++    }
++
++    return {
++      ImportDeclaration(node) {
++        reportDeep(node, node.source.value);
++      },
++      ImportExpression(node) {
++        const { source } = node;
++        if (source.type !== 'Literal') return;
++        if (typeof source.value !== 'string') return;
++        reportDeep(node, source.value);
++      },
++    };
++  },
++};
++```
++
++Test additions (`tests/directory-imports.test.js`), proven green:
++valid `import('../lib')`, `import('./max-line-length')`, `import(name)`;
++invalid `import('../lib/limits.js')`.
++
++Non-locked companion edits (7 of the 8 sites are mechanical — point them at the
++directory index `tests/pwa/a11y/index.ts`, which already re-exports `hooks`):
++
++- the 4 `src/**/tests/*.tsx` and the 3 `tests/pwa/entry/*.test.ts` imports above.
++
++The 8th site needs a decision: `tests/pwa/entry/entryBrowser.ts` deliberately
++**executes** the composition root `src/main.tsx` (the app entry that calls
++`createRoot` and arms the service-worker listener); there is no index that
++re-exports it, and importing `src/index.ts` would not run the bootstrap. Options:
++(a) a single, justified `eslint-disable-next-line` on that one line; or
++(b) extend the rule to treat `main.*` as an allowed entry surface alongside
++`index.*`. Recommendation: (a) — narrowest, auditable, no rule semantics change.
++
++## 4. Requested authorization (exact wording)
++
++> Founder: authorize the locked-policy change to Kawun's `kawun/directory-imports`
++> ESLint rule (intent record `1327469051846307`) adding `ImportExpression`
++> coverage so dynamic `import()` cannot bypass the index-only import constraint,
++> together with the mechanical companion edits to the 7 listed test imports and
++> the single justified disable at `tests/pwa/entry/entryBrowser.ts`.
++
++If the Founder declines, residual C is recorded as an accepted limitation and
++#155/#195 are closed/annotated on that basis.
++
++## 5. #195 landing assessment (measured 2026-10-16)
++
++`origin/main` and `origin/release/along-long-namespace` diverged at `d300b5e3`:
++**128** commits on the release line that main lacks, **178** on main that the
++release line lacks; full diff **622 files, +13785 / −14580**.
++
++A trial merge (local, `--no-commit`, then aborted; no ref moved) produced **35
++conflicted files**, including `package.json`, `policy/locked-policy.json`, several
++barrel `index.ts` files, and a batch of add/add test files under
++`tests/secret-url/`.
++
++Conclusion: landing the release line is a deliberate, reviewed integration
++effort — not a bounded single-agent action — and `main` is the production deploy
++branch (`kawunapp-deploy.yml`). Viche should not perform a unilateral wholesale
++merge. Recommended: a dedicated integration front with conflict-resolution,
++full-gate verification at the merged head, and independent review; or a decision
++that main has superseded the release line and #195 is closed as such.
++
++## 6. Recommendation
++
++Escalate once, concisely, with the prepared patch ready (done 2026-10-16 via Town
++Hall #297). Do not modify the locked rule without the instruction above. Do not
++perform a unilateral wholesale merge of `release/along-long-namespace` into `main`.
+diff --git a/records/MANDATES.md b/records/MANDATES.md
+index a0ce7487..5e4043f8 100644
+--- a/records/MANDATES.md
++++ b/records/MANDATES.md
+@@ -25,12 +25,18 @@
+ | #152 | audit secret Skrynia URL handling | **Verified & closed** | `f6fd55b8`/`d2952fed` in main; 1367 tests pass |
+ | #142 | rejecting message settle leaves reply port unanswered | **Verified & closed** | `2c371a68`/`3003225d`/`38d79716` in main; 1367 tests pass |
+ | #154 | replace browser JWK binding with device grant roots | **Verified & closed** | `b9ce4f62`/`7914f899` in main; 1367 tests pass |
+-| #155 | user/module grants and owner capability recovery | **Verified & closed** | `5b3a5cca`/`371f7848` in main; 1367 tests pass |
++| #155 | user/module grants and owner capability recovery | **Implementation verified; issue OPEN** | `5b3a5cca`/`371f7848` in main; 1367 tests pass. Board stays open: review (cd5b5be90e71) is request-changes on residual C (locked-rule gap). Escalated to Founder 2026-10-16 |
+ | #156 | private chat capability islands and per-writer streams | **Verified & closed** | `8745c0e9` in main; 1367 tests pass |
+ | #158 | remove obsolete crypto machinery, validate privacy e2e | **Verified & closed** | `a917d1f6` in main; 1367 tests pass |
+ | #188 | isEntry accepts write-authority field on read path | **Verified & closed** | `428a03a`/`d0f4628` in main; 1367 tests pass |
+ | #203 | check-retired-apps.mjs fails 19 times | **Fixed & closed** | `a30afa45` in main; handles-only matcher + keys.ts comment fix; check passes |
+-| #195 | Single-holder landing queue | **BLOCKED** | 14 commits on `release/along-long-namespace` @ `985c6638`; residual C (ImportExpression directory-imports rule) bars main landing; needs authorized locked-policy change (Founder-reserved) |
++| #195 | Single-holder landing queue | **OPEN — large integration** | Release line diverged: 128 release-only / 178 main-only commits, 622 files; trial merge = 35 conflicts vs production deploy branch. Not a bounded unilateral action. Escalated residual C; recommends dedicated integration front or closure decision |
++
++**Residual C (root blocker for #155/#195):** the locked ESLint rule
++`kawun/directory-imports` misses `ImportExpression`. Fixing it modifies
++Founder-locked policy (intent record `1327469051846307`; AGENTS.md), so it needs
++an explicit Founder instruction. Authorization requested 2026-10-16 (Town Hall
++#297); prepared patch + evidence in `records/KAWUN-RESIDUAL-C-2026-10-16.md`.
+ 
+ **Test baseline:** 413 test files / 1367 tests pass on `main` @ `a30afa45` (2026-10-16).
+ 

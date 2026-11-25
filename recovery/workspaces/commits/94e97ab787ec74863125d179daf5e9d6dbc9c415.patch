@@ -1,0 +1,138 @@
+commit 94e97ab787ec74863125d179daf5e9d6dbc9c415
+Author:     Viche Integrator <integrator@viche.local>
+AuthorDate: Mon Nov 23 03:12:52 2026 +0000
+Commit:     Viche Integrator <integrator@viche.local>
+CommitDate: Mon Nov 23 03:12:52 2026 +0000
+
+    Integrate delivery/act33-first-trial-dispatch-gate-20261122 (operator): Bind live deterministic Stats dispatch to independent first-trial evidence preflight
+    
+    Landed by the integration queue (Act 31) as one candidate on main 46edf381b456.
+    
+    Delivery-Branch: delivery/act33-first-trial-dispatch-gate-20261122
+    Delivery-Head: 6dfaa56fc392c632a7f77ebf1b35a92d88e0b52e
+    Proposed-By: operator
+    Reviewed-By: reviewer-emmgotujfqjfyeia3yvylu-costume
+    Review-Reason: Binds verified_order dispatch to the independent Act 33 first-trial preflight with a clean env (no VICHE_AT), refuses synthetic dates on live towns, and keeps the smoke fixtures aligned; all affected tests pass.
+    Integrated-By: government/integrator.py (Act 31)
+
+diff --git a/government/statistics-bounded-trial.py b/government/statistics-bounded-trial.py
+index f13ecec4..4f9c904b 100644
+--- a/government/statistics-bounded-trial.py
++++ b/government/statistics-bounded-trial.py
+@@ -128,6 +128,12 @@ def verified_order():
+         "post_guard": TOWN / "government/post_guard.py",
+         "budget_tool": TOWN / "government/knowledge-budget-tool.py",
+         "budget_config": CONF,
++        "trial_preflight": TOWN / "government/statistics-preflight.sh",
++        "trial_verifier": TOWN / "government/statistics-first-trial.py",
++        "trial_evidence": TOWN / "government/statistics-evidence.py",
++        "activation_gate": TOWN / "government/knowledge-activation-verify.sh",
++        "phase_gate": TOWN / "government/knowledge-phase-gate.sh",
++        "phase_verifier": TOWN / "government/knowledge-phase-verifier.py",
+         "runner": Path(__file__).resolve(),
+     }
+     if (not isinstance(hashes, dict) or set(hashes) != set(paths)
+@@ -140,6 +146,19 @@ def verified_order():
+                        env=dict(os.environ, VICHE_TOWN_ROOT=str(TOWN)))
+     except (OSError, subprocess.SubprocessError) as exc:
+         raise Denied("independent phase/activation gate is not green") from exc
++    # Act 33's additional, independently corroborated prospective design and
++    # Economy/Judiciary pretrial evidence gate MUST be checked at the point of
++    # actual Statistics work, not just in a standalone documentation script.
++    # Never pass an env-controlled synthetic date (VICHE_AT) to production.
++    try:
++        subprocess.run(["/bin/sh", str(TOWN / "government/statistics-preflight.sh"),
++                        "statistics", "first-trial"],
++                       check=True, capture_output=True, timeout=30,
++                       env={"VICHE_TOWN_ROOT": str(TOWN),
++                            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
++                            "LANG": "C.UTF-8", "PYTHONNOUSERSITE": "1"})
++    except (OSError, subprocess.SubprocessError) as exc:
++        raise Denied("independent prospective Act33 first-trial preflight is not green") from exc
+     return office
+ 
+ 
+diff --git a/government/statistics-preflight.sh b/government/statistics-preflight.sh
+index ded0ca9d..eace2e5e 100644
+--- a/government/statistics-preflight.sh
++++ b/government/statistics-preflight.sh
+@@ -88,6 +88,15 @@ case "$mode" in
+     [ -s "$helper" ] || exit 1
+     at=${VICHE_AT:-}
+     if [ -n "$at" ]; then
++      # A fabricated future/past wall clock could make an expired or not-yet-
++      # valid Executive order appear active. Synthetic dates are allowed ONLY
++      # for an explicitly selected, isolated /tmp trial fixture, never the
++      # canonical billy-dev state or an arbitrary Git seat worktree.
++      real_town=$(cd "$town" && pwd -P) || exit 1
++      case "$real_town" in
++        /tmp/*) : ;;
++        *) echo 'Act33 preflight: synthetic time refused on live town' >&2; exit 1 ;;
++      esac
+       python3 "$helper" verify "$town" "$att" "$at" >/dev/null 2>&1 || exit 1
+     else
+       python3 "$helper" verify "$town" "$att" >/dev/null 2>&1 || exit 1
+diff --git a/tests/statistics-bounded-post-smoke.sh b/tests/statistics-bounded-post-smoke.sh
+index 62bd34e6..48becc3a 100644
+--- a/tests/statistics-bounded-post-smoke.sh
++++ b/tests/statistics-bounded-post-smoke.sh
+@@ -10,6 +10,13 @@ mkdir -p "$town/government" "$town/records/knowledge" "$state/institutional-outc
+ cp "$repo/government/statistics-bounded-trial.py" "$repo/government/knowledge-budget-tool.py" \
+    "$repo/government/statistics-report.py" "$repo/government/post.py" "$repo/government/post_guard.py" \
+    "$repo/government/knowledge-budget.conf" "$town/government/"
++# This smoke isolates the runner resource precharge from the separately
++# tested independent Act33 first-trial evidence gate.
++printf '#!/bin/sh\n[ "$1" = statistics ] && [ "$2" = first-trial ]\n' > "$town/government/statistics-preflight.sh"
++printf '# exact audited helper fixture\n' > "$town/government/statistics-first-trial.py"
++printf '# exact evidence fixture\n' > "$town/government/statistics-evidence.py"
++printf '#!/bin/sh\nexit 0\n' > "$town/government/knowledge-phase-gate.sh"
++printf '# exact phase verifier fixture\n' > "$town/government/knowledge-phase-verifier.py"
+ cat > "$town/government/LAWS.md" <<'EOF'
+ ## Act 32 — Institutional Knowledge and Communications Act (enacted 2026-11-20)
+ ## Act 33 — Prospective Statistics Trial Clarification (enacted 2026-11-22)
+@@ -34,7 +41,12 @@ root=Path(sys.argv[1])
+ src={k:hashlib.sha256((root/"government"/f).read_bytes()).hexdigest()
+      for k,f in (("runner","statistics-bounded-trial.py"),("report","statistics-report.py"),
+                  ("post","post.py"),("post_guard","post_guard.py"),
+-                 ("budget_tool","knowledge-budget-tool.py"),("budget_config","knowledge-budget.conf"))}
++                 ("budget_tool","knowledge-budget-tool.py"),("budget_config","knowledge-budget.conf"),
++                 ("trial_preflight","statistics-preflight.sh"),("trial_verifier","statistics-first-trial.py"),
++                 ("trial_evidence","statistics-evidence.py"),
++                 ("activation_gate","knowledge-activation-verify.sh"),
++                 ("phase_gate","knowledge-phase-gate.sh"),
++                 ("phase_verifier","knowledge-phase-verifier.py"))}
+ now=int(time.time())
+ (root/"records/knowledge/activation.json").write_text(json.dumps({
+ "schema":"viche-knowledge-activation-v1",
+diff --git a/tests/statistics-bounded-trial-smoke.sh b/tests/statistics-bounded-trial-smoke.sh
+index 557badd5..2aaef90e 100644
+--- a/tests/statistics-bounded-trial-smoke.sh
++++ b/tests/statistics-bounded-trial-smoke.sh
+@@ -24,6 +24,13 @@ print("dummy fixture Statistics report without a model or network")
+ PY
+ printf '# A pinned inert Post fixture; not invoked in the trial smoke\n' > "$town/government/post.py"
+ cp "$repo/government/knowledge-budget.conf" "$town/government/knowledge-budget.conf"
++# This smoke isolates the runner resource precharge from the separately
++# tested independent Act33 first-trial evidence gate.
++printf '#!/bin/sh\n[ "$1" = statistics ] && [ "$2" = first-trial ]\n' > "$town/government/statistics-preflight.sh"
++printf '# exact audited helper fixture\n' > "$town/government/statistics-first-trial.py"
++printf '# exact evidence fixture\n' > "$town/government/statistics-evidence.py"
++printf '#!/bin/sh\nexit 0\n' > "$town/government/knowledge-phase-gate.sh"
++printf '# exact phase verifier fixture\n' > "$town/government/knowledge-phase-verifier.py"
+ python3 - "$town/government/knowledge-budget.conf" <<'BUDGET_ENABLED'
+ import json,sys
+ p=sys.argv[1];c=json.load(open(p));c["offices"]["statistics"]["enabled"]=True
+@@ -36,7 +43,12 @@ root=Path(sys.argv[1])
+ a={}
+ for name,rel in (("runner","statistics-bounded-trial.py"),("report","statistics-report.py"),
+                  ("post","post.py"),("post_guard","post_guard.py"),
+-                 ("budget_tool","knowledge-budget-tool.py"),("budget_config","knowledge-budget.conf")):
++                 ("budget_tool","knowledge-budget-tool.py"),("budget_config","knowledge-budget.conf"),
++                 ("trial_preflight","statistics-preflight.sh"),("trial_verifier","statistics-first-trial.py"),
++                 ("trial_evidence","statistics-evidence.py"),
++                 ("activation_gate","knowledge-activation-verify.sh"),
++                 ("phase_gate","knowledge-phase-gate.sh"),
++                 ("phase_verifier","knowledge-phase-verifier.py")):
+  a[name]=hashlib.sha256((root/"government"/rel).read_bytes()).hexdigest()
+ now=int(time.time())
+ (root/"records/knowledge/activation.json").write_text(json.dumps({

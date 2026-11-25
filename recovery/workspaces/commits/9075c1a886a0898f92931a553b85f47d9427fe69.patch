@@ -1,0 +1,303 @@
+commit 9075c1a886a0898f92931a553b85f47d9427fe69
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 01:37:07 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 01:37:07 2026 +0000
+
+    Economy: identify safe idle compute as waste and inform Executive allocation
+
+diff --git a/government/MINISTRY-OF-ECONOMY.md b/government/MINISTRY-OF-ECONOMY.md
+index 1a4deb93..6fdb4da6 100644
+--- a/government/MINISTRY-OF-ECONOMY.md
++++ b/government/MINISTRY-OF-ECONOMY.md
+@@ -45,6 +45,17 @@ You never spend money, add a paid model, create an account, hold a credential, o
+ 
+ ## 3. Efficiency of the rest of the Town
+ 
++- Treat sustained unused CPU and safe memory headroom, when valuable assigned
++  work is available, as potential **resource waste**, not merely healthy capacity.
++  The resource report's `capacity` field measures CPU usage over a cgroup counter
++  interval and memory above the reserve. Investigate underuse, identify whether
++  funding, dependencies, scheduling, disk or low marginal yield is the true
++  constraint, and provide actionable recommendations to the Executive. Prefer
++  bounded independent work using existing caches when disk is short. Do not aim
++  to fill RAM or create busywork. The Executive alone commissions workers; assess
++  the resulting delivered output and revise recommendations. Unknown or stale
++  capacity is not evidence of waste or spare capacity.
++
+ - Read `state/dispatch-gate/` (passes skipped because nothing changed), `state/obligations/` (obligations expired unverified) and the daily digest. Find where tokens are spent without an outcome: repeated passes, reports that restate the previous report, work that keeps getting re-triggered.
+ - Report findings to the Executive coordinator as short, evidence-backed recommendations with an estimated saving and the risk of the cut. Implementation of an approved change is the Executive's; a change to law is Parliament's, which you may inform with evidence but not sponsor.
+ - The Janitor (Act 12) and the Resource Safety guard (Act 13) are your instruments, not rivals: use their modes, keep their invariants, do not duplicate their code.
+diff --git a/government/economy-resources.py b/government/economy-resources.py
+index 84e4c8fe..63f6a35a 100644
+--- a/government/economy-resources.py
++++ b/government/economy-resources.py
+@@ -188,6 +188,90 @@ def load_average():
+             "per_cpu": round(five / cpus, 2)}
+ 
+ 
++def cpu_counter():
++    """Cgroup CPU usage, not load average; respect affinity and CPU quota."""
++    try:
++        fields = dict(line.split() for line in (CGROUP / "cpu.stat").read_text().splitlines())
++        quota, period = (CGROUP / "cpu.max").read_text().split()
++        cpus = float(len(os.sched_getaffinity(0)))
++        effective = (CGROUP / "cpuset.cpus.effective").read_text().strip()
++        if effective:
++            count = sum(int(part.split("-")[-1]) - int(part.split("-")[0]) + 1
++                        for part in effective.split(","))
++            cpus = min(cpus, count)
++        if quota != "max":
++            cpus = min(cpus, int(quota) / int(period))
++        st = CGROUP.stat()
++        if cpus <= 0:
++            return None
++        return {"usage_usec": int(fields["usage_usec"]), "cpus": cpus,
++                "identity": "%s:%s" % (st.st_dev, st.st_ino)}
++    except (OSError, ValueError, KeyError, ZeroDivisionError, AttributeError):
++        return None
++
++
++def capacity_assessment(resources, counter, previous, current, pol):
++    """Report potential resource waste separately from scarcity/safety status.
++
++    A time-window delta is evidence, not a worker quota. Never fill memory
++    for its own sake; prefer productive, bounded, independent work.
++    """
++    old = previous.get("capacity", {})
++    before = old.get("cpu_sample") or {}
++    elapsed = current - before.get("epoch", current)
++    sample = dict(counter, epoch=current) if counter else None
++    cpu = None
++    if (sample and 60 <= elapsed <= 3600 and
++            before.get("identity") == sample["identity"] and
++            before.get("cpus") == sample["cpus"] and
++            isinstance(before.get("usage_usec"), int)):
++        delta = sample["usage_usec"] - before["usage_usec"]
++        if 0 <= delta <= elapsed * 1e6 * sample["cpus"] * 1.05:
++            cpu = min(sample["cpus"], delta / (elapsed * 1e6))
++    mem = resources.get("memory", {})
++    headroom = mem.get("headroom_gib")
++    reserve = max(3.0, pol["memory_headroom_bytes"][0] / GIB)
++    spare_mem = max(0.0, headroom - reserve) if isinstance(headroom, (int, float)) else None
++    spare_cpu = sample["cpus"] - cpu if cpu is not None else None
++    previous_oom = previous.get("resources", {}).get("memory", {}).get("oom_kills")
++    oom = mem.get("oom_kills")
++    new_oom = isinstance(previous_oom, int) and isinstance(oom, int) and oom > previous_oom
++    funding = resources.get("model_funding", {})
++    disks = [v for k, v in resources.items() if k.startswith("disk:")]
++    disk_mode = ("unknown" if not disks else "blocked" if any(v["status"] == "critical" for v in disks)
++                 else "disk-light-only" if any(v["status"] in ("short", "watch") for v in disks) else "normal")
++    reasons = []
++    if disk_mode in ("blocked", "unknown"):
++        reasons.append("disk safety or visibility")
++    if mem.get("status") != "ok" or new_oom:
++        reasons.append("memory safety or recent OOM")
++    if resources.get("load", {}).get("status") in ("short", "critical"):
++        reasons.append("load pressure")
++    free = funding.get("free_available_now")
++    if not isinstance(free, int) or free < 1 or funding.get("status") == "critical":
++        reasons.append("free model availability")
++    if reasons:
++        status = "constrained"
++    elif spare_cpu is None or spare_mem is None:
++        status = "unmeasured"
++    elif spare_cpu >= 1.0 and spare_mem >= 2.0 and cpu / sample["cpus"] <= .70:
++        status = "underused"
++    else:
++        status = "no_clear_spare_capacity"
++    signal = {"status": status, "disk_mode": disk_mode,
++              "spare_cpu_band": int(spare_cpu) if spare_cpu is not None else None,
++              "spare_memory_band": int(spare_mem // 2) if spare_mem is not None else None,
++              "constraints": reasons}
++    return {"status": status, "cpu_sample": sample, "window_seconds": elapsed if cpu is not None else None,
++            "cpu_used_cores": round(cpu, 2) if cpu is not None else None,
++            "cpu_spare_cores": round(spare_cpu, 2) if spare_cpu is not None else None,
++            "memory_headroom_gib": headroom, "memory_reserve_gib": reserve,
++            "memory_spare_gib": round(spare_mem, 2) if spare_mem is not None else None,
++            "disk_mode": disk_mode, "constraints": reasons, "dispatch_signal": signal,
++            "action": ("Potential resource waste: Executive should expand useful independent work within the measured resource envelope, or record the concrete constraint. Assess verified output, not worker count."
++                       if status == "underused" else "Assess capacity and constraints; do not manufacture load or spend to occupy resources.")}
++
++
+ def growth_sizes(current, urgent):
+     """Sizes of the Town-owned top-level directories, cached; du is slow on a big box."""
+     cache = load(ROOT / "sizes.json", {})
+@@ -392,7 +476,8 @@ def measure(current, record=True):
+ def refresh(args):
+     current = now()
+     ROOT.mkdir(parents=True, exist_ok=True)
+-    previous = load(ROOT / "resources.json", {}).get("resources", {})
++    previous_report = load(ROOT / "resources.json", {})
++    previous = previous_report.get("resources", {})
+     pol, resources = measure(current)
+     taken = []
+     if not args.no_act:
+@@ -407,6 +492,7 @@ def refresh(args):
+         "actions_this_pass": taken, "needs_founder": needs_founder(resources, taken, previous),
+         "town_owned_largest": sizes.get("dirs", [])[:8], "town_owned_total_kb": sizes.get("total_kb"),
+         "policy": pol,
++        "capacity": capacity_assessment(resources, cpu_counter(), previous_report, now(), pol),
+     }
+     atomic_write(ROOT / "resources.json", json.dumps(report, sort_keys=True, indent=1) + "\n")
+     summary = {"overall": report["overall"], "actions": len(taken), "needs_founder": len(report["needs_founder"])}
+diff --git a/government/executive-agenda.md b/government/executive-agenda.md
+index 8d548ad1..242706b7 100644
+--- a/government/executive-agenda.md
++++ b/government/executive-agenda.md
+@@ -8,6 +8,18 @@ Acts 2 and 8 assign the executive, not the Clerk, responsibility for delivering
+ 
+ **Founder-directed throughput improvement (2026-10-23).** The Town has been underutilized. At every Executive pass, commission useful independent work and integrate reviewed outputs; don't confuse finished prompts, status reporting, or accumulated local branches with delivery. A stale instruction file in an old worktree is a policy-refresh problem, not a justification to suspend a standing Founder mission. Use the *current canonical* laws and Founder directives. When an authorized PR mechanism is unavailable, investigate the actual available delivery paths: inspect government/DELIVERY.md and use signed, exact-commit verified Git SSH delivery after lawful independent review. Do not repeatedly announce unavailable GitHub API access as a blocker. Distinct mathematical fronts may proceed in parallel without an artificial global agent cap.
+ 
++**Economy-driven allocation.** Read the Ministry of Economy's current resource
++report (`state/economy/resources.json` in the configured state root). Safe idle
++compute capacity with useful outstanding work is resource waste. Use the measured
++CPU and memory envelope to commission additional independent productive fronts;
++when capacity is underused and work exists, expansion is the default. If expansion
++is blocked, record the actual limiting resource, dependency, or marginal yield
++and work to remove it. Disk shortage restricts disk-heavy work, not every
++productive activity. Never deliberately consume resources without expected value.
++Assess delivered outcomes and avoid duplicate work. Unknown/stale data calls for
++fresh measurement, not an assumption of zero utilization. Only the Executive
++allocates and dispatches research workers; the Ministry assesses and recommends.
++
+ **Standing mission research parallelism.** At every Executive pass, inspect
+ the mission mandates under missions/*/mandate.md, their open issues, and live
+ Antonina agents. Pursue useful independent fronts without numerical worker
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 72b325d3..2e272609 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -169,6 +169,31 @@ depleted queue. Check live assignments and pursue new useful work when any
+ Founder's standing objective is still open.
+ EOF
+ )
++# Economy's report is the resource authority; missing/stale evidence is not zero.
++economy_capacity='{"status":"unmeasured","action":"obtain fresh Economy report"}'
++if [ -s "$state/economy/resources.json" ]; then
++  economy_capacity=$(jq -c --argjson now "$(date +%s)" '
++    if (.epoch | type) == "number" and $now >= .epoch and ($now-.epoch) <= 3600
++    then {at,overall,capacity,resources: {memory:.resources.memory,load:.resources.load,model_funding:.resources.model_funding}}
++    else {status:"stale",action:"obtain fresh Economy report"} end' "$state/economy/resources.json" 2>/dev/null) || economy_capacity='{"status":"unmeasured"}'
++fi
++economy_signature=$(printf '%s\n' "$economy_capacity" | jq -cS '.capacity.dispatch_signal // {status}' 2>/dev/null) || economy_signature=unreadable
++prompt=$(cat <<EOF
++$prompt
++
++=== MINISTRY OF ECONOMY: RESOURCE CAPACITY AND WASTE ===
++$economy_capacity
++=== END ECONOMY REPORT ===
++Treat unused safe compute capacity with useful outstanding work as resource waste.
++When Economy identifies underuse, commission additional independent productive
++fronts promptly within actual CPU, memory, disk and funding constraints. Do not
++wait for one front to finish if another can proceed. Record a concrete reason if
++safe capacity cannot be used; investigate the bottleneck rather than merely
++reporting it. Reassess results and marginal yield, not activity counts. Preserve
++resource safety and existing model funding policy. Only the Executive manages
++research workers. No fixed worker cap or requirement to artificially consume RAM.
++EOF
++)
+ cases='{"open_cases":[]}'
+ if [ -f "$town/government/institutional-cases.py" ]; then
+   cases=$(python3 "$town/government/institutional-cases.py" report) || exit 1
+@@ -215,7 +240,7 @@ if [ -f "$town/government/dispatch-gate.sh" ]; then
+   if { printf '%s\n' "$eligible" "$delivery" "$handoffs" "$recovery" "$board_sig" "$proceed"
+        git -C "$town" rev-parse HEAD 2>/dev/null || :
+        printf '%s\n' "$cases" | jq -cS '[.open_cases[]? | {id,signal,state,owner}]' 2>/dev/null || printf '%s\n' "$cases"
+-       printf '%s\n' "$mission_dispatch_signature"; } |
++       printf '%s\n' "$mission_dispatch_signature" "$economy_signature"; } |
+      /bin/sh "$town/government/dispatch-gate.sh" check executive "${VICHE_EXECUTIVE_GATE_MAX_AGE:-7200}" > "$state/branches/executive-gate.log"; then
+     :
+   else
+diff --git a/government/executive-economy-cycle.sh b/government/executive-economy-cycle.sh
+index 183c2376..bbf26ba6 100644
+--- a/government/executive-economy-cycle.sh
++++ b/government/executive-economy-cycle.sh
+@@ -85,8 +85,13 @@ case "$mode" in
+     readiness=ready
+     agent_interval=43200
+     case "$resource_level" in short|critical) agent_interval=7200 ;; esac
++    capacity_signal=unknown
++    if [ -s "$econ/resources.json" ]; then
++      capacity_signal=$(jq -cS '.capacity.dispatch_signal // "unknown"' "$econ/resources.json" 2>/dev/null) || capacity_signal=unknown
++    fi
++    previous_capacity=$(cat "$root/last-capacity-signal" 2>/dev/null || printf unknown)
+     # Public Post content cannot change the Economy office's launch cadence.
+-    if [ "$last" -eq 0 ] || [ $((now-last)) -ge "$agent_interval" ]; then
++    if [ "$last" -eq 0 ] || [ $((now-last)) -ge "$agent_interval" ] || [ "$capacity_signal" != "$previous_capacity" ]; then
+       orders='No specific Executive order: keep the Town funded, research the free models, find waste.'
+       [ ! -s "$econ/orders.md" ] || orders=$(cat "$econ/orders.md")
+       report='{"note":"no funding report yet; the first refresh runs within the hour"}'
+@@ -107,7 +112,7 @@ case "$mode" in
+              printf '%s\n' "$report" | jq -cS 'del(.at,.backup,.probes_run,.previous_order)' 2>/dev/null || printf '%s\n' "$report"
+              # Resources: only the status of each, so a percentage drifting by 0.1 does not wake the agent.
+              if [ -s "$econ/resources.json" ]; then
+-               jq -cS '{overall, s: (.resources | map_values(.status)), needs: .needs_founder}' "$econ/resources.json" 2>/dev/null || :
++               jq -cS '{overall, s: (.resources | map_values(.status)), needs: .needs_founder, capacity: .capacity.dispatch_signal}' "$econ/resources.json" 2>/dev/null || :
+              fi
+              printf '%s\n' "$cases" | jq -cS '[.open_cases[]? | {id,signal,state,owner}]' 2>/dev/null || :
+              } | /bin/sh "$town/government/dispatch-gate.sh" check economy 86400 > "$root/gate.log"; then
+@@ -141,6 +146,9 @@ $report
+ === LATEST RESOURCE REPORT (deterministic: disk, inodes, memory, load, Town-owned growth) ===
+ $resources
+ === END RESOURCE REPORT ===
++Treat safely underused compute with useful outstanding work as resource waste.
++Investigate the capacity assessment, recommend concrete increases in productive
++parallelism to the Executive, and verify the resulting throughput.
+ Your mandate is the availability of EVERY scarce resource, not only model funding
+ (Act 29 section 6). government/economy-resources.py measures and forecasts and has
+ already run the safe Janitor steps listed under actions_this_pass; you act on what
+@@ -170,6 +178,7 @@ policy_file="$town/government/AGENT-REPORTING-POLICY.md"
+         antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1 || exit 1
+         [ ! -f "$town/government/dispatch-gate.sh" ] || /bin/sh "$town/government/dispatch-gate.sh" commit economy
+         printf '%s\n' "$now" > "$root/last-dispatch"
++        printf '%s\n' "$capacity_signal" > "$root/last-capacity-signal"
+         last=$now
+         readiness=dispatched
+       else
+diff --git a/tests/economy-capacity-smoke.sh b/tests/economy-capacity-smoke.sh
+new file mode 100755
+index 00000000..3b073754
+--- /dev/null
++++ b/tests/economy-capacity-smoke.sh
+@@ -0,0 +1,40 @@
++#!/bin/sh
++# Test the Ministry measurement and safe expansion signal with no host dependency.
++set -eu
++cd "$(dirname "$0")/.."
++python3 - <<'PY_TEST'
++import importlib.util
++from pathlib import Path
++from unittest.mock import patch
++import tempfile
++import copy
++spec = importlib.util.spec_from_file_location("economy", "government/economy-resources.py")
++m = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(m)
++r = {"disk:state":{"status":"short"}, "memory":{"status":"ok","headroom_gib":11,"oom_kills":5},
++     "load":{"status":"ok"}, "model_funding":{"status":"ok","free_available_now":8}}
++cpu = {"usage_usec":120_000_000,"cpus":4.0,"identity":"a"}
++old = {"capacity":{"cpu_sample":dict(cpu,usage_usec=0,epoch=1000)}, "resources":copy.deepcopy(r)}
++def assess(resources=r, counter=cpu, previous=old, current=1600):
++    return m.capacity_assessment(resources,counter,previous,current,m.DEFAULT_POLICY)
++x = assess()
++assert x['status']=='underused' and x['cpu_used_cores']==.2 and x['cpu_spare_cores']==3.8, x
++assert x['memory_spare_gib']==8 and x['disk_mode']=='disk-light-only', x
++assert assess(counter=dict(cpu,usage_usec=2_250_000_000))['status']=='no_clear_spare_capacity'
++assert assess(current=1100+3600)['status']=='unmeasured'
++assert assess(counter=dict(cpu,identity='new'))['status']=='unmeasured'
++assert assess(counter=None)['status']=='unmeasured'
++assert assess(previous={})['status']=='unmeasured'
++for key, change in [('memory',{'status':'critical','headroom_gib':1}), ('memory',{'oom_kills':6}), ('model_funding',{'free_available_now':0}), ('disk:state',{'status':'critical'})]:
++    constrained=copy.deepcopy(r);constrained[key].update(change)
++    assert assess(resources=constrained)['status']=='constrained', key
++with tempfile.TemporaryDirectory() as tmp:
++    d=Path(tmp)
++    (d/'cpu.stat').write_text('usage_usec 2000000\n')
++    (d/'cpu.max').write_text('150000 100000\n')
++    (d/'cpuset.cpus.effective').write_text('0-3\n')
++    with patch.object(m,'CGROUP',d),patch.object(m.os,'sched_getaffinity',return_value={0,1,2,3}):
++        assert m.cpu_counter()['cpus']==1.5
++        assert m.cpu_counter()['usage_usec']==2_000_000
++print('Economy capacity: measured underuse, quotas, stale counters and safety constraints passed')
++PY_TEST

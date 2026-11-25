@@ -1,0 +1,58 @@
+commit 92cebf7719543780d258796aa4df355837c042e9
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 18:20:52 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 18:20:52 2026 +0000
+
+    Accept checker-intake[bot] verdicts in PnP reconciliation
+    
+    The upstream checker now posts verdicts as pequalnp-intake[bot] after the
+    repository/bot rename. Accept both the legacy LiorDagan author and the
+    intake bot so ACCEPTED/REJECTED on an exact published revision are recorded
+    and corrections trigger. Add a regression test.
+
+diff --git a/missions/pnp/reconcile.py b/missions/pnp/reconcile.py
+index 9106f2cc..96f0ecea 100644
+--- a/missions/pnp/reconcile.py
++++ b/missions/pnp/reconcile.py
+@@ -13,13 +13,18 @@ VERDICT = re.compile(
+     r"^Checked on the base repository at commit `([0-9a-f]{9,40})`\.\s+"
+     r"\*\*(ACCEPTED|REJECTED|FAULT|REFUSED) \([^\n]*\)\*\*", re.M)
+ 
++# The checker posts verdicts under the legacy human account and, after the
++# upstream repository/bot rename, under the intake bot. Accept both so a
++# verdict on a published, exact revision is never silently ignored.
++VERDICT_AUTHORS = frozenset({"LiorDagan", "pequalnp-intake[bot]"})
++
+ 
+ def current_verdict(comments, sha):
+     if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+         return None
+     verdicts = []
+     for comment in comments:
+-        if comment.get("author") != "LiorDagan":
++        if comment.get("author") not in VERDICT_AUTHORS:
+             continue
+         body = comment.get("body") or ""
+         match = VERDICT.search(body)
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 547ebcb4..b60a7be9 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -615,6 +615,16 @@ class TestReconcile(unittest.TestCase):
+         c["body"] = c["body"].replace(config.UPSTREAM, "unrelated/pequalnp-proofs")
+         self.assertIsNone(reconcile.current_verdict([c], SHA))
+ 
++    def test_intake_bot_verdict_accepted(self):
++        c = verdict_comment(SHA, "ACCEPTED", author="pequalnp-intake[bot]")
++        c["body"] = c["body"].replace("brilliant-hq/pequalnp-proofs", config.UPSTREAM)
++        self.assertEqual(reconcile.current_verdict([c], SHA), "ACCEPTED")
++        # Legacy author still accepted, unrelated authors still rejected.
++        self.assertEqual(reconcile.current_verdict(
++            [verdict_comment(SHA, "ACCEPTED")], SHA), "ACCEPTED")
++        self.assertIsNone(reconcile.current_verdict(
++            [verdict_comment(SHA, "ACCEPTED", author="impostor")], SHA))
++
+     def test_old_or_untrusted_verdict_ignored(self):
+         new_state("PR_OPEN", commit_sha=SHA, pr_number=123)
+         gh = FakeGH()

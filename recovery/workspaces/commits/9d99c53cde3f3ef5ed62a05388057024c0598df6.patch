@@ -1,0 +1,231 @@
+commit 9d99c53cde3f3ef5ed62a05388057024c0598df6
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 23:13:16 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 23:13:16 2026 +0000
+
+    Derive effective audit correction signals from committed Git history
+
+diff --git a/government/AUDIT-CYCLE-IDENTITY.md b/government/AUDIT-CYCLE-IDENTITY.md
+index 163e79d3..639ebc88 100644
+--- a/government/AUDIT-CYCLE-IDENTITY.md
++++ b/government/AUDIT-CYCLE-IDENTITY.md
+@@ -18,7 +18,14 @@ even after its earlier correction has been confirmed. A per-case file lock
+ serializes reads and append/cache updates between concurrent CLI processes.
+ A missing, malformed or legacy correction identity fails closed without
+ backdating or silently assigning an invented cycle. Confirmation is a
+-procedural second pass, not independent verification.
++procedural second pass, not independent verification. The monitoring check
++reads **committed Git HEAD** for each cached correction and never treats an
++untracked or modified working-tree correction log as legally effective. If
++there is no valid committed confirmed correction, the original verdict stays
++effective (where recoverable), and a distinct `correction_not_effective` or
++`correction_anchor_invalid` signal exposes the mismatch. Old original evidence
++references may be unavailable in legacy cache rows; the signal explicitly
++marks them uncertain instead of manufacturing corroboration.
+ 
+ If the detached audit launch returns an error after token preparation, the
+ dispatch time remains recorded; an immediate retry is refused because the
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+index 8d95d87e..b0aacb3f 100644
+--- a/government/audit-accountability.py
++++ b/government/audit-accountability.py
+@@ -54,6 +54,48 @@ def correction_trail(case_id):
+     return rows
+ 
+ 
++def committed_confirmed_correction(case_id):
++    """Only rows committed in HEAD are effective under Act17 §2.2.
++
++    This NEVER reads untracked or modified worktree bytes as legal authority.
++    Fail closed on malformed committed rows, duplicate cycles or unpaired
++    confirmations. Returns the latest confirmed FILING (not its procedural
++    confirmation reference), or None when no correction has taken effect.
++    """
++    town = os.environ.get("VICHE_TOWN_ROOT", "/var/lib/lubko/wd/viche")
++    rel = f"records/oversight/corrections/{case_id}.jsonl"
++    p = subprocess.run(["git", "-C", town, "show", f"HEAD:{rel}"],
++                       capture_output=True, text=True, timeout=15)
++    if p.returncode:
++        return None
++    pending = {}
++    confirmed = set()
++    effective = None
++    for idx, line in enumerate(p.stdout.splitlines(), 1):
++        try:
++            row = json.loads(line)
++        except (TypeError, ValueError) as exc:
++            raise ValueError(f"committed correction row {idx} malformed") from exc
++        if not isinstance(row, dict) or row.get("case_id") != case_id or row.get("correction") is not True:
++            raise ValueError(f"committed correction row {idx} wrong case or type")
++        token = row.get("cycle_id")
++        if not valid_cycle_token(token):
++            raise ValueError(f"committed correction row {idx} missing valid cycle identity")
++        if row.get("confirmed") is False:
++            if token in pending or token in confirmed:
++                raise ValueError("more than one correction filing in committed cycle")
++            pending[token] = row
++        elif row.get("confirmed") is True:
++            filed = pending.get(token)
++            if filed is None or token in confirmed or filed.get("verdict") != row.get("verdict"):
++                raise ValueError("orphan or mismatched committed correction confirmation")
++            confirmed.add(token)
++            effective = filed
++        else:
++            raise ValueError(f"committed correction row {idx} lacks confirmed status")
++    return effective
++
++
+ def append_correction(case_id, record):
+     # Append-only: never overwrite or rewrite a committed entry (Act 17 §2.2, §2.7).
+     d = records_dir()
+@@ -194,6 +236,11 @@ def report(args):
+         held = [h.get("verdict") for h in prior.get("history", [])]
+         if args.verdict in held:
+             raise ValueError("bare re-flip: target verdict already held by this case")
++        # Preserve the original verdict and evidence for a Git-unanchored
++        # correction's effective-state fallback and future independent audit.
++        prior.setdefault("original_verdict", prior.get("verdict"))
++        prior.setdefault("original_evidence_ref", prior.get("evidence_ref"))
++        prior.setdefault("original_at", prior.get("at"))
+         rec = {
+             "at": now, "case_id": args.case, "verdict": args.verdict,
+             "evidence_ref": args.evidence, "auditor": args.auditor,
+@@ -267,17 +314,57 @@ def check(args):
+             overdue += 1
+             signals.append({"type": "unreported_sample", "case_id": case["case_id"]})
+         if verdict is not None:
++            # State-dir verdicts are a derived cache, NOT the legal correction
++            # trail. A confirmed procedural recheck does not make a correction
++            # effective until Git HEAD contains its filed+confirmed rows.
++            effective = verdict.get("verdict")
++            effective_ref = verdict.get("evidence_ref")
++            effective_at = verdict.get("at", now)
++            corrected_from_finding = bool(verdict.get("corrected_from_finding"))
++            history = [h for h in verdict.get("history", [])
++                       if isinstance(h, dict) and h.get("correction")]
++            if history:
++                original = verdict.get("original_verdict", history[0].get("supersedes"))
++                anchored = None
++                try:
++                    anchored = committed_confirmed_correction(case["case_id"])
++                except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
++                    signals.append({"type": "correction_anchor_invalid",
++                                    "case_id": case["case_id"], "detail": str(exc)[:180]})
++                if anchored is None:
++                    effective = original if original in (
++                        "finding", "verified", "not_assigned", "inconclusive", "verified_fixed") else None
++                    effective_ref = verdict.get("original_evidence_ref")
++                    effective_at = verdict.get("original_at", effective_at)
++                    corrected_from_finding = False
++                    signals.append({"type": "correction_not_effective",
++                                    "case_id": case["case_id"],
++                                    "reason": "no valid confirmed correction committed in Git HEAD"})
++                else:
++                    effective = anchored.get("verdict")
++                    effective_ref = anchored.get("evidence_ref")
++                    effective_at = anchored.get("at", effective_at)
++                    corrected_from_finding = (
++                        effective != "finding" and
++                        (original == "finding" or
++                         any(h.get("supersedes") == "finding" for h in history)))
++                    if effective != verdict.get("verdict"):
++                        signals.append({"type": "correction_not_effective",
++                                        "case_id": case["case_id"],
++                                        "reason": "state cache ahead of committed correction"})
+             if verdict.get("correction_pending"):
+                 signals.append({"type": "correction_pending", "case_id": case["case_id"]})
+-            if verdict["verdict"] == "finding":
++            if effective == "finding":
+                 subject = f"{case['population']}:{case['id']}"
+                 findings[subject] = findings.get(subject, 0) + 1
+                 signals.append({"type": "unresolved_finding", "case_id": case["case_id"],
+-                                "evidence_ref": verdict["evidence_ref"]})
+-            elif verdict.get("corrected_from_finding"):
++                                "evidence_ref": effective_ref,
++                                "caveat": "source_not_independently_verified"})
++            elif corrected_from_finding:
+                 signals.append({"type": "corrected_finding", "case_id": case["case_id"],
+-                                "evidence_ref": verdict["evidence_ref"]})
+-            if verdict["verdict"] == "inconclusive" and now - verdict["at"] > deadline:
++                                "evidence_ref": effective_ref,
++                                "git_anchored": True})
++            if effective == "inconclusive" and now - effective_at > deadline:
+                 signals.append({"type": "unresolved_inconclusive", "case_id": case["case_id"]})
+     for subject, count in findings.items():
+         if count >= 2:
+diff --git a/tests/audit-correction-smoke.sh b/tests/audit-correction-smoke.sh
+index 42786b0f..c0af7efd 100644
+--- a/tests/audit-correction-smoke.sh
++++ b/tests/audit-correction-smoke.sh
+@@ -12,6 +12,9 @@ mkdir -p "$scratch/bin" "$scratch/state/oversight/random/cases" \
+     "$scratch/seats/branches/judiciary"
+ printf 'authoritative fixture\n' > "$scratch/charter"
+ : > "$scratch/town/records/SUMMONED.txt"
++git -C "$scratch/town" init -q -b main
++git -C "$scratch/town" -c user.name=Fixture -c user.email=fixture@example.invalid \
++  commit --allow-empty -qm 'initial Git state: no effective corrections yet'
+ CASE=0123456789abcdef01
+ TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ printf '{"case_id":"%s","population":"ignored_work","id":"301","at":2000000000}\n' \
+@@ -73,6 +76,13 @@ jq -e --arg c "$CASE" '.verdict' "$scratch/state/oversight/random/outcomes/$CASE
+ 
+ # 5. Second procedural pass (same office/model — NOT independent) confirms it.
+ python3 "$CTRL" report --case "$CASE" --confirm --evidence "second procedural replay" >/dev/null
++python3 "$CTRL" check > "$scratch/check"
++jq -e --arg c "$CASE" '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' "$scratch/check" >/dev/null
++# Only a committed Git version, not a writable state-dir cache or untracked
++# file, makes that first confirmed correction legally effective.
++git -C "$scratch/town" add records/oversight/corrections/"$CASE".jsonl
++git -C "$scratch/town" -c user.name=Fixture -c user.email=fixture@example.invalid \
++  commit -qm 'anchor first confirmed correction'
+ grep -q '"phase": "second_procedural_pass_not_independent"' "$trail"
+ grep -q '"confirmed": true' "$trail"
+ [ "$(jq -r .verdict "$scratch/state/oversight/random/outcomes/$CASE.json")" = finding ]
+@@ -94,6 +104,14 @@ python3 "$CTRL" report --case "$CASE" --verdict not_assigned \
+     --supersedes finding --auditor c1e00008 --reason_code retracted_on_stronger_evidence \
+     --why_stronger "new replay shows the original finding was a false positive" >/dev/null
+ python3 "$CTRL" report --case "$CASE" --confirm --evidence "procedural retraction replay" >/dev/null
++# This uncommitted retraction is a false-positive corrected_finding signal
++# unless check() derives its effective state from Git HEAD instead of cache.
++python3 "$CTRL" check > "$scratch/check"
++jq -e --arg c "$CASE" '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' "$scratch/check" >/dev/null
++jq -e --arg c "$CASE" '.signals[]|select(.type=="unresolved_finding" and .case_id==$c)' "$scratch/check" >/dev/null
++git -C "$scratch/town" add records/oversight/corrections/"$CASE".jsonl
++git -C "$scratch/town" -c user.name=Fixture -c user.email=fixture@example.invalid \
++  commit -qm 'anchor second confirmed correction'
+ python3 "$CTRL" check > "$scratch/check"
+ jq -e '[.signals[].type]|index("corrected_finding")' "$scratch/check" >/dev/null
+ if jq -e '[.signals[].type]|index("unresolved_finding")' "$scratch/check" >/dev/null; then
+@@ -408,4 +426,31 @@ if ! { [ "$a" -eq 0 ] && [ "$b" -ne 0 ]; } &&
+   exit 1
+ fi
+ [ "$(wc -l < "$scratch/town/records/oversight/corrections/$RACE_CASE.jsonl")" -eq 1 ]
++# Historical failure: a state cache advertises corrected_finding but its
++# two correction rows were never Git anchored. Act17 §2.2 keeps the original
++# finding operative. Do not create an imaginary independent confirmation.
++UNANCHORED=787878787878787878
++printf '{"case_id":"%s","population":"ignored_work","id":"999","at":2000000000}\n' \
++  "$UNANCHORED" > "$scratch/state/oversight/random/cases/$UNANCHORED.json"
++printf '{"case_id":"%s","verdict":"not_assigned","at":2000000000,"evidence_ref":"cached unanchored retraction","corrected_from_finding":true,"correction_pending":false,"history":[{"correction":true,"confirmed":true,"supersedes":"finding","verdict":"not_assigned"}]}\n' \
++  "$UNANCHORED" > "$scratch/state/oversight/random/outcomes/$UNANCHORED.json"
++python3 "$CTRL" check > "$scratch/check"
++jq -e --arg c "$UNANCHORED" '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' "$scratch/check" >/dev/null
++jq -e --arg c "$UNANCHORED" '.signals[]|select(.type=="unresolved_finding" and .case_id==$c)' "$scratch/check" >/dev/null
++if jq -e --arg c "$UNANCHORED" '.signals[]|select(.type=="corrected_finding" and .case_id==$c)' "$scratch/check" >/dev/null; then
++  echo 'Uncommitted cache falsely corrected an unresolved finding' >&2; exit 1
++fi
++# Exact historical failure pattern: original inconclusive -> (unanchored)
++# finding -> (unanchored) not_assigned. Both invalid corrections cannot
++# generate corrected_finding or turn the original inconclusive into finding.
++TWO_STEP=898989898989898989
++printf '{"case_id":"%s","population":"ignored_work","id":"998","at":2000000000}\n' \
++ "$TWO_STEP" > "$scratch/state/oversight/random/cases/$TWO_STEP.json"
++printf '{"case_id":"%s","verdict":"not_assigned","at":2000000000,"evidence_ref":"cached second retraction","corrected_from_finding":true,"history":[{"correction":true,"confirmed":true,"supersedes":"inconclusive","verdict":"finding"},{"correction":true,"confirmed":true,"supersedes":"finding","verdict":"not_assigned"}]}\n' \
++ "$TWO_STEP" > "$scratch/state/oversight/random/outcomes/$TWO_STEP.json"
++python3 "$CTRL" check > "$scratch/check"
++jq -e --arg c "$TWO_STEP" '.signals[]|select(.type=="correction_not_effective" and .case_id==$c)' "$scratch/check" >/dev/null
++if jq -e --arg c "$TWO_STEP" '.signals[]|select((.type=="corrected_finding" or .type=="unresolved_finding") and .case_id==$c)' "$scratch/check" >/dev/null; then
++ echo 'Unanchored two-step history changed original inconclusive verdict' >&2;exit 1
++fi
+ echo 'Act 17 audit correction smoke passed'

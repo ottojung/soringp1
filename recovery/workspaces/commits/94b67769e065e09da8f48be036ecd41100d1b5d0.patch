@@ -1,0 +1,52 @@
+commit 94b67769e065e09da8f48be036ecd41100d1b5d0
+Author:     economy <economy@viche.local>
+AuthorDate: Wed Nov 25 14:50:56 2026 +0000
+Commit:     economy <economy@viche.local>
+CommitDate: Wed Nov 25 14:50:56 2026 +0000
+
+    pnp lbcert: restart autosolve cleanly when its source changes on main
+    
+    A running Python process never reloads edited source. When the value/template
+    KeyError fix was delivered at 14:15Z, the live autosolve kept running the old
+    poll loop and threw KeyError 'statement' on every poll (277 times over ~7h),
+    generating no candidates and suppressing credited steps. Detect a source hash
+    change at each poll and exit cleanly so allocator.sh relaunches with current
+    code within one tick.
+
+diff --git a/missions/pnp/lbcert/autosolve.py b/missions/pnp/lbcert/autosolve.py
+index 7d85952d..44b05d4b 100644
+--- a/missions/pnp/lbcert/autosolve.py
++++ b/missions/pnp/lbcert/autosolve.py
+@@ -24,6 +24,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
+ sys.path.insert(0, HERE)
+ import lbparse  # noqa: E402
+ 
++# A running Python process does not reload a module whose source changes on
++# disk. Without this guard, a fix delivered while autosolve is alive stays
++# dormant until some unrelated restart, which previously left the poll loop
++# throwing KeyError on value/template desk gaps for hours while generating no
++# candidates. Detect a source change at each poll and exit cleanly; allocator.sh
++# relaunches us with the current code within one tick (it holds our flock).
++START_HASH = hashlib.sha256(open(HERE + '/autosolve.py', 'rb').read()).hexdigest()
++
++
++def source_changed():
++    try:
++        now = hashlib.sha256(open(HERE + '/autosolve.py', 'rb').read()).hexdigest()
++    except OSError:
++        return False
++    return now != START_HASH
++
+ STATE = os.environ.get('PNP_STATE_ROOT', '/var/lib/lubko/wd/viche-state/pnp')
+ WORK = os.path.join(STATE, 'lbcert')
+ CANDS = os.path.join(WORK, 'cands')
+@@ -172,6 +188,9 @@ def main():
+     pool = ThreadPoolExecutor(REMOTE_WORKERS)
+     queued = QUEUED
+     while not os.path.exists(os.path.join(WORK, 'STOP')):
++        if source_changed():
++            log('source changed; exiting for clean restart')
++            return 0
+         try:
+             gaps = json.loads(get(DESK))['gaps']
+             # The desk also publishes unresolved value/template gaps that carry

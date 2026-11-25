@@ -1,0 +1,174 @@
+commit 96a3e239b83188d08adba68258f67b54fc8d2148
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Thu Oct 22 17:42:05 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Thu Oct 22 17:42:05 2026 +0000
+
+    Return silent researchers to preferred model after quota reset
+
+diff --git a/scripts/agent_pool_keeper.py b/scripts/agent_pool_keeper.py
+index 8969fad..c884701 100644
+--- a/scripts/agent_pool_keeper.py
++++ b/scripts/agent_pool_keeper.py
+@@ -18,8 +18,10 @@ TARGET_RUNNING = 8  # Buffer above the hard minimum for normal completions.
+ INTERVAL = 10
+ MIN_RESEARCH_RESTART_SECONDS = 240  # Avoid fast repeats of completed investigations.
+ STALLED_OUTPUT_SECONDS = 30 * 60  # A silent managed agent is not productive capacity.
++PREFERRED_MODEL_QUIET_SECONDS = 5 * 60  # Resume preferred model after genuine quota reset.
+ MAX_STALLED_STEERS_PER_TICK = 1  # Recover gradually without losing the agent floor.
+ AGENTS_DIR = Path("/home/lubko/.local/state/antonina/agents")
++MODELS_CONFIG = Path("/home/lubko/.config/antonina/config.json")
+ STATE = Path("/home/lubko/.local/state/soringp1/agent-pool.json")
+ CURSORS = STATE.parent / "packet-cursors.json"
+ PACKETS = Path(__file__).resolve().parent.parent / "docs/research-packets.json"
+@@ -112,6 +114,34 @@ def save_history(history, cursors):
+     pending.replace(CURSORS)
+ 
+ 
++def restored_preferred_model(agent_id, expected_cwd, now):
++    """The first configured model is eligible again after its prior cooldown.
++
++    Read only the local operator-configured model order. No model discovery,
++    provider probe or broad process kill. Never preempt fresh model output.
++    """
++    try:
++        meta = json.loads((AGENTS_DIR / agent_id / "meta.json").read_text())
++        config = json.loads(MODELS_CONFIG.read_text())
++        choices = config.get("models")
++        if not isinstance(choices, list) or not choices:
++            return False
++        preferred = choices[0].get("model")
++        if not isinstance(preferred, str) or not preferred:
++            return False
++        if meta.get("state") != "running" or meta.get("cwd") != expected_cwd:
++            return False
++        failover = meta.get("model_failover") or {}
++        if failover.get("selected_model") in (None, preferred):
++            return False
++        cooldowns = failover.get("cooldowns") or []
++        # Only undo a *recorded* exclusion when it has expired.
++        matching = [c for c in cooldowns if c.get("model") == preferred]
++        return bool(matching and all(float(c["until"]) <= now for c in matching))
++    except (OSError, ValueError, TypeError, KeyError, AttributeError):
++        return False
++
++
+ def recover_stalled(live, history, cursors, plan, now):
+     """Steer in place without temporarily lowering the agent count.
+ 
+@@ -124,7 +154,14 @@ def recover_stalled(live, history, cursors, plan, now):
+         if agent_id not in live or count >= MAX_STALLED_STEERS_PER_TICK:
+             continue
+         last = last_observed_output(agent_id, "/home/lubko/" + wd)
+-        if last is None or now - max(last, history.get(agent_id, 0)) < STALLED_OUTPUT_SECONDS:
++        if last is None:
++            continue
++        quiet_for = now - max(last, history.get(agent_id, 0))
++        returning_primary = (
++            quiet_for >= PREFERRED_MODEL_QUIET_SECONDS and
++            restored_preferred_model(agent_id, "/home/lubko/" + wd, now)
++        )
++        if not returning_primary and quiet_for < STALLED_OUTPUT_SECONDS:
+             continue
+         prompt = select_packet(agent_id, fallback, cursors, plan)
+         try:
+@@ -135,7 +172,8 @@ def recover_stalled(live, history, cursors, plan, now):
+                 history[agent_id] = now
+                 cursors[agent_id] = int(cursors.get(agent_id, 0)) + 1
+                 count += 1
+-                print("steered stalled", agent_id, "packet", cursors[agent_id], flush=True)
++                print("steered", "returned-primary" if returning_primary else "stalled",
++                      agent_id, "packet", cursors[agent_id], flush=True)
+             else:
+                 print("stall recovery failed", agent_id, p.stderr[-250:], flush=True)
+         except Exception as e:
+diff --git a/tests/test_agent_pool_keeper.py b/tests/test_agent_pool_keeper.py
+index e5626ed..4f8ea9b 100644
+--- a/tests/test_agent_pool_keeper.py
++++ b/tests/test_agent_pool_keeper.py
+@@ -108,6 +108,85 @@ class KeeperTests(unittest.TestCase):
+                 KEEPER.tick(history, cursors, plan)
+                 self.assertEqual(execute.call_count, 1)  # restarted agent cooldown
+ 
++    def test_return_to_primary_after_actual_cooldown_and_quiet_period(self):
++        plan = KEEPER.load_packet_plan()
++        now = time.time()
++        agent_id, wd, _ = KEEPER.ROSTER[0]
++        live = {a for a, _, _ in KEEPER.ROSTER}
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            path = root / "agents" / agent_id
++            path.mkdir(parents=True)
++            meta_file = path / "meta.json"
++            model_config = root / "model-config.json"
++            model_config.write_text(json.dumps({"models": [
++                {"model": "test/primary"}, {"model": "test/fallback"}]}))
++            meta = {
++                "state": "running", "cwd": "/home/lubko/" + wd,
++                "started_at": now - 650,
++                "model_failover": {
++                    "selected_model": "test/fallback",
++                    "cooldowns": [{"model": "test/primary",
++                                   "reason": "quota_exhausted",
++                                   "until": now + 15}],
++                },
++            }
++            meta_file.write_text(json.dumps(meta))
++            (path / "output.log").write_text("last response")
++            import os
++            os.utime(path / "output.log", (now - 650, now - 650))
++            history = {agent_id: now - 650}
++            cursors = {}
++            with (mock.patch.object(KEEPER, "STATE", root / "history.json"),
++                  mock.patch.object(KEEPER, "CURSORS", root / "cursors.json"),
++                  mock.patch.object(KEEPER, "AGENTS_DIR", root / "agents"),
++                  mock.patch.object(KEEPER, "MODELS_CONFIG", model_config),
++                  mock.patch.object(KEEPER, "running", return_value=live),
++                  mock.patch.object(KEEPER, "execute", return_value=mock.Mock(
++                      returncode=0, stdout='{"state":"running"}', stderr="")) as execute,
++                  mock.patch.object(KEEPER.time, "time", return_value=now)):
++                KEEPER.tick(history, cursors, plan)
++                execute.assert_not_called()  # Provider's reset has not passed.
++                meta["model_failover"]["cooldowns"][0]["until"] = now - 30
++                meta_file.write_text(json.dumps(meta))
++                KEEPER.tick(history, cursors, plan)
++                self.assertEqual(execute.call_count, 1)
++                self.assertIn("--steer", execute.call_args.args[0])
++                self.assertEqual(cursors[agent_id], 1)
++                KEEPER.tick(history, cursors, plan)
++                self.assertEqual(execute.call_count, 1)  # No rapid re-steer.
++
++    def test_primary_recovery_does_not_interrupt_recent_fallback_output(self):
++        plan = KEEPER.load_packet_plan()
++        now = time.time()
++        agent_id, wd, _ = KEEPER.ROSTER[0]
++        live = {a for a, _, _ in KEEPER.ROSTER}
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            path = root / "agents" / agent_id
++            path.mkdir(parents=True)
++            (path / "meta.json").write_text(json.dumps({
++                "state": "running", "cwd": "/home/lubko/" + wd,
++                "started_at": now - 650,
++                "model_failover": {
++                    "selected_model": "test/fallback",
++                    "cooldowns": [{"model": "test/primary",
++                                   "reason": "quota_exhausted",
++                                   "until": now - 1}],
++                },
++            }))
++            (path / "output.log").write_text("recent actual output")
++            cfg = root / "config.json"
++            cfg.write_text(json.dumps({"models": [
++                {"model": "test/primary"}, {"model": "test/fallback"}]}))
++            with (mock.patch.object(KEEPER, "AGENTS_DIR", root / "agents"),
++                  mock.patch.object(KEEPER, "MODELS_CONFIG", cfg),
++                  mock.patch.object(KEEPER, "running", return_value=live),
++                  mock.patch.object(KEEPER, "execute") as execute,
++                  mock.patch.object(KEEPER.time, "time", return_value=now)):
++                KEEPER.tick({agent_id: now - 650}, {}, plan)
++                execute.assert_not_called()
++
+     def test_recent_output_protects_long_running_research(self):
+         plan = KEEPER.load_packet_plan()
+         now = time.time()

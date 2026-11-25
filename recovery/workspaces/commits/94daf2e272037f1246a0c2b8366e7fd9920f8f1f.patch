@@ -1,0 +1,252 @@
+commit 94daf2e272037f1246a0c2b8366e7fd9920f8f1f
+Merge: ff22b1ad 154af49a
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 22:55:23 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 22:55:23 2026 +0000
+
+    Merge remote-tracking branch 'origin/main' into exec/act22-act21s5-current-main
+
+diff --git a/government/APPOINTMENT-RECOVERY.md b/government/APPOINTMENT-RECOVERY.md
+new file mode 100644
+index 00000000..38307999
+--- /dev/null
++++ b/government/APPOINTMENT-RECOVERY.md
+@@ -0,0 +1,45 @@
++# Terminal appointment evidence — October 23, 2026
++
++The appointment registry stores one currently selected Antonina agent ID per
++logical parliamentary seat or government office. An Antonina agent that fails
++cannot silently vanish from the audit trail when the registry selects a new
++agent.
++
++**Before** replacing a failed/stopped/killed or unreachable prior agent,
++`government/appointments.sh` now invokes
++`government/terminal-appointment-evidence.sh` while holding its appointment
++lock. It captures once per departed agent ID:
++
++- the last exact Antonina status JSON, including actual execution model,
++  finished timestamp, failure class and retry-safety flags (if available);
++- the last 80 log lines, the current worktree HEAD and dirtiness (without
++  modifying or resetting either the old agent or its working tree);
++- a structured terminal event in
++  `$VICHE_STATE_ROOT/appointments/terminal-evidence/AGENT_ID/event.json`
++  and an append-only `terminal-events.jsonl` convenience index.
++
++If the old agent's status cannot be read, replacement is **refused** rather
++than guessing it has died and creating a second live agent in the same seat.
++Confirmed `failed`, `stopped` and `killed` states permit evidence capture.
++Unavailable log, Git HEAD or worktree-status diagnostics are explicitly
++marked unavailable in the structured event (not silently called successful),
++with ten-second command timeouts and a 128 KiB log excerpt bound. The primary
++per-ID snapshot is authoritative; an interrupted index append is repaired on
++its next idempotent invocation. Private state uses umask 077. A snapshot must
++be persisted before the registry changes; failures block replacement.
++
++**Important limitation:** This safeguard is observational, not an Act 19
++compliance claim. The existing `appointments.sh ensure` still selects a new
++agent on its first terminal failure; consequently, the separate Act 19
++3-distinct-transient-failure per-office reset logic cannot reliably see all
++events under the old appointee. Counting observations of the SAME failed
++invocation three times would itself be a false positive. A naive change
++retaining failed agents may either deadlock the government or unsafely replay
++tool effects when `backend_error.automatic_retry_safe=false`.
++
++The Executive and Legislature must implement the complete lawful treatment
++of that contradiction under the explicitly billy-dev-assigned Antonina
++issue `4Ux4sxiHjpXqSi9T9d2suq-alabama` (and enact an amendment if
++required). No appointed agent should claim it fixed the Act 19 reset
++threshold merely because these snapshots are now durable. Maintain
++SoringP1 and other independent work during review.
+diff --git a/government/appointments.sh b/government/appointments.sh
+index 9e6036b1..2129ce3e 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -44,16 +44,32 @@ fi
+ live=false
+ if [ -n "$old" ]; then
+   case "$old" in *[!a-zA-Z0-9_-]*|'') echo 'invalid stored ID' >&2; exit 1;; esac
+-  if meta=$(antonina agent status --id "$old" --json 2>/dev/null); then
+-    status=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
+-    case "$status" in running|idle|succeeded) live=true;; failed|stopped|killed) :;; *) echo "unknown status $status" >&2; exit 1;; esac
++  if ! meta=$(antonina agent status --id "$old" --json 2>/dev/null); then
++    # A transient status-query failure is NOT evidence of a dead agent.
++    # Replacing it could create a second live agent on the same worktree.
++    echo "Viche: status of appointed agent $old is unreadable; refuse replacement until a terminal status is proven" >&2
++    exit 1
+   fi
++  status=$(printf '%s\n' "$meta" | jq -er '.state') || exit 1
++  case "$status" in running|idle|succeeded) live=true;; failed|stopped|killed) :;; *) echo "unknown status $status" >&2; exit 1;; esac
+ fi
+ if [ "$action" = resolve ]; then
+   [ "$live" = true ] || { echo "no live appointment for $key" >&2; exit 1; }
+   printf '%s\n' "$old"
+   exit 0
+ fi
++# The Act 19 supervisors need evidence of real failed invocations. Historically
++# 'ensure' replaced a failed appointee BEFORE they could observe it. Capture
++# exact terminal status, last log and worktree identity BEFORE replacement.
++# Record at most once per disposable agent ID, even across repeated cycles.
++# This does not authorize replay of an unsafe failed prompt or claim that a
++# first-failure replacement met Act 19's reset threshold.
++if [ -n "$old" ] && [ "$live" != true ]; then
++  observed=${meta:-'{"state":"unreadable"}'}
++  printf '%s\n' "$observed" |
++    /bin/sh "$(CDPATH= cd "$(dirname "$0")" && pwd -P)/terminal-appointment-evidence.sh" "$key" "$old" "$cwd" ||
++      { echo "Cannot preserve evidence of departing agent $old" >&2; exit 1; }
++fi
+ # An old Git branch may carry a retired model or scope restriction.
+ # Refresh only idle appointees, not worktrees of currently running agents.
+ if [ -s "$town/AGENTS.md" ] && { [ -f "$cwd/.git" ] || [ -d "$cwd/.git" ]; } &&
+diff --git a/government/terminal-appointment-evidence.sh b/government/terminal-appointment-evidence.sh
+new file mode 100644
+index 00000000..3664f206
+--- /dev/null
++++ b/government/terminal-appointment-evidence.sh
+@@ -0,0 +1,75 @@
++#!/bin/sh
++# Durable per-ID terminal evidence before any appointment replacement.
++# Never modify the old agent or worktree. Caller serializes normal mutations.
++set -eu
++[ "$#" -eq 3 ] || { echo 'Usage: terminal-appointment-evidence.sh KEY ID CWD' >&2; exit 2; }
++key=$1 id=$2 cwd=$3
++case "$key:$id" in *[!a-zA-Z0-9_:-]*|'') echo 'Invalid terminal appointment key' >&2; exit 2;; esac
++umask 077
++root=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}/appointments
++mkdir -p "$root/terminal-evidence"
++dest=$root/terminal-evidence/$id
++index=$root/terminal-events.jsonl
++
++if [ ! -d "$dest" ]; then
++    tmp=$(mktemp -d "$root/.terminal-XXXXXXXX") || exit 1
++    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++    cat > "$tmp/status.json"
++    jq -e 'type=="object" and (.state | type=="string")' "$tmp/status.json" >/dev/null ||
++      { echo 'Malformed terminal appointment evidence' >&2; exit 1; }
++    state=$(jq -r '.state' "$tmp/status.json")
++    case "$state" in
++      failed|killed|stopped|unreadable) : ;;
++      *) echo "Refusing to log nonterminal state: $state" >&2; exit 1 ;;
++    esac
++
++    # Diagnostic capture is best-effort, but failure is explicitly recorded.
++    log_ok=false
++    log_truncated=false
++    if timeout 10 antonina agent log --id "$id" --lines 80 > "$tmp/log-tail.txt" 2> "$tmp/log-error.txt"; then
++        log_ok=true
++    fi
++    log_bytes=$(wc -c < "$tmp/log-tail.txt")
++    if [ "$log_bytes" -gt 131072 ]; then
++        head -c 131072 "$tmp/log-tail.txt" > "$tmp/log-limited.txt"
++        mv "$tmp/log-limited.txt" "$tmp/log-tail.txt"
++        log_truncated=true
++    fi
++    head_ok=false
++    if timeout 10 git -C "$cwd" rev-parse HEAD > "$tmp/worktree-head.txt" 2> "$tmp/head-error.txt"; then
++        head_ok=true
++    else
++        printf 'unavailable\n' > "$tmp/worktree-head.txt"
++    fi
++    worktree_ok=false
++    if timeout 10 git -C "$cwd" status --short > "$tmp/worktree-status.txt" 2> "$tmp/worktree-error.txt"; then
++        worktree_ok=true
++    else
++        printf 'UNAVAILABLE: unable to establish worktree status\n' > "$tmp/worktree-status.txt"
++    fi
++
++    jq -cn --arg key "$key" --arg id "$id" --arg cwd "$cwd" \
++      --arg at "$(date -u +%FT%TZ)" --argjson log_ok "$log_ok" \
++      --argjson log_truncated "$log_truncated" --argjson head_ok "$head_ok" \
++      --argjson worktree_ok "$worktree_ok" --slurpfile m "$tmp/status.json" \
++      '{at:$at, office:$key, agent_id:$id, cwd:$cwd, state:$m[0].state,
++        finished_at:($m[0].finished_at//null), prompts:($m[0].prompts//null),
++        failure_class:($m[0].backend_error.classification//null),
++        transient:$m[0].backend_error.transient,
++        automatic_retry_safe:$m[0].backend_error.automatic_retry_safe,
++        log_captured:$log_ok, log_truncated:$log_truncated,
++        worktree_head_captured:$head_ok, worktree_status_captured:$worktree_ok,
++        evidence:("terminal-evidence/" + $id)}' > "$tmp/event.json"
++    mv "$tmp" "$dest"
++    trap - EXIT HUP INT TERM
++fi
++
++# An earlier process may crash after moving the evidence dir but before indexing.
++# The appointment lock serializes these calls; repair the missing index row.
++[ -s "$dest/event.json" ] ||
++  { echo "Incomplete terminal snapshot for $id" >&2; exit 1; }
++if ! { [ -f "$index" ] && grep -Fq "\"agent_id\":\"$id\"" "$index"; }; then
++    cat "$dest/event.json" >> "$index" ||
++      { echo "Could not index terminal evidence for $id" >&2; exit 1; }
++fi
++echo "Viche: retained terminal appointment $id before replacement" >&2
+diff --git a/tests/appointments-smoke.sh b/tests/appointments-smoke.sh
+index 03a2aa5a..5d3dd79e 100644
+--- a/tests/appointments-smoke.sh
++++ b/tests/appointments-smoke.sh
+@@ -18,7 +18,13 @@ elif [ "$1" = agent ] && [ "$2" = status ]; then
+   id=$4
+   [ -f "$MOCK/$id" ] || exit 1
+   status=$(cat "$MOCK/$id")
+-  printf '{"state":"%s","model":null,"variant":"low"}\n' "$status"
++  if [ "$status" = failed ]; then
++    printf '{"state":"failed","finished_at":1792775220.5,"prompts":2,"backend_error":{"classification":"upstream_endpoint_unavailable","transient":true,"automatic_retry_safe":false}}\n'
++  elif [ "$status" = failed-permanent ]; then
++    printf '{"state":"failed","finished_at":1792775230.25,"prompts":3,"backend_error":{"classification":"invalid_api_key","transient":false,"automatic_retry_safe":false}}\n'
++  else
++    printf '{"state":"%s","model":null,"variant":"low"}\n' "$status"
++  fi
+ else
+   echo 'unexpected mocked command' >&2; exit 7
+ fi
+@@ -38,15 +44,51 @@ r=$(/bin/sh "$script" resolve a1)
+ [ "$r" = "$a" ] || exit 1
+ rm "$MOCK/$a"
+ if /bin/sh "$script" resolve a1 >/dev/null 2>&1; then echo 'resolve invented missing agent' >&2; exit 1; fi
++if /bin/sh "$script" ensure a1 >/dev/null 2>&1; then echo 'unreadable agent was replaced' >&2; exit 1; fi
++[ ! -d "$tmp/state/appointments/terminal-evidence/fresh-1" ]
++[ "$(awk -F '\t' '$1=="a1"{print $2}' "$tmp/state/appointments/appointments.tsv")" = fresh-1 ]
++# Only a CONFIRMED stopped status permits replacement.
++printf stopped > "$MOCK/$a"
+ c=$(/bin/sh "$script" ensure a1)
+ [ "$c" = fresh-2 ] || exit 1
++jq -e '.state=="stopped" and .agent_id=="fresh-1"' \
++  "$tmp/state/appointments/terminal-evidence/fresh-1/event.json" >/dev/null
+ printf failed > "$MOCK/$c"
+ x=$(/bin/sh "$script" ensure a1)
+ [ "$x" = fresh-3 ] || exit 1
++# Preserve the real failed status, no duplicate observation of this invocation.
++jq -e '.state=="failed" and .agent_id=="fresh-2" and .office=="a1" and
++       .finished_at==1792775220.5 and .prompts==2 and
++       .failure_class=="upstream_endpoint_unavailable" and
++       .transient==true and .automatic_retry_safe==false' \
++  "$tmp/state/appointments/terminal-evidence/fresh-2/event.json" >/dev/null
++[ -s "$tmp/state/appointments/terminal-evidence/fresh-2/status.json" ]
++# The mock has no 'agent log'; this MUST be explicitly marked unavailable,
++# not masquerade as a successfully captured log. Worktree is not Git either.
++jq -e '.log_captured==false and .worktree_status_captured==false and
++       .worktree_head_captured==false' \
++  "$tmp/state/appointments/terminal-evidence/fresh-2/event.json" >/dev/null
++[ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 2 ]
++# Recovery after a crash between primary evidence publication and index append:
++sed -i '/"agent_id":"fresh-2"/d' "$tmp/state/appointments/terminal-events.jsonl"
++[ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 1 ]
++/bin/sh "$town/government/terminal-appointment-evidence.sh" a1 fresh-2 "$tmp/seats/a1" </dev/null
++[ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 2 ]
++[ "$(/bin/sh "$script" ensure a1)" = fresh-3 ]
++[ "$(wc -l < "$tmp/state/appointments/terminal-events.jsonl")" -eq 2 ]
+ y=$(/bin/sh "$script" replace a1)
+ [ "$y" = fresh-4 ] || exit 1
+ e=$(/bin/sh "$script" ensure executive)
+ [ "$e" = fresh-5 ] || exit 1
++# A confirmed nontransient terminal failure must retain false, not be erased
++# into null by jq's alternative operator (false // null is null).
++printf failed-permanent > "$MOCK/$e"
++f=$(/bin/sh "$script" ensure executive)
++[ "$f" = fresh-6 ] || exit 1
++jq -e '.state=="failed" and .failure_class=="invalid_api_key" and
++        .transient==false and .automatic_retry_safe==false and
++        .prompts==3 and .finished_at==1792775230.25' \
++  "$tmp/state/appointments/terminal-evidence/fresh-5/event.json" >/dev/null
+ [ "$(wc -l < "$tmp/state/appointments/appointments.tsv")" -eq 2 ] || exit 1
+ # No secret powers granted by supplying an unknown role key.
+ if /bin/sh "$script" ensure a2 >/dev/null 2>&1; then exit 1; fi

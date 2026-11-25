@@ -1,0 +1,278 @@
+commit 9e7f84b30d33f0699fd16e5ae148af200ee79225
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 05:01:28 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 05:01:28 2026 +0000
+
+    PnP: reserve host memory and back off interrupted publication builds
+
+diff --git a/missions/pnp/build_control.py b/missions/pnp/build_control.py
+index f5397036..ed2b2de5 100644
+--- a/missions/pnp/build_control.py
++++ b/missions/pnp/build_control.py
+@@ -2,6 +2,7 @@
+ import contextlib
+ import fcntl
+ import os
++from pathlib import Path
+ import time
+ 
+ from . import config, state
+@@ -45,6 +46,13 @@ def slot(timeout=600):
+                 raise BuildDeferred("publication assignment ended")
+             try:
+                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                free = headroom()
++                if free is not None and free < MAX_BUILD_RSS + RESERVE:
++                    fcntl.flock(fd, fcntl.LOCK_UN)
++                    if time.monotonic() >= deadline:
++                        raise BuildDeferred("insufficient memory for full publication build")
++                    time.sleep(2)
++                    continue
+                 break
+             except BlockingIOError:
+                 if time.monotonic() >= deadline:
+@@ -72,3 +80,48 @@ def busy():
+         return None
+     finally:
+         os.close(fd)
++
++
++GIB = 1024 ** 3
++RESERVE = 2 * GIB
++MAX_BUILD_RSS = 6 * GIB
++
++
++def headroom(root=Path("/sys/fs/cgroup")):
++    """Conservative cgroup headroom, excluding reclaimable inactive file cache."""
++    try:
++        limit = int((root / "memory.max").read_text())
++        current = int((root / "memory.current").read_text())
++        stats = dict(line.split() for line in
++                     (root / "memory.stat").read_text().splitlines())
++        return max(0, limit - current + int(stats.get("inactive_file", "0")))
++    except (OSError, ValueError, TypeError):
++        return None
++
++
++def group_rss(group, proc=Path("/proc")):
++    """Sum RSS in our own process group; no arbitrary process selection."""
++    rss = 0
++    page = os.sysconf("SC_PAGE_SIZE")
++    for entry in proc.iterdir():
++        if not entry.name.isdigit():
++            continue
++        try:
++            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
++            if int(fields[2]) == group:
++                rss += max(0, int(fields[21])) * page
++        except (OSError, ValueError, IndexError):
++            continue
++    return rss
++
++
++def memory_reason(group):
++    free = headroom()
++    if free is not None and free < RESERVE:
++        return "host memory reserve threatened"
++    try:
++        if group_rss(group) > MAX_BUILD_RSS:
++            return "publication build exceeded 6 GiB RSS budget"
++    except OSError:
++        pass
++    return None
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index ec4d0b1c..cf18be7d 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -156,6 +156,8 @@ def build(worktree, module, statement, runner=None):
+            if not (k.startswith("LEAN_") or k.startswith("LAKE_")
+                    or k in ("PEQUALNP_IN_QUEUE", "PEQUALNP_REAL_LAKE"))}
+     # Use the upstream build queue and content-addressed artifact cache.
++    # Its shell sets LEAN_NUM_THREADS from build-jobs.conf; constrain that
++    # independently of the number of model-bound researchers.
+     # Never inherit an untrusted worker's Lake search path/options.
+     # Retain the publisher lock across an orphaned build subprocess, too.
+     lock_fd = os.environ.get("PNP_PUBLISH_LOCK_FD")
+@@ -171,11 +173,14 @@ def build(worktree, module, statement, runner=None):
+             while True:
+                 if build_control.obsolete():
+                     raise build_control.BuildDeferred("publication assignment ended")
++                reason = build_control.memory_reason(proc.pid)
++                if reason:
++                    raise build_control.BuildDeferred(reason)
+                 remaining = deadline - time.monotonic()
+                 if remaining <= 0:
+                     raise GitError("local Lean build timed out; retry")
+                 try:
+-                    code = proc.wait(timeout=min(3, remaining))
++                    code = proc.wait(timeout=min(0.5, remaining))
+                     break
+                 except subprocess.TimeoutExpired:
+                     continue
+diff --git a/missions/pnp/jobs.py b/missions/pnp/jobs.py
+index 21830fec..fe993c27 100644
+--- a/missions/pnp/jobs.py
++++ b/missions/pnp/jobs.py
+@@ -3,6 +3,7 @@ import fcntl
+ import os
+ import subprocess
+ import sys
++import time
+ 
+ from . import config, publish, state, validate
+ 
+@@ -66,7 +67,8 @@ def submit(gap, source):
+                              failure_reason=None)
+         elif rec["state"] == "CANDIDATE_READY":
+             state.update(gap, candidate_digest=digest, failure_reason=None)
+-        state.update(gap, queued_lease=rec["lease"])
++        state.update(gap, queued_lease=rec["lease"],
++                     publisher_retry_at=None, publisher_failures=0)
+         launch(gap, fd)
+         return {"gap": gap, "status": "publishing", "digest": digest}
+     finally:
+@@ -80,6 +82,8 @@ def resume(gap):
+             not rec.get("queued_lease") or rec["queued_lease"] != rec["lease"] or
+             not os.path.isfile(candidate_path(gap))):
+         return False
++    if (rec.get("publisher_retry_at") or 0) > time.time():
++        return True
+     fd = claim(gap)
+     if fd is None:
+         return True
+@@ -90,21 +94,39 @@ def resume(gap):
+         os.close(fd)
+ 
+ 
++def defer(gap, lease):
++    """Bound retries without turning transient outages into failed proofs."""
++    rec = state.load(gap)
++    if (not rec or rec.get("lease") != lease or rec["state"] not in READY
++            or rec.get("queued_lease") != lease):
++        return
++    attempts = min(8, (rec.get("publisher_failures") or 0) + 1)
++    delay = min(900, 30 * 2 ** (attempts - 1))
++    state.update(gap, publisher_failures=attempts,
++                 publisher_retry_at=time.time() + delay)
++
++
+ def run(gap, fd):
++    lease = None
+     try:
+         os.environ["PNP_PUBLISH_LOCK_FD"] = str(fd)
+         rec = state.load(gap)
+         if rec["state"] not in READY or rec.get("queued_lease") != rec["lease"]:
+             return
+         os.environ["PNP_PUBLISH_GAP"] = gap
+-        os.environ["PNP_PUBLISH_LEASE"] = rec.get("lease") or ""
++        lease = rec.get("lease")
++        os.environ["PNP_PUBLISH_LEASE"] = lease or ""
+         result = publish.publish(gap, candidate_path(gap))
+         print(result, flush=True)
+     except publish.StopPublish as exc:
+         print("publication stopped:", exc, flush=True)
++        if lease:
++            defer(gap, lease)
+     except Exception as exc:
+         # Preserve the pending candidate for the ordinary recovery cycle.
+         print("publication interrupted:", exc, flush=True)
++        if lease:
++            defer(gap, lease)
+     finally:
+         os.close(fd)
+ 
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index e5bc2c8b..8735d993 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -122,3 +122,10 @@ for scratch development, then hand the full required candidate to submit.
+ Avoid full local checker runs and redundant full Mathlib loads. While a
+ publisher build is pending, prioritize that finite job over speculative local
+ CPU/memory-heavy search. Keep independent model-bound reasoning productive.
++
++Full Mathlib/checklemma processes can exhaust the machine: the local full
++checker is NOT a publication prerequisite. Do not run it on billy-dev.
++Use the publisher for the required full build, not multiple simultaneous
++full-import Lean scratch processes. Use minimal scratch imports, bounded
++search subprocesses and small test inputs. A memory-deferred publisher
++preserves the proof and retries; do not start a competing full build.
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index 0e310c2c..0f2a02c2 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -174,6 +174,8 @@ def reacquire(gap_id, **fields):
+             rec[key] = None
+         rec["failure_reason"] = None
+         rec["queued_lease"] = None
++        rec["publisher_retry_at"] = None
++        rec["publisher_failures"] = 0
+         rec["intent"] = None
+         rec["researchers"] = []
+         rec["state"] = "LEASED"
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 6ed1e846..b85ceed7 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -398,6 +398,23 @@ class TestCli(unittest.TestCase):
+             self.assertEqual(f.read(), GOOD)
+         self.assertEqual(state.load(GAP)["queued_lease"], "lease-1")
+ 
++    def test_publication_retry_backoff_preserves_candidate(self):
++        from missions.pnp import jobs
++        new_state("LEASED")
++        with mock.patch.object(jobs, "launch"):
++            jobs.submit(GAP, candidate_file())
++        jobs.defer(GAP, "old-lease")
++        self.assertIsNone(state.load(GAP).get("publisher_retry_at"))
++        jobs.defer(GAP, "lease-1")
++        rec = state.load(GAP)
++        self.assertEqual(rec["publisher_failures"], 1)
++        self.assertGreater(rec["publisher_retry_at"], time.time())
++        with mock.patch.object(jobs, "launch") as launch:
++            self.assertTrue(jobs.resume(GAP))
++            launch.assert_not_called()
++        self.assertTrue(os.path.isfile(jobs.candidate_path(GAP)))
++        self.assertEqual(rec["state"], "CANDIDATE_READY")
++
+     def test_concurrent_publisher_lock_prevents_duplicate_launch(self):
+         from missions.pnp import jobs
+         new_state("LEASED")
+diff --git a/tests/pnp-real-smoke.py b/tests/pnp-real-smoke.py
+index a7bb2009..662b012a 100644
+--- a/tests/pnp-real-smoke.py
++++ b/tests/pnp-real-smoke.py
+@@ -102,7 +102,7 @@ class FullPathSmoke(unittest.TestCase):
+ 
+     def test_publication_slot_and_confirmed_obsolescence(self):
+         with tempfile.TemporaryDirectory() as tmp:
+-            with patch.object(config, "CACHE_DIR", tmp):
++            with patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=16 * build_control.GIB):
+                 self.assertFalse(build_control.busy())
+                 with build_control.slot(timeout=0):
+                     self.assertTrue(build_control.busy())
+@@ -117,6 +117,24 @@ class FullPathSmoke(unittest.TestCase):
+         with patch.object(state, "load", return_value={"state": "LEASED", "lease": "new"}):
+             self.assertTrue(build_control.obsolete("L-meta-1", "old"))
+ 
++    def test_memory_reserve_and_process_group_budget(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = pathlib.Path(tmp)
++            (root / "memory.max").write_text(str(14 * build_control.GIB))
++            (root / "memory.current").write_text(str(13 * build_control.GIB))
++            (root / "memory.stat").write_text("inactive_file 1073741824\n")
++            self.assertEqual(build_control.headroom(root), 2 * build_control.GIB)
++            (root / "memory.max").write_text("max")
++            self.assertIsNone(build_control.headroom(root))
++        with patch.object(build_control, "headroom", return_value=build_control.GIB):
++            self.assertIn("reserve", build_control.memory_reason(1))
++        with patch.object(build_control, "headroom", return_value=None), patch.object(
++                build_control, "group_rss", return_value=7 * build_control.GIB):
++            self.assertIn("budget", build_control.memory_reason(1))
++        with patch.object(build_control, "headroom", return_value=None), patch.object(
++                build_control, "group_rss", return_value=0):
++            self.assertIsNone(build_control.memory_reason(1))
++
+     def test_reuse_requires_exact_publisher_tree(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             def git(*args):

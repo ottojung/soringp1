@@ -1,0 +1,79 @@
+commit 9685c3ac0931d3cb45f51452fe4e6fc862ec8e04
+Author:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+AuthorDate: Wed Oct 14 09:22:12 2026 -0700
+Commit:     Otto Jung <121908118+ottojung@users.noreply.github.com>
+CommitDate: Wed Oct 14 09:22:12 2026 -0700
+
+    Test Founder intake despite busy clerk, dedupe and backend retry
+
+diff --git a/tests/intake-smoke.sh b/tests/intake-smoke.sh
+new file mode 100644
+index 00000000..bf212280
+--- /dev/null
++++ b/tests/intake-smoke.sh
+@@ -0,0 +1,65 @@
++#!/bin/sh
++# Hermetic regression: busy clerk must receive Founder messages despite sitting skip.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' 0
++mkdir -p "$d/bin" "$d/town/government" "$d/state" "$d/seats/c1a00001" "$d/charter" "$d/mock"
++printf 'c1a00001\tClerk\tFounder intake\n' > "$d/town/government/seats.tsv"
++printf 'Protected constitution fixture\n' > "$d/charter/CONSTITUTION.md"
++cat > "$d/bin/antonina" <<'MOCK'
++#!/bin/sh
++set -eu
++case "$1 $2" in
++'board show')
++  while [ "$#" -gt 0 ]; do
++    case "$1" in --page) page=$2; shift 2;; *) shift;; esac
++  done
++  jq -c --argjson page "$page" '{messages:(.messages | (length) as $n | .[([0,$n-$page*50]|max):($n-($page-1)*50)])}' "$MOCK_DIR/comments"
++  ;;
++'board feed')
++  echo '{"entries":[]}'
++  ;;
++'agent status')
++  printf '{"state":"%s"}\n' "$(cat "$MOCK_DIR/status")"
++  ;;
++'agent run')
++  if [ "${MOCK_FAIL:-0}" = 1 ]; then exit 9; fi
++  printf '%s\n' "$*" >> "$MOCK_DIR/prompts"
++  printf '1\n' >> "$MOCK_DIR/calls"
++  ;;
++*) echo "Unexpected mock Antonina call: $*" >&2; exit 9;;
++esac
++MOCK
++chmod +x "$d/bin/antonina"
++cat > "$d/mock/comments" <<'JSON'
++{"messages":[{"id":"a","author":"other","createdAt":"2026-10-14T01:00:00Z","body":"ignore"},{"id":"b","author":"Vitalik","createdAt":"2026-10-14T02:00:00Z","body":"Issue #298 Janitor Office"}]}
++JSON
++printf 'running\n' > "$d/mock/status"
++PATH="$d/bin:$PATH"
++MOCK_DIR="$d/mock"
++VICHE_TOWNHALL_ID=297
++VICHE_TOWN_ROOT="$d/town"
++VICHE_SEATS_ROOT="$d/seats"
++VICHE_STATE_ROOT="$d/state"
++VICHE_CONSTITUTION_DIR="$d/charter"
++export PATH MOCK_DIR VICHE_TOWNHALL_ID VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION_DIR
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 1 ]
++grep -q -- '--steer' "$d/mock/prompts"
++[ "$(find "$d/state/founder-inbox/sent" -name '*.json' | wc -l)" -eq 1 ]
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 1 ]
++# Failed backend retains durable pending queue; an idle clerk can be restarted.
++cat > "$d/mock/comments" <<'JSON'
++{"messages":[{"id":"a","author":"other","createdAt":"2026-10-14T01:00:00Z","body":"ignore"},{"id":"b","author":"Vitalik","createdAt":"2026-10-14T02:00:00Z","body":"first"},{"id":"c","author":"Vitalik","createdAt":"2026-10-14T03:00:00Z","body":"second"}]}
++JSON
++if MOCK_FAIL=1 /bin/sh "$repo/government/founder-intake.sh" >/dev/null 2>&1; then
++  echo 'Expected backend failure' >&2; exit 1
++fi
++[ "$(find "$d/state/founder-inbox/pending" -name '*.json' | wc -l)" -eq 1 ]
++printf 'failed\n' > "$d/mock/status"
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 2 ]
++if tail -n 1 "$d/mock/prompts" | grep -q -- '--steer'; then exit 1; fi
++echo 'Viche Founder intake smoke passed'

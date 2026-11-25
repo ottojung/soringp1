@@ -1,0 +1,128 @@
+commit 9f1cb1adbaaec24e27e4532a2b9d5efee3516f7d
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Thu Nov 19 14:35:37 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Thu Nov 19 14:35:37 2026 +0000
+
+    Repair Act 30 expiry: minute-precision handoffs and owner handoff close
+    
+    Research-identified defects in government/obligation-expiry.py (Innovation
+    Office round 5, 17 Nov 2026):
+    
+    1. iso_to_epoch only parsed second-precision timestamps, so durable handoffs
+       with minute-precision 'created:' values (e.g. H-1794129600-holdgates,
+       created 2026-11-08T16:02Z) were silently exempt from the 72h expiry.
+       Now also accepts %Y-%m-%dT%H:%MZ.
+    
+    2. 'close' supported only receipts, so a handoff owner could not record owner
+       closure through the tool as the Founder directive 7/11(c) contemplates.
+       Adds 'close handoff ID --evidence ...', marking status closed_by_owner with
+       closure evidence and independently-verified: false (never a verdict).
+    
+    tests/obligation-expiry-smoke.sh gains regression coverage for both.
+    sh tests/run-all.sh green on exact tree; obligation-expiry smoke green.
+    
+    Engineering repair of Town machinery under Founder directive item 9, not a
+    bill, law change, ballot, Judiciary finding or new external mission.
+
+diff --git a/government/obligation-expiry.py b/government/obligation-expiry.py
+index f74e363e..d293fdeb 100644
+--- a/government/obligation-expiry.py
++++ b/government/obligation-expiry.py
+@@ -59,11 +59,16 @@ def ttl_seconds():
+ def iso_to_epoch(text):
+     if not isinstance(text, str) or not text:
+         return None
+-    try:
+-        return datetime.datetime.strptime(text.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(
+-            tzinfo=datetime.timezone.utc).timestamp()
+-    except ValueError:
+-        return None
++    value = text.strip()
++    # Accept second-precision (canonical) and minute-precision timestamps;
++    # the latter occur in durable records such as handoffs (e.g. "2026-...T16:02Z").
++    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
++        try:
++            return datetime.datetime.strptime(value, fmt).replace(
++                tzinfo=datetime.timezone.utc).timestamp()
++        except ValueError:
++            continue
++    return None
+ 
+ 
+ def epoch_to_iso(epoch):
+@@ -311,6 +316,28 @@ def close_receipt(office, evidence, now):
+             "evidence": evidence.strip()})
+ 
+ 
++def close_handoff(ident, evidence, now):
++    if not evidence or not evidence.strip():
++        raise SystemExit("closing a handoff requires evidence text")
++    path = HANDOFFS / (ident + ".txt")
++    if not path.is_file():
++        raise SystemExit("no such handoff: %s" % ident)
++    fields = handoff_fields(path)
++    if fields.get("status") != "open":
++        raise SystemExit("handoff %s is %s, not open" % (ident, fields.get("status")))
++    text = path.read_text()
++    if not text.endswith("\\n"):
++        text += "\\n"
++    text = re.sub(r"(?m)^status: open$", "status: closed_by_owner", text, count=1)
++    text += "closed: %s\n" % epoch_to_iso(now)
++    text += "closed-by: owner\n"
++    text += "closure-evidence: %s\n" % " ".join(evidence.split())
++    text += "independently-verified: false\n"
++    atomic_write(path, text)
++    ledger({"at": epoch_to_iso(now), "kind": "handoff", "id": ident, "action": "closed_by_owner",
++            "evidence": evidence.strip()})
++
++
+ def main(argv):
+     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+     parser.add_argument("--now", type=int, default=None)
+@@ -322,7 +349,7 @@ def main(argv):
+     renew_p.add_argument("ident")
+     renew_p.add_argument("--reason", required=True)
+     close_p = sub.add_parser("close")
+-    close_p.add_argument("kind", choices=["receipt"])
++    close_p.add_argument("kind", choices=["receipt", "handoff"])
+     close_p.add_argument("ident")
+     close_p.add_argument("--evidence", required=True)
+     args = parser.parse_args(argv)
+@@ -335,7 +362,10 @@ def main(argv):
+     elif command == "renew":
+         renew(args.kind, args.ident, args.reason, now)
+     elif command == "close":
+-        close_receipt(args.ident, args.evidence, now)
++        if args.kind == "receipt":
++            close_receipt(args.ident, args.evidence, now)
++        elif args.kind == "handoff":
++            close_handoff(args.ident, args.evidence, now)
+     return 0
+ 
+ 
+diff --git a/tests/obligation-expiry-smoke.sh b/tests/obligation-expiry-smoke.sh
+index 6871e5e4..67cff066 100644
+--- a/tests/obligation-expiry-smoke.sh
++++ b/tests/obligation-expiry-smoke.sh
+@@ -96,6 +96,20 @@ jq -e '.state == "closed_by_owner" and .independently_verified == false and .clo
+ test -z "$(/bin/sh "$d/town/government/terminal-continuity.sh" instruction fresh-office)"
+ if $tool close receipt fresh-office --evidence x 2>/dev/null; then echo 'double close accepted' >&2; exit 1; fi
+ 
++# Minute-precision timestamps (used by durable handoffs) must not silently escape expiry.
++handoff H-4-minute 2026-11-08T16:02Z open
++$tool sweep | jq -e '.handoffs == ["H-4-minute"]' >/dev/null
++grep -q '^status: expired$' "$d/town/records/handoffs/H-4-minute.txt"
++grep -q 'expired unverified' "$d/town/records/handoffs/H-4-minute.txt"
++
++# The owner can close its own open handoff alone, without a verifier.
++handoff H-5-owner 2026-11-16T10:00:00Z open
++$tool close handoff H-5-owner --evidence 'checked durable board: nothing pending'
++grep -q '^status: closed_by_owner$' "$d/town/records/handoffs/H-5-owner.txt"
++grep -q '^closure-evidence: checked durable board: nothing pending$' "$d/town/records/handoffs/H-5-owner.txt"
++grep -q '^independently-verified: false$' "$d/town/records/handoffs/H-5-owner.txt"
++if $tool close handoff H-5-owner --evidence x 2>/dev/null; then echo 'double handoff close accepted' >&2; exit 1; fi
++
+ # TTL 0 disables expiry entirely.
+ receipt eternal 2026-01-01T00:00:00Z
+ VICHE_OBLIGATION_TTL_HOURS=0 $tool sweep | jq -e '.receipts == []' >/dev/null

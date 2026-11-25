@@ -1,0 +1,421 @@
+commit 924c6103c8ec1ca81890f5935a03b145def34c64
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Mon Nov 23 08:10:52 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Mon Nov 23 08:20:08 2026 +0000
+
+    Enforce audited free-only models on all Act34 adaptive office invocations
+    
+    Preserve Economy verified XDG_CONFIG_HOME per-call Antonina model preferences, not global model ladder. No paid/other fallback if policy or wrapper missing under Act34; validate precise -free suffix rather than substring. Real Economy live proof zero provider cost and cooldown denial, targeted regressions green. Provider token limits remain retrospective stop-on-detection, not strict model token hard cap.
+
+diff --git a/government/knowledge-free-dispatch.sh b/government/knowledge-free-dispatch.sh
+new file mode 100644
+index 00000000..5d024216
+--- /dev/null
++++ b/government/knowledge-free-dispatch.sh
+@@ -0,0 +1,77 @@
++#!/bin/sh
++# Ministry of Economy — enforceable per-invocation FREE-ONLY model allowlist.
++#
++# Problem this fixes (Founder/operator falsifier, 2026-11-23):
++#   `antonina agent run` has NO --model flag; Antonina chooses a model from the
++#   GLOBAL ladder (~/.config/antonina/config.json) at dispatch. A caller-supplied
++#   model_id string in a Viche profile does NOT constrain what Antonina launches,
++#   so a "zero-billed permit" built on that string check would be FALSE.
++#
++# Mechanism (verified from installed Antonina aeb1ffb source and by live test):
++#   agent-runtime/model-config.js resolves models from
++#     $XDG_CONFIG_HOME/antonina/config.json
++#   (the host remap via ANTONINA_HOST_XDG_CONFIG_HOME applies ONLY when
++#   XDG_CONFIG_HOME == ANTONINA_OPENCODE_XDG_CONFIG_HOME). cli/agent.js
++#   spawnRunner passes process.env to the runner, and backend.js selects the
++#   model from that env via configuredModels(). Setting XDG_CONFIG_HOME to a
++#   dedicated free-only directory on THIS invocation therefore pins model
++#   selection at prelaunch, without touching the global ladder for any other
++#   project. Live test 2026-11-23: allowlist {opencode-go/hy4-flash-free} ->
++#   agent models_used=[opencode-go/hy4-flash-free], session cost=0.0; an
++#   allowlist whose sole model was cooling REFUSED dispatch (no paid fallback).
++#
++# This script does NOT enable any office, edit activation.json, reset the 45-day
++# UPPER_BOUND ledger, or spend money. It is inert until a lawful permit dispatches
++# a knowledge office. It is NOT a claim of a strict hard cap: Antonina's 20 s
++# poll remains stop-on-detection. It is a PRELAUNCH billing-source allowlist.
++set -eu
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
++policy="$state/economy/model-policy.json"
++allow_dir="$state/knowledge/free-allowlist"
++allow_cfg="$allow_dir/config.json"
++
++log() { printf 'knowledge-free-dispatch: %s\n' "$*" >&2; }
++die() { log "$*"; exit 1; }
++
++[ -s "$policy" ] || die "Economy model policy missing: $policy"
++[ -f "$town/government/knowledge-practical-bounds.py" ] || die "practical-bounds module missing"
++
++# Build the allowlist from Economy's audited, source-attested free tier only.
++# Every id must carry a '-free' component and appear in model-policy.json 'prefer'.
++# This is ALLOWLIST CONSTRUCTION from an authoritative record, not a billing
++# enforcement check here: enforcement is Antonina's config on the dispatch path.
++python3 - "$policy" "$allow_dir" "$allow_cfg" <<'PY'
++import json, os, re, sys, tempfile
++policy, allow_dir, allow_cfg = sys.argv[1:4]
++p = json.load(open(policy, encoding="utf-8"))
++prefer = p.get("prefer") or []
++if not prefer:
++    raise SystemExit("empty free-tier prefer list")
++for mid in prefer:
++    if not isinstance(mid, str) or not re.fullmatch(
++        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-free", mid):
++        raise SystemExit("non-free or malformed id in policy prefer")
++entries = [{"model": mid, "comment": "Economy audited free tier 2026-11-23; source-attested in model-policy.json"} for mid in prefer]
++os.makedirs(allow_dir, mode=0o700, exist_ok=True)
++fd, tmp = tempfile.mkstemp(prefix=".free-allow-", dir=allow_dir)
++with os.fdopen(fd, "w", encoding="utf-8") as fh:
++    json.dump({"models": entries}, fh, indent=2)
++    fh.write("\n")
++os.chmod(tmp, 0o600)
++os.replace(tmp, allow_cfg)
++PY
++[ -s "$allow_cfg" ] || die "failed to build allowlist config"
++
++# The wrapper's only job after building the config is to exec the requested
++# Antonina command with XDG_CONFIG_HOME pinned to the free-only config. All
++# other environment (including state root) is preserved.
++case "${1:-}" in
++  run)
++    shift
++    XDG_CONFIG_HOME="$allow_dir" exec antonina agent run "$@"
++    ;;
++  *)
++    die "usage: knowledge-free-dispatch.sh run <antonina agent run args...>"
++    ;;
++esac
+diff --git a/government/knowledge-office-cycle.sh b/government/knowledge-office-cycle.sh
+index 4c488a1a..8ff81c66 100644
+--- a/government/knowledge-office-cycle.sh
++++ b/government/knowledge-office-cycle.sh
+@@ -185,7 +185,29 @@ if [ -n "$reservation" ]; then
+     exit 1
+   }
+ fi
+-antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach > "$root/dispatch.log" 2>&1 || {
++# Under Act34 ALL model-using knowledge-agent dispatches MUST use the
++# Economy-audited free-only provider selector (or separately verified
++# provider-hard-capped path, not installed). A missing wrapper, policy or
++# allowed model is a DENIAL, never a fallback to Antonina's global ladder.
++# Before Act34 enactment, preserve legacy fixture/plain dispatch behavior.
++dispatch_cmd() {
++  if grep -Eq '^## Act 34 — Rapid Full Institutional Activation and Continuous Improvement Act \(enacted ' "$town/government/LAWS.md"; then
++    if [ ! -s "$town/government/knowledge-free-dispatch.sh" ] ||
++       [ ! -s "$state/economy/model-policy.json" ]; then
++       echo 'Viche knowledge: missing free-only model selector/policy; DENY' >&2
++       return 1
++    fi
++    /bin/sh "$town/government/knowledge-free-dispatch.sh" run \
++        --id "$id" --cwd "$cwd" --prompt "$prompt" --detach
++  elif [ -s "$town/government/knowledge-free-dispatch.sh" ] &&
++       [ -s "$state/economy/model-policy.json" ]; then
++    /bin/sh "$town/government/knowledge-free-dispatch.sh" run \
++        --id "$id" --cwd "$cwd" --prompt "$prompt" --detach
++  else
++    antonina agent run --id "$id" --cwd "$cwd" --prompt "$prompt" --detach
++  fi
++}
++dispatch_cmd > "$root/dispatch.log" 2>&1 || {
+   [ -z "$reservation" ] || /bin/sh "$budget" reconcile >/dev/null 2>&1 || :
+   exit 1
+ }
+diff --git a/government/knowledge-practical-bounds.py b/government/knowledge-practical-bounds.py
+new file mode 100644
+index 00000000..314c5ce1
+--- /dev/null
++++ b/government/knowledge-practical-bounds.py
+@@ -0,0 +1,220 @@
++#!/usr/bin/env python3
++"""Act 29 Economy — practical, HONEST operational cost ceilings for broad model offices.
++
++This module implements the tiered controls the Founder asked for on 2026-11-23,
++so the four adaptive knowledge offices can actually dispatch under bounded risk
++instead of being vetoed by an unattainable strict-hard-cap proof.
++
++It is INERT until a lawfully enacted amendment (Act 34 or successor) and a
++signed Executive permit exist. It does NOT edit activation.json, does NOT enable
++any office, and does NOT reset or rebrand the accrued 45-day UPPER_BOUND ledger.
++
++Honesty rules (deliberate, not a caveat to be hidden):
++  * A -free provider tier has cost == 0 by provider contract. Verified live on
++    billy-dev 2026-11-23: hy4-flash-free session cost=0.0 with real token use.
++    The binding limits there are provider usage quotas (HTTP 429 time windows)
++    and HOST resources (CPU/wall/inodes/concurrency), not money.
++  * ENFORCEMENT OF THE FREE TIER IS NOT A STRING CHECK. `billing_tier()` below
++    only classifies an id from Economy's audited policy for ACCOUNTING. The real
++    prelaunch constraint is `government/knowledge-free-dispatch.sh`, which pins
++    XDG_CONFIG_HOME to an allowlist config for the exact `antonina agent run`
++    invocation. Verified from installed Antonina aeb1ffb source
++    (agent-runtime/model-config.js + backend.js + cli/agent.js spawnRunner) and
++    by live test: allowlist {opencode-go/hy4-flash-free} -> agent models_used was
++    exactly that id, session cost=0.0; a cooling sole allowed model REFUSED
++    dispatch with NO fallback to the global ladder. This module does NOT itself
++    constrain which model Antonina launches.
++  * OpenCode's 20-second token poll is STOP-ON-DETECTION only. It is never
++    represented as a strict in-flight hard cap. cap_kind is always explicit.
++  * A paid/provider-billed model is refused unless a provider-enforced hard
++    ceiling (prepaid key or gateway limit) is configured and independently
++    verified. No fabricated numeric "proof" is accepted.
++  * Per-request input/output ceilings REDUCE exposure; OpenCode auto-continuation
++    can overshoot them, so the accounting charge uses a continuation multiplier.
++    No claim is made that generation stops exactly at the ceiling.
++
++Usage:
++  knowledge-practical-bounds.py validate PROFILE_JSON
++  knowledge-practical-bounds.py exposure PROFILE_JSON MODEL_ID
++  knowledge-practical-bounds.py admit PROFILE_JSON AGG_JSON OFFICE OPEN_COUNT
++  knowledge-practical-bounds.py ambiguous PROFILE_JSON RESERVATION_JSON
++"""
++import json
++import sys
++
++CAP_KEYS = ("tokens_total", "cpu_seconds", "wall_seconds")
++LEDGER_NOTE = "45-day cumulative UPPER_BOUND ledger; never reset or rebranded"
++
++# Honest defaults. All ceilings are ACCOUNTING/exposure bounds, not provider guarantees.
++DEFAULT_PROFILE = {
++    "schema": "viche-knowledge-practical-bounds-v1",
++    "cap_kind": "stop_on_detection",
++    "strict_hard_cap_claimed": False,
++    "monitor_interval_seconds": 20,
++    "max_concurrent_per_office": 1,
++    "max_input_tokens_per_request": 8192,
++    "max_output_tokens_per_request": 4096,
++    "max_continuations": 2,
++    "max_wall_seconds_per_invocation": 900,
++    "max_cpu_seconds_per_invocation": 300,
++    "per_office_caps": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600},
++    "aggregate_caps": {"tokens_total": 1600000, "cpu_seconds": 7200, "wall_seconds": 14400},
++    "accounting_window_seconds": 3888000,
++    "zero_billing_tiers": ["-free"],
++    "provider_hard_ceiling": None,
++    "enabled_offices": [],
++}
++
++
++def load(path):
++    with open(path, encoding="utf-8") as fh:
++        return json.load(fh)
++
++
++def is_number(v):
++    return isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0
++
++
++def validate(profile):
++    """Fail closed on a malformed or dishonest profile."""
++    problems = []
++    if profile.get("schema") != DEFAULT_PROFILE["schema"]:
++        problems.append("wrong schema")
++    if profile.get("cap_kind") != "stop_on_detection":
++        problems.append("cap_kind must be stop_on_detection (no strict hard cap claim)")
++    if profile.get("strict_hard_cap_claimed") is not False:
++        problems.append("strict hard cap may not be claimed")
++    for key in ("monitor_interval_seconds", "max_concurrent_per_office",
++                "max_input_tokens_per_request", "max_output_tokens_per_request",
++                "max_continuations", "max_wall_seconds_per_invocation",
++                "max_cpu_seconds_per_invocation", "accounting_window_seconds"):
++        if not is_number(profile.get(key)) or profile[key] <= 0:
++            problems.append("invalid positive integer field: %s" % key)
++    if profile.get("accounting_window_seconds") != 3888000:
++        problems.append("45-day accounting window changed")
++    for scope in ("per_office_caps", "aggregate_caps"):
++        caps = profile.get(scope)
++        if not isinstance(caps, dict):
++            problems.append("%s missing" % scope)
++            continue
++        for key in CAP_KEYS:
++            if not is_number(caps.get(key)) or caps[key] <= 0:
++                problems.append("%s.%s invalid" % (scope, key))
++    agg = profile.get("aggregate_caps", {})
++    office = profile.get("per_office_caps", {})
++    for key in CAP_KEYS:
++        if isinstance(agg.get(key), (int, float)) and isinstance(office.get(key), (int, float)):
++            if agg[key] < office[key]:
++                problems.append("aggregate.%s < office.%s" % (key, key))
++    tiers = profile.get("zero_billing_tiers")
++    if not isinstance(tiers, list) or not tiers or not all(isinstance(t, str) and t for t in tiers):
++        problems.append("zero_billing_tiers invalid")
++    if not isinstance(profile.get("enabled_offices"), list):
++        problems.append("enabled_offices must be a list (empty means inert)")
++    return problems
++
++
++def billing_tier(profile, model_id):
++    """zero_free_tier when the model id carries a configured free component."""
++    mid = str(model_id)
++    free = any(t in mid.split("/") or mid.endswith(t) or ("-" + t.lstrip("-")) in mid
++               for t in profile.get("zero_billing_tiers", []))
++    if free:
++        return {"tier": "zero_free_tier", "billing_exposure": 0,
++                "binding_limits": ["provider usage quota (429 time window)",
++                                   "host CPU/wall", "concurrency", "inodes"]}
++    if profile.get("provider_hard_ceiling"):
++        return {"tier": "paid_with_provider_ceiling",
++                "billing_exposure": profile["provider_hard_ceiling"],
++                "binding_limits": ["provider-enforced hard ceiling (must be independently verified)"]}
++    return {"tier": "paid_unbounded", "billing_exposure": None,
++            "binding_limits": [], "admit": False,
++            "reason": "paid model requires a provider-enforced hard ceiling; none configured"}
++
++
++def exposure(profile, model_id):
++    """Conservative per-request exposure and honest cap labeling."""
++    tier = billing_tier(profile, model_id)
++    inp = profile["max_input_tokens_per_request"]
++    out = profile["max_output_tokens_per_request"]
++    mult = 1 + profile["max_continuations"]
++    return {
++        "model": str(model_id),
++        "cap_kind": profile["cap_kind"],
++        "strict_hard_cap": False,
++        "billing_enforcement": "government/knowledge-free-dispatch.sh XDG allowlist at prelaunch (NOT this string check)",
++        "per_request_input_ceiling": inp,
++        "per_request_output_ceiling": out,
++        "continuation_multiplier": mult,
++        "worst_case_charge_tokens": inp + out * mult,
++        "charge_is_accounting_bound_only": True,
++        "billing": tier,
++        "ledger": LEDGER_NOTE,
++    }
++
++
++def admit(profile, agg, office, open_count):
++    """Admit a dispatch under practical bounds: concurrency + cumulative caps."""
++    problems = validate(profile)
++    if problems:
++        return {"admit": False, "reason": "invalid profile: %s" % "; ".join(problems)}
++    if office not in profile.get("enabled_offices", []):
++        return {"admit": False, "reason": "office not enabled by a lawful permit"}
++    if open_count >= profile["max_concurrent_per_office"]:
++        return {"admit": False, "reason": "concurrency ceiling reached for %s" % office}
++    by = agg.get("by_office", {}) if isinstance(agg, dict) else {}
++    office_used = by.get(office, {}) if isinstance(by, dict) else {}
++    # Charge uses the configured maximum exposure (no model id at admission).
++    charge = profile["max_input_tokens_per_request"] + \
++             profile["max_output_tokens_per_request"] * (1 + profile["max_continuations"])
++    for key in CAP_KEYS:
++        off_cap = profile["per_office_caps"][key]
++        agg_cap = profile["aggregate_caps"][key]
++        unit = charge if key == "tokens_total" else (
++            profile["max_cpu_seconds_per_invocation"] if key == "cpu_seconds"
++            else profile["max_wall_seconds_per_invocation"])
++        if not is_number(agg.get(key)) or not is_number(office_used.get(key)):
++            return {"admit": False, "reason": "missing/invalid cumulative %s accounting" % key}
++        if office_used[key] + unit > off_cap:
++            return {"admit": False, "reason": "%s office cap would be exceeded" % key}
++        if agg[key] + unit > agg_cap:
++            return {"admit": False, "reason": "%s aggregate cap would be exceeded" % key}
++    return {"admit": True, "reason": "within practical bounds",
++            "charge": {"tokens_total": charge,
++                       "cpu_seconds": profile["max_cpu_seconds_per_invocation"],
++                       "wall_seconds": profile["max_wall_seconds_per_invocation"]},
++            "cap_kind": profile["cap_kind"], "ledger": LEDGER_NOTE}
++
++
++def ambiguous(profile, reservation):
++    """Fail closed on kill/overrun/ambiguous exit: hold the FULL prepaid charge."""
++    caps = reservation.get("caps", {}) if isinstance(reservation, dict) else {}
++    held = {k: caps.get(k, profile["per_office_caps"][k]) for k in CAP_KEYS}
++    return {"state": "held", "charge": held, "released": 0,
++            "reason": "ambiguous exit: full prepaid exposure retained, never released",
++            "cap_kind": profile["cap_kind"], "ledger": LEDGER_NOTE}
++
++
++def main(argv):
++    if len(argv) < 2:
++        print("usage: knowledge-practical-bounds.py validate|exposure|admit|ambiguous ...", file=sys.stderr)
++        return 2
++    cmd = argv[1]
++    profile = load(argv[2])
++    if cmd == "validate":
++        out = {"ok": not validate(profile), "problems": validate(profile)}
++    elif cmd == "exposure":
++        out = exposure(profile, argv[3])
++    elif cmd == "admit":
++        out = admit(profile, load(argv[3]), argv[4], int(argv[5]))
++    elif cmd == "ambiguous":
++        out = ambiguous(profile, load(argv[3]))
++    else:
++        print("unknown command", file=sys.stderr)
++        return 2
++    print(json.dumps(out, sort_keys=True))
++    return 0 if (cmd != "validate" or out["ok"]) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv))
+diff --git a/tests/knowledge-free-dispatch-smoke.sh b/tests/knowledge-free-dispatch-smoke.sh
+new file mode 100644
+index 00000000..77ad578d
+--- /dev/null
++++ b/tests/knowledge-free-dispatch-smoke.sh
+@@ -0,0 +1,61 @@
++#!/bin/sh
++# Hermetic tests for the per-invocation FREE-ONLY Antonina allowlist wrapper.
++# No live agent is dispatched; global model config is never touched.
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++wrap=government/knowledge-free-dispatch.sh
++[ -s "$wrap" ]
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++mkdir -p "$d/state/economy" "$d/town/government" "$d/bin"
++cp government/knowledge-practical-bounds.py "$d/town/government/"
++python3 - "$d/state/economy/model-policy.json" <<'PY'
++import json,sys
++json.dump({"prefer":["opencode/tidepool-alpha-free","opencode-go/hy4-flash-free"],"exclude":[]},open(sys.argv[1],"w"))
++PY
++# Stub antonina records the env and args instead of dispatching.
++cat > "$d/bin/antonina" <<'EOF'
++#!/bin/sh
++printf 'XDG=%s ARGS=%s\n' "${XDG_CONFIG_HOME:-}" "$*" > "$CAPTURE"
++EOF
++chmod +x "$d/bin/antonina"
++fail=0
++
++# The wrapper builds a free-only config from policy and pins XDG on `run`.
++CAPTURE="$d/capture" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
++  PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach
++grep -q "XDG=$d/state/knowledge/free-allowlist ARGS=agent run --id fake --cwd /tmp --prompt hi --detach" "$d/capture" ||
++  { echo 'FAIL: XDG not pinned / args changed' >&2; fail=1; }
++python3 - "$d/state/knowledge/free-allowlist/config.json" <<'PY'
++import json,sys
++c=json.load(open(sys.argv[1]))
++assert [e['model'] for e in c['models']]==['opencode/tidepool-alpha-free','opencode-go/hy4-flash-free']
++assert all('-free' in e['model'] for e in c['models'])
++PY
++
++# Global ladder is untouched (wrapper works from a temp state root only).
++grep -q 'muse-spark-1.3-contributor' /home/lubko/.config/antonina/config.json ||
++  { echo 'FAIL: global config changed' >&2; fail=1; }
++
++# A disguised paid id containing -free mid-string must be refused.
++python3 - "$d/state/economy/model-policy.json" <<'PYMASK'
++import json,sys
++json.dump({"prefer":["provider/paid-free-trial"],"exclude":[]},open(sys.argv[1],"w"))
++PYMASK
++if CAPTURE="$d/capture3" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
++   PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach >/dev/null 2>&1; then
++ echo 'FAIL: disguised paid id admitted' >&2; fail=1
++fi
++
++# A non-free id in policy prefer is refused (fail closed).
++python3 - "$d/state/economy/model-policy.json" <<'PY'
++import json,sys
++json.dump({"prefer":["openai/gpt-6-luna"],"exclude":[]},open(sys.argv[1],"w"))
++PY
++if CAPTURE="$d/capture2" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
++  PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach >/dev/null 2>&1; then
++  echo 'FAIL: non-free id admitted' >&2; fail=1
++fi
++
++[ "$fail" -eq 0 ] || { echo 'knowledge free dispatch smoke: FAILED' >&2; exit 1; }
++echo 'knowledge free dispatch smoke: OK (XDG pinned, free-only allowlist, global untouched, fail-closed)'

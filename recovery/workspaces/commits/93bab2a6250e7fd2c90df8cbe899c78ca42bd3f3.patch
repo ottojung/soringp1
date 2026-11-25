@@ -1,0 +1,121 @@
+commit 93bab2a6250e7fd2c90df8cbe899c78ca42bd3f3
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 18:28:43 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 18:28:44 2026 +0000
+
+    Test disabled and limited-budget fixtures without requiring live offices to remain disabled
+
+diff --git a/tests/knowledge-activation-binding-smoke.sh b/tests/knowledge-activation-binding-smoke.sh
+index 45d36700..c20d8318 100644
+--- a/tests/knowledge-activation-binding-smoke.sh
++++ b/tests/knowledge-activation-binding-smoke.sh
+@@ -87,9 +87,11 @@ printf '%s\n' \
+   '## Act 43 — Institutional Knowledge and Communications Act (enacted 2026-11-20)' > "$laws"
+ expect 1 'ambiguous IKCA Act number fails' statistics
+ 
+-# Boot, appointments and the office cycle must all delegate to the one verifier
+-# and none may retain the weak startswith("act:") predicate.
+-for f in government/boot.sh government/appointments.sh government/knowledge-office-cycle.sh; do
++# The actual launch and appointment paths must use the same verifier.
++# Boot delegates independently to the office cycle, never checking the board
++# synchronously on Parliament's critical path.
++grep -q 'nonblocking_office "knowledge-\$office".*knowledge-office-cycle.sh' government/boot.sh
++for f in government/appointments.sh government/knowledge-office-cycle.sh; do
+   grep -q 'knowledge-activation-verify.sh' "$f" || {
+     echo "FAIL: $f does not use the shared verifier" >&2; exit 1;
+   }
+@@ -101,4 +103,4 @@ if grep -q 'startswith("act:")' government/knowledge-activation-verify.sh; then
+   echo 'FAIL: shared verifier retains the weak act-prefix predicate' >&2; exit 1
+ fi
+ 
+-echo 'knowledge activation binding: forged/wrong-Act/wrong-office/expiry rejected; boot+appointments+cycle agree'
++echo 'knowledge activation binding: forged/wrong-Act/wrong-office/expiry rejected; independent boot, appointments+cycle agree'
+diff --git a/tests/knowledge-budget-run-slices-smoke.sh b/tests/knowledge-budget-run-slices-smoke.sh
+index caaed1e4..677b3651 100644
+--- a/tests/knowledge-budget-run-slices-smoke.sh
++++ b/tests/knowledge-budget-run-slices-smoke.sh
+@@ -19,6 +19,10 @@ p=Path(sys.argv[1])
+ c=json.loads(p.read_text())
+ c["metering"]["opencode_db"]=sys.argv[2]
+ c["offices"]["statistics"]["enabled"]=True
++for office in c["offices"].values():
++    office["caps"]={"tokens_total":400000,"cpu_seconds":1800,"wall_seconds":3600}
++    office.pop("per_run_caps",None)
++c["aggregate"]["caps"]={"tokens_total":1600000,"cpu_seconds":7200,"wall_seconds":14400}
+ c["offices"]["statistics"]["per_run_caps"]={
+     "tokens_total":120000, "cpu_seconds":400,"wall_seconds":600}
+ p.write_text(json.dumps(c))
+diff --git a/tests/knowledge-budget-smoke.sh b/tests/knowledge-budget-smoke.sh
+index 010f30ca..94da65b3 100644
+--- a/tests/knowledge-budget-smoke.sh
++++ b/tests/knowledge-budget-smoke.sh
+@@ -26,13 +26,24 @@ PY
+ python3 - "$d/town/government/knowledge-budget.conf" "$DB" <<'PY'
+ import json,sys
+ p=sys.argv[1]; c=json.load(open(p)); c['metering']['opencode_db']=sys.argv[2]
+-for x in c['offices'].values(): x['enabled']=True
++for x in c['offices'].values():
++    x['enabled']=False
++    x['caps']={'tokens_total':400000,'cpu_seconds':1800,'wall_seconds':3600}
++    x.pop('per_run_caps',None)
++c['aggregate']['caps']={'tokens_total':1600000,'cpu_seconds':7200,'wall_seconds':14400}
+ json.dump(c,open(p,'w'))
+ PY
+ 
+-# All shipped office activations are disabled.
+-jq -e '[.offices[] | .enabled] | all(. == false)' government/knowledge-budget.conf >/dev/null ||
+-  fail 'shipped config did not default all offices disabled'
++# A disabled test office must deny admission. Production activation is lawful
++# mutable state, not a permanent expectation of the test suite.
++no /bin/sh "$ENGINE" guard statistics
++no /bin/sh "$ENGINE" reserve statistics test-agent
++python3 - "$d/town/government/knowledge-budget.conf" <<'PYENABLE'
++import json,sys
++p=sys.argv[1];c=json.load(open(p))
++for x in c['offices'].values(): x['enabled']=True
++json.dump(c,open(p,'w'))
++PYENABLE
+ 
+ # Valid token telemetry plus host-wide busy CPU accounting admits a
+ # PRELAUNCH reservation with durable CPU baseline before any agent exists.
+diff --git a/tests/knowledge-office-cumulative-admission-smoke.sh b/tests/knowledge-office-cumulative-admission-smoke.sh
+index 6cc4b142..ea27f45a 100644
+--- a/tests/knowledge-office-cumulative-admission-smoke.sh
++++ b/tests/knowledge-office-cumulative-admission-smoke.sh
+@@ -10,6 +10,11 @@ root=Path(sys.argv[1])
+ spec=importlib.util.spec_from_file_location("budget",root/"government/knowledge-budget-tool.py")
+ m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+ cfg=json.loads((root/"government/knowledge-budget.conf").read_text())
++# Fixed adversarial accounting example, independent of lawful live budgets.
++for office in cfg["offices"].values():
++    office["caps"]={"tokens_total":400000,"cpu_seconds":1800,"wall_seconds":3600}
++    office.pop("per_run_caps",None)
++cfg["aggregate"]["caps"]={"tokens_total":1600000,"cpu_seconds":7200,"wall_seconds":14400}
+ by={key:{k:0 for k in m.CAP_KEYS} for key in m.OFFICES}
+ agg={k:0 for k in m.CAP_KEYS}
+ agg["by_office"]=by
+diff --git a/tests/knowledge-phase-verifier-smoke.sh b/tests/knowledge-phase-verifier-smoke.sh
+index c0f3c048..96dd5a03 100644
+--- a/tests/knowledge-phase-verifier-smoke.sh
++++ b/tests/knowledge-phase-verifier-smoke.sh
+@@ -29,9 +29,10 @@ audit=$(python3 "$ver" --town "$town" audit)
+ printf '%s\n' "$audit" | grep -q '"ok": true'
+ printf '%s\n' "$audit" | grep -q '"new_invocation_after_expiry": \[\]'
+ 
+-# All four offices remain disabled by default in the authorization record.
+-disabled=$(jq -r '[.offices[] | .enabled] | all(. == false)' "$town/records/knowledge/activation.json")
+-[ "$disabled" = true ]
++# Verify the legacy draft independently of the later Act34 activation record.
++# Disabled activation and cross-office forgery are exercised in isolated
++# knowledge-activation-binding-smoke fixtures, not by assuming live inactivity.
++jq -e '.offices | keys == ["foresight","spying","statistics","strategy"]' "$town/records/knowledge/activation.json" >/dev/null
+ 
+ # Wrapper carries no authority but locates the verifier deterministically.
+ set +e
+@@ -40,4 +41,4 @@ wrc=$?
+ set -e
+ [ "$wrc" -ne 0 ] || { echo 'wrapper failed open' >&2; exit 1; }
+ 
+-echo 'knowledge phase-gate verifier smoke: OK (fail-closed hold, offices disabled)'
++echo 'knowledge phase-gate verifier smoke: OK (fail-closed legacy draft)'

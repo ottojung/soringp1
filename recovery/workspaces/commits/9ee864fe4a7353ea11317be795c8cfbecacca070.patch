@@ -1,0 +1,209 @@
+commit 9ee864fe4a7353ea11317be795c8cfbecacca070
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 22:59:45 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 22:59:45 2026 +0000
+
+    Quiesce oscillating appointees before Act19 session replacement
+
+diff --git a/government/APPOINTMENT-RECOVERY.md b/government/APPOINTMENT-RECOVERY.md
+index 96cb76ad..5ec47ade 100644
+--- a/government/APPOINTMENT-RECOVERY.md
++++ b/government/APPOINTMENT-RECOVERY.md
+@@ -36,8 +36,11 @@ for 30-minute window arithmetic. Merely polling a failed invocation multiple
+ times cannot satisfy Act 19's **three distinct transient failures** threshold.
+ Actual Git commits since the earlier failure break the consecutive streak.
+ After threshold and cooldown, the supervisor snapshots evidence and performs
+-exactly **one** explicit replacement, preserving the occupied worktree and
+-current handoff queue.
++exactly **one** compare-and-swap replacement. If the old front has resumed
++running, it must first be stopped and observed quiescent; an unsuccessful
++stop leaves the old appointment in place and does **not** start cooldown.
++This prevents two live agents writing one seat worktree. Existing dirty
++worktrees and the durable handoff queue are preserved.
+ 
+ A *new*, independently specified prompt may be dispatched following a failed
+ front only when Antonina explicitly marks the preceding failure both
+diff --git a/government/appointments.sh b/government/appointments.sh
+index 92d118a8..8f88553d 100644
+--- a/government/appointments.sh
++++ b/government/appointments.sh
+@@ -60,6 +60,12 @@ if [ "$action" = replace ] && [ -n "$expected" ] && [ "$old" != "$expected" ]; t
+   echo "Viche: stale recovery appointment $expected for $key; actual is $old" >&2
+   exit 1
+ fi
++# Never register two live workers for the same worktree. A threshold reset of
++# an oscillating, currently running agent must quiesce it first.
++if [ "$action" = replace ] && [ "${status:-}" = running ]; then
++  echo "Viche: running appointee $old must be stopped before replacement" >&2
++  exit 1
++fi
+ if [ "$action" = resolve ]; then
+   [ -n "$old" ] || { echo "no appointment for $key" >&2; exit 1; }
+   printf '%s\n' "$old"
+diff --git a/government/branch-bootstrap.sh b/government/branch-bootstrap.sh
+index d9e02a9d..a1ed3cb7 100755
+--- a/government/branch-bootstrap.sh
++++ b/government/branch-bootstrap.sh
+@@ -40,7 +40,7 @@ finished=$(printf '%s\n' "$meta" | jq -r '.finished_at // ""')
+ if [ "$mode" = failed ]; then
+   if oc_is_transient "$reason" "$tflag"; then
+     unsafe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == false then "yes" else "no" end')
+-    retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == false then "no" else "yes" end')
++    retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+     oc_record_failure "$liv" "$branch" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$cwd" || exit 1
+     [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$liv" "$branch" "$id" "$invocation"
+   else
+@@ -60,8 +60,9 @@ if [ "$reset_due" = true ]; then
+   printf '%s\n' "$meta" > "$snapshot/status.json"
+   antonina agent log --id "$id" --lines 200 > "$snapshot/log.txt" 2>&1 || :
+   git -C "$cwd" status --short > "$snapshot/worktree.txt"
+-  printf '%s\n' "$now" > "$liv/last-reset-$branch"
++  oc_quiesce_for_reset "$id" || exit 1
+   id=$(/bin/sh "$town/government/appointments.sh" replace "$branch" "$id")
++  printf '%s\n' "$now" > "$liv/last-reset-$branch"
+   meta=$(antonina agent status --id "$id" --json)
+   oc_clear_failures "$liv" "$branch"
+   printf '%s branch=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+diff --git a/government/clerk-liveness.sh b/government/clerk-liveness.sh
+index f2173835..f8ccdc15 100644
+--- a/government/clerk-liveness.sh
++++ b/government/clerk-liveness.sh
+@@ -24,7 +24,7 @@ invocation=$(printf '%s\n' "$metadata" | jq -r '.invocation_id // .run_id // .fi
+ finished=$(printf '%s\n' "$metadata" | jq -r '.finished_at // ""')
+ if [ "$kind" = failed ]; then
+   if oc_is_transient "$reason" "$tflag"; then
+-    retry_safe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_safe == false then "no" else "yes" end')
++    retry_safe=$(printf '%s\n' "$metadata" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+     oc_record_failure "$state" "$seat_id" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$seats/$seat_id"
+     [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$state" "$seat_id" "$id" "$invocation"
+   else
+@@ -46,8 +46,9 @@ if [ "$reset_due" = true ]; then
+   git -C "$seats/$seat_id" status --short > "$snapshot/worktree-status.txt"
+   git -C "$seats/$seat_id" rev-parse HEAD > "$snapshot/worktree-head.txt"
+   # Persist the attempted recovery before any destructive agent-metadata operation.
+-  printf '%s\n' "$now" > "$state/last-reset-$seat_id"
++  oc_quiesce_for_reset "$id" || exit 1
+   id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id" "$id")
++  printf '%s\n' "$now" > "$state/last-reset-$seat_id"
+   oc_clear_failures "$state" "$seat_id"
+   printf '%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+     "$(date -u +%FT%TZ)" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" \
+diff --git a/government/office-continuity.sh b/government/office-continuity.sh
+index 4c7c0bd5..c27cf759 100644
+--- a/government/office-continuity.sh
++++ b/government/office-continuity.sh
+@@ -53,6 +53,31 @@ oc_record_failure() {
+   return 0
+ }
+ 
++# Before a lawful threshold reset, require the existing invocation to be
++# quiescent so two live agents cannot edit the same seat worktree. Stop only
++# when the current observed invocation is running; preserve evidence first.
++oc_quiesce_for_reset() {
++  oc_reset_id=$1
++  oc_stop_meta=$(antonina agent status --id "$oc_reset_id" --json) || return 1
++  oc_stop_state=$(printf '%s\n' "$oc_stop_meta" | jq -er '.state') || return 1
++  case "$oc_stop_state" in
++    running)
++      antonina agent stop --id "$oc_reset_id" >&2 || return 1
++      oc_stop_try=0
++      while [ "$oc_stop_try" -lt 8 ]; do
++        oc_stop_meta=$(antonina agent status --id "$oc_reset_id" --json) || return 1
++        oc_stop_state=$(printf '%s\n' "$oc_stop_meta" | jq -er '.state') || return 1
++        case "$oc_stop_state" in stopped|killed|failed) return 0 ;; esac
++        oc_stop_try=$((oc_stop_try+1))
++        sleep 1
++      done
++      echo "Viche: $oc_reset_id did not quiesce; keeping current appointment" >&2
++      return 1 ;;
++    idle|succeeded|stopped|killed|failed) return 0 ;;
++    *) return 1 ;;
++  esac
++}
++
+ # Decide from the failure record alone (§3.1.5) whether a bounded reset is due:
+ # at least oc_threshold failures inside oc_window, cooldown expired. The
+ # currently-observed agent state is irrelevant to this decision.
+diff --git a/government/seat-liveness.sh b/government/seat-liveness.sh
+index 417c68d8..f00cba5f 100644
+--- a/government/seat-liveness.sh
++++ b/government/seat-liveness.sh
+@@ -27,7 +27,7 @@ if ! oc_is_transient "$reason" "$tflag"; then
+   oc_surface_permanent "$root" "$id" "$reason"
+   exit 0
+ fi
+-retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == false then "no" else "yes" end')
++retry_safe=$(printf '%s\n' "$meta" | jq -r 'if .backend_error.automatic_retry_safe == true and .backend_error.transient == true then "yes" else "no" end')
+ oc_record_failure "$root" "$seat_id" "$id" "$invocation" "$reason" "$finished" "$retry_safe" "$now" "$seats/$seat_id"
+ [ "$retry_safe" = yes ] || oc_mark_unsafe_hold "$root" "$seat_id" "$id" "$invocation"
+ oc_commit_age_signal "$root" "$id" "$seats/$seat_id" "$now"
+@@ -41,8 +41,9 @@ printf '%s\n' "$meta" > "$snapshot/agent-status.json"
+ antonina agent log --id "$id" --lines 200 > "$snapshot/agent-log-tail.txt" 2>&1 || :
+ git -C "$seat" status --short > "$snapshot/worktree-status.txt"
+ git -C "$seat" rev-parse HEAD > "$snapshot/worktree-head.txt"
+-printf '%s\n' "$now" > "$root/last-reset-$seat_id"
++oc_quiesce_for_reset "$id" || exit 1
+ id=$(/bin/sh "$town/government/appointments.sh" replace "$seat_id" "$id")
++printf '%s\n' "$now" > "$root/last-reset-$seat_id"
+ oc_clear_failures "$root" "$seat_id"
+ printf '%s seat=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+   "$(date -u +%FT%TZ)" "$seat_id" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" >> "$root/recoveries.log"
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index cc71c2d8..18d0b442 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -30,7 +30,22 @@ case "$1 $2" in
+     id="id-$n"
+     printf '{"state":"idle","model":null,"variant":null}\n' > "$MOCK_ROOT/$id.json"
+     printf '%s\n' "$id" ;;
+-  'agent log') printf 'captured log\n' ;;
++  'agent log')
++    # Oscillating agent may have restarted running after its terminal event
++    # but before the threshold reset; quiesce it before replacing.
++    id=$4
++    if [ "${MOCK_REVIVE_ON_LOG:-}" = "$id" ] && [ -s "$MOCK_ROOT/$id.json" ] &&
++       [ "$(jq -r .state "$MOCK_ROOT/$id.json")" = failed ]; then
++      jq '.state="running"' "$MOCK_ROOT/$id.json" > "$MOCK_ROOT/$id.next"
++      mv "$MOCK_ROOT/$id.next" "$MOCK_ROOT/$id.json"
++    fi
++    printf 'captured log\n' ;;
++  'agent stop')
++    id=$4
++    printf '%s\n' "$id" >> "$MOCK_ROOT/stops"
++    if [ "${MOCK_STOP_FAIL:-}" = yes ]; then exit 3; fi
++    jq '.state="stopped"' "$MOCK_ROOT/$id.json" > "$MOCK_ROOT/$id.next"
++    mv "$MOCK_ROOT/$id.next" "$MOCK_ROOT/$id.json" ;;
+   'agent run') printf 'run\n' >> "$MOCK_ROOT/runs"; printf '%s\n' "$*" >> "$MOCK_ROOT/run-args" ;;
+   *) echo "unexpected Antonina call: $*" >&2; exit 9 ;;
+ esac
+@@ -84,7 +99,9 @@ run_branch
+ id3=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve "$office")
+ test "$id3" = "$id2"
+ set_status failed "$((base+2))" run-3 upstream_endpoint_unavailable true true "$id3"
+-run_branch
++MOCK_REVIVE_ON_LOG=$id3 run_branch
++test "$(grep -c -Fx "$id3" "$MOCK_ROOT/stops")" -eq 1 ||
++  { echo 'Running appointee was not stopped exactly once before reset' >&2; exit 1; }
+ id4=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve "$office")
+ test "$id4" != "$id3"
+ # A concurrent supervisor still holding the old agent identity must NOT
+@@ -98,6 +115,18 @@ test "$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve executive)
+ test "$(cat "$MOCK_ROOT/next")" -eq 1 || { echo 'Multiple replacements for one Act19 threshold event' >&2; exit 1; }
+ test "$(wc -l < "$VICHE_STATE_ROOT/liveness/recoveries.log")" -eq 1
+ test "$(wc -l < "$ledger")" -eq 3
++# A failed stop may not begin reset cooldown or replace a live appointee.
++oc_quiesce_for_reset_test_id=$id4
++set_status running "$((base+5))" run-running idle false true "$oc_quiesce_for_reset_test_id"
++. "$repo/government/office-continuity.sh"
++if MOCK_STOP_FAIL=yes oc_quiesce_for_reset "$oc_quiesce_for_reset_test_id"; then
++  echo 'Failed quiescence incorrectly reported success' >&2; exit 1
++fi
++test "$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" resolve executive)" = "$id4"
++test "$(jq -r .state "$MOCK_ROOT/$id4.json")" = running
++# Stop directly to restore a benign terminal state for subsequent fixtures.
++oc_quiesce_for_reset "$oc_quiesce_for_reset_test_id"
++test "$(jq -r .state "$MOCK_ROOT/$id4.json")" = stopped
+ test "$(awk -F '\t' '$1=="executive" {n++} END {print n+0}' "$registry")" -eq 1
+ 
+ # latest durable handoff and dirty worktree survive replacement; no duplicate

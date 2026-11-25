@@ -1,0 +1,45 @@
+commit 911443f4c9b417aecb10ec5b513356d3adf60d46
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Thu Nov 12 00:59:01 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Thu Nov 12 00:59:01 2026 +0000
+
+    Give board-trail measurement adequate timeout budget
+
+diff --git a/government/judiciary-measurements.py b/government/judiciary-measurements.py
+index 0bc90de3..03af1678 100644
+--- a/government/judiciary-measurements.py
++++ b/government/judiciary-measurements.py
+@@ -47,7 +47,14 @@ def board_trail():
+     if shutil.which('antonina') is None:
+         out['reason']='antonina CLI unavailable'; return out
+     try:
+-        done=subprocess.run(['/bin/sh',str(script)],capture_output=True,text=True,timeout=30)
++        # The live eight-issue scan has independently measured at 42.368 s.
++        # Keep a bounded timeout, but leave headroom so that a complete scan
++        # does not get misreported as unavailable solely due to this wrapper.
++        try:
++            timeout=max(1,int(os.environ.get('VICHE_BOARD_TRAIL_TIMEOUT','60')))
++        except ValueError:
++            timeout=60
++        done=subprocess.run(['/bin/sh',str(script)],capture_output=True,text=True,timeout=timeout)
+     except (subprocess.TimeoutExpired,OSError) as err:
+         out['reason']='cross-check unavailable: '+str(err)[:160]; return out
+     if done.returncode!=0:
+diff --git a/tests/board-trail-smoke.sh b/tests/board-trail-smoke.sh
+index 189931ac..96aa51d3 100755
+--- a/tests/board-trail-smoke.sh
++++ b/tests/board-trail-smoke.sh
+@@ -61,4 +61,12 @@ jq -e '.board_trail.completed_total==6 and .board_trail.terminal_reached==2 and
+ jq -e '(.board_trail.git_only_gaps|length)==1 and .board_trail.git_only_gaps[0].issue=="102"' "$report" >/dev/null
+ jq -e '.board_trail.dangling_trails==4 and .board_trail.content_standard_failures==1' "$report" >/dev/null
+ jq -e '.no_proposals==true and .measurement_reliability=="not_established"' "$report" >/dev/null
++# The measurement wrapper must keep timeout failures explicit, never measured.
++# Use a short test-only budget so this remains a fast, hermetic regression.
++cat > "$scratch/town/government/board-trail-check.sh" <<'SLOW'
++#!/bin/sh
++sleep 2
++SLOW
++VICHE_BOARD_TRAIL_TIMEOUT=1 python3 "$scratch/town/government/judiciary-measurements.py" >/dev/null
++jq -e '.board_trail.status=="not_measured" and (.board_trail.reason|contains("timed out"))' "$report" >/dev/null
+ echo 'Board-trail completeness lens smoke passed'

@@ -1,0 +1,67 @@
+commit 93d21b876fc5a92e7e9897bce5d830cae79e6025
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 16 20:28:24 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 16 20:28:24 2026 +0000
+
+    Age-weight independent omission sampling and validate case identifiers
+
+diff --git a/government/audit-accountability.py b/government/audit-accountability.py
+index d232aa1d..7569006f 100644
+--- a/government/audit-accountability.py
++++ b/government/audit-accountability.py
+@@ -5,6 +5,7 @@ Auditor submissions are claims with evidence references, not independently verif
+ facts. The controller never declares an issue solved from agent completion alone.
+ """
+ import argparse
++import re
+ import json
+ import os
+ from pathlib import Path
+@@ -30,6 +31,8 @@ def base():
+ 
+ def report(args):
+     root = base()
++    if not re.fullmatch(r"[0-9a-f]{18}", args.case):
++        raise ValueError("invalid audit case identifier")
+     case = json_file(root / "cases" / f"{args.case}.json")
+     if case is None:
+         raise ValueError("unknown audit case")
+diff --git a/government/audit-selection.py b/government/audit-selection.py
+index 977c567b..8be70433 100644
+--- a/government/audit-selection.py
++++ b/government/audit-selection.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+ """Randomized, independent audit selection. Does not trust executive task lists."""
+ import hashlib
++from datetime import datetime
+ import json
+ import os
+ from pathlib import Path
+@@ -52,7 +53,15 @@ def choose(rng, items, size, now, root, kind):
+             previous = root / "seen" / key
+             last = int(previous.read_text()) if previous.exists() else 0
+             age = now - last if last else now
+-            weights.append(1.0 + min(8.0, max(0, age) / (3 * 86400)))
++            try:
++                created = datetime.fromisoformat(item.get("createdAt", "").replace("Z", "+00:00")).timestamp()
++                issue_age = max(0, now - created)
++            except (ValueError, TypeError):
++                issue_age = 0
++            # Persistently old issues grow harder to neglect even if somebody
++            # comments on them. No project title or executive report is used.
++            weights.append(1.0 + min(8.0, max(0, age) / (3 * 86400))
++                           + (min(6.0, issue_age / (7 * 86400)) if kind == "ignored_work" else 0))
+         threshold = rng.random() * sum(weights)
+         for i, weight in enumerate(weights):
+             threshold -= weight
+@@ -77,7 +86,7 @@ def main():
+         if len(sha) == 40:
+             decisions.append({"id": sha, "title": title})
+     pools = {
+-        "ignored_work": [{"id": str(i["number"]), "title": i["title"]} for i in open_issues],
++        "ignored_work": [{"id": str(i["number"]), "title": i["title"], "createdAt": i.get("createdAt", "")} for i in open_issues],
+         "claimed_delivery": [{"id": str(i["number"]), "title": i["title"]} for i in closed],
+         "government_decision": decisions,
+     }

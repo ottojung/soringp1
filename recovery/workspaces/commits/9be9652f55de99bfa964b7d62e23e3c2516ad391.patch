@@ -1,0 +1,132 @@
+commit 9be9652f55de99bfa964b7d62e23e3c2516ad391
+Author:     c1a00002 <recovery-steward@viche.local>
+AuthorDate: Sun Nov 8 10:03:17 2026 +0000
+Commit:     c1a00002 <recovery-steward@viche.local>
+CommitDate: Sun Nov 8 10:03:17 2026 +0000
+
+    executive-cycle: re-read transient 'unknown' agent state; fail with a named diagnostic
+    
+    An unrecognized agent state (Antonina returns 'unknown' while a backend failure
+    is recovering) hit the catch-all arm and aborted the cycle silently, leaving the
+    branch unhealthy and dispatching nothing.
+    
+    Chosen treatment: bounded re-read, then fail closed with a specific diagnostic.
+    - Re-reads up to VICHE_AGENT_STATE_RETRIES (default 3) times, VICHE_AGENT_STATE_DELAY
+      seconds apart, covering status-command failure, unparseable .state and any
+      unrecognized state.
+    - On exhaustion: exit 1 with the agent id, attempt count, the reason
+      ('unrecognized agent state', 'status has no parseable .state field', or
+      'status query failed'), a truncated raw status, and the remedy.
+    - 'unknown' is never treated as idle: dispatching to an agent whose state is
+      unknown could duplicate work on a running agent. The failed retry-safety check
+      is untouched.
+    
+    Tests extend executive-cycle-smoke: unknown-then-running is re-read (2 calls, no
+    extra dispatch); persistent unknown fails with the diagnostic and no dispatch.
+    
+    Not merged: this is a government/ change and Act 21 s1 requires run-all green,
+    which is still blocked solely by the protected ballot record.
+
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index e4262b9f..ca2bca3b 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -27,8 +27,40 @@ fi
+ # a pre-read failure; the open handoff remains and the next successful run
+ # honours it.
+ handoffs=$(/bin/sh "$town/government/handoff-queue.sh" list-open "$town") || exit 1
+-status=$(antonina agent status --id "$id" --json)
+-current=$(printf "%s\n" "$status" | jq -r ".state")
++# A transient backend failure can make Antonina return 'unknown' or an
++# unparseable status. Re-read a bounded number of times before deciding, and on
++# exhaustion fail with a distinct, actionable diagnostic. 'unknown' is NEVER
++# treated as idle: dispatching to an agent whose state is unknown could
++# duplicate work on an agent that is actually running.
++state_retries=${VICHE_AGENT_STATE_RETRIES:-3}
++state_delay=${VICHE_AGENT_STATE_DELAY:-1}
++case "$state_retries" in ''|*[!0-9]*|0) state_retries=1 ;; esac
++case "$state_delay" in ''|*[!0-9]*) state_delay=1 ;; esac
++attempt=1
++reason=
++while :; do
++  if ! status=$(antonina agent status --id "$id" --json 2>/dev/null); then
++    current=
++    reason="status query failed"
++  else
++    current=$(printf '%s\n' "$status" | jq -r '.state // empty' 2>/dev/null) || current=
++    [ -n "$current" ] || reason="status has no parseable .state field"
++  fi
++  case "$current" in
++    running|failed|idle|clearexit) reason=; break ;;
++  esac
++  [ -n "$reason" ] || reason="unrecognized agent state '$current'"
++  [ "$attempt" -lt "$state_retries" ] || break
++  attempt=$((attempt+1))
++  sleep "$state_delay"
++done
++if [ -n "$reason" ]; then
++  raw=$(printf '%s' "${status:-}" | tr '\n' ' ' | cut -c1-200)
++  echo "Viche: executive agent '$id' has no usable state after $attempt attempt(s): $reason" >&2
++  echo "Viche: raw_status=$raw" >&2
++  echo "Viche: refusing to dispatch on an unknown state; re-read later. Check 'antonina agent status --id $id --json'; if the agent no longer exists, re-resolve with 'appointments.sh ensure executive'." >&2
++  exit 1
++fi
+ case "$current" in
+   running) exit 0 ;;
+   failed)
+diff --git a/tests/executive-cycle-smoke.sh b/tests/executive-cycle-smoke.sh
+index 2fd4524c..befb82f2 100755
+--- a/tests/executive-cycle-smoke.sh
++++ b/tests/executive-cycle-smoke.sh
+@@ -25,7 +25,15 @@ case "$1 $2" in
+   "board show")
+     echo '{"body":"All agent execution and development work must happen on billy-dev.","messages":[]}' ;;
+   "agent status")
+-    printf '{"state":"%s","model":"%s","variant":"low"}\n' "$MODE" "$MODEL" ;;
++    if [ "$MODE" = sequence ]; then
++        n=0
++        [ ! -f "$MOCK_STATE/status-calls" ] || n=$(cat "$MOCK_STATE/status-calls")
++        n=$((n+1)); printf '%s\n' "$n" > "$MOCK_STATE/status-calls"
++        if [ "$n" -eq 1 ]; then printf '%s\n' '{"state":"unknown"}'
++        else printf '%s\n' '{"state":"running"}'; fi
++    else
++        printf '{"state":"%s","model":"%s","variant":"low"}\n' "$MODE" "$MODEL"
++    fi ;;
+   "agent run")
+     case "$*" in *"Founder charter fixture"*"301"*) : ;; *) exit 8 ;; esac
+     case "$*" in *"SoringP1"*"research-plan.md"*) : ;; *) exit 8 ;; esac
+@@ -46,6 +54,9 @@ MODE=idle MODEL=test-provider/example
+ OUTPUT=$scratch/dispatched
+ SORING_FRONTIER_STATE=$scratch/frontier.json
+ export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION MODE MODEL OUTPUT SORING_FRONTIER_STATE
++MOCK_STATE=$scratch
++MOCK_STATE=$MOCK_STATE
++export MOCK_STATE
+ grep -Fq "Before interacting with Antonina board or agents" "$repo/government/executive-cycle.sh"
+ grep -Fq "government/antonina-interface.md" "$repo/government/executive-agenda.md"
+ sh "$repo/government/executive-cycle.sh"
+@@ -70,4 +81,24 @@ BOARD_DOWN=yes
+ export MODE MODEL BOARD_DOWN
+ if sh "$repo/government/executive-cycle.sh" 2>/dev/null; then exit 1; fi
+ test "$(wc -l < "$OUTPUT")" -eq 3
++# A transient 'unknown' is re-read, not fatal and not treated as idle.
++MODE=sequence
++VICHE_AGENT_STATE_RETRIES=3 VICHE_AGENT_STATE_DELAY=0
++export MODE VICHE_AGENT_STATE_RETRIES VICHE_AGENT_STATE_DELAY
++rm -f "$MOCK_STATE/status-calls"
++sh "$repo/government/executive-cycle.sh"
++test "$(cat "$MOCK_STATE/status-calls")" -eq 2
++test "$(wc -l < "$OUTPUT")" -eq 3
++
++# A persistent 'unknown' fails closed with a specific diagnostic and no dispatch.
++MODE=unknown
++export MODE
++if sh "$repo/government/executive-cycle.sh" 2>"$scratch/unknown.err"; then
++    echo 'FAIL: persistent unknown state must not be treated as success' >&2; exit 1
++fi
++grep -q 'has no usable state' "$scratch/unknown.err"
++grep -q "unrecognized agent state 'unknown'" "$scratch/unknown.err"
++test "$(wc -l < "$OUTPUT")" -eq 3
++
+ echo 'Independent Executive dispatch and fail-closed assignment smoke passed'
++

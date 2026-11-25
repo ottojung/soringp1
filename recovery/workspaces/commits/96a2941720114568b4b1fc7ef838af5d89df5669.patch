@@ -1,0 +1,93 @@
+commit 96a2941720114568b4b1fc7ef838af5d89df5669
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Fri Oct 23 08:31:07 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Fri Oct 23 08:31:07 2026 +0000
+
+    Harden janitor quarantine queue retirement
+
+diff --git a/government/janitor.sh b/government/janitor.sh
+index e5da0525..b391cde3 100644
+--- a/government/janitor.sh
++++ b/government/janitor.sh
+@@ -816,7 +816,7 @@ reclaim_quarantined() {
+     if ! exec 3< "$qcopy"; then
+         log_append "$jstate/actions.log" "$ts reclaim-quarantined deferred reason=qlog-open-failed"
+         rm -f "$qcopy" "$tmp"
+-        return 1
++        return 0
+     fi
+     qheader_read=
+     if ! IFS= read -r qheader_read <&3 || [ "$qheader_read" != "$qheader" ]; then
+@@ -897,16 +897,18 @@ reclaim_quarantined() {
+             fi
+             candidate_kb=$(du_kb "$dest")
+             is_num "$candidate_kb" || candidate_kb=0
+-            if rm -rf "$dest" 2>/dev/null; then
++            rm_status=0
++            rm -rf "$dest" 2>/dev/null || rm_status=$?
++            if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+                 after=$(available_kb 2>/dev/null || printf '')
+                 if [ -n "$after" ]; then
+                     delta=$((after - before))
+-                    log_append "$jstate/actions.log" "$ts action=reclaim executed src=$src dest=$dest candidate_du_kb=$candidate_kb device_avail_before_kb=$before device_avail_after_kb=$after measured_device_delta_kb=$delta why=expired-quarantine recoverability=quarantine-copy liveness=clear owner=janitor-quarantine"
++                    log_append "$jstate/actions.log" "$ts action=reclaim executed src=$src dest=$dest rm_status=$rm_status candidate_du_kb=$candidate_kb device_avail_before_kb=$before device_avail_after_kb=$after measured_device_delta_kb=$delta why=expired-quarantine recoverability=quarantine-copy liveness=clear owner=janitor-quarantine"
+                 else
+-                    log_append "$jstate/actions.log" "$ts action=reclaim executed src=$src dest=$dest candidate_du_kb=$candidate_kb device_measurement=unavailable"
++                    log_append "$jstate/actions.log" "$ts action=reclaim executed src=$src dest=$dest rm_status=$rm_status candidate_du_kb=$candidate_kb device_measurement=unavailable"
+                 fi
+             else
+-                log_append "$jstate/actions.log" "$ts action=reclaim failed src=$src dest=$dest candidate_du_kb=$candidate_kb"
++                log_append "$jstate/actions.log" "$ts action=reclaim failed src=$src dest=$dest rm_status=$rm_status candidate_du_kb=$candidate_kb path_remains=1"
+                 printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$src" "$dest" "$size" "$qat" >> "$tmp"
+             fi
+         fi
+diff --git a/tests/janitor-smoke.sh b/tests/janitor-smoke.sh
+index 29558d0d..fc936cb4 100644
+--- a/tests/janitor-smoke.sh
++++ b/tests/janitor-smoke.sh
+@@ -74,6 +74,8 @@ else
+ fi
+ MOCK
+ chmod +x "$d/bin/df"
++REAL_RM=$(command -v rm)
++export REAL_RM
+ PATH="$d/bin:$PATH"
+ export PATH
+ /bin/sh "$town/government/janitor.sh" cycle
+@@ -129,6 +131,35 @@ printf '2026-01-01T00:00:00Z\t/recreated\t%s/old-item\t1\t%s\n' "$q" "$now" >> "
+ /bin/sh "$town/government/janitor.sh" reclaim-quarantined
+ [ -d "$q/old-item" ]
+ 
++# A command can report failure after removing the whole destination. Retire that
++# completed row too, so a new generation at the same path remains under its grace.
++mkdir -p "$q/rm-nonzero-item"
++printf 'old generation\n' > "$q/rm-nonzero-item/f"
++now=$(date -u +%s)
++printf '2026-01-01T00:00:00Z\t/rm-nonzero\t%s/rm-nonzero-item\t1\t%s\n' \
++    "$q" "$((now - grace - 1))" >> "$state/janitor/quarantined.tsv"
++cat > "$d/bin/rm" <<'MOCK'
++#!/bin/sh
++if [ "${2:-}" = "$RM_FAIL_TARGET" ]; then
++    "$REAL_RM" "$@"
++    exit 1
++fi
++exec "$REAL_RM" "$@"
++MOCK
++chmod +x "$d/bin/rm"
++export RM_FAIL_TARGET=$q/rm-nonzero-item
++/bin/sh "$town/government/janitor.sh" reclaim-quarantined
++[ ! -e "$q/rm-nonzero-item" ]
++grep -q 'action=reclaim executed.*rm_status=1' "$state/janitor/actions.log"
++now=$(date -u +%s)
++mkdir -p "$q/rm-nonzero-item"
++printf 'new generation\n' > "$q/rm-nonzero-item/f"
++printf '2026-01-01T00:00:00Z\t/rm-nonzero-new\t%s/rm-nonzero-item\t1\t%s\n' \
++    "$q" "$now" >> "$state/janitor/quarantined.tsv"
++/bin/sh "$town/government/janitor.sh" reclaim-quarantined
++[ -d "$q/rm-nonzero-item" ]
++unset RM_FAIL_TARGET
++
+ # A deterministic device probe proves the audit reports the measured available-KB
+ # delta independently from candidate du size (the second df sample gains 7 KB).
+ mkdir -p "$q/measured-item"

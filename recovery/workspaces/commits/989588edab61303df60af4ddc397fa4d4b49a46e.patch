@@ -1,0 +1,83 @@
+commit 989588edab61303df60af4ddc397fa4d4b49a46e
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 20:07:25 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 21:44:24 2026 +0000
+
+    pnp: run gitctl commands from durable cwd
+    
+    Publishers/reconcilers can inherit a cwd inside a removed launcher or
+    proof worktree. Git resolves its repository from the process cwd even
+    for remote-only commands like ls-remote, causing reconcile to record a
+    fatal 'Unable to read current working directory' and leave PRs pending.
+    
+    Default gitctl.run to a durable cache cwd when no cwd is pinned, and add
+    a regression test for the deleted-cwd remote command case.
+
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index 084a597d..e81cd269 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -34,6 +34,14 @@ def check_commit_fields(fmt):
+ 
+ 
+ def run(argv, cwd=None, check=True):
++    if cwd is None:
++        # A publisher or reconciler may inherit the cwd of a worktree that was
++        # removed after publication. Git resolves its repository from the
++        # process cwd, so even remote-only commands such as `git ls-remote`
++        # then fail with "Unable to read current working directory". Run every
++        # git subprocess from a durable directory unless a caller pins one.
++        cwd = config.CACHE_DIR
++        os.makedirs(cwd, exist_ok=True)
+     p = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, timeout=90)
+     if check and p.returncode != 0:
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 14a3e1e6..9ee018f8 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -57,6 +57,43 @@ def candidate_file(content=GOOD):
+     return p
+ 
+ 
++class TestGitRunCwd(unittest.TestCase):
++    def test_remote_only_git_uses_durable_cwd_when_unspecified(self):
++        # A deleted launcher worktree must not break `git ls-remote`, which
++        # resolves its repository from the process cwd even for a remote URL.
++        captured = {}
++
++        class FakeResult:
++            returncode = 0
++            stdout = ""
++            stderr = ""
++
++        def fake_run(argv, cwd=None, **kw):
++            captured["cwd"] = cwd
++            return FakeResult()
++
++        with mock.patch.object(gitctl.subprocess, "run", fake_run):
++            gitctl.run(["git", "ls-remote", "--heads", "url", "refs/heads/x"])
++        self.assertEqual(captured["cwd"], config.CACHE_DIR)
++        self.assertTrue(os.path.isdir(config.CACHE_DIR))
++
++    def test_explicit_cwd_is_respected(self):
++        captured = {}
++
++        class FakeResult:
++            returncode = 0
++            stdout = ""
++            stderr = ""
++
++        def fake_run(argv, cwd=None, **kw):
++            captured["cwd"] = cwd
++            return FakeResult()
++
++        with mock.patch.object(gitctl.subprocess, "run", fake_run):
++            gitctl.run(["git", "rev-parse", "HEAD"], cwd="/example/worktree")
++        self.assertEqual(captured["cwd"], "/example/worktree")
++
++
+ class FakeDesk:
+     def __init__(self, beat=200):
+         self.beat_status = beat

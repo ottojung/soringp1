@@ -1,0 +1,116 @@
+commit 9b89dc429da9ec626f409e8f924c527502688a03
+Merge: 20b26a42 e27c9b3e
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Sun Nov 22 18:48:58 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Sun Nov 22 18:48:58 2026 +0000
+
+    Merge remote-tracking branch 'refs/remotes/origin/main' into fix/deterministic-statistics-20261122
+
+diff --git a/government/knowledge-activation-verify.sh b/government/knowledge-activation-verify.sh
+index 870cf498..c187f522 100644
+--- a/government/knowledge-activation-verify.sh
++++ b/government/knowledge-activation-verify.sh
+@@ -55,4 +55,25 @@ jq -e \
+     ((.offices[$office].expires_at - .offices[$office].not_before) <= 3888000) and
+     (.offices[$office].not_before <= $now) and
+     (.offices[$office].expires_at > $now)
+-  ' "$activation" >/dev/null
++  ' "$activation" >/dev/null || exit 1
++
++# Act 33 requires a separately authenticated Judiciary PROCEED before every
++# Statistics / successor dispatch. An enabled JSON flag and an act label alone
++# have never proved phase approval. The pointer only chooses the phase record;
++# the independent verifier checks its Git provenance and officer corroboration.
++if grep -Eq '^## Act 33 — Prospective Statistics Trial Clarification \(enacted ' "$laws"; then
++  record=$(jq -er --arg office "$office" '
++    .offices[$office].phase_gate_record |
++    select(type == "string" and
++           test("^records/knowledge/phases/[A-Za-z0-9_-]+[.]json$"))
++  ' "$activation") || exit 1
++  [ -s "$town/$record" ] || exit 1
++  jq -e --arg office "$office" --argjson act "$act_num" '
++    .schema=="viche-knowledge-phase-gate-v1" and
++    .office==$office and .act==$act and .decision=="proceed"
++  ' "$town/$record" >/dev/null 2>&1 || exit 1
++  [ -s "$town/government/knowledge-phase-gate.sh" ] || exit 1
++  # A missing or hung verifier denies only the office. Do not stop Parliament.
++  timeout 30 /bin/sh "$town/government/knowledge-phase-gate.sh" verify "$record" >/dev/null 2>&1 || exit 1
++fi
++exit 0
+diff --git a/records/suite-status.json b/records/suite-status.json
+index 236b982b..2f2bb4fd 100644
+--- a/records/suite-status.json
++++ b/records/suite-status.json
+@@ -1,14 +1,14 @@
+ {
+   "generated_by": "government/suite-status.sh",
+   "act": 21,
+-  "recorded_at": 1795372501,
+-  "recorded_iso": "2026-11-22T18:35:01Z",
+-  "suite": "tests/records-smoke.sh",
+-  "commit": "68e5a42fe65924f8935672c004d5f92eb9c88c3e",
+-  "tree": "46038e857d1879d16154ab752089dfa661b93d9e",
+-  "main": "2c7fb98d0c38be93ca806c80c8a86d42f7f73a67",
++  "recorded_at": 1795372876,
++  "recorded_iso": "2026-11-22T18:41:16Z",
++  "suite": "tests/run-all.sh",
++  "commit": "9f567c4f75403330f3886559448c55bb852aa1a3",
++  "tree": "7e2f6cae59c0ede2711dfa31cdd42678ae2d8831",
++  "main": "774903b200503da44f4630f0ee7397f9a5d2ace3",
+   "result": "green",
+-  "runs": [{"run":1,"result":"green","exit":0,"output_sha256":"2e5a7e79772f14b774757fd872135179a505df27eee04abba74ce9fbc40ce593"}],
++  "runs": [{"run":1,"result":"green","exit":0,"output_sha256":"7298e505b27494b33ae80bce17bd438d4c22a509967e86d0cdf6fae64f332377"}],
+   "ci_result": "unavailable",
+   "ci_reconciliation": "unavailable",
+   "verifier": "integrator",
+diff --git a/tests/knowledge-phase-dispatch-binding-smoke.sh b/tests/knowledge-phase-dispatch-binding-smoke.sh
+new file mode 100644
+index 00000000..55e45bac
+--- /dev/null
++++ b/tests/knowledge-phase-dispatch-binding-smoke.sh
+@@ -0,0 +1,44 @@
++#!/bin/sh
++# Hermetic Act33 runtime gate; no live activation or agent state changed.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++t="$d/town"
++mkdir -p "$t/government" "$t/records/knowledge/phases"
++cp "$repo/government/knowledge-activation-verify.sh" "$t/government/"
++cat > "$t/government/LAWS.md" <<'EOF'
++## Act 32 — Institutional Knowledge and Communications Act (enacted 2026-11-20)
++## Act 33 — Prospective Statistics Trial Clarification (enacted 2026-11-22)
++EOF
++now=$(date +%s)
++a="$t/records/knowledge/activation.json"
++jq -n --argjson nb "$((now-5))" --argjson ex "$((now+3600))" '{
++schema:"viche-knowledge-activation-v1",
++offices:{statistics:{enabled:true,authorized_by:"act:32:statistics",not_before:$nb,expires_at:$ex}}
++}' > "$a"
++verify() { VICHE_TOWN_ROOT="$t" /bin/sh "$t/government/knowledge-activation-verify.sh" statistics >/dev/null 2>&1; }
++deny() { if verify; then echo "FAIL: $1" >&2; exit 1; fi; }
++deny "bare enabled/authorized label"
++jq '.offices.statistics.phase_gate_record="records/knowledge/phases/statistics-initial.json"' "$a" > "$d/new"
++mv "$d/new" "$a"
++deny "missing gate record"
++r="$t/records/knowledge/phases/statistics-initial.json"
++printf '%s\n' '{"schema":"viche-knowledge-phase-gate-v1","act":32,"office":"statistics","decision":"hold"}' > "$r"
++printf '#!/bin/sh\nexit 0\n' > "$t/government/knowledge-phase-gate.sh"
++deny "independent hold even when helper exits success"
++jq '.decision="proceed" | .office="spying"' "$r" > "$d/new"
++mv "$d/new" "$r"
++deny "wrong-office replay"
++jq '.office="statistics" | .act=31' "$r" > "$d/new"
++mv "$d/new" "$r"
++deny "wrong-Act replay"
++jq '.act=32' "$r" > "$d/new"
++mv "$d/new" "$r"
++verify || { echo 'FAIL: structure + successful helper did not permit' >&2; exit 1; }
++printf '#!/bin/sh\nexit 1\n' > "$t/government/knowledge-phase-gate.sh"
++deny "independent actual verification failure"
++jq '.offices.statistics.phase_gate_record="records/knowledge/phases/../other.json"' "$a" > "$d/new"
++mv "$d/new" "$a"
++deny "path traversal"
++echo 'knowledge phase dispatch gate: correct structural binding and fail-closed independent review'

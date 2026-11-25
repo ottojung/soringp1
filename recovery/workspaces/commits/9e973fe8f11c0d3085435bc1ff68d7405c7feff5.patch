@@ -1,0 +1,123 @@
+commit 9e973fe8f11c0d3085435bc1ff68d7405c7feff5
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Sat Nov 7 00:51:12 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Sat Nov 7 00:51:12 2026 +0000
+
+    Follow opaque board feed cursors without skipping Founder messages
+
+diff --git a/government/founder-intake.sh b/government/founder-intake.sh
+index 74719400..46f402db 100644
+--- a/government/founder-intake.sh
++++ b/government/founder-intake.sh
+@@ -40,22 +40,31 @@ if [ -n "$latest" ]; then
+   mv "$d/cursor" "$q/town-cursor"
+ fi
+ # Board activity outside Town Hall, using monotonic positions.
+-last=0
++last=
+ [ ! -s "$q/feed-cursor" ] || last=$(cat "$q/feed-cursor")
+-case "$last" in ''|*[!0-9]*) exit 1;; esac
++# Board v4 publishes stable opaque message IDs. Older intake runs stored
++# numeric positions; accept those until the next successful observation, then
++# persist the entry ID instead. Never discard an unrecognized durable anchor.
++last_kind=id
++case "$last" in ''|*[!0-9]*) :;; *) last_kind=position;; esac
+ page=1
+-first=0
++first=
+ while :; do
+   antonina board feed --page "$page" --limit 100 --json > "$d/feed"
+   jq -e '.entries|type=="array"' "$d/feed" >/dev/null
+   count=$(jq '.entries|length' "$d/feed")
+   [ "$count" -gt 0 ] || break
+-  [ "$first" -gt 0 ] || first=$(jq -r '.entries[0].position // 0' "$d/feed")
++  [ -n "$first" ] || first=$(jq -r '.entries[0].id // empty' "$d/feed")
+   stop=0
+   jq -c '.entries[]' "$d/feed" > "$d/items"
+   while IFS= read -r line; do
+     pos=$(printf '%s\n' "$line" | jq -r '.position // 0')
+-    if [ "$last" -gt 0 ] && [ "$pos" -le "$last" ]; then stop=1; break; fi
++    entry_id=$(printf '%s\n' "$line" | jq -r '.id // empty')
++    if [ "$last_kind" = id ]; then
++      if [ -n "$last" ] && [ "$entry_id" = "$last" ]; then stop=1; break; fi
++    elif [ -n "$last" ] && [ "$pos" -le "$last" ]; then
++      stop=1; break
++    fi
+     [ "$(printf '%s\n' "$line" | jq -r '.author // empty')" = Vitalik ] || continue
+     issue=$(printf '%s\n' "$line" | jq -r '.issueNumber // empty')
+     [ "$issue" != "$VICHE_TOWNHALL_ID" ] || continue
+@@ -68,11 +77,17 @@ while :; do
+     mv "$d/new" "$q/pending/$key.json"
+   done < "$d/items"
+   [ "$stop" -eq 0 ] || break
+-  [ "$last" -gt 0 ] || break
++  [ -n "$last" ] || break
+   [ "$count" -eq 100 ] || break
+   page=$((page+1))
+ done
+-if [ "$first" -gt 0 ]; then
++# The source may have been compacted or changed. Do not silently jump past
++# an unseen Founder instruction if our exact prior event cannot be located.
++if [ "$last_kind" = id ] && [ -n "$last" ] && [ "$stop" -eq 0 ]; then
++  echo "Founder feed cursor not found in board history: $last" >&2
++  exit 1
++fi
++if [ -n "$first" ]; then
+   printf '%s\n' "$first" > "$d/cursor"
+   mv "$d/cursor" "$q/feed-cursor"
+ fi
+diff --git a/tests/intake-smoke.sh b/tests/intake-smoke.sh
+index 066cfc4d..108bcf74 100644
+--- a/tests/intake-smoke.sh
++++ b/tests/intake-smoke.sh
+@@ -7,6 +7,7 @@ trap 'rm -rf "$d"' 0
+ mkdir -p "$d/bin" "$d/town/government" "$d/state" "$d/seats/c1a00001" "$d/charter" "$d/mock"
+ printf 'c1a00001\tClerk\tFounder intake\n' > "$d/town/government/seats.tsv"
+ printf 'Protected constitution fixture\n' > "$d/charter/CONSTITUTION.md"
++printf 'Report material blockers to the Judiciary mailbox.\n' > "$d/town/government/AGENT-REPORTING-POLICY.md"
+ cat > "$d/bin/antonina" <<'MOCK'
+ #!/bin/sh
+ set -eu
+@@ -18,7 +19,17 @@ case "$1 $2" in
+   jq -c --argjson page "$page" '{messages:(.messages | (length) as $n | .[([0,$n-$page*50]|max):($n-($page-1)*50)])}' "$MOCK_DIR/comments"
+   ;;
+ 'board feed')
+-  echo '{"entries":[]}'
++  if [ ! -s "$MOCK_DIR/feed" ]; then
++    echo '{"entries":[]}'
++  else
++    page=1
++    limit=100
++    while [ "$#" -gt 0 ]; do
++      case "$1" in --page) page=$2; shift 2;; --limit) limit=$2; shift 2;; *) shift;; esac
++    done
++    jq -c --argjson start "$(((page-1)*limit))" --argjson end "$((page*limit))" \
++      '{entries:(.entries[$start:$end])}' "$MOCK_DIR/feed"
++  fi
+   ;;
+ 'agent status')
+   printf '{"state":"%s"}\n' "$(cat "$MOCK_DIR/status")"
+@@ -94,4 +105,22 @@ oldfile=$(find "$d/state/founder-inbox/sent" -name '*.json' | head -n 1)
+ touch -d '11 minutes ago' "$oldfile"
+ /bin/sh "$repo/government/founder-intake.sh"
+ [ "$(wc -l < "$d/mock/calls")" -eq 4 ]
++# Feed cursors are opaque event identities, not necessarily numeric positions.
++# The saved anchor can be on a later page; process every newer item exactly once.
++jq -n '{entries:[range(0;102)|
++  {id:("sha256:message-"+(.|tostring)),position:(1000-.),
++   author:(if .==0 then "Vitalik" else "other" end),
++   issueNumber:"303",at:"2026-10-15T01:00:00Z",body:"new instruction"}]}' > "$d/mock/feed"
++printf '%s\n' 'sha256:message-101' > "$d/state/founder-inbox/feed-cursor"
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(cat "$d/state/founder-inbox/feed-cursor")" = 'sha256:message-0' ]
++[ "$(wc -l < "$d/mock/calls")" -eq 5 ]
++/bin/sh "$repo/government/founder-intake.sh"
++[ "$(wc -l < "$d/mock/calls")" -eq 5 ]
++# An unknown prior anchor must never be silently skipped during a cutover.
++printf '%s\n' 'sha256:missing-event' > "$d/state/founder-inbox/feed-cursor"
++if /bin/sh "$repo/government/founder-intake.sh" >/dev/null 2>&1; then
++  echo 'Missing founder feed anchor was incorrectly accepted' >&2; exit 1
++fi
++[ "$(cat "$d/state/founder-inbox/feed-cursor")" = 'sha256:missing-event' ]
+ echo 'Viche Founder intake smoke passed'

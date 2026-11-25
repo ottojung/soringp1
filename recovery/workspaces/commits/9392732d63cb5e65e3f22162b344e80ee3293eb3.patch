@@ -1,0 +1,336 @@
+commit 9392732d63cb5e65e3f22162b344e80ee3293eb3
+Author:     c1a00002 Executive <executive@viche.local>
+AuthorDate: Sat Nov 7 14:48:36 2026 +0000
+Commit:     c1a00002 Executive <executive@viche.local>
+CommitDate: Sat Nov 7 14:48:36 2026 +0000
+
+    Harden verification artifacts; stop claiming cryptographic independence
+    
+    Second independent review of 591bb09 found that a self-written artifact cannot
+    prove independent verification on this host (all offices share one uid), and
+    that the check had real bypasses. This commit addresses the mechanical defects
+    and states the honest limit instead of overclaiming.
+    
+    Hardening:
+      * verified_at must satisfy first_seen < verified_at <= now and
+        last_seen <= verified_at (no pre-dated, no future-dated, no stale artifact
+        surviving a relapse);
+      * evidence.ref must be a relative path inside the state root, with no ".."
+        and no symlink on any component, and must be a regular file within a
+        4 MiB cap (blocks absolute paths, traversal, symlink escape and /dev/zero);
+      * timestamps require type(x) is int (JSON true is not a timestamp);
+      * read() tolerates OSError, so an unreadable or directory-valued state file
+        can no longer abort the whole reconcile pass;
+      * closure_evidence records provenance as
+        "declared_by_artifact_content_not_cryptographically_enforced" so no reader
+        mistakes the artifact for a signature.
+    
+    Routing:
+      * branch-health emits case_awaiting_verification when any open case has
+        awaiting_independent_verification, so a cleared symptom without
+        verification is not reported healthy; the reconciler treats it as an
+        advisory META signal and never creates a case from it;
+      * the Clerk sitting prompt no longer says closure follows "repeated
+        deterministic observation"; it states the artifact requirement.
+    
+    Tests: rejection cases now assert the counts are preserved and the flag is set;
+    add absolute-path, traversal, symlink, boolean-timestamp and future-timestamp
+    refusals; assert a matching artifact cannot substitute for a missing continuity
+    receipt; assert the advisory signal is emitted and not turned into a case.
+    
+    Not claimed: that this proves who wrote the artifact. Honest limit is in the
+    docstring, closure_evidence and this message. Earlier closures made under the
+    rejected probe-count rule are left as historical records, not silently
+    re-labelled or reopened.
+
+diff --git a/government/branch-health.sh b/government/branch-health.sh
+index 70641ffa..326bbd2f 100755
+--- a/government/branch-health.sh
++++ b/government/branch-health.sh
+@@ -90,6 +90,13 @@ if [ -d "$mailbox_dir" ] &&
+    [ -n "$(find "$mailbox_dir" -maxdepth 1 -type f -name '*.md' -print -quit 2>/dev/null)" ]; then
+   signals="${signals}${signals:+,}judiciary_mailbox_pending"
+ fi
++# An obligation whose symptom cleared but which still lacks a case-bound
++# verification artifact is NOT healthy, and must not be reported as clear.
++cases_dir="$state/institutional-cases"
++if [ -d "$cases_dir" ] &&
++   grep -l '"awaiting_independent_verification": true' "$cases_dir"/*.json >/dev/null 2>&1; then
++  signals="${signals}${signals:+,}case_awaiting_verification"
++fi
+ printf '%s\t%s\n' "$now" "${signals:-clear}" >> "$root/observations.tsv"
+ if [ -z "$signals" ]; then
+   if [ -s "$root/incident.json" ]; then
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 0f02b46b..77951743 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -10,6 +10,7 @@ import hashlib
+ import json
+ import os
+ import pathlib
++import stat
+ import tempfile
+ import time
+ 
+@@ -20,7 +21,7 @@ STORE = ROOT / "institutional-cases"
+ def read(path):
+     try:
+         return json.loads(path.read_text())
+-    except (FileNotFoundError, ValueError):
++    except (OSError, ValueError):
+         return {}
+ 
+ 
+@@ -123,26 +124,55 @@ def latest_health_observation():
+ 
+ 
+ INDEPENDENT_VERIFIERS = ("judiciary", "clerk")
++MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
+ 
+ 
+-def verification_artifact(case):
+-    """Validate the case-bound independent verification artifact, or None.
++def _is_int(value):
++    # JSON booleans satisfy isinstance(x, int); they are not timestamps.
++    return type(value) is int
+ 
+-    A case may only close on evidence produced by an independent office for
+-    THAT case. Requirements are deliberately strict because the earlier
+-    "healthy observation" schemes let the reconciler's own clock stand in for
+-    evidence:
+ 
+-      * ``case_id`` equals this case's id (a receipt cannot be reused for a
+-        later case for the same signal);
+-      * ``verified_by`` is an independent office, never the Executive that
+-        owns the repair;
+-      * ``verified_at`` is later than ``first_seen`` (no pre-dated artifact);
+-      * ``evidence`` names a durable file that still exists and whose sha256
+-        matches what the verifier recorded (tamper-evident, checkable).
++def _within_root(ref):
++    """True only for a real regular file inside ROOT, reached without symlinks."""
++    relative = pathlib.PurePath(ref)
++    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
++        return False
++    path = ROOT
++    for part in relative.parts:
++        path = path / part
++        # Reject symlinks anywhere on the path inside the state root.
++        if path.is_symlink():
++            return False
++    try:
++        info = path.lstat()
++    except OSError:
++        return False
++    return stat.S_ISREG(info.st_mode) and info.st_size <= MAX_EVIDENCE_BYTES
++
++
++def verification_artifact(case, now):
++    """Validate the case-bound verification artifact, or None.
++
++    Closure needs evidence recorded for THIS case by an office other than the
++    one that owns the repair:
++
++      * ``case_id`` equals this case's id (no reuse for a later case);
++      * ``verified_by`` names an independent office;
++      * ``first_seen < verified_at <= last_seen <= now``: the verification must
++        postdate the last observed failure and cannot be future-dated;
++      * ``evidence`` names a regular file inside the state root, reached with
++        no symlinks and within a size cap, whose sha256 matches the recorded
++        digest.
++
++    Honest limit: all offices run as the same host user, so this validates the
++    artifact's contents, not who wrote it. Provenance is enforced by process
++    (the verification pipeline is the only intended writer), not by
++    cryptography.
+     """
+     signal = case.get("signal")
+-    if not signal:
++    if not isinstance(signal, str) or not signal:
++        return None
++    if not signal.replace("_", "").replace("-", "").isalnum():
+         return None
+     path = ROOT / "verification" / (signal + ".json")
+     artifact = read(path)
+@@ -152,9 +182,10 @@ def verification_artifact(case):
+         return None
+     verified_at = artifact.get("verified_at")
+     first_seen = case.get("first_seen")
+-    if not isinstance(verified_at, int) or not isinstance(first_seen, int):
++    last_seen = case.get("last_seen", first_seen)
++    if not (_is_int(verified_at) and _is_int(first_seen) and _is_int(last_seen)):
+         return None
+-    if verified_at <= first_seen:
++    if not (first_seen < verified_at <= now and last_seen <= verified_at):
+         return None
+     evidence = artifact.get("evidence")
+     if not isinstance(evidence, dict):
+@@ -165,22 +196,22 @@ def verification_artifact(case):
+         return None
+     if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+         return None
+-    target = pathlib.Path(ref)
+-    if not target.is_absolute():
+-        target = ROOT / ref
++    if not _within_root(ref):
++        return None
+     try:
+-        data = target.read_bytes()
++        data = (ROOT / ref).read_bytes()
+     except OSError:
+         return None
+     if hashlib.sha256(data).hexdigest() != digest:
+         return None
+     return {
+-        "artifact": str(path.relative_to(ROOT)),
++        "artifact": "verification/" + signal + ".json",
+         "case_id": case.get("id"),
+         "verified_by": artifact.get("verified_by"),
+         "verified_at": verified_at,
+         "evidence_ref": ref,
+         "evidence_sha256": digest,
++        "provenance": "declared_by_artifact_content_not_cryptographically_enforced",
+     }
+ 
+ 
+@@ -196,6 +227,9 @@ def owner(signal):
+     return "legislature"
+ 
+ 
++META_SIGNALS = {"case_awaiting_verification"}
++
++
+ def reconcile():
+     now, signals = collect()
+     health_observation = latest_health_observation()
+@@ -205,6 +239,10 @@ def reconcile():
+     for signal in sorted(names):
+         if not signal.replace("_", "").replace("-", "").isalnum():
+             continue
++        if signal in META_SIGNALS:
++            # Advisory: derived from open cases, so it must not become a case
++            # itself (that would be self-referential and unclosable).
++            continue
+         path = STORE / (signal + ".json")
+         case = read(path)
+         if signal in signals:
+@@ -231,6 +269,7 @@ def reconcile():
+             if health_observation is None or health_observation[1] != "clear":
+                 case["clear_observations"] = 0
+                 case.pop("last_clear_observation", None)
++                case.pop("awaiting_independent_verification", None)
+             elif (health_observation[0] > case.get("last_seen", case.get("first_seen", 0))
+                   and health_observation[0] != case.get("last_clear_observation")):
+                 case["clear_observations"] = case.get("clear_observations", 0) + 1
+@@ -239,7 +278,7 @@ def reconcile():
+                 # Healthy probes are necessary but NOT sufficient. An open
+                 # case closes only on a case-bound artifact from an
+                 # independent office whose cited evidence resolves.
+-                artifact = verification_artifact(case)
++                artifact = verification_artifact(case, now)
+                 continuity = None
+                 if signal.startswith("continuity_unverified_"):
+                     continuity = continuity_receipt(signal[len("continuity_unverified_"):])
+diff --git a/government/sitting.sh b/government/sitting.sh
+index 879d5858..f6a8b4c8 100644
+--- a/government/sitting.sh
++++ b/government/sitting.sh
+@@ -206,8 +206,11 @@ $cases
+ === END CORRECTIVE OBLIGATIONS ===
+ Preserve identity across sittings. Judiciary independently measures;
+ Parliament authorizes changes to ordinary law when needed; Executive
+-implements authorized repairs. Case closure requires disappearance of the
+-failure confirmed by repeated deterministic observation, not an agent exit.
++implements authorized repairs. Healthy branch probes are only a precondition:
++closure requires a case-bound verification artifact for that case id, recorded
++by an independent office, whose cited evidence still resolves and matches its
++recorded digest. A disappearance of the symptom alone, an agent exit, or a
++repeated probe is not closure.
+ EOF
+ fi
+ 
+diff --git a/tests/branch-health-smoke.sh b/tests/branch-health-smoke.sh
+index b1c28c9c..c44e5a43 100755
+--- a/tests/branch-health-smoke.sh
++++ b/tests/branch-health-smoke.sh
+@@ -96,4 +96,12 @@ restamp 5600
+ sh "$repo/government/branch-health.sh"
+ VICHE_CASE_NOW=5600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .awaiting_independent_verification==true' "$scratch/institutional-cases/outcomes_stale.json" >/dev/null
++# A stuck obligation must be visible and routed, not silently healthy, and the
++# advisory signal must not become a self-referential case.
++VICHE_BRANCH_NOW=5700; export VICHE_BRANCH_NOW
++restamp 5700
++sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1
++jq -e '.signals|index("case_awaiting_verification")' "$scratch/branches/incident.json" >/dev/null
++VICHE_CASE_NOW=5700 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++[ ! -e "$scratch/institutional-cases/case_awaiting_verification.json" ]
+ echo 'Three-branch liveness and Judiciary self-measurement smoke passed'
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index 2e7578f3..8e6ffeb4 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -93,16 +93,35 @@ write_artifact() {
+ # evidence and a mismatched digest must all be refused.
+ write_artifact 'innovation_stale:9999' clerk 1300 evidence/repair.txt "$digest"
+ VICHE_CASE_NOW=1260 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.state=="open" and .clear_observations==2 and .awaiting_independent_verification==true' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ write_artifact 'innovation_stale:1000' executive 1300 evidence/repair.txt "$digest"
+ VICHE_CASE_NOW=1270 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ write_artifact 'innovation_stale:1000' clerk 500 evidence/repair.txt "$digest"
+ VICHE_CASE_NOW=1280 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ write_artifact 'innovation_stale:1000' clerk 1300 evidence/missing.txt "$digest"
+ VICHE_CASE_NOW=1290 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+-jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++# Evidence outside the state root, path traversal and symlinks are refused:
++# the cited artifact must be a real regular file under the state root.
++write_artifact 'innovation_stale:1000' clerk 1300 /etc/hostname "$(python3 -c 'import hashlib;print(hashlib.sha256(open("/etc/hostname","rb").read()).hexdigest())')"
++VICHE_CASE_NOW=1292 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++write_artifact 'innovation_stale:1000' clerk 1300 ../../etc/hostname "$(python3 -c 'import hashlib;print(hashlib.sha256(open("/etc/hostname","rb").read()).hexdigest())')"
++VICHE_CASE_NOW=1294 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++ln -s /etc/hostname "$d/state/evidence/link.txt"
++write_artifact 'innovation_stale:1000' clerk 1300 evidence/link.txt "$(python3 -c 'import hashlib;print(hashlib.sha256(open("/etc/hostname","rb").read()).hexdigest())')"
++VICHE_CASE_NOW=1296 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++# A JSON boolean is not a timestamp; a future-dated artifact is not evidence.
++printf '{"case_id":"innovation_stale:1000","verified_by":"clerk","verified_at":true,"evidence":{"ref":"evidence/repair.txt","sha256":"%s"}}\n' "$digest" > "$d/state/verification/innovation_stale.json"
++VICHE_CASE_NOW=1297 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++write_artifact 'innovation_stale:1000' clerk 999999 evidence/repair.txt "$digest"
++VICHE_CASE_NOW=1298 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ write_artifact 'innovation_stale:1000' clerk 1300 evidence/repair.txt "$(printf '0%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64)"
+ VICHE_CASE_NOW=1295 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open"' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+@@ -125,16 +144,22 @@ printf '{"case_id":"continuity_unverified_innovation-centre:1000","verified_by":
+ VICHE_CASE_NOW=1510 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="verified_closed" and .closure_evidence.verified_by=="judiciary" and .closure_evidence.continuity_receipt.previous_agent=="old-agent"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ # Withdrawing the case-specific receipt must keep a fresh case open: generic
+-# healthy probes and generic artifacts are not continuity evidence.
++# healthy probes are not continuity evidence, and even a matching artifact
++# cannot substitute for the missing reconciliation receipt.
+ rm "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" "$d/state/continuity/verified-innovation-centre.json"
+ printf '{"signals":["continuity_unverified_innovation-centre"],"observed_at":1600}\n' > "$d/state/branches/incident.json"
+ VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++cid=$(jq -r '.id' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json")
++printf '{"case_id":"%s","verified_by":"judiciary","verified_at":1700,"evidence":{"ref":"evidence/repair.txt","sha256":"%s"}}\n' "$cid" "$digest" > "$d/state/verification/continuity_unverified_innovation-centre.json"
+ rm "$d/state/branches/incident.json"
+ printf '1650\tclear\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1650 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ printf '1700\tclear\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1700 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++printf '1750\tclear\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1750 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ 
+ # After a real enactment, Executive unit runs on preserved worktree, not a
+ # parliamentary summons. Mock only the branch-bootstrap and deployment.

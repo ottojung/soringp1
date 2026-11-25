@@ -1,0 +1,162 @@
+commit 9bbed63a4b0e05a4f6377bdf27e9cc4bf9980025
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Wed Nov 25 03:50:18 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Wed Nov 25 03:50:18 2026 +0000
+
+    Escalate persistent staffing incidents instead of routine worker churn
+
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index a4a92405..cfb6b09e 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -150,14 +150,14 @@ for diagnostic in "$town"/missions/*/status.sh; do
+     line='{"status":"unavailable","action":"investigate diagnostic failure"}'
+   mission_diagnostics="$mission_diagnostics
+ $label: $line"
+-  if printf '%s\n' "$line" | jq -e '.coordination_due == true' >/dev/null 2>&1; then
++  if printf '%s\n' "$line" | jq -e 'if has("executive_coordination_due") then .executive_coordination_due == true else .coordination_due == true end' >/dev/null 2>&1; then
+     mission_coordination_due=yes
+   fi
+-  # Compact stable signal: a change in staffing, checked output or mission
+-  # state causes an Executive pass. Timestamps and full notes do not.
++  # Missions may expose a compact incident-level Executive signal separately
++  # from fast-changing worker rosters. Other missions keep their existing signal.
+   signal=$(printf '%s\n' "$line" | jq -cS '
+       if type=="object" then
+-        (.dispatch_signal // {status,counts,by_state})
++        (.executive_dispatch_signal // .dispatch_signal // {status,counts,by_state})
+       else . end' 2>/dev/null) || signal="unreadable"
+   mission_dispatch_signature="$mission_dispatch_signature
+ $label:$signal"
+diff --git a/missions/pnp/staffing/README.md b/missions/pnp/staffing/README.md
+index 67b9c7f2..eee2a465 100644
+--- a/missions/pnp/staffing/README.md
++++ b/missions/pnp/staffing/README.md
+@@ -77,8 +77,10 @@ are retained for seven days; lifecycle events for thirty days. Metrics
+ report observed general slot-seconds and unobserved intervals separately.
+ A stale health snapshot is not evidence of coverage. A live but quiet
+ worker exposes last activity; the controller does not kill one simply for
+-being quiet (it might be compiling). A sustained vacancy or stale health
+-requires Executive diagnosis, not another independent staffing loop.
++being quiet (it might be compiling). A sustained vacancy (120 seconds by default) or stale health requires Executive
++diagnosis, not another independent staffing loop. The Executive dispatch gate
++receives persistent incidents and publication outcomes, not routine worker
++identity changes. Full instantaneous worker diagnostics remain available.
+ 
+ The Antonina interface does not provide a server-side idempotency key or
+ atomic lease/launch transaction. This is reconciliation, not a claim of
+diff --git a/missions/pnp/staffing/controller.py b/missions/pnp/staffing/controller.py
+index f5411a7b..6c1287b3 100644
+--- a/missions/pnp/staffing/controller.py
++++ b/missions/pnp/staffing/controller.py
+@@ -34,7 +34,7 @@ def tick():
+             except Exception as exc:
+                 row={"phase":"unknown","reason":"slot error "+type(exc).__name__}
+             rows.append({"key":s.key,"label":s.label,"gap":s.gap,
+-                         **{k:row.get(k) for k in ("phase","reason","agent","vacant_since","next_at","failures","started","activity","model")}})
++                         **{k:row.get(k) for k in ("phase","reason","agent","vacant_since","next_at","failures","started","activity","model","uncovered_since")}})
+         def history_scan():
+             try:
+                 return staff.roster()
+@@ -65,7 +65,13 @@ def tick():
+                     pass
+         t=time.time()
+         store.sample(rows,t)
+-        out={"at":t,"last_good_at":t,"state":"paused" if p["paused"] else "degraded" if issues or any(r["phase"]=="unknown" for r in rows) else "healthy" if all(r["phase"] in ("running","completed") for r in rows) else "reconciling","issues":issues,
++        alerts=sorted(f'{r["gap"] or "support"}:{r["label"]}'
++                      for r in rows if r["phase"] not in ("running","completed","paused","obsolete")
++                      and isinstance(r.get("uncovered_since"),(int,float))
++                      and t-r["uncovered_since"]>=p["alert_after"])
++        if issues:
++            alerts.append("planning degraded")
++        out={"at":t,"last_good_at":t,"state":"paused" if p["paused"] else "degraded" if issues or any(r["phase"]=="unknown" for r in rows) else "healthy" if all(r["phase"] in ("running","completed") for r in rows) else "reconciling","issues":issues,"alerts":alerts,
+              "duration":round(t-now,3),"slots":rows,"retired":retired,
+              "desired":len(rows),"running":sum(r["phase"]=="running" for r in rows),
+              "unknown":sum(r["phase"]=="unknown" for r in rows)}
+diff --git a/missions/pnp/staffing/policy.py b/missions/pnp/staffing/policy.py
+index 3a021653..33a68e23 100644
+--- a/missions/pnp/staffing/policy.py
++++ b/missions/pnp/staffing/policy.py
+@@ -9,13 +9,13 @@ from .. import config, state
+ DEFAULT = {
+     "interval": 5, "parallel": 4, "retry_min": 5, "retry_max": 180,
+     "short_run": 20, "ambiguity_grace": 45, "support_refresh": 600,
+-    "focus_obligations": 2, "rotate_after": 3, "paused": False, "extras": [],
++    "focus_obligations": 2, "rotate_after": 3, "alert_after": 120, "paused": False, "extras": [],
+ }
+ BOUNDS = {
+     "interval": (2, 60), "parallel": (1, 12), "retry_min": (2, 60),
+     "retry_max": (30, 1800), "short_run": (5, 120),
+     "ambiguity_grace": (30, 600), "support_refresh": (120, 3600),
+-    "focus_obligations": (0, 12), "rotate_after": (2, 12),
++    "focus_obligations": (0, 12), "rotate_after": (2, 12), "alert_after": (30, 1800),
+ }
+ 
+ 
+diff --git a/missions/pnp/staffing/reconcile.py b/missions/pnp/staffing/reconcile.py
+index 372f7070..f11516df 100644
+--- a/missions/pnp/staffing/reconcile.py
++++ b/missions/pnp/staffing/reconcile.py
+@@ -15,6 +15,10 @@ def update(row, phase, reason="", **kw):
+ 
+ def save(slot,row,phase,reason="",event=None,**kw):
+     update(row,phase,reason,**kw)
++    if phase in ("running","completed","paused","obsolete"):
++        row["uncovered_since"]=None
++    elif row.get("uncovered_since") is None:
++        row["uncovered_since"]=time.time()
+     store.put(slot.key,row,event)
+     return row
+ 
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index fe33df72..87c6bad3 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -175,7 +175,22 @@ def snapshot():
+     score["available"] = lb.get("available", False)
+     score["stale"] = stale
+     by_state = dict(collections.Counter(r["state"] for r in rows))
++    # Worker identities churn as bounded passes finish. Wake the Executive
++    # for persistent incidents or externally meaningful changes, not for
++    # individual vacancies the controller is already reconciling.
++    staffing_alerts=list(controller_health.get("alerts",[]))
++    if controller_health.get("state") in ("unknown","stale"):
++        staffing_alerts.append("controller "+controller_health["state"])
++    publication_alerts=sorted(r["gap"] for r in rows if r["state"] in ("FAULT","REJECTED")
++                              or (r["state"]=="PR_OPEN" and r.get("failure_reason")))
++    executive_signal={"staffing_alerts":sorted(set(staffing_alerts)),
++                      "publication_alerts":publication_alerts,
++                      "leaderboard":[score.get("rank"),score.get("our_steps")],
++                      "corrections":corrections}
++
+     return {"staffing_controller":controller_health,
++        "executive_dispatch_signal":executive_signal,
++        "executive_coordination_due":bool(staffing_alerts or publication_alerts),
+         "observed": len(rows), "by_state": by_state, "recent": rows[-12:],
+         "leaderboard": score, "workers": w,
+         "research_support": {"agents": scouts, "completed_current_evidence": sorted(complete), "coverage_missing": missing_support,
+diff --git a/tests/pnp-staffing.py b/tests/pnp-staffing.py
+index 7114fdbd..2877f675 100644
+--- a/tests/pnp-staffing.py
++++ b/tests/pnp-staffing.py
+@@ -271,6 +271,19 @@ class Tests(unittest.TestCase):
+             with self.assertRaises(backend.Uncertain):controller.tick()
+         self.assertFalse(self.fake.runs)
+ 
++    def test_persistent_vacancy_alert_not_transient(self):
++        aid=self.launch()
++        self.fake.finish(aid)
++        self.step()
++        row=store.get(self.slot.key)
++        row["uncovered_since"]=time.time()-200
++        row["next_at"]=time.time()+120
++        store.put(self.slot.key,row)
++        with patch.object(staff,"roster",return_value=self.fake.history()):
++            out=controller.tick()
++        self.assertIn(self.rec["gap_id"]+":general",out["alerts"])
++        self.assertNotIn(self.rec["gap_id"]+":integrator",out["alerts"])
++
+     def test_metrics_no_imputation_across_outage(self):
+         t=time.time()-300
+         a=[{"label":"general","phase":"running"}]

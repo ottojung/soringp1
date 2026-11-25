@@ -1,0 +1,106 @@
+commit 9603c07c1b8f694e24fdd9475b1086895350aa9f
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Tue Nov 24 23:58:30 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Tue Nov 24 23:58:30 2026 +0000
+
+    Keep initial research prompts focused and expose actual preflight evidence
+
+diff --git a/missions/pnp/research/playbook.py b/missions/pnp/research/playbook.py
+index 0f9b335c..528b803c 100644
+--- a/missions/pnp/research/playbook.py
++++ b/missions/pnp/research/playbook.py
+@@ -178,6 +178,13 @@ def packet(role, cwd=None):
+         out["attempt"]=support.attempt(rec)
+         out["family"]=knowledge.family((rec.get("gap_title") or "")+" "+rec.get("statement",""))
+         out["cumulative_research"]=knowledge.relevant(rec)
++        try:
++            from .. import preflight
++            report=preflight.read(rec)
++            if report and report.get("result")=="candidate":
++                out["preflight_candidate"]={"path":report["candidate"],"generator":report.get("generator"),
++                                            "sha256":report["sha256"],"kernel_checked":False}
++        except (OSError,ValueError,ImportError,KeyError):pass
+         label=assignment.worker_label(cwd)
+         if label and label.startswith("ob-"):
+             out["assigned_obligation"]=label[3:]
+@@ -223,13 +230,15 @@ def main():
+             if key in data:print(key+":",data[key])
+         context=data.get("cumulative_research") or {}
+         if context.get("obligations"):
+-            print("\nCurrent exact obligations (show ID for full statement):")
++            print("\nExact-gap obligations (show ID for full statement; fork/recheck if base differs):")
+             for o in context["obligations"]:
+-                print(o["id"],"CHECKED" if o.get("verified") else o.get("status","OPEN"),o["statement"][:220].replace("\n"," "))
++                print(o["id"],"CHECKED" if o.get("verified") else o.get("status","OPEN"),("same-base" if o.get("base")==data.get("base") else "other-base"),o["statement"][:220].replace("\n"," "))
+         if context.get("knowledge"):
+             print("\nRelevant knowledge:")
+             for x in context["knowledge"]:
+                 print(x["id"],x["kind"],x["statement"][:200].replace("\n"," "))
++        if data.get("preflight_candidate"):
++            print("\nGenerated candidate (not yet kernel-checked):",data["preflight_candidate"]["path"])
+         if data.get("open_method_nodes"):
+             print("\nOpen mathematical methods (coordinate ownership before reuse):")
+             for x in data["open_method_nodes"]:print(x["id"],x["family"],x["statement"].replace("\n"," "))
+diff --git a/missions/pnp/staff.py b/missions/pnp/staff.py
+index dcc75c37..a415d741 100644
+--- a/missions/pnp/staff.py
++++ b/missions/pnp/staff.py
+@@ -103,29 +103,20 @@ def roster():
+ 
+ def prompt(rec, approach, general=False):
+     return (
+-        "Work on the exact current P vs NP assignment below, using the independent "
+-        "workspace already prepared for you. Pursue this distinct mathematical "
+-        "approach; communicate useful sublemmas and artifacts to the other researchers "
+-        "on this same gap. No unrelated gap acquisition, no direct desk or GitHub "
+-        "mutation, no agent launches. Use the local managed compiler and guard from "
+-        "your bound cwd. At entry run PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.tools "
+-        "to discover the currently installed capabilities, applicability and examples. "
+-        "Read automatic preflight results from guard; use an available generator or adapter before "
+-        "reinventing its work. Recheck the tool inventory whenever guard reports a changed tools revision. "
+-        "Use proofs find/source first and proofs search for bounded "
+-        "finite circuit synthesis, with a durable CEGIS checkpoint. Verify any witness "
+-        "on the full domain; solver UNSAT alone is not a Lean proof. Reuse peer source "
+-        "fragments and previous attempts rather than restarting equivalent work. Use proofs share FILE "
+-        "--message RESULT to snapshot a reusable Lean helper; proofs fragments --all-attempts "
+-        "lists available helpers. Preserve "
+-        "work when the lease ends. When a complete exact proof exists, immediately "
+-        "invoke python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py submit GAP FILE "
+-        "with actual gap and file; never wait for an extra review. If the guard "
+-        "says publication owns the candidate or stop, do not compete with it.\n"
++        "Use the injected role playbook and exact assignment below. Work from your bound cwd. "
++        "No direct desk/GitHub mutation, unrelated claims or agent launches. "
++        "Read guard's preflight candidate and peer findings; use an applicable generator, "
++        "checked proof or adapter before reinventing it. The full tool inventory is available "
++        "through python3 -m missions.pnp.tools when needed, not mandatory at entry. "
++        "For finite search use durable CEGIS checkpoints and independently verify witnesses; "
++        "UNSAT alone is not a Lean proof. Preserve checked helpers and exact failed inferences. "
++        "When an exact proof exists, immediately invoke python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py "
++        "submit GAP FILE with the actual gap and file. No extra approval. If guard says "
++        "publication owns the candidate or stop, preserve your work and do not compete.\n"
+         f"Gap: {rec['gap_id']}\nStatement: {rec['statement']}\n"
+         f"Imports: {json.dumps(rec.get('imports', []))}\n"
+         f"Context: {rec.get('context') or ''}\n"
+-        f"Desk proof sketch / cut ancestry / failed approaches (advisory): {json.dumps(brief.read(rec),ensure_ascii=False)}\n"
++        f"Desk proof sketch / cut ancestry / failed approaches (advisory): {json.dumps(brief.read(rec),ensure_ascii=False)[:6000]}\n"
+         "Start by reading the exact supplied sketch, checked reduction sources, and solved siblings "
+         "with the current pinned upstream checkout. Do not redo known mathematics. "
+         "For shard assignments work only on the assigned range; do not infer a global refutation. "
+diff --git a/tests/pnp-support.py b/tests/pnp-support.py
+index 07b90461..9e869d7b 100644
+--- a/tests/pnp-support.py
++++ b/tests/pnp-support.py
+@@ -137,10 +137,10 @@ class SupportTests(unittest.TestCase):
+              patch.object(status.frontier.build_control, "legacy_compilers", return_value=[]), \
+              patch.object(status.frontier.build_control, "headroom", return_value=1024):
+             snap = status.snapshot()
+-        self.assertEqual(snap["research_support"]["coverage_missing"], ["flow", "lease-evaluation"])
++        self.assertEqual(snap["research_support"]["coverage_missing"], ["flow", "lease-evaluation", "method", "tool"])
+         self.assertTrue(snap["coordination_due"])
+         self.assertEqual(snap["workers"]["count"], 1)
+-        self.assertEqual(snap["dispatch_signal"]["missing_support"], ["flow", "lease-evaluation"])
++        self.assertEqual(snap["dispatch_signal"]["missing_support"], ["flow", "lease-evaluation", "method", "tool"])
+ 
+ 
+ if __name__ == "__main__":
