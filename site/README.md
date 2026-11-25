@@ -2,6 +2,12 @@
 
 Live site: https://ottojung.github.io/soringp1/
 
+The front page is an editorial gazette: a curated collection of short
+mathematical stories with evidence links, written in `site/gazette.py`.
+It introduces the research to human readers before offering the full
+searchable archive. The front-page stylesheet is `site/assets/gazette.css`.
+Keep editorial claims aligned with the curated results and corrections.
+
 A dependency-free static website generated entirely from the research archive.
 It is a reading and discovery interface, not an active research service.
 

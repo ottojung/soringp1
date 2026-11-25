@@ -14,6 +14,7 @@ import subprocess
 from render import esc, markdown, slug, inline
 from results import CATEGORIES, parse as parse_results, plain
 from search_index import SearchIndex, write_json
+from gazette import home as gazette_home
 
 ROOT=Path(__file__).resolve().parent.parent
 ARCH=ROOT/'recovery'
@@ -86,6 +87,7 @@ def page(path,title,body,description='',active='',script=False):
 <a class="skip" href="#main">Skip to content</a><header class="site-header"><div class="header-inner">
 <a class="brand" href="'''+esc(home)+'''"><span class="brand-mark" aria-hidden="true">S(n)</span>SoringP1</a><nav aria-label="Main navigation">'''+''.join(links)+'''</nav></div></header>
 <main id="main">'''+body+'''</main><footer class="site-footer">Research archive · Suspended 24 November 2026 · Revision '''+external(REPO+'/commit/'+REV,REV[:8])+''' · '''+external(REPO,'Source on GitHub')+'''</footer>'''
+    if path=='index.html':out=out.replace('</head>','<link rel="stylesheet" href="assets/gazette.css"></head>')
     if script:out+='<script defer src="'+esc(rel(path,'assets/search-core.js'))+'"></script>'+'<script defer src="'+esc(rel(path,'assets/explore.js'))+'"></script>'
     write(path,out+'</body></html>\n')
 
@@ -217,25 +219,10 @@ def item_record(path,record):
     return '<div class="result"><div class="result-meta">'+extra+'</div><h3><a href="'+esc(url)+'">'+esc(record['title'])+'</a></h3><p>'+esc(record.get('summary',''))+'</p>'+external(record['source'],'Original evidence')+'</div>'
 
 def make_home(index):
-    path='index.html'
-    body='''<section class="hero"><div><span class="kicker">Mathematics · Computational complexity</span><h1>Understanding optimal sorting.</h1><p class="lead">Explore the accumulated research on the minimum number of comparisons needed to sort n distinct elements in the worst case. Results, counterexamples, conjectures, and original evidence in one place.</p><div class="actions"><span class="pill warm">Research suspended</span><span class="muted">Archive through November 2026</span></div>'''+searchform(path)+'''<div class="actions">'''+link(path,'results/index.html','Read the results','btn primary')+link(path,'explore.html','Explore all evidence','btn')+'''</div></div><aside class="formula"><span class="kicker">Central question</span><strong>S(n) = F(A<sub>n</sub>)</strong><p>What is the exact minimum worst-case comparison count? Can we compute it efficiently? The general complexity remains open.</p><p>'''+link(path,'guides/problem.html','Read the precise model')+'''</p></aside></section>'''
-    stats=[('Research fronts',len(fronts)),('Board messages',len(DATA['board'])),('Historical patches',len(DATA['commits'])),('Searchable records',len(index.records))]
-    body+='<div class="stats">'+''.join(f'<div class="stat"><strong>{v:,}</strong><span>{esc(t)}</span></div>' for t,v in stats)+'</div>'
-    body+='<section class="section"><div class="section-head"><h2>Start with the research</h2></div><div class="cards">'
-    for source,title,summary in GUIDES[:6]:body+=tile(path,guide_pages[source],title,summary)
-    body+='</div></section><section class="section"><div class="section-head"><h2>Selected findings</h2>'+link(path,'results/index.html','All curated results')+'</div><div class="cards">'
-    for ident in ('K02','A02','P01','B02','C05','D03'):
-        r=next(r for r in index.records if r['kind']=='result' and r['id']==ident)
-        body+=tile(path,r['url'],r['title'],r['summary'],CATEGORIES[r['evidence']])
-    body+='</div></section><section class="section"><div class="section-head"><h2>Browse by topic</h2>'+link(path,'topics/index.html','All topics')+'</div><div class="cards">'
-    for topic,rows in sorted(topics.items(),key=lambda kv:-len(kv[1])):
-        body+=tile(path,'topics/'+slug(topic)+'.html',topic,'Questions, reported findings and linked evidence',f'{len(rows)} ledger fronts')
-    body+='</div></section><section class="section"><div class="section-head"><h2>Explore original evidence</h2>'+link(path,'browse/index.html','All collections')+'</div><div class="cards">'
-    counts=Counter(r['kind'] for r in index.records)
-    for kind in ('result','board','source','session','patch','commission','mixed','github','workspace','scratch','label'):
-        if counts[kind]:body+=tile(path,'browse/'+kind+'/001.html',*KINDS[kind],f'{counts[kind]:,} entries')
-    body+='</div></section><div class="note"><strong>Evidence matters.</strong> The archive preserves historical claims, including incorrect or incomplete arguments. A successful agent exit or an accepted historical review is not a formal proof. '+link(path,'guides/corrections.html','Read the corrections')+'.</div>'
-    page(path,'Research library',body,active='Home')
+    page('index.html','The SoringP1 Gazette',
+         gazette_home(index,fronts,DATA['board'],searchform),
+         description='Mathematical curiosities from the SoringP1 research archive: surprising counterexamples, the mysteries of optimal sorting, logic, and computational complexity.',
+         active='Home')
 
 def make_explorer(index):
     path='explore.html'

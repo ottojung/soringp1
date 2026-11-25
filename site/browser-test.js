@@ -78,7 +78,10 @@ const resultsReady="/^[0-9,]+ results?/.test(document.getElementById('result-cou
   await send("Page.enable");await send("Runtime.enable");
   await metrics(1440,1000);
   await navigate(base);
-  assert((await layout("Desktop homepage")).title.includes("Understanding optimal sorting"));
+  assert((await layout("Desktop homepage")).title.includes("The SoringP1 Gazette"));
+  assert.equal(await evaluate("document.querySelectorAll('.gazette article').length"),10);
+  assert(await evaluate("document.querySelector('.gazette-feature h2').textContent.includes('twelve objects')"));
+  assert(await evaluate("document.querySelector('.gazette-archive form input[type=search]')!==null"));
   await screenshot("home-desktop.png");
   await navigate(base+"explore.html?q=cospectral+minimax&kind=front",resultsReady);
   const hit=await evaluate("({count:document.getElementById('result-count').textContent,items:document.querySelectorAll('#results-list article').length,first:document.querySelector('#results-list h3')?.textContent})");
