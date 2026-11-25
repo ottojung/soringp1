@@ -35,6 +35,13 @@ original missing paths to surviving public archive evidence. It found
 1,234 exact-path report references covering 545 paths. This does **not**
 establish recovery of the original file bytes. Twenty-five references
 remain without an exact match in the scanned report collections.
+A follow-up directory-prefix scan found 87 descendant-path references.
+Together these cover 556 of the 570 original references; the remaining
+14 still lack a surviving exact or descendant reference in the audited
+public text. A targeted scan of additional archived source objects,
+historical patches and GitHub discussions did not identify further
+matches. Descendant references are possible directory provenance,
+not evidence of identical original file bytes.
 
 The [historical label index](historical-labels/README.md) preserves 240
 explicit report labels outside the final 750-front ledger, including

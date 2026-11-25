@@ -17,8 +17,9 @@ and deploys it on changes to the website or the archive.
 The explorer searches titles, metadata and indexed text from the archived
 fronts, board messages, source objects, historical patches, assistant
 reports, task commissions, mixed-session reports, GitHub discussions,
-and curated/canonical documents. Large text files are indexed up to the
-first 1 MiB, and compressed experiment outputs by metadata only. Searches
+and curated/canonical documents. Large text files are indexed and previewed up to the
+first 1 MiB, and compressed experiment outputs by metadata only. Every
+record retains a link to its complete original file on GitHub. Searches
 are local to the browser; no external search service or tracking is used.
 
 Evidence tags are historical workflow labels, not proof assessments.
@@ -26,8 +27,9 @@ The curated results and corrections pages distinguish established
 theorems, independently reproduced computations, open questions and
 disputed or refuted claims. Original evidence is always linked.
 
-The site has pre-rendered evidence-graded results, topic, front, board-message, scratch-reference, historical-label and guide pages,
-plus paginated collection indexes; these are usable without JavaScript.
+The site has pre-rendered evidence-graded results, topic, front, board-message, scratch-reference, historical-label and guide pages, plus local readers for original reports, source files,
+patches, discussions and workspace inventories,
+and paginated collection indexes; these are usable without JavaScript.
 The search interface uses a sharded inverted index and loads it on demand.
 
 GitHub Pages is active. If it is ever disabled, select

@@ -1,578 +1,578 @@
 # Missing scratch references
 
-These pages locate surviving, exact path mentions. They are **not** reconstructed scratch-file contents. Some entries may be directory names, examples, executable paths or filenames mentioned in passing.
+These pages locate surviving exact path mentions and references to descendant paths of a possible directory. They are **not** reconstructed scratch-file contents. Some entries may be directory names, examples, executable paths or filenames mentioned in passing.
 
 [Archive home](../../README.md)
 
-| Original reference | Surviving report references | Candidate filename matches |
-|---|---:|---:|
-| [/tmp/board_increment_post.txt](a5873f6cd996f6f10ce2.md) | 2 | 0 |
-| [/tmp/board_post_followup.json](8addf854c0234f78e6cb.md) | 2 | 0 |
-| [/tmp/board_post_result.json](f42e6d82a9cb991f0208.md) | 2 | 0 |
-| [/tmp/bound_check.py](2ddd84695e2df6afa2f6.md) | 1 | 0 |
-| [/tmp/count_optimal.py](f377679648bcd3370ca2.md) | 3 | 0 |
-| [/tmp/e143_levels/level_](16f52a757d265f41b14f.md) | 1 | 0 |
-| [/tmp/fib_threshold_board_post.md](f642bc74bf74c628d19a.md) | 2 | 0 |
-| [/tmp/fib_threshold_followup.md](7c20c77303f0c5b5370e.md) | 2 | 0 |
-| [/tmp/fj_n11/fj_tree.c](46b69ff551177ebd18cf.md) | 2 | 0 |
-| [/tmp/increment_audit.py](d708bef1bde50ea43cf4.md) | 2 | 0 |
-| [/tmp/opencode/B_exact.py](8d3b3c62e6959660b279.md) | 1 | 0 |
-| [/tmp/opencode/SORING301-BASELINE.md](e41091e5a9bf69e2f72d.md) | 3 | 0 |
-| [/tmp/opencode/a12front](f1da3bbbee6c1be20c3d.md) | 1 | 0 |
-| [/tmp/opencode/a3b5_finding.md](d6e0bdc85afc18bce988.md) | 8 | 0 |
-| [/tmp/opencode/a7.go](4781b2ca3d9b155ee7be.md) | 2 | 0 |
-| [/tmp/opencode/abcdec](91234d6d9fe9d443690b.md) | 2 | 0 |
-| [/tmp/opencode/abcfront](593fa874fa1430827fff.md) | 2 | 0 |
-| [/tmp/opencode/abcverify](9a60172d2bd37319a45d.md) | 1 | 0 |
-| [/tmp/opencode/abcverify/verify.py](3d17be4fd04e0ef3f290.md) | 1 | 2 |
-| [/tmp/opencode/abcx](adc5cf48338a7ffec646.md) | 1 | 0 |
-| [/tmp/opencode/abcx/counterexample.py](e4dfb18b0c9a3fdc6690.md) | 3 | 0 |
-| [/tmp/opencode/abfree](a84444d67cd36eec6a2e.md) | 1 | 0 |
-| [/tmp/opencode/adsuff](9b5bff98eb4f1153c8cf.md) | 1 | 0 |
-| [/tmp/opencode/adv/diag24.py](8a85bb8f6239a631843b.md) | 2 | 0 |
-| [/tmp/opencode/adv/rerun_signflip.py](c6b37931819dc70eb376.md) | 2 | 0 |
-| [/tmp/opencode/adv_cert_probe.py](6a52f4f0935b143a13e9.md) | 3 | 0 |
-| [/tmp/opencode/adv_cert_verify.py](af9eb19cea7587fa3c18.md) | 1 | 0 |
-| [/tmp/opencode/agent-KIs34cEznVs1GUdNnzlTjI-laden-JTsW4AnxTLzN18IBQibXea-fervor/soringp1](3fd6bca428a61a2bc789.md) | 1 | 0 |
-| [/tmp/opencode/all-n-threshold-proof-draft.md](fbd84644c752576991fc.md) | 2 | 0 |
-| [/tmp/opencode/all_questions.txt](12da700bd2c20cd0bee0.md) | 1 | 0 |
-| [/tmp/opencode/alternation_trading_no_go.md](0e5f0db1cb547b714361.md) | 8 | 0 |
-| [/tmp/opencode/antichain-lookahead-post.md](69b1f94bdec796b9207a.md) | 2 | 0 |
-| [/tmp/opencode/antichain-lookahead-result.json](506918a5cc036f561682.md) | 2 | 0 |
-| [/tmp/opencode/antichain_defect_](30035d8c273b9b1742d2.md) | 1 | 0 |
-| [/tmp/opencode/antichain_defect_check.py](2f583b3ef6f8f024644e.md) | 2 | 0 |
-| [/tmp/opencode/antichain_defect_finding.txt](5b73c74262351a0e6de6.md) | 2 | 0 |
-| [/tmp/opencode/antichain_defect_post](64651b15f2b11a6a97c5.md) | 2 | 0 |
-| [/tmp/opencode/antichain_defect_post.json](7148f72593b13b3fddda.md) | 2 | 0 |
-| [/tmp/opencode/balfj](3a146ea90313a5a25e08.md) | 0 | 0 |
-| [/tmp/opencode/balfj/check.py](9eb55ef370e7c768462b.md) | 1 | 0 |
-| [/tmp/opencode/balfj/independent.py](207dd900078c19dca3df.md) | 1 | 0 |
-| [/tmp/opencode/balfront_probe.py](4e28339b727d490bbc2c.md) | 12 | 0 |
-| [/tmp/opencode/band_lib.py](119ba772b9108aa971b3.md) | 2 | 0 |
-| [/tmp/opencode/band_post_result.json](32e676d7720a8a9745b2.md) | 2 | 0 |
-| [/tmp/opencode/binomial_post.md](77263dddff81f628d9b7.md) | 8 | 0 |
-| [/tmp/opencode/binrate_solver.py](de8a48de20b4f2c4cde3.md) | 1 | 0 |
-| [/tmp/opencode/bisim](0858497d17133eb5f24c.md) | 0 | 0 |
-| [/tmp/opencode/blockratio](23e8ef89abfd56bf34f9.md) | 1 | 0 |
-| [/tmp/opencode/board](4dddb9107d121d7104be.md) | 0 | 0 |
-| [/tmp/opencode/board301-post.json](55f47320b61b04106783.md) | 2 | 0 |
-| [/tmp/opencode/board_body.txt](ebcc3d1b3eeb434418f9.md) | 2 | 0 |
-| [/tmp/opencode/board_full.py](88ac8ee5c372c2ce4498.md) | 3 | 0 |
-| [/tmp/opencode/board_output_poly.txt](2df35153a2138e33d2cd.md) | 10 | 0 |
-| [/tmp/opencode/board_post.md](2a151bf5d7daf5377ddc.md) | 3 | 0 |
-| [/tmp/opencode/board_post.txt](d380b6d87efe822ab51c.md) | 2 | 0 |
-| [/tmp/opencode/board_post_constant_advice.md](4072a4478c1578ca1106.md) | 2 | 0 |
-| [/tmp/opencode/board_post_result.json](d70086bc0e650825798a.md) | 6 | 0 |
-| [/tmp/opencode/board_post_vcollapse.txt](06f8d7acf2539d06a2a8.md) | 2 | 0 |
-| [/tmp/opencode/bounded-excess-self-reduction-post.md](d7630ebc621c37c01f70.md) | 2 | 0 |
-| [/tmp/opencode/bqp_check.py](4843700f46acf2dccb11.md) | 1 | 0 |
-| [/tmp/opencode/build_tree_check.py](e8ec3e0d1c9395210d9f.md) | 10 | 0 |
-| [/tmp/opencode/c128_10.out](c7221b59fd0e90b296c7.md) | 2 | 0 |
-| [/tmp/opencode/calc_l2_23.py](2e385742bd10115b5980.md) | 2 | 0 |
-| [/tmp/opencode/calc_l3_23.py](e9518999e88b98a67f7a.md) | 4 | 0 |
-| [/tmp/opencode/canon128](6831f43518b2f2ef8369.md) | 2 | 0 |
-| [/tmp/opencode/canon128.cpp](99065c9ae22df5e14375.md) | 2 | 0 |
-| [/tmp/opencode/cdcheck](820531fda6d20f636c0b.md) | 1 | 0 |
-| [/tmp/opencode/census-growth](9e0ecec1a8e7b1461c07.md) | 1 | 0 |
-| [/tmp/opencode/certdu](e564d50a3999373d8423.md) | 1 | 0 |
-| [/tmp/opencode/certreport](f36176fbdba21d328927.md) | 1 | 0 |
-| [/tmp/opencode/cg_reach_task](0f2e71533b1d8a43ebc8.md) | 0 | 0 |
-| [/tmp/opencode/chain_](20823f73725103133119.md) | 1 | 0 |
-| [/tmp/opencode/check-threshold-witnesses.py](510560b99971d717c756.md) | 1 | 0 |
-| [/tmp/opencode/check_l2_23_subset.py](8aeb38747d284c8a6fd1.md) | 2 | 0 |
-| [/tmp/opencode/check_l4b.py](addeed8573ae3ed3388f.md) | 1 | 0 |
-| [/tmp/opencode/check_l5.py](b659888cda3c29623abf.md) | 1 | 0 |
-| [/tmp/opencode/check_m2_reachable.py](4ff67707b9cf46e256f6.md) | 2 | 0 |
-| [/tmp/opencode/check_rect_n6.py](639cf482b00b682051da.md) | 1 | 0 |
-| [/tmp/opencode/check_root_layer.py](e9e07fef8b68fae985ac.md) | 1 | 0 |
-| [/tmp/opencode/classstable](d46db27320ac3f67f4ee.md) | 11 | 0 |
-| [/tmp/opencode/classstable/verify.go](785bd2b29dc83d3bd792.md) | 2 | 0 |
-| [/tmp/opencode/cleanfront](6d235938c6dc86f19280.md) | 11 | 0 |
-| [/tmp/opencode/coarsening_post_result.json](99d2d7bdee84df83c7ad.md) | 2 | 0 |
-| [/tmp/opencode/coarsening_report.md](4dd2338d233f01b3cc32.md) | 2 | 0 |
-| [/tmp/opencode/coexist_probe.cpp](4c85b1324f526e4aa04d.md) | 2 | 0 |
-| [/tmp/opencode/collision_solver.py](3bc50b561f10428d622d.md) | 1 | 0 |
-| [/tmp/opencode/comm_cc.py](f46be4be4096ea6f9308.md) | 1 | 0 |
-| [/tmp/opencode/comm_probe_20261121.py](a805e9d0190d76e03567.md) | 1 | 0 |
-| [/tmp/opencode/comp_antichain](dac51ffd653087e98692.md) | 1 | 0 |
-| [/tmp/opencode/comp_antichain/post_result.json](f72ac0170b0f6cd7d450.md) | 2 | 1 |
-| [/tmp/opencode/compact_f_check.py](dcca90bf0dc475845f15.md) | 2 | 0 |
-| [/tmp/opencode/conpmem](d4dd7a914c980421fa03.md) | 4 | 0 |
-| [/tmp/opencode/correct_probe.py](042ce0a004846d6c0993.md) | 1 | 0 |
-| [/tmp/opencode/cospectral_front](325f3c778d3532a93cea.md) | 14 | 0 |
-| [/tmp/opencode/coverratio](c09db3d4bbec292f7ecd.md) | 1 | 0 |
-| [/tmp/opencode/cpsat-fr-n12-exact](da8b84239f731faafdc9.md) | 0 | 0 |
-| [/tmp/opencode/cpsig](9840f16ee2c8759826f0.md) | 9 | 0 |
-| [/tmp/opencode/cremer-selection-pruning-agent-version.py](4dca35e636629253c036.md) | 1 | 0 |
-| [/tmp/opencode/crosscost](3d4493b0830f31e26955.md) | 1 | 0 |
-| [/tmp/opencode/curator/minimax.py](ec7f0bca1d3ec28b1a70.md) | 2 | 0 |
-| [/tmp/opencode/curator301/sidon.py](47280b489a52b45378bb.md) | 2 | 0 |
-| [/tmp/opencode/curator_probe/count_trees.py](620da40924784663b8bc.md) | 2 | 0 |
-| [/tmp/opencode/d2verify](0aa1a79836690e7b15c0.md) | 2 | 0 |
-| [/tmp/opencode/dag.pdf](36e5bb166e7a56457af4.md) | 2 | 0 |
-| [/tmp/opencode/dag_post.txt](e53a38709cc5975a5ba8.md) | 2 | 0 |
-| [/tmp/opencode/db12](4035af10fe504589bad4.md) | 1 | 0 |
-| [/tmp/opencode/db_cstar](6fd2dbcdc1c52ce09e97.md) | 1 | 0 |
-| [/tmp/opencode/dbgap](a27d59d428867a6d99d8.md) | 3 | 0 |
-| [/tmp/opencode/dbgap/engine.py](8efcf0220b533062e1bc.md) | 1 | 0 |
-| [/tmp/opencode/dbir](099bc29282ca1adc1853.md) | 2 | 0 |
-| [/tmp/opencode/dbtsharp](cb871cc3b2877ce6f5d0.md) | 1 | 0 |
-| [/tmp/opencode/dbtsharp/verify.py](8ce2b7bb523186b65044.md) | 1 | 2 |
-| [/tmp/opencode/ddel](b0e1db3d884ec84cb794.md) | 2 | 0 |
-| [/tmp/opencode/deck](91ff1ef31934ff4f75c2.md) | 5 | 0 |
-| [/tmp/opencode/deckattack/compute_F.py](e991d7965f7be0d4ec52.md) | 2 | 0 |
-| [/tmp/opencode/deckattack/pair12.txt](9a5c520bfafbefbc6a22.md) | 2 | 0 |
-| [/tmp/opencode/deckattack/pair12_out.txt](83f8c0b2bd8b221862eb.md) | 2 | 0 |
-| [/tmp/opencode/deckmove](154691b40df16dd937a5.md) | 13 | 0 |
-| [/tmp/opencode/defect](376d405d4225bce28b95.md) | 6 | 0 |
-| [/tmp/opencode/defect_chain_probe.py](4cd280681d89b000c4a2.md) | 2 | 0 |
-| [/tmp/opencode/defectfree_go](3ea4b6dadbf53d2044ef.md) | 0 | 0 |
-| [/tmp/opencode/deg_probe.py](1d4f8d6e3bef3aac3b39.md) | 1 | 0 |
-| [/tmp/opencode/degprod](1195d341a675d8e6d73c.md) | 3 | 0 |
-| [/tmp/opencode/deletion.cpp](ad2bfac89428dac70d67.md) | 1 | 0 |
-| [/tmp/opencode/depth_alln](8be89174f7d2133e6065.md) | 3 | 0 |
-| [/tmp/opencode/depth_alln/rbd.py](1bd66f69828fd6fe482c.md) | 1 | 0 |
-| [/tmp/opencode/depth_n9](f90b81130580d5eee422.md) | 3 | 0 |
-| [/tmp/opencode/deviation_probe.py](0fb5b95d75fff0cd0da8.md) | 2 | 0 |
-| [/tmp/opencode/du](a36f296890fd7d342108.md) | 2 | 0 |
-| [/tmp/opencode/du2](9b637e8c27cb83cfcaff.md) | 2 | 0 |
-| [/tmp/opencode/du_d2](8729e90cb7ef54deb782.md) | 3 | 0 |
-| [/tmp/opencode/du_rtable](da263c18a8870673267d.md) | 1 | 0 |
-| [/tmp/opencode/du_superadd](c05436c436932003d5c8.md) | 1 | 0 |
-| [/tmp/opencode/ecovers](108d14a74db3d0191c3b.md) | 1 | 0 |
-| [/tmp/opencode/efsplit](17db4ecb35d5fda4b2b2.md) | 0 | 0 |
-| [/tmp/opencode/eindex-transfer](574529b85214e1dba9a9.md) | 0 | 0 |
-| [/tmp/opencode/endpoint](24cbde45bbed28a10a09.md) | 1 | 0 |
-| [/tmp/opencode/evaluator_barrier_check.py](1fed8474f0bc57c6ab67.md) | 1 | 0 |
-| [/tmp/opencode/exactframed](9f0468dce927f8dcae89.md) | 2 | 0 |
-| [/tmp/opencode/excess](20a7130291374780b909.md) | 0 | 0 |
-| [/tmp/opencode/excess/twochain.py](b39b0896cc16152f5078.md) | 1 | 0 |
-| [/tmp/opencode/excess25](f34e6b2f95409575a90e.md) | 1 | 0 |
-| [/tmp/opencode/excess_regularity_post](3d75afe240b5c2833b95.md) | 16 | 0 |
-| [/tmp/opencode/excessdrop](a2ed733be8217c605091.md) | 1 | 0 |
-| [/tmp/opencode/exec-lit-sweep-20261121-finding.txt](14cb104989023063ab23.md) | 2 | 0 |
-| [/tmp/opencode/exec_check_20261119.py](60ef1b3a3eecd457039e.md) | 2 | 0 |
-| [/tmp/opencode/exec_check_fj.py](fecf7c96ba709fdde27d.md) | 1 | 0 |
-| [/tmp/opencode/exec_close_verify_loadwitness_20261122.py](cb3e7773f0e614c1c745.md) | 2 | 0 |
-| [/tmp/opencode/exec_deck_audit_20261123.cpp](4160179d105c514f66f1.md) | 1 | 0 |
-| [/tmp/opencode/exec_gapspan_check.py](1a97ef44545d96c78076.md) | 2 | 0 |
-| [/tmp/opencode/exec_n7_delta_census.go](0e22bbf4eedcfd95dd5a.md) | 1 | 0 |
-| [/tmp/opencode/exec_n7_engine.cpp](bab03cde356e5425244e.md) | 1 | 0 |
-| [/tmp/opencode/exec_n8_census_20261123.cpp](8ed20abff24ee522573a.md) | 2 | 0 |
-| [/tmp/opencode/exec_ref_20261123_1400.py](9a9f950c32da838148f2.md) | 1 | 0 |
-| [/tmp/opencode/exec_ref_20261123_1420.py](a417c935f0b1a28eb4e5.md) | 1 | 0 |
-| [/tmp/opencode/exec_ref_binrate_20261121.py](67d96432d84da9b7c41d.md) | 1 | 0 |
-| [/tmp/opencode/exec_ref_depth2_20261123.py](bce755f23a812a2f89a4.md) | 1 | 0 |
-| [/tmp/opencode/exec_ref_depth3_20261123.py](b37c2d5ae700dea9cb0e.md) | 2 | 0 |
-| [/tmp/opencode/exec_ref_descent_verify_20261121.py](e8e9fd71beb65ce5b88b.md) | 2 | 0 |
-| [/tmp/opencode/exec_ref_ecounttie_20261123_1437.py](6fc6b49284da6147a059.md) | 1 | 0 |
-| [/tmp/opencode/exec_ref_ksafe_20261123.py](341b83c0e93008753149.md) | 2 | 0 |
-| [/tmp/opencode/exec_ref_lemmaD_n7_verify_20261123_1520.py](08690d84d3b4effaf28f.md) | 1 | 0 |
-| [/tmp/opencode/exec_ref_m2_reachable_20261123.py](6af0321063c7b851cca0.md) | 1 | 0 |
-| [/tmp/opencode/exec_ref_reach8_20261123.py](e5cfe65361ca2f1a2de9.md) | 1 | 0 |
-| [/tmp/opencode/exec_ref_run_decomp_20261121.py](9bed2083ff1b14a7aa04.md) | 2 | 0 |
-| [/tmp/opencode/exec_ref_unif_base_20261122.py](fd192692509e72f901b6.md) | 2 | 0 |
-| [/tmp/opencode/exec_ref_verify_20261121b.py](daa2dc853f5520e3af66.md) | 2 | 0 |
-| [/tmp/opencode/exec_ref_verify_general.py](bcd24a264e3c0ebdfdd7.md) | 2 | 0 |
-| [/tmp/opencode/exec_referee_20261123_1341.py](c0e7ea8c5c02750dc664.md) | 2 | 0 |
-| [/tmp/opencode/exec_verify_coexist_20261119.py](7d694860710c3cc0bc2b.md) | 2 | 0 |
-| [/tmp/opencode/exec_verify_deck.py](845c926e7e20c10d3a04.md) | 1 | 0 |
-| [/tmp/opencode/exec_verify_deckclosure.py](dc06eb0daaf768fd11be.md) | 1 | 0 |
-| [/tmp/opencode/exec_verify_greedy_evalue.py](b000ef58c02c9b3cc31a.md) | 1 | 0 |
-| [/tmp/opencode/exec_verify_kraft.py](d4c2b6613260f9b3e740.md) | 2 | 0 |
-| [/tmp/opencode/exec_verify_reversal_n9.py](325a4abb549d4356e455.md) | 1 | 0 |
-| [/tmp/opencode/exec_verify_split.py](eff874660f98d2e81fbe.md) | 2 | 0 |
-| [/tmp/opencode/exec_verify_tieinv.py](3f9988bcbd3e78904239.md) | 2 | 0 |
-| [/tmp/opencode/exec_witness_py_20261123.py](29aa4be5a6651d039e95.md) | 1 | 0 |
-| [/tmp/opencode/execdom](a18681e11a7b61e68f78.md) | 1 | 0 |
-| [/tmp/opencode/exp](89a92ee1c3e051b010ae.md) | 1 | 0 |
-| [/tmp/opencode/exp_candidates.py](e5a24d2b3007b747b4bb.md) | 1 | 0 |
-| [/tmp/opencode/explore_surplus.py](d9f727650b8607823bef.md) | 1 | 0 |
-| [/tmp/opencode/ext_monotone_check.py](6799f50a47ff2fb48393.md) | 3 | 0 |
-| [/tmp/opencode/extpair-census.py](40be26427598ea306f8f.md) | 2 | 0 |
-| [/tmp/opencode/extpair-witness-direct.py](0773215e3cd54706a3e4.md) | 1 | 0 |
-| [/tmp/opencode/extract_front](c4ef085e62133f5d0b28.md) | 1 | 0 |
-| [/tmp/opencode/extremal_probe2.py](74613e4d31979e437b1e.md) | 1 | 0 |
-| [/tmp/opencode/fanexact](22b45a95fd69bba5f190.md) | 1 | 0 |
-| [/tmp/opencode/fdid](b6ecd25b779003b3977f.md) | 0 | 0 |
-| [/tmp/opencode/fence_check.py](cde9ccc45607a67fa4ab.md) | 1 | 0 |
-| [/tmp/opencode/ff9_verify_fromscratch.go](76e6bfb461f0228f5a6b.md) | 2 | 0 |
-| [/tmp/opencode/ff_result_post_response.json](7bc7479230499785aba8.md) | 13 | 0 |
-| [/tmp/opencode/fib_eval.py](01cbc52654cbbec05e35.md) | 1 | 0 |
-| [/tmp/opencode/fiballr](1635bf8966a9b4bb410b.md) | 14 | 0 |
-| [/tmp/opencode/fiballr_verify_exec.py](6836f900b16cf1df29a5.md) | 1 | 0 |
-| [/tmp/opencode/fibcert](610b12437f270a74cbab.md) | 1 | 0 |
-| [/tmp/opencode/fibdu](be246148835c0aeedb5d.md) | 3 | 0 |
-| [/tmp/opencode/fibpres](159816f0bdb651253d7d.md) | 1 | 0 |
-| [/tmp/opencode/fibr](1177046af3265aed3403.md) | 2 | 0 |
-| [/tmp/opencode/filter_h2](802edf02491217b6178f.md) | 2 | 0 |
-| [/tmp/opencode/fixedarity](4f3caaeaaa6104096bb3.md) | 0 | 0 |
-| [/tmp/opencode/fixedply](84e71cd80848ad52806d.md) | 3 | 0 |
-| [/tmp/opencode/fj](cb45e8478b800e4b2e0d.md) | 1 | 0 |
-| [/tmp/opencode/fj_cert.py](0e177c5e2da0b8d4edf3.md) | 1 | 0 |
-| [/tmp/opencode/fjamp.py](ba2c9a0b5ec4dc85f69e.md) | 3 | 0 |
-| [/tmp/opencode/fjevent](d34ba19b98ee33379fff.md) | 1 | 0 |
-| [/tmp/opencode/fonly](2cf0bf5a5b569f63ade5.md) | 20 | 0 |
-| [/tmp/opencode/fotc](40cfa15d2c8c03642e6c.md) | 2 | 0 |
-| [/tmp/opencode/fourier_plancherel_check.py](3196874c03f4531e530f.md) | 1 | 0 |
-| [/tmp/opencode/fp](820e3337c22826378d04.md) | 0 | 0 |
-| [/tmp/opencode/fp/FINDINGS.md](64344a342e74a2af337f.md) | 7 | 0 |
-| [/tmp/opencode/framed12/checker.py](198e5dbd01bc5921afcb.md) | 1 | 0 |
-| [/tmp/opencode/front_defect](a09588a1a1f999f8767c.md) | 1 | 0 |
-| [/tmp/opencode/frontier](b88fbf5ab63005abd5f6.md) | 2 | 0 |
-| [/tmp/opencode/frontier8](b07d891279263692b792.md) | 3 | 0 |
-| [/tmp/opencode/fulltree](9a926d579e9f633a0548.md) | 2 | 0 |
-| [/tmp/opencode/fulltree-spread/post.md](b229512ae0a9214c402d.md) | 2 | 1 |
-| [/tmp/opencode/fulltree/badposet_q.py](8c318aba10ebcb131d82.md) | 1 | 0 |
-| [/tmp/opencode/g6_resume.py](25bc599d49211b4f79fa.md) | 1 | 0 |
-| [/tmp/opencode/g_completeness_check.py](4adb8b802d26d3f66ba4.md) | 1 | 0 |
-| [/tmp/opencode/game_check.py](f28c70e309142b03a33d.md) | 1 | 0 |
-| [/tmp/opencode/gap](7c51b2646ab483523322.md) | 0 | 0 |
-| [/tmp/opencode/gap2work](e5c2843df81b0325e93d.md) | 1 | 0 |
-| [/tmp/opencode/gap_rate_check.py](20eb39489d8b660e9f07.md) | 2 | 0 |
-| [/tmp/opencode/gap_rate_post.md](d7dd2e69f8e988ad8f8f.md) | 2 | 0 |
-| [/tmp/opencode/gapspan_front](fbf00d3695e61f17a8bb.md) | 1 | 0 |
-| [/tmp/opencode/gapspan_front/verify.py](e51d450a68ff7646b3e5.md) | 1 | 2 |
-| [/tmp/opencode/gbci](36707989737423471e68.md) | 1 | 0 |
-| [/tmp/opencode/gbci/post_body.md](6619e7da49064533c475.md) | 2 | 0 |
-| [/tmp/opencode/gcwork](50bc4e33f64b4e280b5b.md) | 2 | 0 |
-| [/tmp/opencode/gensort_front](c0ebe5748c6004a34597.md) | 1 | 0 |
-| [/tmp/opencode/gensort_front/verify.py](fa37f666f087104e0de6.md) | 1 | 2 |
-| [/tmp/opencode/gensort_verify_exec.py](b6a96e8e1cb2bed78661.md) | 2 | 0 |
-| [/tmp/opencode/gmeasure](3a7950396aee7c8a6d1e.md) | 1 | 0 |
-| [/tmp/opencode/gosolver](ec0a7177f179ee8d70f1.md) | 1 | 0 |
-| [/tmp/opencode/gpc](d8636762b4b9108705be.md) | 4 | 0 |
-| [/tmp/opencode/gpc-residual/certify.c](3856bc4b20841e3d299c.md) | 1 | 0 |
-| [/tmp/opencode/gpccert](1c4733115257487762c8.md) | 4 | 0 |
-| [/tmp/opencode/gpccore](73a40f8a6e1ead3e06b4.md) | 0 | 0 |
-| [/tmp/opencode/gpcdu](05a6c0cde21372ce476e.md) | 3 | 0 |
-| [/tmp/opencode/gpd](6787b5f6ea7ec988a12a.md) | 1 | 0 |
-| [/tmp/opencode/greedy_frontier.py](6780bec553fd6b379aa1.md) | 6 | 0 |
-| [/tmp/opencode/greedy_game.py](d61778c1aa9252bde3b2.md) | 2 | 0 |
-| [/tmp/opencode/gvl](d86580f68b065ebc5d69.md) | 3 | 0 |
-| [/tmp/opencode/h2](949e8c3e31eb201e0456.md) | 12 | 0 |
-| [/tmp/opencode/h2abc](e13d8efdb0bcfb34b230.md) | 1 | 0 |
-| [/tmp/opencode/h2abc/far_search.go](b6594a5cf62db3f8cb2d.md) | 2 | 0 |
-| [/tmp/opencode/h2abc/verify.py](699b5eac884b0877c4df.md) | 2 | 2 |
-| [/tmp/opencode/h2full10](e29f3554fcd961de2b05.md) | 3 | 0 |
-| [/tmp/opencode/h2full12](7f759d4cd5e86ded38d5.md) | 3 | 0 |
-| [/tmp/opencode/h2lit](9b9660d94059ffcdb985.md) | 9 | 0 |
-| [/tmp/opencode/h2search](fb7644ef1ea3171d607b.md) | 3 | 0 |
-| [/tmp/opencode/h2turing](dd9add65b3216b4b08f1.md) | 1 | 0 |
-| [/tmp/opencode/h3excess](bf59d86cc2b8011153c6.md) | 1 | 0 |
-| [/tmp/opencode/h3excess/exhaustive_n6.py](2be67292708d7c12253d.md) | 1 | 0 |
-| [/tmp/opencode/h3excess/n7.go](6c33467efae6d8548616.md) | 1 | 0 |
-| [/tmp/opencode/h3excess/verify_excess.py](5bd533272e365b671ef0.md) | 1 | 0 |
-| [/tmp/opencode/h3gpc](92bd0252631ac8543239.md) | 1 | 0 |
-| [/tmp/opencode/haeupler.pdf](a68d5ad09588a4cced41.md) | 2 | 0 |
-| [/tmp/opencode/halfbal](769f3fb76a2fd9289f3e.md) | 1 | 0 |
-| [/tmp/opencode/hwanglin.py](552736d874757b2b8da3.md) | 3 | 0 |
-| [/tmp/opencode/hybrid_h_compute.py](9392331e2abbc47df6a3.md) | 1 | 0 |
-| [/tmp/opencode/ibgi_board_result.json](c224c1feb7f2c1190bea.md) | 2 | 0 |
-| [/tmp/opencode/independent_e88](a7953f59275101dd72f3.md) | 0 | 0 |
-| [/tmp/opencode/independent_e88/dual_census.py](170ac2e7b13ce9945807.md) | 1 | 0 |
-| [/tmp/opencode/independent_e88/run54.log](8d3539651a26ea011b01.md) | 1 | 0 |
-| [/tmp/opencode/independent_l3_matrix.py](b86a1a2562db0ab68227.md) | 2 | 0 |
-| [/tmp/opencode/indy_defectfree.py](f48472b07f034cbc38e9.md) | 2 | 0 |
-| [/tmp/opencode/indy_referee_du.py](a3cfcf6d670b53bb0ec1.md) | 2 | 0 |
-| [/tmp/opencode/indy_t4_verify.py](0c28705ec0790c32112b.md) | 2 | 0 |
-| [/tmp/opencode/indy_verify_xaug.py](1a849ff95c5cd0b325c0.md) | 2 | 0 |
-| [/tmp/opencode/insertion_front](44b059c8d69009323c09.md) | 0 | 0 |
-| [/tmp/opencode/inv](7c6ebbbc8b8b63845bcc.md) | 2 | 0 |
-| [/tmp/opencode/inv/solver.py](036c719d46a31dc0fc07.md) | 1 | 0 |
-| [/tmp/opencode/invariant_falsify.py](83f3107f5985b3a813e2.md) | 1 | 0 |
-| [/tmp/opencode/invverify](d46fc9575ae434d130f8.md) | 0 | 0 |
-| [/tmp/opencode/issue_301.json](21bf404f1a53c7ee4ba6.md) | 1 | 0 |
-| [/tmp/opencode/itight](e8315dd9866833f20231.md) | 2 | 0 |
-| [/tmp/opencode/kwl](c88deb6f7d1179bacfd4.md) | 3 | 0 |
-| [/tmp/opencode/kwl3](7091deb66c1423b5997b.md) | 2 | 0 |
-| [/tmp/opencode/labelled_growth](3f57f6ff9e9243716185.md) | 2 | 0 |
-| [/tmp/opencode/labelled_growth/my_minimax.py](8cb64daafb3d72aa6446.md) | 1 | 0 |
-| [/tmp/opencode/labelled_growth/perm_check.py](77aa901e5b0bce7359c7.md) | 1 | 0 |
-| [/tmp/opencode/layered-info-canonical.py](43b369e6b5bfa7e5d171.md) | 1 | 0 |
-| [/tmp/opencode/lgx](179ff56fb02307dbdc81.md) | 0 | 0 |
-| [/tmp/opencode/lift](9a890b9841e0ae15c7ae.md) | 1 | 0 |
-| [/tmp/opencode/lookahead.py](caab7474339310263353.md) | 1 | 0 |
-| [/tmp/opencode/lp_sort_check.py](fc35cf3861d2e7363fee.md) | 2 | 0 |
-| [/tmp/opencode/lp_sort_probe.py](74f31adb534a87e922b1.md) | 2 | 0 |
-| [/tmp/opencode/lsec-const](62fe735c9a85c42ee00b.md) | 3 | 0 |
-| [/tmp/opencode/lt_n12.py](67664474387895f9dcd7.md) | 1 | 0 |
-| [/tmp/opencode/lt_strong.cpp](e7b2bfaf52ab4d80ea18.md) | 1 | 0 |
-| [/tmp/opencode/m2front/engine.py](cb7a598ada6dbf3d6695.md) | 2 | 0 |
-| [/tmp/opencode/matching-poset-board-result.json](0c2994031699372af51b.md) | 8 | 0 |
-| [/tmp/opencode/matching-poset-evaluator-post.md](5fb004f03c111c8c66b4.md) | 8 | 0 |
-| [/tmp/opencode/mcm](b9c636b8133b35866310.md) | 0 | 0 |
-| [/tmp/opencode/mcm/post_result.json](cd4f6794271fb1bf9073.md) | 2 | 1 |
-| [/tmp/opencode/merge7](5274acb041121b928622.md) | 9 | 0 |
-| [/tmp/opencode/merge_cert_probe.py](caa9fa17140bac8bd897.md) | 2 | 0 |
-| [/tmp/opencode/minimax_s.py](3724619b0ec265039738.md) | 3 | 0 |
-| [/tmp/opencode/minratio.py](711b13dea6e9fe80223e.md) | 3 | 0 |
-| [/tmp/opencode/mono_front](89e200d35993915468ff.md) | 1 | 0 |
-| [/tmp/opencode/mono_scope_](175d4e5b9362a212ae9d.md) | 1 | 0 |
-| [/tmp/opencode/mult](4569a994375512b3fe7b.md) | 3 | 0 |
-| [/tmp/opencode/mult/comment301.json](949d57ee611605a80e06.md) | 2 | 0 |
-| [/tmp/opencode/multiway_probe.py](94ff78c4da55e16b9374.md) | 1 | 0 |
-| [/tmp/opencode/mydeck](8513cfcda7873ab365b9.md) | 2 | 0 |
-| [/tmp/opencode/myfront/engine.cpp](061591092d9961832047.md) | 1 | 0 |
-| [/tmp/opencode/n11](de22e68eb112ede4ba67.md) | 1 | 0 |
-| [/tmp/opencode/n11/main.go](a0579c41194774dd194a.md) | 2 | 0 |
-| [/tmp/opencode/n18](e8afade6a1d13ed3ef95.md) | 2 | 0 |
-| [/tmp/opencode/n7.log](2a9267575075614db5bf.md) | 1 | 2 |
-| [/tmp/opencode/n8_alltight_tree.txt](4022857047a78a5d02f3.md) | 2 | 0 |
-| [/tmp/opencode/n8closure](1fd4bfad67ebe05c969b.md) | 3 | 0 |
-| [/tmp/opencode/n9](f37b32e57ef8f6503eca.md) | 1 | 0 |
-| [/tmp/opencode/noncross_post.md](433a504a7bf9c1cde183.md) | 2 | 0 |
-| [/tmp/opencode/nonindex](caf878a5369e2b7487c1.md) | 2 | 0 |
-| [/tmp/opencode/nontight_force2.py](bec2a5d711de79f16de1.md) | 4 | 0 |
-| [/tmp/opencode/ordinal_inversion_verify.py](460ccb3d77b8516c76ba.md) | 1 | 0 |
-| [/tmp/opencode/ordinal_lift_front](46f0a8e66dfa9104f33c.md) | 1 | 0 |
-| [/tmp/opencode/ordinal_lift_front/n9_census.cpp](e53e742a596a2317f385.md) | 3 | 0 |
-| [/tmp/opencode/ordinal_lift_front/verify_witness.py](c2ea6b0954cea798edca.md) | 1 | 0 |
-| [/tmp/opencode/ordsum_depthbalance.py](8ed8a8901729c96579ab.md) | 2 | 0 |
-| [/tmp/opencode/p2halving](366800ac82b346d64b83.md) | 3 | 0 |
-| [/tmp/opencode/p2hostscratch](1f55ec6b68c7187ccb0b.md) | 11 | 0 |
-| [/tmp/opencode/pairfreq_check.py](0ffed2b9f7ce9780076d.md) | 3 | 0 |
-| [/tmp/opencode/pairfreq_post.txt](85fec591ab2158505e1c.md) | 2 | 0 |
-| [/tmp/opencode/pendant_n12b.py](e3663e7677ac58c946ab.md) | 1 | 0 |
-| [/tmp/opencode/pendant_n12c.py](e90af310b32696d18961.md) | 1 | 0 |
-| [/tmp/opencode/perm_probe.py](faee26ed1cbf6f2b7610.md) | 1 | 0 |
-| [/tmp/opencode/perpath](4270d5cf6c4bf1c01064.md) | 1 | 0 |
-| [/tmp/opencode/perpath_theory.md](a4a705714294ddf7a74b.md) | 14 | 0 |
-| [/tmp/opencode/persist](ecd34573d482b0d3679c.md) | 2 | 0 |
-| [/tmp/opencode/persist/solver.go](abc1f12046fb6db1f99b.md) | 1 | 0 |
-| [/tmp/opencode/post.md](f3f75a768d496547990a.md) | 3 | 1 |
-| [/tmp/opencode/post_gap.json](1827581ee49b1539bbde.md) | 2 | 0 |
-| [/tmp/opencode/post_haeupler](7d23a37f8d7da15a4c2a.md) | 2 | 0 |
-| [/tmp/opencode/post_invdec](8a8e48107e98b0360eae.md) | 13 | 0 |
-| [/tmp/opencode/post_invdec.md](7351309b25e0540b08b8.md) | 1 | 0 |
-| [/tmp/opencode/post_result.json](99136505e889acddc475.md) | 28 | 1 |
-| [/tmp/opencode/prime](34f6d41a7d1f8fc8fc9e.md) | 0 | 0 |
-| [/tmp/opencode/prime_excess_gap](f888bcc0f7e649ae2546.md) | 3 | 0 |
-| [/tmp/opencode/primeh2](ad528a2588f3712286e1.md) | 3 | 0 |
-| [/tmp/opencode/primeh3](88edb0dabd676a5617a9.md) | 2 | 0 |
-| [/tmp/opencode/primeunb](1158ae16c4b1883b2c20.md) | 4 | 0 |
-| [/tmp/opencode/prompt_compact_f_statistic.md](4818856146a21a97f792.md) | 1 | 0 |
-| [/tmp/opencode/prompt_run_decomp.md](122244fa2ba0475e4dd6.md) | 2 | 0 |
-| [/tmp/opencode/pspace_completeness_report.md](66872a086a75caa94feb.md) | 19 | 0 |
-| [/tmp/opencode/pylibs](5c417b2dc841fb83252d.md) | 2 | 0 |
-| [/tmp/opencode/q1](b8f13b3c30f34e98bed3.md) | 1 | 0 |
-| [/tmp/opencode/q2](da58a2404e3484af3786.md) | 2 | 0 |
-| [/tmp/opencode/qbf_experiment.py](146469961756acbd3e5e.md) | 1 | 0 |
-| [/tmp/opencode/querylb_probe.py](2bf20c46115aaf2d06a3.md) | 1 | 0 |
-| [/tmp/opencode/r3mm](0171aa8cb1fd598227e7.md) | 1 | 0 |
-| [/tmp/opencode/r7_independent_verify.py](beccd56c9f1d5e09bd99.md) | 1 | 0 |
-| [/tmp/opencode/r7_restricted_consistency.cpp](f580825cc664226a5a0c.md) | 1 | 0 |
-| [/tmp/opencode/rand_front_board.md](d6949aadc0ee852d59c1.md) | 2 | 0 |
-| [/tmp/opencode/randcheck11.out](bbd3def62d6a7c051f61.md) | 2 | 0 |
-| [/tmp/opencode/rank-falsifier-independent.py](b013cf7df6eef97595bb.md) | 1 | 0 |
-| [/tmp/opencode/rank-window-followup.md](4f1c3d9dd29c54974736.md) | 1 | 0 |
-| [/tmp/opencode/rbdepth](816f8d5d4642500d122f.md) | 2 | 0 |
-| [/tmp/opencode/rbdepth_verify.py](bfc996dcf2ab8d5444c5.md) | 3 | 0 |
-| [/tmp/opencode/reach.py](1fa06ae9ebdd77dc9cf3.md) | 4 | 0 |
-| [/tmp/opencode/reach6.py](d09dbfc30757b8265ade.md) | 2 | 0 |
-| [/tmp/opencode/reach_verify.py](4ca9c122489479948640.md) | 1 | 0 |
-| [/tmp/opencode/reach_verify2.py](d6f39278f85ef3f5f225.md) | 1 | 0 |
-| [/tmp/opencode/reachdisc](55734e4efa8dc7d45576.md) | 10 | 0 |
-| [/tmp/opencode/reccert](5bb3c82b8715771ff5c4.md) | 3 | 0 |
-| [/tmp/opencode/recovery_board.txt](868c75496353797beb6f.md) | 2 | 0 |
-| [/tmp/opencode/ref](8f06e18eb8be094518b2.md) | 1 | 0 |
-| [/tmp/opencode/ref_certifiable_band.py](88cb0a57d847f2a87a4b.md) | 1 | 0 |
-| [/tmp/opencode/ref_chain_extremality.py](359159e549d76e7a3923.md) | 1 | 0 |
-| [/tmp/opencode/ref_defect_necessity.py](0d475008350bdc273fe4.md) | 2 | 0 |
-| [/tmp/opencode/ref_du_verify.py](d3e7b5b910ff577eaca2.md) | 1 | 0 |
-| [/tmp/opencode/ref_efsplit_20261121.py](b245d672d3aa77a83bcb.md) | 2 | 0 |
-| [/tmp/opencode/ref_evaluator_barrier2.py](573adfdadd57cb40da69.md) | 2 | 0 |
-| [/tmp/opencode/ref_gap_solver.go](e656f828e0a8b9143f96.md) | 2 | 0 |
-| [/tmp/opencode/ref_invariant.py](fce2f4ab0911d6586b1b.md) | 2 | 0 |
-| [/tmp/opencode/ref_minimax.py](b20456d2121f923de647.md) | 1 | 0 |
-| [/tmp/opencode/ref_mono_check.py](0373ed1a4c8e7761f141.md) | 1 | 0 |
-| [/tmp/opencode/ref_tight_insertion_20261121.py](eb158641779bfee9873c.md) | 2 | 0 |
-| [/tmp/opencode/ref_ts_barrier.py](d2eb3f3adf56e975b641.md) | 2 | 0 |
-| [/tmp/opencode/ref_two_fronts_20261121.py](97c6ee32245749d1df3c.md) | 1 | 0 |
-| [/tmp/opencode/ref_two_new_results.py](332efb98a2938ed79f8c.md) | 1 | 0 |
-| [/tmp/opencode/ref_zeroone.py](f568b8230c592dab78df.md) | 3 | 0 |
-| [/tmp/opencode/referee](084111f72ba9e3714fd6.md) | 3 | 0 |
-| [/tmp/opencode/referee2_20261122.py](bdf150bec3e944447b59.md) | 1 | 0 |
-| [/tmp/opencode/referee3_20261122.md](6a493454bddfe4bf2136.md) | 1 | 0 |
-| [/tmp/opencode/referee4_20261122.py](7ee49ad875005fce969e.md) | 1 | 0 |
-| [/tmp/opencode/referee_](64bb95a523d1233189e3.md) | 1 | 0 |
-| [/tmp/opencode/referee_20261122.py](74a62cffa446790f9ef0.md) | 1 | 0 |
-| [/tmp/opencode/referee_adsuff.py](4be103b4569e47ab5703.md) | 1 | 0 |
-| [/tmp/opencode/referee_antichain_infofj.py](8a37ad9b89c346d4fc82.md) | 1 | 0 |
-| [/tmp/opencode/referee_balfj_20261121.py](b26bd5a625a444b10128.md) | 1 | 0 |
-| [/tmp/opencode/referee_delta.py](05f24b352abaa184a187.md) | 1 | 0 |
-| [/tmp/opencode/referee_r7_indep.cpp](d013dbab1785b7905b2c.md) | 1 | 0 |
-| [/tmp/opencode/referee_tight_split.py](dc27932050bb20a65b0b.md) | 1 | 0 |
-| [/tmp/opencode/referee_verify.py](a5a0bcf1dbccf1af1575.md) | 1 | 0 |
-| [/tmp/opencode/reflection](6dadbdcccc6b1999e1ed.md) | 3 | 0 |
-| [/tmp/opencode/report.md](b517ac145ecf7b7a0394.md) | 28 | 1 |
-| [/tmp/opencode/rfib](f258ff6434015c911cac.md) | 3 | 0 |
-| [/tmp/opencode/rootcomp_probe.py](0bdd0f27b35cd54d0d2e.md) | 1 | 0 |
-| [/tmp/opencode/rpdg_task](6f978104df7d68cfb5de.md) | 3 | 0 |
-| [/tmp/opencode/run_decomp_check.py](19563baa246dba322fa2.md) | 1 | 0 |
-| [/tmp/opencode/run_decomp_post_body.txt](e3327dd468065b3ae36f.md) | 1 | 0 |
-| [/tmp/opencode/rval_eval.py](5545d1d569e2764a807f.md) | 1 | 0 |
-| [/tmp/opencode/rval_ladder_finding.md](06defc323e3f053c71d8.md) | 2 | 0 |
-| [/tmp/opencode/s23_backward_wall.py](0008e1207a8dcce0315a.md) | 2 | 0 |
-| [/tmp/opencode/s23_report.md](7aef3e7423e7eeb6b1d6.md) | 1 | 0 |
-| [/tmp/opencode/sat_adm](d5c280d49544d4896ff4.md) | 2 | 0 |
-| [/tmp/opencode/satfront](6682360ab7b5c15261dc.md) | 2 | 0 |
-| [/tmp/opencode/sched-rate](5362e5ff7ad3eeb8e9ca.md) | 0 | 0 |
-| [/tmp/opencode/sched-rate/verify_exponent.py](d85537293ddb98febf75.md) | 1 | 0 |
-| [/tmp/opencode/search_fib_counter2.go](1a688dcfd4dd98248db8.md) | 1 | 0 |
-| [/tmp/opencode/seconds](16282581340a15bef0c6.md) | 1 | 0 |
-| [/tmp/opencode/seconds/board_post.txt](562bda78cbd83355ffda.md) | 2 | 0 |
-| [/tmp/opencode/seconds/forced.py](00a61a8bd6e03f3b6286.md) | 1 | 0 |
-| [/tmp/opencode/sergeev-ceiling](2c289b98995a077624be.md) | 1 | 0 |
-| [/tmp/opencode/sergeev-tr20-096.txt](54ca07e9218995a338bd.md) | 2 | 0 |
-| [/tmp/opencode/sergeev.txt](91a916a946c77fafb6bd.md) | 3 | 0 |
-| [/tmp/opencode/sergeev_band_math3.py](29ce206d5fbb85e363ad.md) | 1 | 0 |
-| [/tmp/opencode/sergeev_effective_bound.md](faa88fbcbe0f864e7357.md) | 1 | 0 |
-| [/tmp/opencode/sergeev_nonuniv](4ca1094b5438fcd644af.md) | 1 | 0 |
-| [/tmp/opencode/sidonfront/q19_mod.log](b20284db36a13aaec035.md) | 2 | 0 |
-| [/tmp/opencode/sidonfront/sidon.go](ed63a9493e0eabe32ef6.md) | 2 | 0 |
-| [/tmp/opencode/sidonref](255d4ff28fc6c00ff34e.md) | 3 | 0 |
-| [/tmp/opencode/sidonref/sidon_verify.py](279c0f21547a72141373.md) | 2 | 0 |
-| [/tmp/opencode/sigma2/check.py](0d27a62ff2136ed4d7ec.md) | 1 | 0 |
-| [/tmp/opencode/singdel](8a315126acb48e562bc1.md) | 1 | 0 |
-| [/tmp/opencode/single-bit-post-result.json](f810f342314fe74bccdc.md) | 2 | 0 |
-| [/tmp/opencode/single-bit-post.md](7196de7a8ecac787d85e.md) | 2 | 0 |
-| [/tmp/opencode/soring301](00458e5b3dcb7d5c9176.md) | 0 | 0 |
-| [/tmp/opencode/soring301/repo](d9daec65427081a2500a.md) | 1 | 0 |
-| [/tmp/opencode/soringp1-JTsW4AnxTLzN18IBQibXea-fervor](42968b058e8e473edaa1.md) | 2 | 0 |
-| [/tmp/opencode/soringp1-spec-recon-JTsW4AnxTLzN18IBQibXea/SoringP1-formal-spec-reconciliation-plan.md](9d88144d74d4ba090b72.md) | 1 | 0 |
-| [/tmp/opencode/space-reduction-301-report.md](67b4023f1daf7fcec5e8.md) | 2 | 0 |
-| [/tmp/opencode/sparse_g.py](7e9b72f930b7850703f7.md) | 3 | 0 |
-| [/tmp/opencode/spectral_report.md](5ea78edcb6f97f269b30.md) | 1 | 0 |
-| [/tmp/opencode/splitmerge/L_262144.npy](add39c28c09431f9c6a3.md) | 2 | 0 |
-| [/tmp/opencode/splitmerge/front_coefficient.py](ba894414b0165707c034.md) | 2 | 0 |
-| [/tmp/opencode/splitmerge/k18](959fbfff8915b580148b.md) | 0 | 0 |
-| [/tmp/opencode/splitmerge/k18/ckpt_k19.bin](77333790f94553f7fe2a.md) | 1 | 0 |
-| [/tmp/opencode/splitmerge/k18/lf.bin](5d698b209cb67392701b.md) | 2 | 0 |
-| [/tmp/opencode/splitmerge/k20/ckpt_k20.bin](ec55edc75773a9d11d2a.md) | 2 | 0 |
-| [/tmp/opencode/starve](8e23f583594abe081901.md) | 0 | 0 |
-| [/tmp/opencode/starve/scan.py](58f6281eb62116a7ebe7.md) | 2 | 0 |
-| [/tmp/opencode/struct](c011f0d62466e4105e6b.md) | 2 | 0 |
-| [/tmp/opencode/structural_lookahead.py](02ba318c807a8808afb6.md) | 1 | 0 |
-| [/tmp/opencode/surplus](d81f95984860351da8d2.md) | 1 | 0 |
-| [/tmp/opencode/symq](74047e0945892369079f.md) | 1 | 0 |
-| [/tmp/opencode/t3_independent_audit.py](6b83fabca4ede56680f3.md) | 1 | 0 |
-| [/tmp/opencode/t4_extension_set_audit.py](babae0fe2ef17ffb9fa1.md) | 1 | 0 |
-| [/tmp/opencode/t4_n11_light.py](feea5348cb740723b8f2.md) | 1 | 0 |
-| [/tmp/opencode/t4_n12_tree_audit.py](de1e6acfab05c110949d.md) | 1 | 0 |
-| [/tmp/opencode/t5_search.py](7c8dbecd60fd48baad75.md) | 1 | 0 |
-| [/tmp/opencode/t5_threshold.py](50abfeaf5018588bf8f8.md) | 4 | 0 |
-| [/tmp/opencode/t5work](8d900405445a7ea23ac1.md) | 5 | 0 |
-| [/tmp/opencode/tieinv](e284ad46991461b368c2.md) | 2 | 0 |
-| [/tmp/opencode/tieinv/post_result.json](73c80784a9d0ed9266f3.md) | 2 | 1 |
-| [/tmp/opencode/tight_framed_cert_n5.json](41bac8abadc8fb3f67bf.md) | 1 | 0 |
-| [/tmp/opencode/tight_n_check.py](62b421d474f0968079a0.md) | 1 | 0 |
-| [/tmp/opencode/tight_n_post_result.json](e4ae6780b8fff47daabc.md) | 2 | 0 |
-| [/tmp/opencode/tightinv](10a6deecfdeef7f1bbbd.md) | 3 | 0 |
-| [/tmp/opencode/tightness/attack.md](afdcc4b64845f2c736d7.md) | 1 | 0 |
-| [/tmp/opencode/time-exp-adv](eaf4e2ec93fe28d76cde.md) | 1 | 0 |
-| [/tmp/opencode/tr20-096.txt](4bb118e2c60565cb3994.md) | 1 | 0 |
-| [/tmp/opencode/ts_barrier_probe.py](49e7c3156d2f81ae5d6b.md) | 1 | 0 |
-| [/tmp/opencode/twowl](282ac57822b7c5ab4ecf.md) | 1 | 0 |
-| [/tmp/opencode/twowl/board_post.md](d4c1dc65e0c68331a682.md) | 2 | 0 |
-| [/tmp/opencode/twowl/vals8.json](bb39c8b603657e3416fb.md) | 1 | 0 |
-| [/tmp/opencode/twowl/vals9.json](da1306890ff0bb91d1e7.md) | 1 | 0 |
-| [/tmp/opencode/uniqueness_minimax_check.py](e611ba93590dc57f0931.md) | 1 | 0 |
-| [/tmp/opencode/upineq](05263c300f8769155070.md) | 4 | 0 |
-| [/tmp/opencode/upineq/fmin.c](8c85d442bfdd0265ae05.md) | 2 | 0 |
-| [/tmp/opencode/upineq/verify_subset.py](44210b65ebaca446744d.md) | 2 | 0 |
-| [/tmp/opencode/validate_lt.py](300c00988e629f1d9512.md) | 1 | 0 |
-| [/tmp/opencode/verify](0467ef8556b326fd4957.md) | 2 | 0 |
-| [/tmp/opencode/verify-int/verify_interval_reversal.py](a9d994950b51d561cca9.md) | 1 | 0 |
-| [/tmp/opencode/verify-n7-sibling-budgets.py](189c1e54dd6d5a59c650.md) | 1 | 0 |
-| [/tmp/opencode/verify2_20261122.py](7d1c01c16db2d32908a5.md) | 4 | 0 |
-| [/tmp/opencode/verify_B_20261122.py](b8f0bae6812dcad33ee9.md) | 1 | 0 |
-| [/tmp/opencode/verify_L_reports_exec.py](35a27b5230999df0a393.md) | 1 | 0 |
-| [/tmp/opencode/verify_abc2.py](339cc8011022d25d0e62.md) | 1 | 0 |
-| [/tmp/opencode/verify_adv_cert.py](f17ce1207e05a0f9c9a3.md) | 2 | 0 |
-| [/tmp/opencode/verify_binadd2_20261122.py](3be7ad247f9e313ea7ce.md) | 1 | 0 |
-| [/tmp/opencode/verify_binary_minimax.py](17a5aa5949d6e8d27c9a.md) | 2 | 0 |
-| [/tmp/opencode/verify_bqp_report.py](02a47ca24fad057b2ac2.md) | 2 | 0 |
-| [/tmp/opencode/verify_class_stable_exec.py](659ba62b4285d72a319a.md) | 1 | 0 |
-| [/tmp/opencode/verify_core_census.py](e1bed6a498e4e6b3a513.md) | 1 | 0 |
-| [/tmp/opencode/verify_dbgap.py](d5c59324c601b05d73da.md) | 1 | 0 |
-| [/tmp/opencode/verify_depth_alln.py](a83066b8e2ac8cdaeffa.md) | 1 | 0 |
-| [/tmp/opencode/verify_disj.py](33202b4381a65edf76e6.md) | 1 | 0 |
-| [/tmp/opencode/verify_du2.py](17b7410218ebd4a537f9.md) | 1 | 0 |
-| [/tmp/opencode/verify_ecovers_basis.py](158dbb924986860d76dd.md) | 1 | 0 |
-| [/tmp/opencode/verify_exactframed_exec.py](49a50f2ebb0b2b4a2282.md) | 1 | 0 |
-| [/tmp/opencode/verify_fdrop.py](ffa7f19e9b8ccba735bc.md) | 1 | 0 |
-| [/tmp/opencode/verify_fred_n5.py](bad0d382b1e819eb01fa.md) | 2 | 0 |
-| [/tmp/opencode/verify_front.py](234b34034ea28b065fde.md) | 2 | 0 |
-| [/tmp/opencode/verify_global_excess_exec.py](e3add8ef4f194fd72a63.md) | 1 | 0 |
-| [/tmp/opencode/verify_greedy_vwidth.py](dd86aae18729f54ea239.md) | 1 | 0 |
-| [/tmp/opencode/verify_jr_count.py](5b9bb94f172820389103.md) | 1 | 0 |
-| [/tmp/opencode/verify_labelled_exec.py](3a3ecc1240524a45e864.md) | 1 | 0 |
-| [/tmp/opencode/verify_labelled_growth_exec.py](ec36a21f949d5d7a00f5.md) | 1 | 0 |
-| [/tmp/opencode/verify_lift/verify.py](5d5ea13ec251435af384.md) | 1 | 2 |
-| [/tmp/opencode/verify_lower.py](4693bc8b82958ef98996.md) | 2 | 0 |
-| [/tmp/opencode/verify_lower_bound.py](f486b152c332f7f4e96b.md) | 1 | 0 |
-| [/tmp/opencode/verify_ltree_exec.py](a4e4b918987a56074fa5.md) | 1 | 0 |
-| [/tmp/opencode/verify_n5.py](7cea6edf4dd321a96c07.md) | 1 | 0 |
-| [/tmp/opencode/verify_reachable.cpp](213b642e78ecb240f6fe.md) | 2 | 0 |
-| [/tmp/opencode/verify_reversal_counterexample_20261119.py](e6ed328988448ddd6678.md) | 1 | 0 |
-| [/tmp/opencode/verify_satfront](41671c586438a8274f99.md) | 0 | 0 |
-| [/tmp/opencode/verify_selection_composition.py](c59a62b9db3415634e2a.md) | 3 | 0 |
-| [/tmp/opencode/verify_sym.py](ef0ba7bfcf9397d2db89.md) | 1 | 0 |
-| [/tmp/opencode/verify_three_reports_1518.py](f7a9d5cbf3ce78389493.md) | 1 | 0 |
-| [/tmp/opencode/verify_two_fronts_20261119.py](a8ecb9773b2ec4066f01.md) | 2 | 0 |
-| [/tmp/opencode/verify_two_reports_1119.py](22c8792639699d81a09e.md) | 1 | 0 |
-| [/tmp/opencode/verify_witness30.py](433e6fafc394750d610c.md) | 1 | 0 |
-| [/tmp/opencode/vstarve/census.py](a0fa3f84467d39083392.md) | 1 | 0 |
-| [/tmp/opencode/vstarve/grid.py](f999806870048816b9f6.md) | 1 | 0 |
-| [/tmp/opencode/vstarve/validate_canon.py](6710ff674885abfcacec.md) | 1 | 0 |
-| [/tmp/opencode/vstarve/validate_labeled.py](58caf7cb8a60717eaca4.md) | 1 | 0 |
-| [/tmp/opencode/vstarve/vstarve.py](013a028751a496fd59f8.md) | 1 | 0 |
-| [/tmp/opencode/w2_exact.py](c1a818ffad579bc70d43.md) | 2 | 0 |
-| [/tmp/opencode/w6.py](bf9cea7e9ba468d650d8.md) | 3 | 0 |
-| [/tmp/opencode/w_t_check.py](e118e9cf85fc91e0a9ad.md) | 4 | 0 |
-| [/tmp/opencode/witcheck](955ebe4d6f7daa4d2efb.md) | 1 | 0 |
-| [/tmp/opencode/witness](ad08e543d5287fd8ae0b.md) | 2 | 0 |
-| [/tmp/opencode/wlcount](6ee12b7c14c739eb4fbd.md) | 1 | 0 |
-| [/tmp/opencode/wlcount/board_post.md](f651f3ca0b63a7f7d146.md) | 2 | 0 |
-| [/tmp/opencode/wlcount/pb_both.json](580dc3aeb6abd2ad7ca3.md) | 3 | 0 |
-| [/tmp/opencode/wlcount/witness.py](1f67e39d5bbb2430d55f.md) | 3 | 0 |
-| [/tmp/opencode/work](0b163289d031574fc237.md) | 14 | 0 |
-| [/tmp/opencode/xaug](64e526026aefb8301567.md) | 1 | 0 |
-| [/tmp/opencode/xec_fib.py](99fc4ddb75fd5e0eff7f.md) | 1 | 0 |
-| [/tmp/opencode/xec_fibthr.py](9f9f5c4c204e1e31071d.md) | 2 | 0 |
-| [/tmp/opencode/xec_greedy.py](d1b8f86c3aaacc3c4d21.md) | 1 | 0 |
-| [/tmp/opencode/xec_l1.py](00a10ab36378f7e7fd5a.md) | 1 | 0 |
-| [/tmp/opencode/xec_q8.py](62e2b72f57fbb9733631.md) | 1 | 0 |
-| [/tmp/opencode/xec_verify_both.py](0302a5655ee1d32cf4a2.md) | 1 | 0 |
-| [/tmp/opencode/zeroone_fooling_lab.py](49477e9c7ee7640e73b8.md) | 1 | 0 |
-| [/tmp/scratchpad](70b197e71913b838abaa.md) | 4 | 0 |
-| [/tmp/soring-gap-poset-full-minimax.py](813feb39fbae7436e028.md) | 1 | 0 |
-| [/tmp/soring-gap-poset-plus-one8.py](ba5747baf841033c191f.md) | 1 | 0 |
-| [/tmp/soring-gap-poset-second-spectrum.py](3fe211c3a4461609a76d.md) | 1 | 0 |
-| [/tmp/soring-gap-poset-split.py](800e3c5be2636bb7ba4e.md) | 1 | 0 |
-| [/tmp/soring-isopair-counterexample.py](99a0f3a182408dcd255a.md) | 1 | 0 |
-| [/tmp/soring-singleton-extension-enumerate5.py](433eeed19db21c9ec44e.md) | 1 | 0 |
-| [/tmp/soring-x-y-minimax-check.py](c6c56b363b45f3389ad9.md) | 1 | 0 |
-| [/tmp/soring-xy-budget8.py](006831cb75f7b33532b0.md) | 1 | 0 |
-| [/tmp/soring-xy-budget9.py](d2567f4952c04bf48f42.md) | 1 | 0 |
-| [/tmp/soring301_probe_w2free.py](65a0027aed68cf1d8f17.md) | 1 | 0 |
-| [/tmp/t10](f0e9cbb47a0a736cfa7f.md) | 3 | 0 |
-| [/tmp/t10-census232b.log](fc950f65671a04d7833f.md) | 6 | 0 |
-| [/tmp/t10/chk200_10](73068d654c4ca1323d7b.md) | 1 | 0 |
-| [/tmp/t10/drive232b.sh](04634f06b3d129d955af.md) | 5 | 0 |
-| [/tmp/t10/lv143](a89aae319d46b6aebc42.md) | 2 | 0 |
-| [/tmp/t10/lv160](4a9155f9076e815c4567.md) | 1 | 0 |
-| [/tmp/t10/lv200](45ddb77b49ca8b29095d.md) | 3 | 0 |
-| [/tmp/t10/lv232](1654228ccda735cc0042.md) | 2 | 0 |
-| [/tmp/t10/lv232b](78549c7ead29a271cda9.md) | 4 | 0 |
-| [/tmp/t10/recheck232.py](f3686722d4c9c62ada88.md) | 1 | 0 |
-| [/tmp/t10/verify232.py](1fafa6649f9470d5b3ef.md) | 1 | 0 |
-| [/tmp/t10/w12_boundary.py](7a0db3356abc5103d149.md) | 1 | 0 |
-| [/tmp/t9-census-143.log](5eedbda87e78266d134c.md) | 3 | 0 |
-| [/tmp/t9-census-88.log](decf7f236ca69016c11e.md) | 2 | 0 |
-| [/tmp/t9-check-143.log](c70f44503463673383c7.md) | 2 | 0 |
-| [/tmp/t9-recheck143.log](278bdcf78c45cdf194dd.md) | 2 | 0 |
-| [/tmp/t9_check_result.json](196ef58e37c643cf0cb3.md) | 2 | 0 |
-| [/tmp/test_lk.py](115db92302b0c512f06c.md) | 1 | 0 |
-| [/tmp/tr20-096.pdf](f54ddeaf2119c869f198.md) | 1 | 0 |
+| Original reference | Exact references | Descendant references | Candidate filename matches |
+|---|---:|---:|---:|
+| [/tmp/board_increment_post.txt](a5873f6cd996f6f10ce2.md) | 2 | 0 | 0 |
+| [/tmp/board_post_followup.json](8addf854c0234f78e6cb.md) | 2 | 0 | 0 |
+| [/tmp/board_post_result.json](f42e6d82a9cb991f0208.md) | 2 | 0 | 0 |
+| [/tmp/bound_check.py](2ddd84695e2df6afa2f6.md) | 1 | 0 | 0 |
+| [/tmp/count_optimal.py](f377679648bcd3370ca2.md) | 3 | 0 | 0 |
+| [/tmp/e143_levels/level_](16f52a757d265f41b14f.md) | 1 | 0 | 0 |
+| [/tmp/fib_threshold_board_post.md](f642bc74bf74c628d19a.md) | 2 | 0 | 0 |
+| [/tmp/fib_threshold_followup.md](7c20c77303f0c5b5370e.md) | 2 | 0 | 0 |
+| [/tmp/fj_n11/fj_tree.c](46b69ff551177ebd18cf.md) | 2 | 0 | 0 |
+| [/tmp/increment_audit.py](d708bef1bde50ea43cf4.md) | 2 | 0 | 0 |
+| [/tmp/opencode/B_exact.py](8d3b3c62e6959660b279.md) | 1 | 0 | 0 |
+| [/tmp/opencode/SORING301-BASELINE.md](e41091e5a9bf69e2f72d.md) | 3 | 0 | 0 |
+| [/tmp/opencode/a12front](f1da3bbbee6c1be20c3d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/a3b5_finding.md](d6e0bdc85afc18bce988.md) | 8 | 0 | 0 |
+| [/tmp/opencode/a7.go](4781b2ca3d9b155ee7be.md) | 2 | 0 | 0 |
+| [/tmp/opencode/abcdec](91234d6d9fe9d443690b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/abcfront](593fa874fa1430827fff.md) | 2 | 0 | 0 |
+| [/tmp/opencode/abcverify](9a60172d2bd37319a45d.md) | 1 | 1 | 0 |
+| [/tmp/opencode/abcverify/verify.py](3d17be4fd04e0ef3f290.md) | 1 | 0 | 2 |
+| [/tmp/opencode/abcx](adc5cf48338a7ffec646.md) | 1 | 3 | 0 |
+| [/tmp/opencode/abcx/counterexample.py](e4dfb18b0c9a3fdc6690.md) | 3 | 0 | 0 |
+| [/tmp/opencode/abfree](a84444d67cd36eec6a2e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/adsuff](9b5bff98eb4f1153c8cf.md) | 1 | 0 | 0 |
+| [/tmp/opencode/adv/diag24.py](8a85bb8f6239a631843b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/adv/rerun_signflip.py](c6b37931819dc70eb376.md) | 2 | 0 | 0 |
+| [/tmp/opencode/adv_cert_probe.py](6a52f4f0935b143a13e9.md) | 3 | 0 | 0 |
+| [/tmp/opencode/adv_cert_verify.py](af9eb19cea7587fa3c18.md) | 1 | 0 | 0 |
+| [/tmp/opencode/agent-KIs34cEznVs1GUdNnzlTjI-laden-JTsW4AnxTLzN18IBQibXea-fervor/soringp1](3fd6bca428a61a2bc789.md) | 1 | 0 | 0 |
+| [/tmp/opencode/all-n-threshold-proof-draft.md](fbd84644c752576991fc.md) | 2 | 0 | 0 |
+| [/tmp/opencode/all_questions.txt](12da700bd2c20cd0bee0.md) | 1 | 0 | 0 |
+| [/tmp/opencode/alternation_trading_no_go.md](0e5f0db1cb547b714361.md) | 8 | 0 | 0 |
+| [/tmp/opencode/antichain-lookahead-post.md](69b1f94bdec796b9207a.md) | 2 | 0 | 0 |
+| [/tmp/opencode/antichain-lookahead-result.json](506918a5cc036f561682.md) | 2 | 0 | 0 |
+| [/tmp/opencode/antichain_defect_](30035d8c273b9b1742d2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/antichain_defect_check.py](2f583b3ef6f8f024644e.md) | 2 | 0 | 0 |
+| [/tmp/opencode/antichain_defect_finding.txt](5b73c74262351a0e6de6.md) | 2 | 0 | 0 |
+| [/tmp/opencode/antichain_defect_post](64651b15f2b11a6a97c5.md) | 2 | 0 | 0 |
+| [/tmp/opencode/antichain_defect_post.json](7148f72593b13b3fddda.md) | 2 | 0 | 0 |
+| [/tmp/opencode/balfj](3a146ea90313a5a25e08.md) | 0 | 1 | 0 |
+| [/tmp/opencode/balfj/check.py](9eb55ef370e7c768462b.md) | 1 | 0 | 0 |
+| [/tmp/opencode/balfj/independent.py](207dd900078c19dca3df.md) | 1 | 0 | 0 |
+| [/tmp/opencode/balfront_probe.py](4e28339b727d490bbc2c.md) | 12 | 0 | 0 |
+| [/tmp/opencode/band_lib.py](119ba772b9108aa971b3.md) | 2 | 0 | 0 |
+| [/tmp/opencode/band_post_result.json](32e676d7720a8a9745b2.md) | 2 | 0 | 0 |
+| [/tmp/opencode/binomial_post.md](77263dddff81f628d9b7.md) | 8 | 0 | 0 |
+| [/tmp/opencode/binrate_solver.py](de8a48de20b4f2c4cde3.md) | 1 | 0 | 0 |
+| [/tmp/opencode/bisim](0858497d17133eb5f24c.md) | 0 | 0 | 0 |
+| [/tmp/opencode/blockratio](23e8ef89abfd56bf34f9.md) | 1 | 0 | 0 |
+| [/tmp/opencode/board](4dddb9107d121d7104be.md) | 0 | 0 | 0 |
+| [/tmp/opencode/board301-post.json](55f47320b61b04106783.md) | 2 | 0 | 0 |
+| [/tmp/opencode/board_body.txt](ebcc3d1b3eeb434418f9.md) | 2 | 0 | 0 |
+| [/tmp/opencode/board_full.py](88ac8ee5c372c2ce4498.md) | 3 | 0 | 0 |
+| [/tmp/opencode/board_output_poly.txt](2df35153a2138e33d2cd.md) | 10 | 0 | 0 |
+| [/tmp/opencode/board_post.md](2a151bf5d7daf5377ddc.md) | 3 | 0 | 0 |
+| [/tmp/opencode/board_post.txt](d380b6d87efe822ab51c.md) | 2 | 0 | 0 |
+| [/tmp/opencode/board_post_constant_advice.md](4072a4478c1578ca1106.md) | 2 | 0 | 0 |
+| [/tmp/opencode/board_post_result.json](d70086bc0e650825798a.md) | 6 | 0 | 0 |
+| [/tmp/opencode/board_post_vcollapse.txt](06f8d7acf2539d06a2a8.md) | 2 | 0 | 0 |
+| [/tmp/opencode/bounded-excess-self-reduction-post.md](d7630ebc621c37c01f70.md) | 2 | 0 | 0 |
+| [/tmp/opencode/bqp_check.py](4843700f46acf2dccb11.md) | 1 | 0 | 0 |
+| [/tmp/opencode/build_tree_check.py](e8ec3e0d1c9395210d9f.md) | 10 | 0 | 0 |
+| [/tmp/opencode/c128_10.out](c7221b59fd0e90b296c7.md) | 2 | 0 | 0 |
+| [/tmp/opencode/calc_l2_23.py](2e385742bd10115b5980.md) | 2 | 0 | 0 |
+| [/tmp/opencode/calc_l3_23.py](e9518999e88b98a67f7a.md) | 4 | 0 | 0 |
+| [/tmp/opencode/canon128](6831f43518b2f2ef8369.md) | 2 | 0 | 0 |
+| [/tmp/opencode/canon128.cpp](99065c9ae22df5e14375.md) | 2 | 0 | 0 |
+| [/tmp/opencode/cdcheck](820531fda6d20f636c0b.md) | 1 | 0 | 0 |
+| [/tmp/opencode/census-growth](9e0ecec1a8e7b1461c07.md) | 1 | 0 | 0 |
+| [/tmp/opencode/certdu](e564d50a3999373d8423.md) | 1 | 0 | 0 |
+| [/tmp/opencode/certreport](f36176fbdba21d328927.md) | 1 | 0 | 0 |
+| [/tmp/opencode/cg_reach_task](0f2e71533b1d8a43ebc8.md) | 0 | 1 | 0 |
+| [/tmp/opencode/chain_](20823f73725103133119.md) | 1 | 0 | 0 |
+| [/tmp/opencode/check-threshold-witnesses.py](510560b99971d717c756.md) | 1 | 0 | 0 |
+| [/tmp/opencode/check_l2_23_subset.py](8aeb38747d284c8a6fd1.md) | 2 | 0 | 0 |
+| [/tmp/opencode/check_l4b.py](addeed8573ae3ed3388f.md) | 1 | 0 | 0 |
+| [/tmp/opencode/check_l5.py](b659888cda3c29623abf.md) | 1 | 0 | 0 |
+| [/tmp/opencode/check_m2_reachable.py](4ff67707b9cf46e256f6.md) | 2 | 0 | 0 |
+| [/tmp/opencode/check_rect_n6.py](639cf482b00b682051da.md) | 1 | 0 | 0 |
+| [/tmp/opencode/check_root_layer.py](e9e07fef8b68fae985ac.md) | 1 | 0 | 0 |
+| [/tmp/opencode/classstable](d46db27320ac3f67f4ee.md) | 11 | 2 | 0 |
+| [/tmp/opencode/classstable/verify.go](785bd2b29dc83d3bd792.md) | 2 | 0 | 0 |
+| [/tmp/opencode/cleanfront](6d235938c6dc86f19280.md) | 11 | 0 | 0 |
+| [/tmp/opencode/coarsening_post_result.json](99d2d7bdee84df83c7ad.md) | 2 | 0 | 0 |
+| [/tmp/opencode/coarsening_report.md](4dd2338d233f01b3cc32.md) | 2 | 0 | 0 |
+| [/tmp/opencode/coexist_probe.cpp](4c85b1324f526e4aa04d.md) | 2 | 0 | 0 |
+| [/tmp/opencode/collision_solver.py](3bc50b561f10428d622d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/comm_cc.py](f46be4be4096ea6f9308.md) | 1 | 0 | 0 |
+| [/tmp/opencode/comm_probe_20261121.py](a805e9d0190d76e03567.md) | 1 | 0 | 0 |
+| [/tmp/opencode/comp_antichain](dac51ffd653087e98692.md) | 1 | 2 | 0 |
+| [/tmp/opencode/comp_antichain/post_result.json](f72ac0170b0f6cd7d450.md) | 2 | 0 | 1 |
+| [/tmp/opencode/compact_f_check.py](dcca90bf0dc475845f15.md) | 2 | 0 | 0 |
+| [/tmp/opencode/conpmem](d4dd7a914c980421fa03.md) | 4 | 1 | 0 |
+| [/tmp/opencode/correct_probe.py](042ce0a004846d6c0993.md) | 1 | 0 | 0 |
+| [/tmp/opencode/cospectral_front](325f3c778d3532a93cea.md) | 14 | 0 | 0 |
+| [/tmp/opencode/coverratio](c09db3d4bbec292f7ecd.md) | 1 | 0 | 0 |
+| [/tmp/opencode/cpsat-fr-n12-exact](da8b84239f731faafdc9.md) | 0 | 0 | 0 |
+| [/tmp/opencode/cpsig](9840f16ee2c8759826f0.md) | 9 | 0 | 0 |
+| [/tmp/opencode/cremer-selection-pruning-agent-version.py](4dca35e636629253c036.md) | 1 | 0 | 0 |
+| [/tmp/opencode/crosscost](3d4493b0830f31e26955.md) | 1 | 0 | 0 |
+| [/tmp/opencode/curator/minimax.py](ec7f0bca1d3ec28b1a70.md) | 2 | 0 | 0 |
+| [/tmp/opencode/curator301/sidon.py](47280b489a52b45378bb.md) | 2 | 0 | 0 |
+| [/tmp/opencode/curator_probe/count_trees.py](620da40924784663b8bc.md) | 2 | 0 | 0 |
+| [/tmp/opencode/d2verify](0aa1a79836690e7b15c0.md) | 2 | 0 | 0 |
+| [/tmp/opencode/dag.pdf](36e5bb166e7a56457af4.md) | 2 | 0 | 0 |
+| [/tmp/opencode/dag_post.txt](e53a38709cc5975a5ba8.md) | 2 | 0 | 0 |
+| [/tmp/opencode/db12](4035af10fe504589bad4.md) | 1 | 0 | 0 |
+| [/tmp/opencode/db_cstar](6fd2dbcdc1c52ce09e97.md) | 1 | 0 | 0 |
+| [/tmp/opencode/dbgap](a27d59d428867a6d99d8.md) | 3 | 2 | 0 |
+| [/tmp/opencode/dbgap/engine.py](8efcf0220b533062e1bc.md) | 1 | 0 | 0 |
+| [/tmp/opencode/dbir](099bc29282ca1adc1853.md) | 2 | 0 | 0 |
+| [/tmp/opencode/dbtsharp](cb871cc3b2877ce6f5d0.md) | 1 | 1 | 0 |
+| [/tmp/opencode/dbtsharp/verify.py](8ce2b7bb523186b65044.md) | 1 | 0 | 2 |
+| [/tmp/opencode/ddel](b0e1db3d884ec84cb794.md) | 2 | 0 | 0 |
+| [/tmp/opencode/deck](91ff1ef31934ff4f75c2.md) | 5 | 0 | 0 |
+| [/tmp/opencode/deckattack/compute_F.py](e991d7965f7be0d4ec52.md) | 2 | 0 | 0 |
+| [/tmp/opencode/deckattack/pair12.txt](9a5c520bfafbefbc6a22.md) | 2 | 0 | 0 |
+| [/tmp/opencode/deckattack/pair12_out.txt](83f8c0b2bd8b221862eb.md) | 2 | 0 | 0 |
+| [/tmp/opencode/deckmove](154691b40df16dd937a5.md) | 13 | 0 | 0 |
+| [/tmp/opencode/defect](376d405d4225bce28b95.md) | 6 | 0 | 0 |
+| [/tmp/opencode/defect_chain_probe.py](4cd280681d89b000c4a2.md) | 2 | 0 | 0 |
+| [/tmp/opencode/defectfree_go](3ea4b6dadbf53d2044ef.md) | 0 | 0 | 0 |
+| [/tmp/opencode/deg_probe.py](1d4f8d6e3bef3aac3b39.md) | 1 | 0 | 0 |
+| [/tmp/opencode/degprod](1195d341a675d8e6d73c.md) | 3 | 0 | 0 |
+| [/tmp/opencode/deletion.cpp](ad2bfac89428dac70d67.md) | 1 | 0 | 0 |
+| [/tmp/opencode/depth_alln](8be89174f7d2133e6065.md) | 3 | 1 | 0 |
+| [/tmp/opencode/depth_alln/rbd.py](1bd66f69828fd6fe482c.md) | 1 | 0 | 0 |
+| [/tmp/opencode/depth_n9](f90b81130580d5eee422.md) | 3 | 0 | 0 |
+| [/tmp/opencode/deviation_probe.py](0fb5b95d75fff0cd0da8.md) | 2 | 0 | 0 |
+| [/tmp/opencode/du](a36f296890fd7d342108.md) | 2 | 0 | 0 |
+| [/tmp/opencode/du2](9b637e8c27cb83cfcaff.md) | 2 | 0 | 0 |
+| [/tmp/opencode/du_d2](8729e90cb7ef54deb782.md) | 3 | 0 | 0 |
+| [/tmp/opencode/du_rtable](da263c18a8870673267d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/du_superadd](c05436c436932003d5c8.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ecovers](108d14a74db3d0191c3b.md) | 1 | 0 | 0 |
+| [/tmp/opencode/efsplit](17db4ecb35d5fda4b2b2.md) | 0 | 0 | 0 |
+| [/tmp/opencode/eindex-transfer](574529b85214e1dba9a9.md) | 0 | 1 | 0 |
+| [/tmp/opencode/endpoint](24cbde45bbed28a10a09.md) | 1 | 0 | 0 |
+| [/tmp/opencode/evaluator_barrier_check.py](1fed8474f0bc57c6ab67.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exactframed](9f0468dce927f8dcae89.md) | 2 | 0 | 0 |
+| [/tmp/opencode/excess](20a7130291374780b909.md) | 0 | 1 | 0 |
+| [/tmp/opencode/excess/twochain.py](b39b0896cc16152f5078.md) | 1 | 0 | 0 |
+| [/tmp/opencode/excess25](f34e6b2f95409575a90e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/excess_regularity_post](3d75afe240b5c2833b95.md) | 16 | 0 | 0 |
+| [/tmp/opencode/excessdrop](a2ed733be8217c605091.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec-lit-sweep-20261121-finding.txt](14cb104989023063ab23.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_check_20261119.py](60ef1b3a3eecd457039e.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_check_fj.py](fecf7c96ba709fdde27d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_close_verify_loadwitness_20261122.py](cb3e7773f0e614c1c745.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_deck_audit_20261123.cpp](4160179d105c514f66f1.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_gapspan_check.py](1a97ef44545d96c78076.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_n7_delta_census.go](0e22bbf4eedcfd95dd5a.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_n7_engine.cpp](bab03cde356e5425244e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_n8_census_20261123.cpp](8ed20abff24ee522573a.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_ref_20261123_1400.py](9a9f950c32da838148f2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_ref_20261123_1420.py](a417c935f0b1a28eb4e5.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_ref_binrate_20261121.py](67d96432d84da9b7c41d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_ref_depth2_20261123.py](bce755f23a812a2f89a4.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_ref_depth3_20261123.py](b37c2d5ae700dea9cb0e.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_ref_descent_verify_20261121.py](e8e9fd71beb65ce5b88b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_ref_ecounttie_20261123_1437.py](6fc6b49284da6147a059.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_ref_ksafe_20261123.py](341b83c0e93008753149.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_ref_lemmaD_n7_verify_20261123_1520.py](08690d84d3b4effaf28f.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_ref_m2_reachable_20261123.py](6af0321063c7b851cca0.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_ref_reach8_20261123.py](e5cfe65361ca2f1a2de9.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_ref_run_decomp_20261121.py](9bed2083ff1b14a7aa04.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_ref_unif_base_20261122.py](fd192692509e72f901b6.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_ref_verify_20261121b.py](daa2dc853f5520e3af66.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_ref_verify_general.py](bcd24a264e3c0ebdfdd7.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_referee_20261123_1341.py](c0e7ea8c5c02750dc664.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_verify_coexist_20261119.py](7d694860710c3cc0bc2b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_verify_deck.py](845c926e7e20c10d3a04.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_verify_deckclosure.py](dc06eb0daaf768fd11be.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_verify_greedy_evalue.py](b000ef58c02c9b3cc31a.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_verify_kraft.py](d4c2b6613260f9b3e740.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_verify_reversal_n9.py](325a4abb549d4356e455.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exec_verify_split.py](eff874660f98d2e81fbe.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_verify_tieinv.py](3f9988bcbd3e78904239.md) | 2 | 0 | 0 |
+| [/tmp/opencode/exec_witness_py_20261123.py](29aa4be5a6651d039e95.md) | 1 | 0 | 0 |
+| [/tmp/opencode/execdom](a18681e11a7b61e68f78.md) | 1 | 0 | 0 |
+| [/tmp/opencode/exp](89a92ee1c3e051b010ae.md) | 1 | 1 | 0 |
+| [/tmp/opencode/exp_candidates.py](e5a24d2b3007b747b4bb.md) | 1 | 0 | 0 |
+| [/tmp/opencode/explore_surplus.py](d9f727650b8607823bef.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ext_monotone_check.py](6799f50a47ff2fb48393.md) | 3 | 0 | 0 |
+| [/tmp/opencode/extpair-census.py](40be26427598ea306f8f.md) | 2 | 0 | 0 |
+| [/tmp/opencode/extpair-witness-direct.py](0773215e3cd54706a3e4.md) | 1 | 0 | 0 |
+| [/tmp/opencode/extract_front](c4ef085e62133f5d0b28.md) | 1 | 0 | 0 |
+| [/tmp/opencode/extremal_probe2.py](74613e4d31979e437b1e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fanexact](22b45a95fd69bba5f190.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fdid](b6ecd25b779003b3977f.md) | 0 | 0 | 0 |
+| [/tmp/opencode/fence_check.py](cde9ccc45607a67fa4ab.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ff9_verify_fromscratch.go](76e6bfb461f0228f5a6b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ff_result_post_response.json](7bc7479230499785aba8.md) | 13 | 0 | 0 |
+| [/tmp/opencode/fib_eval.py](01cbc52654cbbec05e35.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fiballr](1635bf8966a9b4bb410b.md) | 14 | 0 | 0 |
+| [/tmp/opencode/fiballr_verify_exec.py](6836f900b16cf1df29a5.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fibcert](610b12437f270a74cbab.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fibdu](be246148835c0aeedb5d.md) | 3 | 0 | 0 |
+| [/tmp/opencode/fibpres](159816f0bdb651253d7d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fibr](1177046af3265aed3403.md) | 2 | 0 | 0 |
+| [/tmp/opencode/filter_h2](802edf02491217b6178f.md) | 2 | 0 | 0 |
+| [/tmp/opencode/fixedarity](4f3caaeaaa6104096bb3.md) | 0 | 0 | 0 |
+| [/tmp/opencode/fixedply](84e71cd80848ad52806d.md) | 3 | 0 | 0 |
+| [/tmp/opencode/fj](cb45e8478b800e4b2e0d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fj_cert.py](0e177c5e2da0b8d4edf3.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fjamp.py](ba2c9a0b5ec4dc85f69e.md) | 3 | 0 | 0 |
+| [/tmp/opencode/fjevent](d34ba19b98ee33379fff.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fonly](2cf0bf5a5b569f63ade5.md) | 20 | 0 | 0 |
+| [/tmp/opencode/fotc](40cfa15d2c8c03642e6c.md) | 2 | 0 | 0 |
+| [/tmp/opencode/fourier_plancherel_check.py](3196874c03f4531e530f.md) | 1 | 0 | 0 |
+| [/tmp/opencode/fp](820e3337c22826378d04.md) | 0 | 7 | 0 |
+| [/tmp/opencode/fp/FINDINGS.md](64344a342e74a2af337f.md) | 7 | 0 | 0 |
+| [/tmp/opencode/framed12/checker.py](198e5dbd01bc5921afcb.md) | 1 | 0 | 0 |
+| [/tmp/opencode/front_defect](a09588a1a1f999f8767c.md) | 1 | 0 | 0 |
+| [/tmp/opencode/frontier](b88fbf5ab63005abd5f6.md) | 2 | 0 | 0 |
+| [/tmp/opencode/frontier8](b07d891279263692b792.md) | 3 | 0 | 0 |
+| [/tmp/opencode/fulltree](9a926d579e9f633a0548.md) | 2 | 1 | 0 |
+| [/tmp/opencode/fulltree-spread/post.md](b229512ae0a9214c402d.md) | 2 | 0 | 1 |
+| [/tmp/opencode/fulltree/badposet_q.py](8c318aba10ebcb131d82.md) | 1 | 0 | 0 |
+| [/tmp/opencode/g6_resume.py](25bc599d49211b4f79fa.md) | 1 | 0 | 0 |
+| [/tmp/opencode/g_completeness_check.py](4adb8b802d26d3f66ba4.md) | 1 | 0 | 0 |
+| [/tmp/opencode/game_check.py](f28c70e309142b03a33d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/gap](7c51b2646ab483523322.md) | 0 | 0 | 0 |
+| [/tmp/opencode/gap2work](e5c2843df81b0325e93d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/gap_rate_check.py](20eb39489d8b660e9f07.md) | 2 | 0 | 0 |
+| [/tmp/opencode/gap_rate_post.md](d7dd2e69f8e988ad8f8f.md) | 2 | 0 | 0 |
+| [/tmp/opencode/gapspan_front](fbf00d3695e61f17a8bb.md) | 1 | 1 | 0 |
+| [/tmp/opencode/gapspan_front/verify.py](e51d450a68ff7646b3e5.md) | 1 | 0 | 2 |
+| [/tmp/opencode/gbci](36707989737423471e68.md) | 1 | 2 | 0 |
+| [/tmp/opencode/gbci/post_body.md](6619e7da49064533c475.md) | 2 | 0 | 0 |
+| [/tmp/opencode/gcwork](50bc4e33f64b4e280b5b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/gensort_front](c0ebe5748c6004a34597.md) | 1 | 1 | 0 |
+| [/tmp/opencode/gensort_front/verify.py](fa37f666f087104e0de6.md) | 1 | 0 | 2 |
+| [/tmp/opencode/gensort_verify_exec.py](b6a96e8e1cb2bed78661.md) | 2 | 0 | 0 |
+| [/tmp/opencode/gmeasure](3a7950396aee7c8a6d1e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/gosolver](ec0a7177f179ee8d70f1.md) | 1 | 0 | 0 |
+| [/tmp/opencode/gpc](d8636762b4b9108705be.md) | 4 | 0 | 0 |
+| [/tmp/opencode/gpc-residual/certify.c](3856bc4b20841e3d299c.md) | 1 | 0 | 0 |
+| [/tmp/opencode/gpccert](1c4733115257487762c8.md) | 4 | 0 | 0 |
+| [/tmp/opencode/gpccore](73a40f8a6e1ead3e06b4.md) | 0 | 0 | 0 |
+| [/tmp/opencode/gpcdu](05a6c0cde21372ce476e.md) | 3 | 0 | 0 |
+| [/tmp/opencode/gpd](6787b5f6ea7ec988a12a.md) | 1 | 0 | 0 |
+| [/tmp/opencode/greedy_frontier.py](6780bec553fd6b379aa1.md) | 6 | 0 | 0 |
+| [/tmp/opencode/greedy_game.py](d61778c1aa9252bde3b2.md) | 2 | 0 | 0 |
+| [/tmp/opencode/gvl](d86580f68b065ebc5d69.md) | 3 | 0 | 0 |
+| [/tmp/opencode/h2](949e8c3e31eb201e0456.md) | 12 | 0 | 0 |
+| [/tmp/opencode/h2abc](e13d8efdb0bcfb34b230.md) | 1 | 2 | 0 |
+| [/tmp/opencode/h2abc/far_search.go](b6594a5cf62db3f8cb2d.md) | 2 | 0 | 0 |
+| [/tmp/opencode/h2abc/verify.py](699b5eac884b0877c4df.md) | 2 | 0 | 2 |
+| [/tmp/opencode/h2full10](e29f3554fcd961de2b05.md) | 3 | 0 | 0 |
+| [/tmp/opencode/h2full12](7f759d4cd5e86ded38d5.md) | 3 | 0 | 0 |
+| [/tmp/opencode/h2lit](9b9660d94059ffcdb985.md) | 9 | 0 | 0 |
+| [/tmp/opencode/h2search](fb7644ef1ea3171d607b.md) | 3 | 0 | 0 |
+| [/tmp/opencode/h2turing](dd9add65b3216b4b08f1.md) | 1 | 0 | 0 |
+| [/tmp/opencode/h3excess](bf59d86cc2b8011153c6.md) | 1 | 1 | 0 |
+| [/tmp/opencode/h3excess/exhaustive_n6.py](2be67292708d7c12253d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/h3excess/n7.go](6c33467efae6d8548616.md) | 1 | 0 | 0 |
+| [/tmp/opencode/h3excess/verify_excess.py](5bd533272e365b671ef0.md) | 1 | 0 | 0 |
+| [/tmp/opencode/h3gpc](92bd0252631ac8543239.md) | 1 | 0 | 0 |
+| [/tmp/opencode/haeupler.pdf](a68d5ad09588a4cced41.md) | 2 | 0 | 0 |
+| [/tmp/opencode/halfbal](769f3fb76a2fd9289f3e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/hwanglin.py](552736d874757b2b8da3.md) | 3 | 0 | 0 |
+| [/tmp/opencode/hybrid_h_compute.py](9392331e2abbc47df6a3.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ibgi_board_result.json](c224c1feb7f2c1190bea.md) | 2 | 0 | 0 |
+| [/tmp/opencode/independent_e88](a7953f59275101dd72f3.md) | 0 | 1 | 0 |
+| [/tmp/opencode/independent_e88/dual_census.py](170ac2e7b13ce9945807.md) | 1 | 0 | 0 |
+| [/tmp/opencode/independent_e88/run54.log](8d3539651a26ea011b01.md) | 1 | 0 | 0 |
+| [/tmp/opencode/independent_l3_matrix.py](b86a1a2562db0ab68227.md) | 2 | 0 | 0 |
+| [/tmp/opencode/indy_defectfree.py](f48472b07f034cbc38e9.md) | 2 | 0 | 0 |
+| [/tmp/opencode/indy_referee_du.py](a3cfcf6d670b53bb0ec1.md) | 2 | 0 | 0 |
+| [/tmp/opencode/indy_t4_verify.py](0c28705ec0790c32112b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/indy_verify_xaug.py](1a849ff95c5cd0b325c0.md) | 2 | 0 | 0 |
+| [/tmp/opencode/insertion_front](44b059c8d69009323c09.md) | 0 | 0 | 0 |
+| [/tmp/opencode/inv](7c6ebbbc8b8b63845bcc.md) | 2 | 1 | 0 |
+| [/tmp/opencode/inv/solver.py](036c719d46a31dc0fc07.md) | 1 | 0 | 0 |
+| [/tmp/opencode/invariant_falsify.py](83f3107f5985b3a813e2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/invverify](d46fc9575ae434d130f8.md) | 0 | 0 | 0 |
+| [/tmp/opencode/issue_301.json](21bf404f1a53c7ee4ba6.md) | 1 | 0 | 0 |
+| [/tmp/opencode/itight](e8315dd9866833f20231.md) | 2 | 0 | 0 |
+| [/tmp/opencode/kwl](c88deb6f7d1179bacfd4.md) | 3 | 0 | 0 |
+| [/tmp/opencode/kwl3](7091deb66c1423b5997b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/labelled_growth](3f57f6ff9e9243716185.md) | 2 | 1 | 0 |
+| [/tmp/opencode/labelled_growth/my_minimax.py](8cb64daafb3d72aa6446.md) | 1 | 0 | 0 |
+| [/tmp/opencode/labelled_growth/perm_check.py](77aa901e5b0bce7359c7.md) | 1 | 0 | 0 |
+| [/tmp/opencode/layered-info-canonical.py](43b369e6b5bfa7e5d171.md) | 1 | 0 | 0 |
+| [/tmp/opencode/lgx](179ff56fb02307dbdc81.md) | 0 | 0 | 0 |
+| [/tmp/opencode/lift](9a890b9841e0ae15c7ae.md) | 1 | 0 | 0 |
+| [/tmp/opencode/lookahead.py](caab7474339310263353.md) | 1 | 0 | 0 |
+| [/tmp/opencode/lp_sort_check.py](fc35cf3861d2e7363fee.md) | 2 | 0 | 0 |
+| [/tmp/opencode/lp_sort_probe.py](74f31adb534a87e922b1.md) | 2 | 0 | 0 |
+| [/tmp/opencode/lsec-const](62fe735c9a85c42ee00b.md) | 3 | 0 | 0 |
+| [/tmp/opencode/lt_n12.py](67664474387895f9dcd7.md) | 1 | 0 | 0 |
+| [/tmp/opencode/lt_strong.cpp](e7b2bfaf52ab4d80ea18.md) | 1 | 0 | 0 |
+| [/tmp/opencode/m2front/engine.py](cb7a598ada6dbf3d6695.md) | 2 | 0 | 0 |
+| [/tmp/opencode/matching-poset-board-result.json](0c2994031699372af51b.md) | 8 | 0 | 0 |
+| [/tmp/opencode/matching-poset-evaluator-post.md](5fb004f03c111c8c66b4.md) | 8 | 0 | 0 |
+| [/tmp/opencode/mcm](b9c636b8133b35866310.md) | 0 | 2 | 0 |
+| [/tmp/opencode/mcm/post_result.json](cd4f6794271fb1bf9073.md) | 2 | 0 | 1 |
+| [/tmp/opencode/merge7](5274acb041121b928622.md) | 9 | 0 | 0 |
+| [/tmp/opencode/merge_cert_probe.py](caa9fa17140bac8bd897.md) | 2 | 0 | 0 |
+| [/tmp/opencode/minimax_s.py](3724619b0ec265039738.md) | 3 | 0 | 0 |
+| [/tmp/opencode/minratio.py](711b13dea6e9fe80223e.md) | 3 | 0 | 0 |
+| [/tmp/opencode/mono_front](89e200d35993915468ff.md) | 1 | 0 | 0 |
+| [/tmp/opencode/mono_scope_](175d4e5b9362a212ae9d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/mult](4569a994375512b3fe7b.md) | 3 | 2 | 0 |
+| [/tmp/opencode/mult/comment301.json](949d57ee611605a80e06.md) | 2 | 0 | 0 |
+| [/tmp/opencode/multiway_probe.py](94ff78c4da55e16b9374.md) | 1 | 0 | 0 |
+| [/tmp/opencode/mydeck](8513cfcda7873ab365b9.md) | 2 | 0 | 0 |
+| [/tmp/opencode/myfront/engine.cpp](061591092d9961832047.md) | 1 | 0 | 0 |
+| [/tmp/opencode/n11](de22e68eb112ede4ba67.md) | 1 | 5 | 0 |
+| [/tmp/opencode/n11/main.go](a0579c41194774dd194a.md) | 2 | 0 | 0 |
+| [/tmp/opencode/n18](e8afade6a1d13ed3ef95.md) | 2 | 0 | 0 |
+| [/tmp/opencode/n7.log](2a9267575075614db5bf.md) | 1 | 0 | 2 |
+| [/tmp/opencode/n8_alltight_tree.txt](4022857047a78a5d02f3.md) | 2 | 0 | 0 |
+| [/tmp/opencode/n8closure](1fd4bfad67ebe05c969b.md) | 3 | 0 | 0 |
+| [/tmp/opencode/n9](f37b32e57ef8f6503eca.md) | 1 | 0 | 0 |
+| [/tmp/opencode/noncross_post.md](433a504a7bf9c1cde183.md) | 2 | 0 | 0 |
+| [/tmp/opencode/nonindex](caf878a5369e2b7487c1.md) | 2 | 0 | 0 |
+| [/tmp/opencode/nontight_force2.py](bec2a5d711de79f16de1.md) | 4 | 0 | 0 |
+| [/tmp/opencode/ordinal_inversion_verify.py](460ccb3d77b8516c76ba.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ordinal_lift_front](46f0a8e66dfa9104f33c.md) | 1 | 3 | 0 |
+| [/tmp/opencode/ordinal_lift_front/n9_census.cpp](e53e742a596a2317f385.md) | 3 | 0 | 0 |
+| [/tmp/opencode/ordinal_lift_front/verify_witness.py](c2ea6b0954cea798edca.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ordsum_depthbalance.py](8ed8a8901729c96579ab.md) | 2 | 0 | 0 |
+| [/tmp/opencode/p2halving](366800ac82b346d64b83.md) | 3 | 0 | 0 |
+| [/tmp/opencode/p2hostscratch](1f55ec6b68c7187ccb0b.md) | 11 | 0 | 0 |
+| [/tmp/opencode/pairfreq_check.py](0ffed2b9f7ce9780076d.md) | 3 | 0 | 0 |
+| [/tmp/opencode/pairfreq_post.txt](85fec591ab2158505e1c.md) | 2 | 0 | 0 |
+| [/tmp/opencode/pendant_n12b.py](e3663e7677ac58c946ab.md) | 1 | 0 | 0 |
+| [/tmp/opencode/pendant_n12c.py](e90af310b32696d18961.md) | 1 | 0 | 0 |
+| [/tmp/opencode/perm_probe.py](faee26ed1cbf6f2b7610.md) | 1 | 0 | 0 |
+| [/tmp/opencode/perpath](4270d5cf6c4bf1c01064.md) | 1 | 0 | 0 |
+| [/tmp/opencode/perpath_theory.md](a4a705714294ddf7a74b.md) | 14 | 0 | 0 |
+| [/tmp/opencode/persist](ecd34573d482b0d3679c.md) | 2 | 1 | 0 |
+| [/tmp/opencode/persist/solver.go](abc1f12046fb6db1f99b.md) | 1 | 0 | 0 |
+| [/tmp/opencode/post.md](f3f75a768d496547990a.md) | 3 | 0 | 1 |
+| [/tmp/opencode/post_gap.json](1827581ee49b1539bbde.md) | 2 | 0 | 0 |
+| [/tmp/opencode/post_haeupler](7d23a37f8d7da15a4c2a.md) | 2 | 0 | 0 |
+| [/tmp/opencode/post_invdec](8a8e48107e98b0360eae.md) | 13 | 0 | 0 |
+| [/tmp/opencode/post_invdec.md](7351309b25e0540b08b8.md) | 1 | 0 | 0 |
+| [/tmp/opencode/post_result.json](99136505e889acddc475.md) | 28 | 0 | 1 |
+| [/tmp/opencode/prime](34f6d41a7d1f8fc8fc9e.md) | 0 | 0 | 0 |
+| [/tmp/opencode/prime_excess_gap](f888bcc0f7e649ae2546.md) | 3 | 0 | 0 |
+| [/tmp/opencode/primeh2](ad528a2588f3712286e1.md) | 3 | 0 | 0 |
+| [/tmp/opencode/primeh3](88edb0dabd676a5617a9.md) | 2 | 0 | 0 |
+| [/tmp/opencode/primeunb](1158ae16c4b1883b2c20.md) | 4 | 0 | 0 |
+| [/tmp/opencode/prompt_compact_f_statistic.md](4818856146a21a97f792.md) | 1 | 0 | 0 |
+| [/tmp/opencode/prompt_run_decomp.md](122244fa2ba0475e4dd6.md) | 2 | 0 | 0 |
+| [/tmp/opencode/pspace_completeness_report.md](66872a086a75caa94feb.md) | 19 | 0 | 0 |
+| [/tmp/opencode/pylibs](5c417b2dc841fb83252d.md) | 2 | 0 | 0 |
+| [/tmp/opencode/q1](b8f13b3c30f34e98bed3.md) | 1 | 0 | 0 |
+| [/tmp/opencode/q2](da58a2404e3484af3786.md) | 2 | 0 | 0 |
+| [/tmp/opencode/qbf_experiment.py](146469961756acbd3e5e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/querylb_probe.py](2bf20c46115aaf2d06a3.md) | 1 | 0 | 0 |
+| [/tmp/opencode/r3mm](0171aa8cb1fd598227e7.md) | 1 | 1 | 0 |
+| [/tmp/opencode/r7_independent_verify.py](beccd56c9f1d5e09bd99.md) | 1 | 0 | 0 |
+| [/tmp/opencode/r7_restricted_consistency.cpp](f580825cc664226a5a0c.md) | 1 | 0 | 0 |
+| [/tmp/opencode/rand_front_board.md](d6949aadc0ee852d59c1.md) | 2 | 0 | 0 |
+| [/tmp/opencode/randcheck11.out](bbd3def62d6a7c051f61.md) | 2 | 0 | 0 |
+| [/tmp/opencode/rank-falsifier-independent.py](b013cf7df6eef97595bb.md) | 1 | 0 | 0 |
+| [/tmp/opencode/rank-window-followup.md](4f1c3d9dd29c54974736.md) | 1 | 0 | 0 |
+| [/tmp/opencode/rbdepth](816f8d5d4642500d122f.md) | 2 | 0 | 0 |
+| [/tmp/opencode/rbdepth_verify.py](bfc996dcf2ab8d5444c5.md) | 3 | 0 | 0 |
+| [/tmp/opencode/reach.py](1fa06ae9ebdd77dc9cf3.md) | 4 | 0 | 0 |
+| [/tmp/opencode/reach6.py](d09dbfc30757b8265ade.md) | 2 | 0 | 0 |
+| [/tmp/opencode/reach_verify.py](4ca9c122489479948640.md) | 1 | 0 | 0 |
+| [/tmp/opencode/reach_verify2.py](d6f39278f85ef3f5f225.md) | 1 | 0 | 0 |
+| [/tmp/opencode/reachdisc](55734e4efa8dc7d45576.md) | 10 | 0 | 0 |
+| [/tmp/opencode/reccert](5bb3c82b8715771ff5c4.md) | 3 | 0 | 0 |
+| [/tmp/opencode/recovery_board.txt](868c75496353797beb6f.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ref](8f06e18eb8be094518b2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ref_certifiable_band.py](88cb0a57d847f2a87a4b.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ref_chain_extremality.py](359159e549d76e7a3923.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ref_defect_necessity.py](0d475008350bdc273fe4.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ref_du_verify.py](d3e7b5b910ff577eaca2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ref_efsplit_20261121.py](b245d672d3aa77a83bcb.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ref_evaluator_barrier2.py](573adfdadd57cb40da69.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ref_gap_solver.go](e656f828e0a8b9143f96.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ref_invariant.py](fce2f4ab0911d6586b1b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ref_minimax.py](b20456d2121f923de647.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ref_mono_check.py](0373ed1a4c8e7761f141.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ref_tight_insertion_20261121.py](eb158641779bfee9873c.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ref_ts_barrier.py](d2eb3f3adf56e975b641.md) | 2 | 0 | 0 |
+| [/tmp/opencode/ref_two_fronts_20261121.py](97c6ee32245749d1df3c.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ref_two_new_results.py](332efb98a2938ed79f8c.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ref_zeroone.py](f568b8230c592dab78df.md) | 3 | 0 | 0 |
+| [/tmp/opencode/referee](084111f72ba9e3714fd6.md) | 3 | 0 | 0 |
+| [/tmp/opencode/referee2_20261122.py](bdf150bec3e944447b59.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee3_20261122.md](6a493454bddfe4bf2136.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee4_20261122.py](7ee49ad875005fce969e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_](64bb95a523d1233189e3.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_20261122.py](74a62cffa446790f9ef0.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_adsuff.py](4be103b4569e47ab5703.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_antichain_infofj.py](8a37ad9b89c346d4fc82.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_balfj_20261121.py](b26bd5a625a444b10128.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_delta.py](05f24b352abaa184a187.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_r7_indep.cpp](d013dbab1785b7905b2c.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_tight_split.py](dc27932050bb20a65b0b.md) | 1 | 0 | 0 |
+| [/tmp/opencode/referee_verify.py](a5a0bcf1dbccf1af1575.md) | 1 | 0 | 0 |
+| [/tmp/opencode/reflection](6dadbdcccc6b1999e1ed.md) | 3 | 0 | 0 |
+| [/tmp/opencode/report.md](b517ac145ecf7b7a0394.md) | 28 | 0 | 1 |
+| [/tmp/opencode/rfib](f258ff6434015c911cac.md) | 3 | 0 | 0 |
+| [/tmp/opencode/rootcomp_probe.py](0bdd0f27b35cd54d0d2e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/rpdg_task](6f978104df7d68cfb5de.md) | 3 | 0 | 0 |
+| [/tmp/opencode/run_decomp_check.py](19563baa246dba322fa2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/run_decomp_post_body.txt](e3327dd468065b3ae36f.md) | 1 | 0 | 0 |
+| [/tmp/opencode/rval_eval.py](5545d1d569e2764a807f.md) | 1 | 0 | 0 |
+| [/tmp/opencode/rval_ladder_finding.md](06defc323e3f053c71d8.md) | 2 | 0 | 0 |
+| [/tmp/opencode/s23_backward_wall.py](0008e1207a8dcce0315a.md) | 2 | 0 | 0 |
+| [/tmp/opencode/s23_report.md](7aef3e7423e7eeb6b1d6.md) | 1 | 0 | 0 |
+| [/tmp/opencode/sat_adm](d5c280d49544d4896ff4.md) | 2 | 0 | 0 |
+| [/tmp/opencode/satfront](6682360ab7b5c15261dc.md) | 2 | 0 | 0 |
+| [/tmp/opencode/sched-rate](5362e5ff7ad3eeb8e9ca.md) | 0 | 1 | 0 |
+| [/tmp/opencode/sched-rate/verify_exponent.py](d85537293ddb98febf75.md) | 1 | 0 | 0 |
+| [/tmp/opencode/search_fib_counter2.go](1a688dcfd4dd98248db8.md) | 1 | 0 | 0 |
+| [/tmp/opencode/seconds](16282581340a15bef0c6.md) | 1 | 3 | 0 |
+| [/tmp/opencode/seconds/board_post.txt](562bda78cbd83355ffda.md) | 2 | 0 | 0 |
+| [/tmp/opencode/seconds/forced.py](00a61a8bd6e03f3b6286.md) | 1 | 0 | 0 |
+| [/tmp/opencode/sergeev-ceiling](2c289b98995a077624be.md) | 1 | 0 | 0 |
+| [/tmp/opencode/sergeev-tr20-096.txt](54ca07e9218995a338bd.md) | 2 | 0 | 0 |
+| [/tmp/opencode/sergeev.txt](91a916a946c77fafb6bd.md) | 3 | 0 | 0 |
+| [/tmp/opencode/sergeev_band_math3.py](29ce206d5fbb85e363ad.md) | 1 | 0 | 0 |
+| [/tmp/opencode/sergeev_effective_bound.md](faa88fbcbe0f864e7357.md) | 1 | 0 | 0 |
+| [/tmp/opencode/sergeev_nonuniv](4ca1094b5438fcd644af.md) | 1 | 1 | 0 |
+| [/tmp/opencode/sidonfront/q19_mod.log](b20284db36a13aaec035.md) | 2 | 0 | 0 |
+| [/tmp/opencode/sidonfront/sidon.go](ed63a9493e0eabe32ef6.md) | 2 | 0 | 0 |
+| [/tmp/opencode/sidonref](255d4ff28fc6c00ff34e.md) | 3 | 2 | 0 |
+| [/tmp/opencode/sidonref/sidon_verify.py](279c0f21547a72141373.md) | 2 | 0 | 0 |
+| [/tmp/opencode/sigma2/check.py](0d27a62ff2136ed4d7ec.md) | 1 | 0 | 0 |
+| [/tmp/opencode/singdel](8a315126acb48e562bc1.md) | 1 | 0 | 0 |
+| [/tmp/opencode/single-bit-post-result.json](f810f342314fe74bccdc.md) | 2 | 0 | 0 |
+| [/tmp/opencode/single-bit-post.md](7196de7a8ecac787d85e.md) | 2 | 0 | 0 |
+| [/tmp/opencode/soring301](00458e5b3dcb7d5c9176.md) | 0 | 2 | 0 |
+| [/tmp/opencode/soring301/repo](d9daec65427081a2500a.md) | 1 | 0 | 0 |
+| [/tmp/opencode/soringp1-JTsW4AnxTLzN18IBQibXea-fervor](42968b058e8e473edaa1.md) | 2 | 0 | 0 |
+| [/tmp/opencode/soringp1-spec-recon-JTsW4AnxTLzN18IBQibXea/SoringP1-formal-spec-reconciliation-plan.md](9d88144d74d4ba090b72.md) | 1 | 0 | 0 |
+| [/tmp/opencode/space-reduction-301-report.md](67b4023f1daf7fcec5e8.md) | 2 | 0 | 0 |
+| [/tmp/opencode/sparse_g.py](7e9b72f930b7850703f7.md) | 3 | 0 | 0 |
+| [/tmp/opencode/spectral_report.md](5ea78edcb6f97f269b30.md) | 1 | 0 | 0 |
+| [/tmp/opencode/splitmerge/L_262144.npy](add39c28c09431f9c6a3.md) | 2 | 0 | 0 |
+| [/tmp/opencode/splitmerge/front_coefficient.py](ba894414b0165707c034.md) | 2 | 0 | 0 |
+| [/tmp/opencode/splitmerge/k18](959fbfff8915b580148b.md) | 0 | 3 | 0 |
+| [/tmp/opencode/splitmerge/k18/ckpt_k19.bin](77333790f94553f7fe2a.md) | 1 | 0 | 0 |
+| [/tmp/opencode/splitmerge/k18/lf.bin](5d698b209cb67392701b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/splitmerge/k20/ckpt_k20.bin](ec55edc75773a9d11d2a.md) | 2 | 0 | 0 |
+| [/tmp/opencode/starve](8e23f583594abe081901.md) | 0 | 2 | 0 |
+| [/tmp/opencode/starve/scan.py](58f6281eb62116a7ebe7.md) | 2 | 0 | 0 |
+| [/tmp/opencode/struct](c011f0d62466e4105e6b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/structural_lookahead.py](02ba318c807a8808afb6.md) | 1 | 0 | 0 |
+| [/tmp/opencode/surplus](d81f95984860351da8d2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/symq](74047e0945892369079f.md) | 1 | 0 | 0 |
+| [/tmp/opencode/t3_independent_audit.py](6b83fabca4ede56680f3.md) | 1 | 0 | 0 |
+| [/tmp/opencode/t4_extension_set_audit.py](babae0fe2ef17ffb9fa1.md) | 1 | 0 | 0 |
+| [/tmp/opencode/t4_n11_light.py](feea5348cb740723b8f2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/t4_n12_tree_audit.py](de1e6acfab05c110949d.md) | 1 | 0 | 0 |
+| [/tmp/opencode/t5_search.py](7c8dbecd60fd48baad75.md) | 1 | 0 | 0 |
+| [/tmp/opencode/t5_threshold.py](50abfeaf5018588bf8f8.md) | 4 | 0 | 0 |
+| [/tmp/opencode/t5work](8d900405445a7ea23ac1.md) | 5 | 0 | 0 |
+| [/tmp/opencode/tieinv](e284ad46991461b368c2.md) | 2 | 2 | 0 |
+| [/tmp/opencode/tieinv/post_result.json](73c80784a9d0ed9266f3.md) | 2 | 0 | 1 |
+| [/tmp/opencode/tight_framed_cert_n5.json](41bac8abadc8fb3f67bf.md) | 1 | 0 | 0 |
+| [/tmp/opencode/tight_n_check.py](62b421d474f0968079a0.md) | 1 | 0 | 0 |
+| [/tmp/opencode/tight_n_post_result.json](e4ae6780b8fff47daabc.md) | 2 | 0 | 0 |
+| [/tmp/opencode/tightinv](10a6deecfdeef7f1bbbd.md) | 3 | 0 | 0 |
+| [/tmp/opencode/tightness/attack.md](afdcc4b64845f2c736d7.md) | 1 | 0 | 0 |
+| [/tmp/opencode/time-exp-adv](eaf4e2ec93fe28d76cde.md) | 1 | 0 | 0 |
+| [/tmp/opencode/tr20-096.txt](4bb118e2c60565cb3994.md) | 1 | 0 | 0 |
+| [/tmp/opencode/ts_barrier_probe.py](49e7c3156d2f81ae5d6b.md) | 1 | 0 | 0 |
+| [/tmp/opencode/twowl](282ac57822b7c5ab4ecf.md) | 1 | 4 | 0 |
+| [/tmp/opencode/twowl/board_post.md](d4c1dc65e0c68331a682.md) | 2 | 0 | 0 |
+| [/tmp/opencode/twowl/vals8.json](bb39c8b603657e3416fb.md) | 1 | 0 | 0 |
+| [/tmp/opencode/twowl/vals9.json](da1306890ff0bb91d1e7.md) | 1 | 0 | 0 |
+| [/tmp/opencode/uniqueness_minimax_check.py](e611ba93590dc57f0931.md) | 1 | 0 | 0 |
+| [/tmp/opencode/upineq](05263c300f8769155070.md) | 4 | 2 | 0 |
+| [/tmp/opencode/upineq/fmin.c](8c85d442bfdd0265ae05.md) | 2 | 0 | 0 |
+| [/tmp/opencode/upineq/verify_subset.py](44210b65ebaca446744d.md) | 2 | 0 | 0 |
+| [/tmp/opencode/validate_lt.py](300c00988e629f1d9512.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify](0467ef8556b326fd4957.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify-int/verify_interval_reversal.py](a9d994950b51d561cca9.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify-n7-sibling-budgets.py](189c1e54dd6d5a59c650.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify2_20261122.py](7d1c01c16db2d32908a5.md) | 4 | 0 | 0 |
+| [/tmp/opencode/verify_B_20261122.py](b8f0bae6812dcad33ee9.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_L_reports_exec.py](35a27b5230999df0a393.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_abc2.py](339cc8011022d25d0e62.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_adv_cert.py](f17ce1207e05a0f9c9a3.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify_binadd2_20261122.py](3be7ad247f9e313ea7ce.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_binary_minimax.py](17a5aa5949d6e8d27c9a.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify_bqp_report.py](02a47ca24fad057b2ac2.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify_class_stable_exec.py](659ba62b4285d72a319a.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_core_census.py](e1bed6a498e4e6b3a513.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_dbgap.py](d5c59324c601b05d73da.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_depth_alln.py](a83066b8e2ac8cdaeffa.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_disj.py](33202b4381a65edf76e6.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_du2.py](17b7410218ebd4a537f9.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_ecovers_basis.py](158dbb924986860d76dd.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_exactframed_exec.py](49a50f2ebb0b2b4a2282.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_fdrop.py](ffa7f19e9b8ccba735bc.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_fred_n5.py](bad0d382b1e819eb01fa.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify_front.py](234b34034ea28b065fde.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify_global_excess_exec.py](e3add8ef4f194fd72a63.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_greedy_vwidth.py](dd86aae18729f54ea239.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_jr_count.py](5b9bb94f172820389103.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_labelled_exec.py](3a3ecc1240524a45e864.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_labelled_growth_exec.py](ec36a21f949d5d7a00f5.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_lift/verify.py](5d5ea13ec251435af384.md) | 1 | 0 | 2 |
+| [/tmp/opencode/verify_lower.py](4693bc8b82958ef98996.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify_lower_bound.py](f486b152c332f7f4e96b.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_ltree_exec.py](a4e4b918987a56074fa5.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_n5.py](7cea6edf4dd321a96c07.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_reachable.cpp](213b642e78ecb240f6fe.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify_reversal_counterexample_20261119.py](e6ed328988448ddd6678.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_satfront](41671c586438a8274f99.md) | 0 | 0 | 0 |
+| [/tmp/opencode/verify_selection_composition.py](c59a62b9db3415634e2a.md) | 3 | 0 | 0 |
+| [/tmp/opencode/verify_sym.py](ef0ba7bfcf9397d2db89.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_three_reports_1518.py](f7a9d5cbf3ce78389493.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_two_fronts_20261119.py](a8ecb9773b2ec4066f01.md) | 2 | 0 | 0 |
+| [/tmp/opencode/verify_two_reports_1119.py](22c8792639699d81a09e.md) | 1 | 0 | 0 |
+| [/tmp/opencode/verify_witness30.py](433e6fafc394750d610c.md) | 1 | 0 | 0 |
+| [/tmp/opencode/vstarve/census.py](a0fa3f84467d39083392.md) | 1 | 0 | 0 |
+| [/tmp/opencode/vstarve/grid.py](f999806870048816b9f6.md) | 1 | 0 | 0 |
+| [/tmp/opencode/vstarve/validate_canon.py](6710ff674885abfcacec.md) | 1 | 0 | 0 |
+| [/tmp/opencode/vstarve/validate_labeled.py](58caf7cb8a60717eaca4.md) | 1 | 0 | 0 |
+| [/tmp/opencode/vstarve/vstarve.py](013a028751a496fd59f8.md) | 1 | 0 | 0 |
+| [/tmp/opencode/w2_exact.py](c1a818ffad579bc70d43.md) | 2 | 0 | 0 |
+| [/tmp/opencode/w6.py](bf9cea7e9ba468d650d8.md) | 3 | 0 | 0 |
+| [/tmp/opencode/w_t_check.py](e118e9cf85fc91e0a9ad.md) | 4 | 0 | 0 |
+| [/tmp/opencode/witcheck](955ebe4d6f7daa4d2efb.md) | 1 | 0 | 0 |
+| [/tmp/opencode/witness](ad08e543d5287fd8ae0b.md) | 2 | 0 | 0 |
+| [/tmp/opencode/wlcount](6ee12b7c14c739eb4fbd.md) | 1 | 3 | 0 |
+| [/tmp/opencode/wlcount/board_post.md](f651f3ca0b63a7f7d146.md) | 2 | 0 | 0 |
+| [/tmp/opencode/wlcount/pb_both.json](580dc3aeb6abd2ad7ca3.md) | 3 | 0 | 0 |
+| [/tmp/opencode/wlcount/witness.py](1f67e39d5bbb2430d55f.md) | 3 | 0 | 0 |
+| [/tmp/opencode/work](0b163289d031574fc237.md) | 14 | 1 | 0 |
+| [/tmp/opencode/xaug](64e526026aefb8301567.md) | 1 | 0 | 0 |
+| [/tmp/opencode/xec_fib.py](99fc4ddb75fd5e0eff7f.md) | 1 | 0 | 0 |
+| [/tmp/opencode/xec_fibthr.py](9f9f5c4c204e1e31071d.md) | 2 | 0 | 0 |
+| [/tmp/opencode/xec_greedy.py](d1b8f86c3aaacc3c4d21.md) | 1 | 0 | 0 |
+| [/tmp/opencode/xec_l1.py](00a10ab36378f7e7fd5a.md) | 1 | 0 | 0 |
+| [/tmp/opencode/xec_q8.py](62e2b72f57fbb9733631.md) | 1 | 0 | 0 |
+| [/tmp/opencode/xec_verify_both.py](0302a5655ee1d32cf4a2.md) | 1 | 0 | 0 |
+| [/tmp/opencode/zeroone_fooling_lab.py](49477e9c7ee7640e73b8.md) | 1 | 0 | 0 |
+| [/tmp/scratchpad](70b197e71913b838abaa.md) | 4 | 1 | 0 |
+| [/tmp/soring-gap-poset-full-minimax.py](813feb39fbae7436e028.md) | 1 | 0 | 0 |
+| [/tmp/soring-gap-poset-plus-one8.py](ba5747baf841033c191f.md) | 1 | 0 | 0 |
+| [/tmp/soring-gap-poset-second-spectrum.py](3fe211c3a4461609a76d.md) | 1 | 0 | 0 |
+| [/tmp/soring-gap-poset-split.py](800e3c5be2636bb7ba4e.md) | 1 | 0 | 0 |
+| [/tmp/soring-isopair-counterexample.py](99a0f3a182408dcd255a.md) | 1 | 0 | 0 |
+| [/tmp/soring-singleton-extension-enumerate5.py](433eeed19db21c9ec44e.md) | 1 | 0 | 0 |
+| [/tmp/soring-x-y-minimax-check.py](c6c56b363b45f3389ad9.md) | 1 | 0 | 0 |
+| [/tmp/soring-xy-budget8.py](006831cb75f7b33532b0.md) | 1 | 0 | 0 |
+| [/tmp/soring-xy-budget9.py](d2567f4952c04bf48f42.md) | 1 | 0 | 0 |
+| [/tmp/soring301_probe_w2free.py](65a0027aed68cf1d8f17.md) | 1 | 0 | 0 |
+| [/tmp/t10](f0e9cbb47a0a736cfa7f.md) | 3 | 9 | 0 |
+| [/tmp/t10-census232b.log](fc950f65671a04d7833f.md) | 6 | 0 | 0 |
+| [/tmp/t10/chk200_10](73068d654c4ca1323d7b.md) | 1 | 0 | 0 |
+| [/tmp/t10/drive232b.sh](04634f06b3d129d955af.md) | 5 | 0 | 0 |
+| [/tmp/t10/lv143](a89aae319d46b6aebc42.md) | 2 | 1 | 0 |
+| [/tmp/t10/lv160](4a9155f9076e815c4567.md) | 1 | 0 | 0 |
+| [/tmp/t10/lv200](45ddb77b49ca8b29095d.md) | 3 | 0 | 0 |
+| [/tmp/t10/lv232](1654228ccda735cc0042.md) | 2 | 0 | 0 |
+| [/tmp/t10/lv232b](78549c7ead29a271cda9.md) | 4 | 0 | 0 |
+| [/tmp/t10/recheck232.py](f3686722d4c9c62ada88.md) | 1 | 0 | 0 |
+| [/tmp/t10/verify232.py](1fafa6649f9470d5b3ef.md) | 1 | 0 | 0 |
+| [/tmp/t10/w12_boundary.py](7a0db3356abc5103d149.md) | 1 | 0 | 0 |
+| [/tmp/t9-census-143.log](5eedbda87e78266d134c.md) | 3 | 0 | 0 |
+| [/tmp/t9-census-88.log](decf7f236ca69016c11e.md) | 2 | 0 | 0 |
+| [/tmp/t9-check-143.log](c70f44503463673383c7.md) | 2 | 0 | 0 |
+| [/tmp/t9-recheck143.log](278bdcf78c45cdf194dd.md) | 2 | 0 | 0 |
+| [/tmp/t9_check_result.json](196ef58e37c643cf0cb3.md) | 2 | 0 | 0 |
+| [/tmp/test_lk.py](115db92302b0c512f06c.md) | 1 | 0 | 0 |
+| [/tmp/tr20-096.pdf](f54ddeaf2119c869f198.md) | 1 | 0 | 0 |

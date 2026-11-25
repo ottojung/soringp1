@@ -125,7 +125,38 @@ for source,title,summary in GUIDES:
 for p in sorted((ROOT/'docs').glob('*.md'))+sorted((ROOT/'notes').glob('*.md')):
     source=str(p.relative_to(ROOT))
     guide_pages.setdefault(source,'guides/'+p.parent.name+'-'+p.stem+'.html')
+def evidence_route(kind,p,title):
+    key=hashlib.sha256((kind+'|'+p+'|'+title).encode()).hexdigest()[:20]
+    return f'evidence/{kind}/{key}.html'
+
+def file_entries():
+    for row in DATA['sources']:
+        yield dict(kind='source',title=row['name'],summary='; '.join(row['origins'][:3]),p=row['path'],extra=' '.join(row['origins']),origins=row['origins'])
+    for row in DATA['sessions']:
+        yield dict(kind='session',title=row['workspace']+' · '+row['id'],summary=f"{row['outputs']} historical assistant report outputs",p=row['path'],related=row['fronts'])
+    for row in DATA['commissions']:
+        yield dict(kind='commission',title=compact(row['title'],150),summary='; '.join(row['workspaces'][:3]),p=row['path'],related=row['fronts'],origins=row['workspaces'])
+    for row in DATA['mixed_reports']:
+        yield dict(kind='mixed',title=compact(row['title'],150),summary='; '.join(row['workspaces'][:3]),p=row['path'],related=row['fronts'],origins=row['workspaces'])
+    for row in DATA['github']:
+        yield dict(kind='github',title=row['kind']+' #'+row['id']+' · '+row['title'],summary=f"{row['comments']} discussion entries",p=row['path'])
+    for row in DATA['commits']:
+        yield dict(kind='patch',title=row['subject'] or row['id'],summary=row['id'],p=row['path'])
+    for row in DATA['workspaces']:
+        yield dict(kind='workspace',title=row['workspace'],summary=f"{row['files']} archived source entries · {row['head']}",p=row['manifest'],related=row['fronts'])
+
+FILE_ENTRIES=list(file_entries())
 source_pages={**guide_pages,**{'recovery/'+f['path']:front_pages[f['id']] for f in fronts.values()}}
+for entry in FILE_ENTRIES:
+    source_pages.setdefault('recovery/'+entry['p'],evidence_route(entry['kind'],entry['p'],entry['title']))
+for file in ('scratch-provenance.json','historical-labels.json'):
+    if (ARCH/'followup'/file).is_file():
+        for row in json.loads((ARCH/'followup'/file).read_text()):
+            source_pages['recovery/followup/'+row['markdown']]=row['page']
+
+def evidence_link(page,source,label):
+    return link(page,source_pages[source],label) if source in source_pages else external(repo_link(source),label)
+
 anchor_cache={}
 def known_anchor(source,fragment):
     if source not in source_pages:return False
@@ -296,7 +327,7 @@ def build():
         for key,name in [('sessions','Agent reports'),('workspaces','Workspace inventories'),('commissions','Task commissions'),('mixed_reports','Cross-project reports')]:
             values=f.get(key,[])
             if values:
-                side+='<details><summary>'+name+f' ({len(values)})</summary><ul>'+''.join('<li>'+external(repo_link('recovery/'+v),Path(v).name)+'</li>' for v in values)+'</ul></details>'
+                side+='<details><summary>'+name+f' ({len(values)})</summary><ul>'+''.join('<li>'+evidence_link(path,'recovery/'+v,Path(v).name)+'</li>' for v in values)+'</ul></details>'
         intro='<div class="result-meta"><span class="pill">'+esc(f['status'])+'</span><span>'+esc(topic)+'</span></div><section class="front-summary"><h2>Research question</h2><p>'+esc(f['question'])+'</p>'
         if f.get('reported_excerpt'):
             intro+='<h2>Reported outcome <span class="pill warm">Unverified excerpt</span></h2><p>'+esc(f['reported_excerpt'])+'</p>'
@@ -328,19 +359,47 @@ def build():
             article(path,title,'recovery/'+source,text,side,intro,[('browse/board/001.html','Board messages')],anchor='#L'+str(b['line']))
             index.add({'kind':'board','title':title,'summary':compact(b.get('verdict') or b['title'],330),'url':path,'source':repo_link('recovery/'+source,'#L'+str(b['line'])),'topics':ts,'date':b['date'],'status':'review' if b.get('verdict') else ''},text)
     print('Indexing other evidence…',flush=True)
-    def add_file(kind,title,summary,p,related=(),status='',date='',extra=''):
+    def add_file(kind,title,summary,p,related=(),status='',date='',extra='',origins=()):
         source='recovery/'+p
         ts=sorted({fronts[f]['topic'] for f in related if f in fronts})
+        route=evidence_route(kind,p,title)
         url=repo_link(source)
+        size=(ROOT/source).stat().st_size
         body='' if p.endswith('.gz') else read(source)
-        index.add({'kind':kind,'title':title,'summary':compact(summary,400),'url':url,'source':url,'topics':ts,'status':status,'date':date},extra+' '+body)
-    for row in DATA['sources']:add_file('source',row['name'],'; '.join(row['origins'][:3]),row['path'],extra=' '.join(row['origins']))
-    for row in DATA['sessions']:add_file('session',row['workspace']+' · '+row['id'],f"{row['outputs']} historical assistant report outputs",row['path'],row['fronts'])
-    for row in DATA['commissions']:add_file('commission',compact(row['title'],150),'; '.join(row['workspaces'][:3]),row['path'],row['fronts'])
-    for row in DATA['mixed_reports']:add_file('mixed',compact(row['title'],150),'; '.join(row['workspaces'][:3]),row['path'],row['fronts'])
-    for row in DATA['github']:add_file('github',row['kind']+' #'+row['id']+' · '+row['title'],f"{row['comments']} discussion entries",row['path'])
-    for row in DATA['commits']:add_file('patch',row['subject'] or row['id'],row['id'],row['path'])
-    for row in DATA['workspaces']:add_file('workspace',row['workspace'],f"{row['files']} archived source entries · {row['head']}",row['manifest'],row['fronts'])
+        if '\x00' in body:body=''
+        side=''
+        if origins:
+            side+='<details open><summary>Original locations ('+str(len(origins))+')</summary><ul>'+''.join('<li>'+esc(v)+'</li>' for v in origins)+'</ul></details>'
+        if related:
+            side+='<h3>Related ledger fronts</h3><ul>'+''.join('<li>'+link(route,front_pages[f],f)+'</li>' for f in dict.fromkeys(related) if f in fronts)+'</ul>'
+        parents=[('browse/'+kind+'/001.html',KINDS[kind][0])]
+        intro='<div class="result-meta"><span class="pill">'+esc(KINDS[kind][0])+'</span><span>'+f'{size:,} source bytes'+'</span></div><div class="note">Original archival evidence. Historical instructions and experimental claims are not live tasks or certified results.</div>'
+        if size>1048576 and body:
+            intro+='<p class="muted">Text preview is limited to the first 1 MiB; the full original is available on GitHub.</p>'
+        if kind in ('session','commission','mixed','github') or (kind=='source' and p.endswith('.md')):
+            article(route,title,source,body,side,intro,parents)
+        else:
+            main=crumb(route,title,parents)+'<div class="article-layout"><article class="article"><h1>'+esc(title)+'</h1><div class="article-actions">'+external(url,'Original source')+' · <a href="#site-related-evidence">Jump to related evidence</a></div>'+intro
+            if kind=='workspace':
+                manifest=json.loads((ROOT/source).read_text())
+                main+='<h2>Recovered workspace</h2><p><strong>Original path:</strong> '+esc(manifest.get('source',''))+'</p><p><strong>HEAD:</strong> <code>'+esc(manifest.get('head',''))+'</code></p>'
+                files=manifest.get('files',{})
+                if files:
+                    main+='<h2>Recovered changed and additional files ('+str(len(files))+')</h2><div class="table-wrap"><table><thead><tr><th scope="col">Original filename</th><th scope="col">Archived source</th></tr></thead><tbody>'
+                    for original,obj in sorted(files.items()):
+                        target='recovery/workspaces/objects/'+obj
+                        main+='<tr><td><code>'+esc(original)+'</code></td><td>'+evidence_link(route,target,'Read file')+'</td></tr>'
+                    main+='</tbody></table></div>'
+                else:main+='<p>No changed/additional file entries in this inventory.</p>'
+                main+='<details><summary>Full manifest, references and omissions</summary><pre><code>'+esc(body)+'</code></pre></details>'
+            elif body:
+                main+='<h2>Source text</h2><pre><code>'+esc(body)+'</code></pre>'
+            else:
+                main+='<h2>Original artifact</h2><p>This compressed or nontext artifact is indexed by its original filename and metadata. Open the original file on GitHub to inspect or download it.</p>'
+            main+='</article><aside id="site-related-evidence" class="sidebar" aria-label="Related evidence"><h2>Source &amp; navigation</h2>'+source_button(source)+side+'</aside></div>'
+            page(route,title,main,compact(summary,160))
+        index.add({'kind':kind,'title':title,'summary':compact(summary,400),'url':route,'source':url,'topics':ts,'status':status,'date':date},extra+' '+body)
+    for entry in FILE_ENTRIES:add_file(**entry)
     for kind,file in [('scratch','scratch-provenance.json'),('label','historical-labels.json')]:
         target=ARCH/'followup'/file
         if not target.is_file():continue

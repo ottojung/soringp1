@@ -79,6 +79,7 @@ def markdown(source, resolve, omit_h1=False):
                 continue
             level = max(2, min(4, level))
             key = slug(label)
+            if key in ('main','site-related-evidence'):key='section-'+key
             seen[key] = seen.get(key, 0) + 1
             anchor = key if seen[key] == 1 else key+'-'+str(seen[key])
             if level <= 3:

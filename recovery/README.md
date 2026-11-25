@@ -41,7 +41,8 @@ The [historical label index](followup/historical-labels/README.md) links
 240 explicitly named report labels that are not exact IDs in the final
 ledger. They may be aliases, earlier directions or one-off checks, not
 necessarily distinct fronts. The [scratch reference index](followup/scratch-provenance/README.md)
-links surviving report evidence for 545 of 570 missing original paths.
+links exact report references for 545 of 570 missing original paths,
+and evidence for 556 when possible descendant-directory references are included.
 
 The [follow-up audit](followup/README.md) records the broader filesystem,
 Git-object, ledger and session checks, including any remaining omissions.

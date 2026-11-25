@@ -53,16 +53,23 @@ def build(check=False):
     labels=defaultdict(dict)
     board_files=defaultdict(list)
     errors=[]
-    def scan(path,text,kind,title,related=(),line=1,date=''):
+    def scan(path,text,kind,title,related=(),line=1,date='',restrict=None):
         related=sorted(set(f for f in related if f in ids))
         topics=sorted({ids[f]['topic'] for f in related})
         for m in PATH.finditer(text):
             p=m.group().rstrip('.,')
-            if p not in targets:continue
+            matched=[]
+            if p in targets:matched.append((p,'exact'))
+            for parent in Path(p).parents:
+                q=str(parent)
+                if q in targets:matched.append((q,'descendant'))
+            if restrict is not None:matched=[(q,relation) for q,relation in matched if q in restrict]
+            if not matched:continue
             ln=line+text.count('\n',0,m.start())
-            k=(kind,path,line)
-            if k not in references[p]:
-                references[p][k]={'kind':kind,'path':path,'line':ln,'title':short(title,180),'date':date,'fronts':related,'topics':topics}
+            for target,relation in matched:
+                k=(kind,path,line,relation)
+                if k not in references[target]:
+                    references[target][k]={'kind':kind,'path':path,'line':ln,'title':short(title,180),'date':date,'fronts':related,'topics':topics,'relation':relation,'cited_path':p}
     for f in x['fronts']:
         scan(f['path'],(ROOT/f['path']).read_text(errors='replace'),'front',f['id'],[f['id']])
     for b in x['board']:board_files[b['path']].append(b)
@@ -89,27 +96,44 @@ def build(check=False):
     for path in sorted((ROOT.parent/'docs').glob('*.md'))+sorted((ROOT.parent/'notes').glob('*.md')):
         scan(os.path.relpath(path,ROOT),path.read_text(errors='replace'),'canonical note',path.name)
 
-    scratch=[];scratch_index=['# Missing scratch references','','These pages locate surviving, exact path mentions. They are **not** reconstructed scratch-file contents. Some entries may be directory names, examples, executable paths or filenames mentioned in passing.','', '[Archive home](../../README.md)','','| Original reference | Surviving report references | Candidate filename matches |','|---|---:|---:|']
+    # The remaining extensionless references may be old directories. Search
+    # additional public source objects and commit patches specifically for
+    # those unresolved paths, without exporting any new private records.
+    unresolved={p for p in targets if not references[p]}
+    scanned=set()
+    for collection,kind in [('sources','archived source'),('commits','historical patch'),('github','GitHub discussion')]:
+        for row in x[collection]:
+            path=row['path']
+            if path in scanned or path.endswith('.gz'):continue
+            scanned.add(path)
+            fp=ROOT/path
+            if fp.stat().st_size>20*1024*1024:continue
+            b=fp.read_bytes()
+            if b'\x00' in b[:8192] or b'/tmp/' not in b:continue
+            scan(path,b.decode('utf-8','replace'),kind,row.get('name') or row.get('subject') or row.get('title') or path,restrict=unresolved)
+    scratch=[];scratch_index=['# Missing scratch references','','These pages locate surviving exact path mentions and references to descendant paths of a possible directory. They are **not** reconstructed scratch-file contents. Some entries may be directory names, examples, executable paths or filenames mentioned in passing.','', '[Archive home](../../README.md)','','| Original reference | Exact references | Descendant references | Candidate filename matches |','|---|---:|---:|---:|']
     for path,oldrow in sorted(targets.items()):
         key=hashlib.sha256(path.encode()).hexdigest()[:20]
         name=f'scratch-provenance/{key}.md'
         refs=sorted(references[path].values(),key=lambda r:(r['kind'],r['date'],r['path'],r['line']))
         candidates=oldrow['candidate_archive_paths']
         ts=sorted({t for r in refs for t in r['topics']})
-        summary=f'{len(refs)} surviving exact-path report references; {len(candidates)} candidate filename matches. Original scratch bytes not established.'
-        row={'title':path,'summary':summary,'page':f'scratch/{key}.html','markdown':name,'topics':ts,'references':refs,'candidate_archive_paths':candidates}
+        exact=sum(r['relation']=='exact' for r in refs)
+        descendants=sum(r['relation']=='descendant' for r in refs)
+        summary=f'{exact} exact-path and {descendants} descendant-path report references; {len(candidates)} candidate filename matches. Original scratch bytes not established.'
+        row={'title':path,'summary':summary,'page':f'scratch/{key}.html','markdown':name,'topics':ts,'references':refs,'exact_reference_count':exact,'descendant_reference_count':descendants,'candidate_archive_paths':candidates}
         scratch.append(row)
-        lines=[f'# {path}','','[Scratch reference index](README.md) · [Archive home](../../README.md)','','**Recovery status:** original file bytes are not established. This page links historical reports that mention the exact path, rather than claiming to recreate the original file.','',f'{len(refs)} surviving exact-path references; {len(candidates)} possible archived filename matches.','']
+        lines=[f'# {path}','','[Scratch reference index](README.md) · [Archive home](../../README.md)','','**Recovery status:** original file bytes are not established. This page links historical reports that mention the exact path or a possible descendant path, rather than claiming to recreate the original file.','',f'{exact} exact-path references; {descendants} descendant-path references; {len(candidates)} possible archived filename matches.','']
         if refs:
             lines+=['## Surviving references','']
             for r in refs:
-                lines.append(f"- {esc(r['kind'])}: {link(r['title'],r['path'],name,r['line'])}"+(f" ({r['date'][:10]})" if r['date'] else ''))
-        else:lines+=['No exact path mention was found by this pass in the indexed public report collections. The original omission record is retained.']
+                lines.append(f"- {esc(r['kind'])}, {r['relation']} path: {link(r['title'],r['path'],name,r['line'])}"+(f" ({r['date'][:10]})" if r['date'] else '')+(f" — cited descendant: `{r['cited_path']}`" if r['relation']=='descendant' else ''))
+        else:lines+=['No exact or descendant path mention was found by this pass in the indexed public report collections. The original omission record is retained.']
         if candidates:
             lines+=['','## Possible archived filename matches','','These are filename-only leads, not evidence of identical historical bytes.','']
             for c in candidates:lines.append('- '+link(Path(c).name,c,name))
         emit(name,lines,check,errors)
-        scratch_index.append(f'| [{esc(path)}]({key}.md) | {len(refs)} | {len(candidates)} |')
+        scratch_index.append(f'| [{esc(path)}]({key}.md) | {exact} | {descendants} | {len(candidates)} |')
     emit('scratch-provenance/README.md',scratch_index,check,errors)
     emit_json('scratch-provenance.json',scratch,check,errors)
 
@@ -141,7 +165,7 @@ def build(check=False):
         label_index.append(f'| [{esc(name)}]({key}.md) | {len(rows)} | {len(related)} |')
     emit('historical-labels/README.md',label_index,check,errors)
     emit_json('historical-labels.json',history,check,errors)
-    print('Scratch paths:',len(scratch),'with surviving exact-path references:',sum(bool(r['references']) for r in scratch),'references:',sum(len(r['references']) for r in scratch))
+    print('Scratch paths:',len(scratch),'with exact references:',sum(bool(r['exact_reference_count']) for r in scratch),'exact references:',sum(r['exact_reference_count'] for r in scratch),'with any exact or descendant references:',sum(bool(r['references']) for r in scratch),'descendant references:',sum(r['descendant_reference_count'] for r in scratch))
     print('Historical labels outside final ledger:',len(history),'possible dated aliases:',sum(bool(r['possible_date_alias']) for r in history))
     if errors:print('Stale or missing outputs:',*errors[:20],sep='\n')
     return bool(errors)

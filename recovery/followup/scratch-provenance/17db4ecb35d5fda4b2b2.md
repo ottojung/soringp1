@@ -2,8 +2,8 @@
 
 [Scratch reference index](README.md) · [Archive home](../../README.md)
 
-**Recovery status:** original file bytes are not established. This page links historical reports that mention the exact path, rather than claiming to recreate the original file.
+**Recovery status:** original file bytes are not established. This page links historical reports that mention the exact path or a possible descendant path, rather than claiming to recreate the original file.
 
-0 surviving exact-path references; 0 possible archived filename matches.
+0 exact-path references; 0 descendant-path references; 0 possible archived filename matches.
 
-No exact path mention was found by this pass in the indexed public report collections. The original omission record is retained.
+No exact or descendant path mention was found by this pass in the indexed public report collections. The original omission record is retained.

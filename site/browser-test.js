@@ -119,6 +119,16 @@ const resultsReady="/^[0-9,]+ results?/.test(document.getElementById('result-cou
   const boardLink=await evaluate("[...document.querySelectorAll('.sidebar a')].find(a=>a.href.includes('/board/'))?.href");
   assert(boardLink);await navigate(boardLink);await layout("Mobile board");
   assert(await evaluate("[...document.querySelectorAll('.sidebar a')].some(a=>['Earlier message','Later message'].includes(a.textContent))"));
+  await navigate(base+"explore.html?q=verifyH8&kind=source",resultsReady);
+  const sourceLink=await evaluate("document.querySelector('#results-list h3 a')?.href");
+  assert(sourceLink&&sourceLink.includes("/evidence/source/"),"source search opens an in-site reader");
+  await navigate(sourceLink);await layout("Mobile archived source");
+  assert(await evaluate("document.querySelector('.article pre')||document.querySelector('.article h2')?true:false"));
+  await navigate(base+"explore.html?q=cospectral-gap-span-alln&kind=workspace",resultsReady);
+  const workspaceLink=await evaluate("document.querySelector('#results-list h3 a')?.href");
+  assert(workspaceLink&&workspaceLink.includes("/evidence/workspace/"));
+  await navigate(workspaceLink);await layout("Mobile workspace inventory");
+  assert(await evaluate("document.querySelector('.article table a')?.href.includes('/evidence/source/')"));
   assert.equal(errors.length,0,errors.join("; "));
   console.log("LIVE BROWSER CHECKS PASSED; JavaScript exceptions:",errors.length);
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{

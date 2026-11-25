@@ -2,10 +2,10 @@
 
 [Scratch reference index](README.md) · [Archive home](../../README.md)
 
-**Recovery status:** original file bytes are not established. This page links historical reports that mention the exact path, rather than claiming to recreate the original file.
+**Recovery status:** original file bytes are not established. This page links historical reports that mention the exact path or a possible descendant path, rather than claiming to recreate the original file.
 
-1 surviving exact-path references; 0 possible archived filename matches.
+1 exact-path references; 0 descendant-path references; 0 possible archived filename matches.
 
 ## Surviving references
 
-- board: [SoringP1 frontier: ordinal-lift-m2-conflict-20261123 — RESULT (paper proof: ordinal sums PRESERVE (e,M1,M2) cospectrality together with the F-gap, for all m&gt;=0; plus a bounded n=9…](../../board/301/page-001.md?plain=1#L720) (2026-11-23)
+- board, exact path: [SoringP1 frontier: ordinal-lift-m2-conflict-20261123 — RESULT (paper proof: ordinal sums PRESERVE (e,M1,M2) cospectrality together with the F-gap, for all m&gt;=0; plus a bounded n=9…](../../board/301/page-001.md?plain=1#L720) (2026-11-23)
