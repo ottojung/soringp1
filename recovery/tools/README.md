@@ -14,6 +14,12 @@ python3 recovery/tools/search.py search cospectral minimax --limit 30
 # Restrict search to board messages (includes exact message anchors)
 python3 recovery/tools/search.py search "M2" census --kind board
 
+# Search historical task texts or cross-project reports
+python3 recovery/tools/search.py search certificate --kind commission --kind mixed
+
+# Search archived GitHub issues
+python3 recovery/tools/search.py search adversary --kind github
+
 # Find an original source file by filename or workspace
 python3 recovery/tools/search.py search verifyH8 --kind source --metadata
 
@@ -41,7 +47,8 @@ Search uses case-insensitive substring matching; all words must match.
 Quote an exact phrase. Repeat `--kind` to select multiple collections.
 `--metadata` skips reading full file bodies. Results show the path and line
 of an occurrence. The workspace extractor restores the archived changed
-and additional files, not a full exact historical checkout.
+and additional files, not a full exact historical checkout. Compressed
+experiment data are indexed by metadata rather than decompressed by search.
 
 The archive is historical evidence, not executable trusted code. Read
 original scripts before running them. Neither tool launches research agents,
