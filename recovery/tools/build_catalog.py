@@ -130,8 +130,8 @@ def main(check=False):
         target=ROOT/'supplement/objects'/obj
         if not target.is_file():raise ValueError(f'missing object {target}')
         sources[(Path(original).name,str(target.relative_to(ROOT)))].append(original)
-    audit=ROOT/'followup/file-audit.json'
-    if audit.is_file():
+    for audit in (ROOT/'followup/file-audit.json',ROOT/'followup/marceline-audit.json'):
+        if not audit.is_file():continue
         for row in data(audit)['mappings']:
             target=ROOT/row['path']
             if not target.is_file():raise ValueError(f'missing follow-up object {target}')

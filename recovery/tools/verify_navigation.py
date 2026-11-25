@@ -16,6 +16,9 @@ def main():
              ARCHIVE/'followup/github-discussions/PULL-REQUESTS.md'}
     pages.update(ARCHIVE.glob('*.md'))
     pages.update((ARCHIVE/'catalog').rglob('*.md'))
+    pages.update((ARCHIVE/'followup/scratch-provenance').rglob('*.md'))
+    pages.update((ARCHIVE/'followup/historical-labels').rglob('*.md'))
+    if (ARCHIVE/'followup/MARCELINE-RECOVERY.md').is_file():pages.add(ARCHIVE/'followup/MARCELINE-RECOVERY.md')
     errors = []
     count = 0
     line_counts = {}

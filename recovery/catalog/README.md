@@ -20,12 +20,12 @@ Start with the [mathematical synthesis](../SYNTHESIS.md), [result register](../R
 
 - [Board messages](board/README.md) — 3,725 messages
 - [Workspace source maps](workspaces/README.md) — 1,574 workspaces
-- [Source files by original name](sources/README.md) — 2,291 file versions
+- [Source files by original name](sources/README.md) — 2,312 file versions
 - [Assistant report sessions](sessions/README.md) — 1,651 sessions
 - [Historical research commissions](commissions/README.md) — 1,386 distinct task texts
 - [Additional cross-project research reports](mixed-reports/README.md) — 1,540 distinct texts
 - [GitHub issues and pull-request discussions](../followup/github-discussions/README.md) — 4 issues, 51 pull requests, 32 discussion entries
-- [Historical commit patches](commits/README.md) — 4,952 patches
+- [Historical commit patches](commits/README.md) — 4,957 patches
 
 ## Search on a local clone
 

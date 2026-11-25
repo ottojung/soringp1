@@ -199,8 +199,9 @@ def verify(index):
         exists(w['manifest'])
         for obj in load(w['manifest'])['files'].values():exists('workspaces/objects/'+obj)
     for obj in load('supplement/manifest.json').values():exists('supplement/objects/'+obj)
-    if (ROOT/'followup/file-audit.json').is_file():
-        for row in load('followup/file-audit.json')['mappings']:exists(row['path'])
+    for audit in ('followup/file-audit.json','followup/marceline-audit.json'):
+        if (ROOT/audit).is_file():
+            for row in load(audit)['mappings']:exists(row['path'])
     if (ROOT/'followup/ledger.json').is_file():
         actual={f['id'] for f in load('followup/ledger.json')['fronts']}
         if actual!=front_ids:errors.append('machine-readable ledger front IDs differ')

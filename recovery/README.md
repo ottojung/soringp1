@@ -66,3 +66,8 @@ by the canonical history or archived patches. The archive cannot establish
 that already-deleted material, undiscovered material or missing scratch
 files were recovered. No historical result was silently promoted to a
 theorem, and no research agent was restarted.
+
+The [marceline-dev retirement recovery](followup/MARCELINE-RECOVERY.md)
+adds 21 distinct historical file contents (including a terminal handoff)
+and five commit patches from the old worktrees. They are indexed in the
+catalogue and website; the historical read-only volume was not modified.
