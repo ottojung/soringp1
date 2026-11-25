@@ -1,0 +1,2322 @@
+commit d52d6ea966fba2098ab90d68b9a4e3b665e88c73
+Author:     Viche operator <operator@viche>
+AuthorDate: Tue Nov 24 22:18:20 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 22:18:21 2026 +0000
+
+    PnP: discover and adapt checked proofs, verify explicit-row circuits and measure throughput
+
+diff --git a/missions/pnp/adapter/NOTE.md b/missions/pnp/adapter/NOTE.md
+new file mode 100644
+index 00000000..1327b454
+--- /dev/null
++++ b/missions/pnp/adapter/NOTE.md
+@@ -0,0 +1,55 @@
++# PnP proof adapter / certificate reuse
++
++## What this module does
++
++`missions.pnp.adapter` implements source-level proof adaptation for reusable PnP
++Lean proofs. It does **not** perform fragile global namespace substitution.
++
++- **Controlled module renaming**: rewrites only the fully qualified source module
++  identifier (`PEqualNP.Outside.L_meta_*`) as a token, preserving unrelated names.
++- **Declaration dependency closure extraction**: parses Lean declarations and
++  computes a conservative transitive closure from a target declaration
++  (`python3 -m missions.pnp.adapter closure ...`).
++- **Stronger-lemma / reusable-proof detection**: searches the checked upstream
++  corpus for exact or structurally stronger candidates, then attempts adaptation
++  while respecting exact leased `imports/module/file/statement`
++  (`python3 -m missions.pnp.adapter detect ...`).
++- **Hypothesis instantiation**: when a stronger source proof has a compatible
++  conclusion with fewer/subset hypotheses, the adapter emits a module-derived
++  helper lemma and a final target theorem wrapper (heuristic, validator-checked).
++- **Minimal standalone emission**: emits Mathlib-first imports from the target gap,
++  demotes helper `theorem` declarations to `lemma`, normalizes helper namespaces
++  under the target module, and validates with `missions.pnp.validate`.
++
++## Worked adaptation (measured)
++
++Archived accepted example: `PEqualNP.Outside.L_meta_1152` (commit `1731dbf`,
++`lean/PEqualNP/Outside/L_meta_1152.lean`, 8-gate monotone circuit, 8 variables).
++
++Adaptation: read the checked upstream source, applied controlled module renaming /
++exact-statement adaptation through `missions.pnp.adapter.adapt.adapt_exact_module`,
++and emitted a validator-clean candidate. The adapted candidate passed
++`missions.pnp.validate.validate` (exact path/module/statement/import checks).
++
++Measured compile (billy-dev, 2026-11-24, scratch worktree from upstream main
++`a6a7084`, copied `.lake` from an existing gap worktree; shared compile queue via
++`PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.compile`):
++
++- `--light -- lake env lean PEqualNP/Outside/L_meta_1152.lean`
++  - result: `RESOURCE DEFERRED: light compilation exceeded 2 GiB; retry as heavy`
++- `-- lake env lean PEqualNP/Outside/L_meta_1152.lean` (heavy slot, LEAN_NUM_THREADS=1)
++  - exit: `0`
++  - output: empty (Lean success)
++
++This measures adaptation+compile for a small archived accepted proof. It is not a
++universal benchmark; larger family files (e.g. L_meta_2455/L_meta_2457) require
++the same controlled adaptation but have much larger compile cost.
++
++## Family case
++
++`L_meta_2455` and `L_meta_2457` share the same large theta-graph engine; the
++checked sources differ by controlled module name and final theorem/wrapper. The
++adapter's closure extraction finds the shared engine declarations, and corpus
++detection can select the exact checked target or a stronger compatible lemma when
++present. Tests cover closure extraction on `L_meta_2455` and family detection
++against archived `L_meta_2455/L_meta_2457` sources.
+diff --git a/missions/pnp/adapter/__init__.py b/missions/pnp/adapter/__init__.py
+new file mode 100644
+index 00000000..c1002709
+--- /dev/null
++++ b/missions/pnp/adapter/__init__.py
+@@ -0,0 +1,6 @@
++"""Family-level proof adaptation and certificate reuse.
++
++Source-level dependency closure extraction, stronger-lemma detection, hypothesis
++instantiation, and emission of standalone Lean that respects exact leased gap
++metadata (imports, module, path, statement).
++"""
+diff --git a/missions/pnp/adapter/__main__.py b/missions/pnp/adapter/__main__.py
+new file mode 100644
+index 00000000..094c127f
+--- /dev/null
++++ b/missions/pnp/adapter/__main__.py
+@@ -0,0 +1,249 @@
++"""CLI for family-level proof adaptation and certificate reuse."""
++from __future__ import annotations
++
++import argparse
++import json
++from pathlib import Path
++import re
++import sys
++
++from .. import assignment, config, state, support, tools, validate
++from ..proofs import corpus
++from .adapt import adapt_exact_module, controlled_module_rename, emit_standalone
++from .closure import dependency_closure, parse_source
++from .detect import detect_and_adapt
++
++
++def _load_gap(args) -> dict:
++    # Offline replay must be explicit. A stale bound workspace may not
++    # silently borrow a newer attempt for the same public gap.
++    if args.gap_json:
++        if assignment.workspace(Path.cwd()):
++            raise SystemExit("offline metadata must be used outside a bound workspace")
++        return json.loads(Path(args.gap_json).read_text(encoding="utf-8"))
++    if args.module and args.statement and args.file:
++        if assignment.workspace(Path.cwd()):
++            raise SystemExit("offline metadata must be used outside a bound workspace")
++        return {
++            "id": args.gap_id or "L-gap-000",
++            "file": args.file, "module": args.module,
++            "statement": args.statement, "imports": args.imports or [],
++        }
++    if assignment.workspace(Path.cwd()):
++        binding = assignment.binding(Path.cwd())
++        if not binding:
++            raise SystemExit("unbound research workspace")
++        rec = state.load(binding[0])
++        if not support.active(rec) or rec["lease"] != binding[1]:
++            raise SystemExit("stale or inactive research assignment")
++        return {
++            "id": rec["gap_id"], "file": rec["path"],
++            "module": rec["module"], "statement": rec["statement"],
++            "imports": rec.get("imports") or [],
++        }
++    raise SystemExit("provide --gap-json, or run in a bound workspace, or pass --file/--module/--statement")
++
++
++def _emit(result, output: Path | None):
++    if output and result.get("candidate"):
++        output.parent.mkdir(parents=True, exist_ok=True)
++        with output.open("x", encoding="utf-8") as f:
++            f.write(result["candidate"])
++    print(json.dumps(result, ensure_ascii=False, indent=2))
++
++
++def cmd_closure(args):
++    source = Path(args.source).read_text(encoding="utf-8")
++    model = parse_source(source)
++    decls = dependency_closure(model, args.target)
++    result = {
++        "target": args.target,
++        "declarations": [
++            {
++                "name": d.name,
++                "kind": d.kind,
++                "namespace": list(d.namespace),
++                "start_line": d.start + 1,
++                "end_line": d.end,
++            }
++            for d in decls
++        ],
++        "count": len(decls),
++    }
++    if args.emit:
++        # Conservative minimal emission: include preamble/scope lines and closure decls in source order.
++        wanted = {id(d) for d in decls}
++        selected = []
++        # include imports and top-level open/variable/namespace scaffolding lines that appear before preamble_end
++        for i, line in enumerate(model.lines):
++            if i < model.preamble_end:
++                selected.append(line)
++        # include namespace/section/open/variable commands and selected declarations in order
++        i = model.preamble_end
++        while i < len(model.lines):
++            line = model.lines[i]
++            if any(id(d) == id(x) for d in decls for x in [d] if d.start == i):
++                decl = next(d for d in decls if d.start == i)
++                selected.extend(model.lines[decl.start:decl.end])
++                i = decl.end
++                continue
++            # keep structural scope commands
++            if re.match(r"^[ \t]*(?:namespace|end|section|variable|open|universe|set_option|attribute|local|omit|include)\b", line):
++                selected.append(line)
++                i += 1
++                continue
++            # keep blank lines between kept items
++            if line.strip() == "":
++                selected.append(line)
++                i += 1
++                continue
++            i += 1
++        text = "\n".join(selected).rstrip() + "\n"
++        result["candidate"] = text
++    _emit(result, Path(args.output) if args.output else None)
++
++
++def cmd_adapt(args):
++    gap = _load_gap(args)
++    source = Path(args.source).read_text(encoding="utf-8")
++    r = adapt_exact_module(source, gap, source_module=args.source_module)
++    result = {
++        "ok": r.ok,
++        "kernel_checked": False,
++        "strategy": r.strategy,
++        "source_module": r.source_module,
++        "target_module": r.target_module,
++        "details": r.details,
++        "candidate": r.candidate,
++    }
++    _emit(result, Path(args.output) if args.output else None)
++
++
++def cmd_detect(args):
++    gap = _load_gap(args)
++    source_text = Path(args.source).read_text(encoding="utf-8") if args.source else None
++    with corpus.open_index() as db:
++        revision = corpus.update(db)
++        detections = detect_and_adapt(db, gap, limit=args.limit, source_text=source_text, source_module=args.source_module)
++    result = {
++        "kernel_checked": False,
++        "revision": revision,
++        "target": {"module": gap["module"], "file": gap["file"]},
++        "matches": [
++            {
++                "path": d.path,
++                "module": d.module,
++                "score": d.score,
++                "strategy": d.strategy,
++                "ok": d.ok,
++                "sha256": d.sha256,
++                "error": d.error,
++                "candidate": d.candidate if args.emit_candidates else None,
++            }
++            for d in detections
++        ],
++    }
++    # If an output is requested, write the first successful candidate.
++    if args.output:
++        ok = next((d for d in detections if d.ok and d.candidate), None)
++        if ok:
++            out = Path(args.output)
++            out.parent.mkdir(parents=True, exist_ok=True)
++            with out.open("x", encoding="utf-8") as f:
++                f.write(ok.candidate)
++            result["output"] = str(out)
++            result["output_sha256"] = ok.sha256
++    print(json.dumps(result, ensure_ascii=False, indent=2))
++
++
++def cmd_emit(args):
++    gap = _load_gap(args)
++    source = Path(args.source).read_text(encoding="utf-8")
++    model = parse_source(source)
++    target = args.target or gap["module"]
++    decls = dependency_closure(model, target)
++    wanted = {id(d) for d in decls}
++    # Build minimal body: keep structural lines and wanted declarations.
++    body_lines = []
++    i = model.preamble_end
++    while i < len(model.lines):
++        decl = next((d for d in decls if d.start == i), None)
++        if decl:
++            body_lines.extend(model.lines[decl.start:decl.end])
++            i = decl.end
++            continue
++        line = model.lines[i]
++        if re.match(r"^[ \t]*(?:namespace|end|section|variable|open|universe|set_option|attribute|local|omit|include)\b", line):
++            body_lines.append(line)
++        elif line.strip() == "":
++            if body_lines and body_lines[-1].strip() != "":
++                body_lines.append("")
++        i += 1
++    body = "\n".join(body_lines).strip()
++    body = controlled_module_rename(body, args.source_module or target, gap["module"])
++    candidate = emit_standalone(gap, body)
++    # Ensure final theorem matches target exactly if possible.
++    final = re.search(r"(?<![\w.])theorem\s+" + re.escape(gap["module"]) + r"\s*:(.*?):=\s*by\b", candidate, re.S)
++    if final and validate.tokens(final.group(1)) != validate.tokens(gap["statement"]):
++        candidate = re.sub(
++            r"(?<![\w.])theorem\s+" + re.escape(gap["module"]) + r"\s*:.*?:=\s*by\b",
++            f"theorem {gap['module']} : {gap['statement']} := by",
++            candidate, count=1, flags=re.S,
++        )
++    result = {"ok": False, "candidate": candidate}
++    try:
++        result["sha256"] = validate.validate(gap, candidate.encode("utf-8"))
++        result["ok"] = True
++    except validate.InvalidCandidate as e:
++        result["error"] = str(e)
++    _emit(result, Path(args.output) if args.output else None)
++
++
++def main(argv=None):
++    p = argparse.ArgumentParser(prog="python3 -m missions.pnp.adapter", description=__doc__)
++    sub = p.add_subparsers(dest="cmd", required=True)
++
++    def add_gap_args(sp):
++        sp.add_argument("--gap-json", type=Path)
++        sp.add_argument("--gap-id")
++        sp.add_argument("--file")
++        sp.add_argument("--module")
++        sp.add_argument("--statement")
++        sp.add_argument("--imports", nargs="*")
++        sp.add_argument("--output")
++
++    c = sub.add_parser("closure", help="extract declaration dependency closure")
++    c.add_argument("source", type=Path)
++    c.add_argument("--target", required=True, help="target declaration name")
++    c.add_argument("--emit", action="store_true", help="include minimal emitted source")
++    c.add_argument("--output")
++    c.set_defaults(func=cmd_closure)
++
++    a = sub.add_parser("adapt", help="adapt a checked source to exact gap metadata")
++    a.add_argument("source", type=Path)
++    a.add_argument("--source-module")
++    add_gap_args(a)
++    a.set_defaults(func=cmd_adapt)
++
++    d = sub.add_parser("detect", help="detect stronger reusable lemmas in corpus")
++    d.add_argument("--source", type=Path, help="optional local source instead of corpus search")
++    d.add_argument("--source-module")
++    d.add_argument("--limit", type=int, default=8)
++    d.add_argument("--emit-candidates", action="store_true")
++    add_gap_args(d)
++    d.set_defaults(func=cmd_detect)
++
++    e = sub.add_parser("emit", help="emit minimal standalone Lean from dependency closure")
++    e.add_argument("source", type=Path)
++    e.add_argument("--target", help="target declaration name; defaults to gap module")
++    e.add_argument("--source-module")
++    add_gap_args(e)
++    e.set_defaults(func=cmd_emit)
++
++    args = p.parse_args(argv)
++    tools.record("adapter-"+args.cmd)
++    args.func(args)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/missions/pnp/adapter/adapt.py b/missions/pnp/adapter/adapt.py
+new file mode 100644
+index 00000000..703da9c8
+--- /dev/null
++++ b/missions/pnp/adapter/adapt.py
+@@ -0,0 +1,189 @@
++"""Adapt checked proofs to a target gap while respecting exact lease metadata."""
++from __future__ import annotations
++
++from dataclasses import dataclass
++import re
++
++from .. import validate
++from .closure import dependency_closure, parse_source, referenced_names
++
++
++@dataclass
++class AdaptationResult:
++    ok: bool
++    candidate: str | None
++    source_module: str
++    target_module: str
++    strategy: str
++    details: dict
++
++
++def _module_from_path(path: str) -> str:
++    if not path.startswith("lean/") or not path.endswith(".lean"):
++        raise ValueError("gap file must be a lean/PEqualNP/*.lean path")
++    return path.removeprefix("lean/").removesuffix(".lean").replace("/", ".")
++
++
++def controlled_module_rename(text: str, source_module: str, target_module: str) -> str:
++    """Rename only the fully qualified module name as an identifier token.
++
++    This is controlled module renaming, not fragile global namespace substitution.
++    """
++    if source_module == target_module:
++        return text
++    pat = re.compile(r"(?<![A-Za-z0-9_'.])" + re.escape(source_module) + r"(?![A-Za-z0-9_'])")
++    return pat.sub(target_module, text)
++
++
++def _split_imports(source: str) -> tuple[list[str], str]:
++    lines = source.splitlines()
++    i = 0
++    imports = []
++    while i < len(lines):
++        s = lines[i].strip()
++        if s == "" or s.startswith("--") or s.startswith("/-"):
++            if s.startswith("/-"):
++                while i < len(lines) and "-/" not in lines[i]:
++                    i += 1
++            i += 1
++            continue
++        m = re.match(r"^import\s+([A-Za-z0-9_.]+)\s*$", lines[i])
++        if m:
++            imports.append(m.group(1))
++            i += 1
++            continue
++        break
++    rest = "\n".join(lines[i:])
++    return imports, rest
++
++
++def _target_imports(target_gap: dict) -> list[str]:
++    imports = ["Mathlib"]
++    for imp in target_gap.get("imports") or []:
++        if imp != "Mathlib" and imp not in imports:
++            imports.append(imp)
++    return imports
++
++
++def _ensure_imports_allowed(source_imports: list[str], target_gap: dict) -> None:
++    allowed = {"Mathlib"} | set(target_gap.get("imports") or [])
++    for imp in source_imports:
++        if imp not in allowed and not re.fullmatch(r"Mathlib(?:\.[A-Za-z][A-Za-z0-9_]*)+", imp):
++            raise ValueError(f"source import {imp} is not allowed by target gap imports")
++
++
++def _extract_final_theorem(text: str, module: str) -> tuple[str, str, str] | None:
++    pat = re.compile(
++        r"(?<![\w.])theorem\s+" + re.escape(module) + r"\s*:(.*?):=\s*by\b",
++        re.S,
++    )
++    m = pat.search(text)
++    if not m:
++        return None
++    return m.group(0), m.group(1), text[m.end():]
++
++
++def _replace_final_theorem(text: str, target_module: str, target_statement: str, proof_body: str) -> str:
++    pat = re.compile(
++        r"(?<![\w.])theorem\s+" + re.escape(target_module) + r"\s*:.*?:=\s*by\b.*\Z",
++        re.S,
++    )
++    m = pat.search(text)
++    if not m:
++        raise ValueError("target theorem not found after rename")
++    replacement = f"theorem {target_module} : {target_statement} := by{proof_body}"
++    return text[:m.start()] + replacement
++
++
++def emit_standalone(target_gap: dict, body: str, source_imports=None) -> str:
++    imports = list(source_imports) if source_imports else _target_imports(target_gap)
++    header = "\n".join(f"import {imp}" for imp in imports)
++    body = body.strip()
++    return header + "\n\n" + body + "\n"
++
++
++def _demote_helper_theorems(text: str, target_module: str) -> str:
++    """Convert non-final theorem declarations to lemmas.
++
++    The validator requires exactly one theorem, with the exact desk module name.
++    In Lean 4, lemma and theorem are synonymous at the declaration level.
++    """
++    pat = re.compile(r"(?m)^(?P<indent>[ \t]*)(?P<prefix>(?:(?:private|protected|noncomputable|partial|scoped|local|nonrec)\s+)*)theorem\b")
++    matches = list(pat.finditer(text))
++    if not matches:
++        return text
++    target_pat = re.compile(
++        r"(?m)^[ \t]*(?:(?:private|protected|noncomputable|partial|scoped|local|nonrec)\s+)*theorem\s+" + re.escape(target_module) + r"\s*:"
++    )
++    target_matches = list(target_pat.finditer(text))
++    keep = target_matches[-1].start() if target_matches else matches[-1].start()
++    parts = []
++    last = 0
++    for m in matches:
++        if m.start() == keep:
++            continue
++        parts.append(text[last:m.start()])
++        parts.append(m.group("indent") + (m.group("prefix") or "") + "lemma")
++        last = m.end()
++    parts.append(text[last:])
++    return "".join(parts)
++
++
++def _normalize_helper_namespaces(text: str, target_module: str) -> str:
++    """Preserve relative Lean scopes of a renamed checked source.
++
++    Changing a relative nested scope to a fully qualified name changes
++    its actual namespace. The validator checks the outer scope instead.
++    For arbitrary unrelated root namespaces do not guess a rewrite:
++    reject them through validate and let the researcher adapt explicitly.
++    """
++    return text
++
++
++def adapt_exact_module(source: str, target_gap: dict, *, source_module: str | None = None) -> AdaptationResult:
++    """Adapt a checked source by controlled module renaming and exact statement alignment.
++
++    Works when the source proves the same statement or when the target statement is
++    already present in the renamed source; the final theorem must match exactly.
++    """
++    target_module = target_gap["module"]
++    if source_module is None:
++        # infer from theorem in source
++        m = re.search(r"(?m)^theorem\s+(PEqualNP\.[A-Za-z0-9_.]+)\s*:", source)
++        if not m:
++            return AdaptationResult(False, None, "", target_module, "exact_module", {"error": "no theorem found"})
++        source_module = m.group(1)
++
++    renamed = controlled_module_rename(source, source_module, target_module)
++    src_imports, _ = _split_imports(renamed)
++    try:
++        _ensure_imports_allowed(src_imports, target_gap)
++    except ValueError as e:
++        return AdaptationResult(False, None, source_module, target_module, "exact_module", {"error": str(e)})
++
++    # Ensure exact target imports are used.
++    _, body = _split_imports(renamed)
++    body = _demote_helper_theorems(body, target_module)
++    body = _normalize_helper_namespaces(body, target_module)
++    candidate = emit_standalone(target_gap, body, src_imports)
++
++    # If the renamed source's theorem statement differs from target, try replacing
++    # the statement but keeping the proof body only when statements are token-equal.
++    final = _extract_final_theorem(candidate, target_module)
++    if final is None:
++        return AdaptationResult(False, None, source_module, target_module, "exact_module", {"error": "missing final theorem after rename"})
++
++    _, stmt, proof_tail = final
++    target_stmt = target_gap["statement"]
++    if validate.tokens(stmt) != validate.tokens(target_stmt):
++        return AdaptationResult(
++            False, candidate, source_module, target_module, "exact_module",
++            {"error": "final theorem statement differs from target after controlled module rename; refusing to keep mismatched proof body"},
++        )
++
++    try:
++        digest = validate.validate(target_gap, candidate.encode("utf-8"))
++    except validate.InvalidCandidate as e:
++        return AdaptationResult(False, candidate, source_module, target_module, "exact_module", {"error": str(e), "digest": None})
++
++    return AdaptationResult(True, candidate, source_module, target_module, "exact_module", {"sha256": digest})
+diff --git a/missions/pnp/adapter/closure.py b/missions/pnp/adapter/closure.py
+new file mode 100644
+index 00000000..c239c6f9
+--- /dev/null
++++ b/missions/pnp/adapter/closure.py
+@@ -0,0 +1,220 @@
++"""Lean declaration dependency closure extraction.
++
++This is source-level and heuristic by design: it extracts a conservative
++dependency closure of named declarations from a Lean source file. It does NOT
++perform global namespace substitution; module renaming is a separate, controlled
++operation in adapt.py.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++import re
++
++DECL_KEYWORDS = (
++    "theorem", "lemma", "def", "abbrev", "noncomputable def",
++    "instance", "structure", "class", "inductive", "opaque",
++)
++
++# A declaration starts at column 0 or after only whitespace in a namespace/section,
++# but we parse conservatively: lines whose stripped form begins with a decl keyword
++# or attribute+decl keyword.
++DECL_START = re.compile(
++    r"^(?P<indent>[ \t]*)(?P<attrs>(?:@\[.*?\][ \t]*)*)"
++    r"(?P<kw>theorem|lemma|def|abbrev|noncomputable\s+def|instance|structure|class|inductive|opaque)\b"
++    r"(?:[ \t]+(?P<name>[A-Za-z_][A-Za-z0-9_'.]*))?"
++)
++
++NAMESPACE_START = re.compile(r"^(?P<indent>[ \t]*)namespace[ \t]+([A-Za-z_][A-Za-z0-9_'.]*)[ \t]*$")
++NAMESPACE_END = re.compile(r"^(?P<indent>[ \t]*)end[ \t]+([A-Za-z_][A-Za-z0-9_'.]*)[ \t]*$")
++SECTION_START = re.compile(r"^(?P<indent>[ \t]*)section(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)?[ \t]*$")
++SECTION_END = re.compile(r"^(?P<indent>[ \t]*)end(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)?[ \t]*$")
++# Commands that affect scope/context and should be retained when relevant.
++SCOPE_COMMAND = re.compile(
++    r"^(?P<indent>[ \t]*)(?:variable\b|open\b|universe\b|set_option\b|attribute\b|local\b|export\b|omit\b|include\b)"
++)
++
++IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_'.]*")
++
++
++@dataclass
++class Declaration:
++    name: str
++    start: int  # line index
++    end: int    # exclusive line index
++    kind: str
++    text: str
++    namespace: tuple[str, ...]
++
++
++@dataclass
++class SourceModel:
++    lines: list[str]
++    declarations: list[Declaration]
++    by_name: dict[str, Declaration]
++    preamble_end: int  # line index where first namespace/decl starts after imports
++
++
++def _line_starts_decl(line: str):
++    m = DECL_START.match(line)
++    return m
++
++
++def parse_source(source: str) -> SourceModel:
++    lines = source.splitlines()
++    declarations: list[Declaration] = []
++    ns_stack: list[str] = []
++    section_depth = 0
++
++    # Find preamble end: after imports and blank lines.
++    preamble_end = 0
++    i = 0
++    while i < len(lines):
++        s = lines[i].strip()
++        if s == "" or s.startswith("import ") or s.startswith("--") or s.startswith("/-"):
++            if s.startswith("/-"):
++                # skip block comment
++                while i < len(lines) and "-/" not in lines[i]:
++                    i += 1
++            i += 1
++            continue
++        preamble_end = i
++        break
++    else:
++        preamble_end = len(lines)
++
++    i = 0
++    while i < len(lines):
++        line = lines[i]
++        m_ns = NAMESPACE_START.match(line)
++        if m_ns:
++            ns_stack.append(m_ns.group(2))
++            i += 1
++            continue
++        m_ne = NAMESPACE_END.match(line)
++        if m_ne:
++            name = m_ne.group(2)
++            if ns_stack and ns_stack[-1] == name:
++                ns_stack.pop()
++            elif name in ns_stack:
++                while ns_stack and ns_stack[-1] != name:
++                    ns_stack.pop()
++                if ns_stack:
++                    ns_stack.pop()
++            i += 1
++            continue
++        m_sec = SECTION_START.match(line)
++        if m_sec:
++            section_depth += 1
++            i += 1
++            continue
++        m_se = SECTION_END.match(line)
++        if m_se and section_depth > 0 and not NAMESPACE_END.match(line):
++            # `end` without a namespace name may close section
++            section_depth -= 1
++            i += 1
++            continue
++
++        m_decl = _line_starts_decl(line)
++        if m_decl:
++            name = m_decl.group("name")
++            kind = re.sub(r"\s+", " ", m_decl.group("kw"))
++            start = i
++            # include preceding attributes/doc comments attached to decl
++            j = start - 1
++            while j >= 0:
++                prev = lines[j].strip()
++                if prev.startswith("@[") or prev.startswith("/--") or prev.startswith("/-!") or prev.startswith("--"):
++                    if prev.startswith("/-"):
++                        k = j
++                        while k >= 0 and "/-" not in lines[k]:
++                            k -= 1
++                        j = k - 1
++                        continue
++                    start = j
++                    j -= 1
++                    continue
++                break
++            # find end: next decl start at same or lower structural level, or namespace/section end
++            i += 1
++            while i < len(lines):
++                nxt = lines[i]
++                if NAMESPACE_START.match(nxt) or NAMESPACE_END.match(nxt) or SECTION_START.match(nxt):
++                    # section end is `end` or `end <name>` - ambiguous; treat named end matching ns as boundary
++                    if SECTION_START.match(nxt):
++                        break
++                    if NAMESPACE_START.match(nxt) or NAMESPACE_END.match(nxt):
++                        break
++                if _line_starts_decl(nxt):
++                    break
++                # A bare `end` can close section; be conservative
++                if re.match(r"^[ \t]*end[ \t]*$", nxt) and section_depth > 0:
++                    break
++                i += 1
++            text = "\n".join(lines[start:i])
++            if name:
++                decl = Declaration(name=name, start=start, end=i, kind=kind, text=text, namespace=tuple(ns_stack))
++                declarations.append(decl)
++            continue
++        i += 1
++
++    by_name: dict[str, Declaration] = {}
++    for d in declarations:
++        by_name[d.name] = d
++        qualified = ".".join((*d.namespace, d.name)) if d.namespace else d.name
++        by_name[qualified] = d
++        # also register with full module-like paths seen in text
++        if d.namespace:
++            by_name[".".join(d.namespace) + "." + d.name] = d
++    return SourceModel(lines=lines, declarations=declarations, by_name=by_name, preamble_end=preamble_end)
++
++
++def referenced_names(text: str) -> set[str]:
++    # Remove comments/strings crudely to reduce noise.
++    cleaned = re.sub(r"/-.*?-/", " ", text, flags=re.S)
++    cleaned = re.sub(r"--[^\n]*", " ", cleaned)
++    cleaned = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', " ", cleaned)
++    return set(IDENT.findall(cleaned))
++
++
++def dependency_closure(model: SourceModel, target: str) -> list[Declaration]:
++    """Return declarations in source order forming a conservative transitive closure."""
++    target_decl = model.by_name.get(target)
++    if target_decl is None:
++        # try suffix match
++        for d in model.declarations:
++            qualified = ".".join((*d.namespace, d.name))
++            if qualified == target or d.name == target or qualified.endswith("." + target):
++                target_decl = d
++                break
++    if target_decl is None:
++        raise ValueError(f"target declaration not found: {target}")
++
++    # Build lookup by short name and qualified names.
++    defs: dict[str, Declaration] = {}
++    for d in model.declarations:
++        defs[d.name] = d
++        q = ".".join((*d.namespace, d.name))
++        defs[q] = d
++        # also suffixes for nested namespace refs
++        parts = q.split(".")
++        for k in range(1, len(parts)):
++            defs[".".join(parts[k:])] = d
++
++    wanted: set[int] = set()
++    queue = [target_decl]
++    while queue:
++        d = queue.pop()
++        key = id(d)
++        if key in wanted:
++            continue
++        wanted.add(key)
++        refs = referenced_names(d.text)
++        for ref in refs:
++            dep = defs.get(ref)
++            if dep is None:
++                # try progressively shorter suffixes / longer prefixes are already in defs
++                continue
++            if id(dep) not in wanted:
++                queue.append(dep)
++    # Preserve source order.
++    return [d for d in model.declarations if id(d) in wanted]
+diff --git a/missions/pnp/adapter/detect.py b/missions/pnp/adapter/detect.py
+new file mode 100644
+index 00000000..a96defaa
+--- /dev/null
++++ b/missions/pnp/adapter/detect.py
+@@ -0,0 +1,155 @@
++"""Detect reusable stronger lemmas in the checked upstream corpus."""
++from __future__ import annotations
++
++from dataclasses import dataclass
++import re
++
++from ..proofs import corpus
++from .. import validate
++from .adapt import adapt_exact_module, controlled_module_rename, emit_standalone, _extract_final_theorem, _replace_final_theorem, _split_imports, _ensure_imports_allowed, _demote_helper_theorems, _normalize_helper_namespaces
++
++
++@dataclass
++class Detection:
++    path: str
++    module: str
++    score: float
++    strategy: str
++    ok: bool
++    sha256: str | None
++    error: str | None
++    candidate: str | None
++
++
++def _hypothesis_parts(statement: str) -> tuple[list[str], str]:
++    # Reuse corpus.hypotheses but keep raw text parts.
++    parts, conclusion = corpus.hypotheses(statement)
++    return [p.strip() for p in parts if p.strip()], conclusion.strip()
++
++
++def _is_stronger_or_equal(source_stmt: str, target_stmt: str) -> str | None:
++    """Return a strategy name if source can justify target, else None.
++
++    Strategies:
++    - exact: token-equal statements.
++    - stronger_hypotheses: same conclusion shape, source hypotheses are subset.
++    - weaker_target: target has extra hypotheses; source can be applied after introducing them.
++    """
++    if validate.tokens(source_stmt) == validate.tokens(target_stmt):
++        return "exact"
++    sh, sc = _hypothesis_parts(source_stmt)
++    th, tc = _hypothesis_parts(target_stmt)
++    if validate.tokens(sc) != validate.tokens(tc):
++        # Try structural conclusion shape equality
++        if corpus.shape(sc) != corpus.shape(tc) or not corpus.shape(sc):
++            return None
++    # Source stronger if its hypotheses are a subset of target hypotheses (by normalized token shape).
++    sset = {corpus.shape(h) for h in sh if corpus.shape(h)}
++    tset = {corpus.shape(h) for h in th if corpus.shape(h)}
++    if sset and sset <= tset:
++        return "stronger_hypotheses"
++    if not sset and tset:
++        # Source has no hypotheses, target does - source is stronger.
++        return "stronger_hypotheses"
++    if sset == tset:
++        return "exact_shape"
++    return None
++
++
++def _instantiate_candidate(source: str, source_module: str, target_gap: dict, strategy: str) -> Detection:
++    target_module = target_gap["module"]
++    renamed = controlled_module_rename(source, source_module, target_module)
++    src_imports, _ = _split_imports(renamed)
++    try:
++        _ensure_imports_allowed(src_imports, target_gap)
++    except ValueError as e:
++        return Detection("", source_module, 0.0, strategy, False, None, str(e), None)
++
++    _, body = _split_imports(renamed)
++    body = _demote_helper_theorems(body, target_module)
++    body = _normalize_helper_namespaces(body, target_module)
++    candidate = emit_standalone(target_gap, body, src_imports)
++    final = _extract_final_theorem(candidate, target_module)
++    if final is None:
++        return Detection("", source_module, 0.0, strategy, False, None, "missing final theorem after rename", candidate)
++
++    _, stmt, proof_tail = final
++    target_stmt = target_gap["statement"]
++
++    if validate.tokens(stmt) != validate.tokens(target_stmt):
++        if strategy in ("exact", "exact_shape"):
++            candidate = _replace_final_theorem(candidate, target_module, target_stmt, proof_tail)
++        elif strategy == "stronger_hypotheses":
++            # Source is stronger (fewer/equal hypotheses, same conclusion). Keep the
++            # renamed source theorem as a helper lemma inside a module-derived namespace,
++            # then emit exactly one final theorem matching the target statement.
++            pat = re.compile(
++                r"(?<![\w.])theorem\s+" + re.escape(target_module) + r"\s*:.*?:=\s*by\b.*\Z",
++                re.S,
++            )
++            m = pat.search(candidate)
++            if not m:
++                return Detection("", source_module, 0.0, strategy, False, None, "cannot locate theorem for wrapping", candidate)
++            helper_ns = target_module + "_aux"
++            helper_lemma = f"lemma adapted_stronger :{stmt} := by{proof_tail}"
++            wrapper = (
++                f"namespace {helper_ns}\n"
++                f"{helper_lemma}\n"
++                f"end {helper_ns}\n\n"
++                f"theorem {target_module} : {target_stmt} := by\n"
++                f"  intros\n"
++                f"  first\n"
++                f"  | exact {helper_ns}.adapted_stronger\n"
++                f"  | apply {helper_ns}.adapted_stronger <;> assumption\n"
++                f"  | (have h := {helper_ns}.adapted_stronger; first | exact h | (apply h <;> assumption))\n"
++            )
++            candidate = candidate[:m.start()] + wrapper
++        else:
++            candidate = _replace_final_theorem(candidate, target_module, target_stmt, proof_tail)
++
++    try:
++        digest = validate.validate(target_gap, candidate.encode("utf-8"))
++    except validate.InvalidCandidate as e:
++        return Detection("", source_module, 0.0, strategy, False, None, str(e), candidate)
++    return Detection("", source_module, 0.0, strategy, True, digest, None, candidate)
++
++
++def detect_and_adapt(db, target_gap: dict, *, limit: int = 8, source_text: str | None = None, source_module: str | None = None) -> list[Detection]:
++    target_stmt = target_gap["statement"]
++    target_module = target_gap["module"]
++    results: list[Detection] = []
++
++    if source_text is not None:
++        mod = source_module
++        if mod is None:
++            m = re.search(r"(?m)^theorem\s+(PEqualNP\.[A-Za-z0-9_.]+)\s*:", source_text)
++            mod = m.group(1) if m else target_module
++        strat = "exact" if mod == target_module else "module_rename"
++        r = adapt_exact_module(source_text, target_gap, source_module=mod)
++        results.append(Detection(path="<source>", module=mod, score=1.0, strategy=r.strategy,
++                                 ok=r.ok, sha256=(r.details or {}).get("sha256"), error=(r.details or {}).get("error"), candidate=r.candidate))
++        return results
++
++    matches = corpus.search(db, target_stmt, target_gap.get("imports") or [], limit=limit)
++    for m in matches:
++        src_module = m["module"]
++        src_stmt = m["statement"]
++        strat = _is_stronger_or_equal(src_stmt, target_stmt)
++        if strat is None:
++            # still try module rename adaptation if same conclusion shape
++            hint = m.get("structural_hint") or {}
++            if hint.get("same_conclusion_shape"):
++                strat = "conclusion_shape"
++            else:
++                continue
++        src = db.execute("select source from proof where path=?", (m["path"],)).fetchone()
++        if not src:
++            continue
++        det = _instantiate_candidate(src[0], src_module, target_gap, strat)
++        det.path = m["path"]
++        det.module = src_module
++        det.score = m["score"]
++        det.strategy = strat
++        results.append(det)
++    results.sort(key=lambda d: (not d.ok, -d.score, d.path))
++    return results
+diff --git a/missions/pnp/brief.py b/missions/pnp/brief.py
+index 30bf40cb..720d8382 100644
+--- a/missions/pnp/brief.py
++++ b/missions/pnp/brief.py
+@@ -98,6 +98,8 @@ def main():
+     if ns.refresh:
+         print(json.dumps(refresh()))
+         return
++    from . import tools
++    tools.record("brief")
+     gap,lease=assignment.resolve()
+     rec=state.load(gap)
+     if not support.active(rec) or rec["lease"]!=lease:
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index 5ad4d8f0..157a38e6 100755
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -260,6 +260,20 @@ def cmd_guard(args):
+                 pass
+     except (OSError, ValueError) as exc:
+         result = {"decision": "wait", "reason": str(exc)}
++    if result.get("decision") == "continue":
++        try:
++            from missions.pnp import tools, preflight
++            # Keep the guard compact, with an explicit current discovery command.
++            snap = tools.snapshot()
++            result["research_tools"] = {"revision":snap["revision"],"command":snap["command"],
++                "instruction":"Inspect current inventory when unfamiliar or revised; use relevant capabilities before redundant manual work."}
++            rec = state.load(gap)
++            if rec and rec.get("lease")==lease:
++                generated = preflight.read(rec)
++                if generated:
++                    result["automatic_proof_preflight"] = generated
++        except (OSError,ValueError,TypeError,KeyError):
++            pass
+     _printer(result)
+     return 0
+ 
+diff --git a/missions/pnp/compile.py b/missions/pnp/compile.py
+index d414f30c..b5b1d8c4 100644
+--- a/missions/pnp/compile.py
++++ b/missions/pnp/compile.py
+@@ -88,6 +88,8 @@ def main(argv=None):
+             print("RESOURCE DEFERRED:", exc, file=sys.stderr)
+             return 75
+     args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
++    from . import tools
++    tools.record("compile-light" if ns.light else "compile-full")
+     def interrupted(signum, frame):
+         raise KeyboardInterrupt
+     signal.signal(signal.SIGTERM, interrupted)
+diff --git a/missions/pnp/continuity.py b/missions/pnp/continuity.py
+index 9f0738bb..e2e3f0c9 100644
+--- a/missions/pnp/continuity.py
++++ b/missions/pnp/continuity.py
+@@ -67,6 +67,9 @@ def support_pass(role, records, selected, agents):
+     prompt = (
+         "You are performing a bounded Executive-delegated research support pass. "
+         "Read /var/lib/lubko/wd/viche/missions/pnp/mandate.md. "
++        "Discover current mathematical and engineering capabilities using "
++        "PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.tools. "
++        "Inspect actual tool adoption with tools --usage when useful; tool invocation is not success. "
+         "Use PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.support targets "
+         "and python3 -m missions.pnp.portfolio inspect. "
+         "Deliver substantive evidence directly via support advise (or portfolio decisions). "
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 9bc30294..343572f5 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -22,6 +22,10 @@ nohup flock -n "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/suppo
+ nohup flock -n "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/brief-refresh.lock" \
+     timeout 25 python3 -m missions.pnp.brief --refresh \
+     </dev/null >"${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/brief-refresh.log" 2>&1 &
++# Independent cheap generators do not wait for a model or the compiler.
++nohup flock -n "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/proof-preflight.lock" \
++    timeout 30 python3 -m missions.pnp.preflight --scan \
++    </dev/null >"${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/cache/proof-preflight.log" 2>&1 &
+ # Renew leases and recover queued publications before the optional score poll.
+ python3 -m missions.pnp.frontier || :
+ python3 missions/pnp/cli.py reconcile
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index d091a60e..f586d025 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -495,3 +495,19 @@ an assertion of kernel checking. Use narrow scratch imports and the managed
+ light queue when possible; the integrator checks the combined exact file.
+ Proof reuse hints in `proofs find` include relaxed conclusion/hypothesis
+ matches; a high score is NOT a proof of implication.
++
++
++## Research capability awareness
++
++The live tool inventory (`python3 -m missions.pnp.tools`, with the canonical
++town PYTHONPATH) is part of every assignment, not a one-time announcement.
++Each guard reports the tool revision and discovery command. A changed revision
++means inspect the applicable new capabilities before doing redundant work.
++Cheap automatic preflight runs separately for every live lease; its candidates
++are not kernel-checked or automatically published. Researchers should review
++and use them promptly. Engineering deliveries that introduce tools must also
++update the inventory with actionable examples, applicability and limitations.
++Use `tools --usage` for attempt-scoped observed CLI invocations; never infer
++proof success from invocation. Use evidence of actual tool use and successful proofs, not mandatory reports
++or ritual invocations, to evaluate adoption. Persistent tooling engineering
++continues independently of any single lease.
+diff --git a/missions/pnp/metrics.py b/missions/pnp/metrics.py
+new file mode 100644
+index 00000000..8c9cc786
+--- /dev/null
++++ b/missions/pnp/metrics.py
+@@ -0,0 +1,118 @@
++"""Observed research funnel. Lease-slot time is not CPU or agent time."""
++import argparse
++from collections import Counter
++from datetime import datetime, timezone
++import json
++import statistics
++
++from . import state, leaderboard
++
++
++def timestamp(value):
++    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
++
++
++def replay(events, now):
++    attempts, prs, checks = [], {}, Counter()
++    current = None
++    malformed = 0
++    for event in events:
++        try:
++            t = timestamp(event["at"])
++            kind = event["kind"]
++            d = event["detail"]
++            if not isinstance(d, dict):
++                raise ValueError("detail")
++        except (ValueError, TypeError, KeyError, AttributeError):
++            malformed += 1
++            continue
++        if kind == "acquired":
++            if current and current["end"] is None:
++                current.update(end=max(current["start"], t), outcome="superseded")
++            current = dict(start=t, end=None, outcome="active", candidate=None, pr=None)
++            attempts.append(current)
++        elif kind == "state":
++            target = d.get("to")
++            if current and target == "CANDIDATE_READY" and current["candidate"] is None:
++                current["candidate"] = max(current["start"], t)
++            if current and current["end"] is None and target in ("RELEASED", "STALE"):
++                current.update(end=max(current["start"], t), outcome=target.lower())
++            if target == "ACCEPTED":
++                for item in prs.values():
++                    if item["sha"] == d.get("sha"):
++                        item["accepted"] = t
++        elif kind == "portfolio_release":
++            if current and current["end"] is None:
++                current.update(end=max(current["start"], t), outcome="released")
++        elif kind == "published":
++            pr = d.get("pr")
++            if not isinstance(pr, int) or isinstance(pr, bool):
++                continue
++            if pr not in prs:
++                prs[pr] = dict(first=t, sha=d.get("sha"), accepted=None)
++            else:
++                prs[pr]["sha"] = d.get("sha")
++            if current and current["end"] is None:
++                current.update(end=max(current["start"], t), outcome="submitted", pr=pr)
++        elif kind == "postcheck":
++            checks[d.get("local_check_status") or "deferred_or_unspecified"] += 1
++    for a in attempts:
++        a["slot_seconds"] = max(0, (a["end"] if a["end"] is not None else now) - a["start"])
++    return attempts, prs, checks, malformed
++
++
++def snapshot(now=None):
++    now = datetime.now(timezone.utc).timestamp() if now is None else now
++    attempts, prs, checks, malformed = [], {}, Counter(), 0
++    for gap in state.all_gaps():
++        events = []
++        try:
++            with open(state.events_path(gap)) as f:
++                for line in f:
++                    try:
++                        events.append(json.loads(line))
++                    except ValueError:
++                        malformed += 1
++        except OSError:
++            continue
++        a, p, c, m = replay(events, now)
++        rec = state.load(gap)
++        if a and a[-1]["outcome"] == "active" and (not rec or rec.get("state") not in ("LEASED", "RESEARCHING", "CANDIDATE_READY", "BUILDING", "SIGNED", "PUSHED")):
++            a[-1]["outcome"] = "unresolved_history"
++            a[-1]["slot_seconds"] = 0
++        attempts.extend(a)
++        prs.update(p)
++        checks.update(c)
++        malformed += m
++    outcomes = Counter(a["outcome"] for a in attempts)
++    hours = sum(a["slot_seconds"] for a in attempts) / 3600
++    def median(values):
++        return round(statistics.median(values), 1) if values else None
++    accepted = [p for p in prs.values() if p["accepted"] is not None]
++    board = leaderboard.load()
++    return {
++        "at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
++        "observed_acquisitions": len(attempts),
++        "attempt_outcomes": dict(outcomes),
++        "lease_slot_hours_including_active": round(hours, 3),
++        "submitted_per_slot_hour": round(outcomes["submitted"] / hours, 4) if hours else None,
++        "median_acquisition_to_candidate_seconds": median([a["candidate"]-a["start"] for a in attempts if a["candidate"] is not None]),
++        "median_acquisition_to_submission_seconds": median([a["slot_seconds"] for a in attempts if a["outcome"]=="submitted"]),
++        "unique_published_prs": len(prs),
++        "observed_accepted_prs": len(accepted),
++        "median_submission_to_acceptance_seconds": median([max(0,p["accepted"]-p["first"]) for p in accepted]),
++        "local_check_events": dict(checks),
++        "official_checked_steps": board.get("our_steps") if board.get("available") else None,
++        "official_score_observed_at": board.get("observed_at"),
++        "malformed_events_skipped": malformed,
++        "notes": "Event history only; active durations censored; unresolved histories excluded from slot-hour denominator; repeated checks count as events, not distinct proofs. Not agent-hours or CPU-hours. Official score is authoritative."
++    }
++
++
++def main():
++    argparse.ArgumentParser(description=__doc__).parse_args()
++    print(json.dumps(snapshot(), indent=2, sort_keys=True))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/missions/pnp/preflight.py b/missions/pnp/preflight.py
+new file mode 100644
+index 00000000..c9305e67
+--- /dev/null
++++ b/missions/pnp/preflight.py
+@@ -0,0 +1,101 @@
++"""Cheap, attempt-scoped proof generators; no leases, agents, builds or publication."""
++import argparse
++import hashlib
++import json
++from pathlib import Path
++
++from . import assignment, state, support, tools, validate
++from .proofs import circuit, synthesis
++
++
++def paths(rec):
++    d=support.directory(rec)/"preflight"
++    return d, d/"report.json"
++
++
++def read(rec):
++    if not support.active(rec):
++        return None
++    d,p=paths(rec)
++    try:
++        report=json.loads(p.read_text())
++        if report.get("attempt")!=support.attempt(rec):
++            return None
++        if report.get("result")=="candidate":
++            f=d/"candidate.lean"
++            if hashlib.sha256(f.read_bytes()).hexdigest()!=report.get("sha256"):
++                return None
++        return report
++    except (OSError,ValueError,AttributeError):
++        return None
++
++
++def run(rec, revision):
++    if not support.active(rec):
++        return None
++    previous=read(rec)
++    if previous and previous.get("tools_revision")==revision:
++        return previous
++    meta={"id":rec["gap_id"],"file":rec["path"],"module":rec["module"],
++          "statement":rec["statement"],"imports":rec["imports"]}
++    result={"attempt":support.attempt(rec),"tools_revision":revision,
++            "result":"not_recognized","local_lean_checked":False}
++    source=None
++    try:
++        r=circuit.explicit_circuit(meta)
++        if r is not None:
++            result.update(generator="explicit",details=r,result="no_candidate")
++            if r.get("verified"):
++                source=circuit.render(meta,"decide")
++        else:
++            r=synthesis.candidate(meta)
++            if r is not None:
++                source=r.pop("candidate",None)
++                result.update(generator="synthesis",details=r,result="no_candidate")
++        if source:
++            validate.validate(meta,source.encode())
++            result.update(result="candidate",sha256=hashlib.sha256(source.encode()).hexdigest(),
++                          candidate=str(paths(rec)[0]/"candidate.lean"))
++    except (ValueError,TypeError,KeyError,validate.InvalidCandidate) as exc:
++        result.update(result="generator_error",error=str(exc)[:500])
++        source=None
++    with state.lock(rec["gap_id"]):
++        latest=state.load(rec["gap_id"])
++        if not support.active(latest) or support.attempt(latest)!=result["attempt"]:
++            return None
++        d,p=paths(latest)
++        if source:
++            state.atomic_write(str(d/"candidate.lean"),source)
++        state.atomic_write(str(p),json.dumps(result,ensure_ascii=False)+"\n")
++    return result
++
++
++def scan():
++    revision=tools.snapshot()["revision"]
++    rows=[]
++    for gap in state.all_gaps():
++        rec=state.load(gap)
++        if support.active(rec):
++            r=run(rec,revision)
++            if r:
++                rows.append({"gap":gap,**r})
++    return rows
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--scan",action="store_true")
++    ns=p.parse_args()
++    if ns.scan:
++        print(json.dumps(scan(),ensure_ascii=False,indent=2))
++        return
++    tools.record("preflight")
++    gap,lease=assignment.resolve()
++    rec=state.load(gap)
++    if not support.active(rec) or rec["lease"]!=lease:
++        p.error("live bound assignment required")
++    print(json.dumps(run(rec,tools.snapshot()["revision"]),ensure_ascii=False,indent=2))
++
++
++if __name__=="__main__":
++    main()
+diff --git a/missions/pnp/proofs/__main__.py b/missions/pnp/proofs/__main__.py
+index d31bbcb3..1eae6db7 100644
+--- a/missions/pnp/proofs/__main__.py
++++ b/missions/pnp/proofs/__main__.py
+@@ -4,7 +4,7 @@ import json
+ from pathlib import Path
+ 
+ from .. import assignment, state
+-from . import corpus, circuit, synthesis, search, fragments
++from . import corpus, circuit, synthesis, search, fragments, rows, bank
+ 
+ 
+ def main():
+@@ -24,12 +24,39 @@ def main():
+     sat.add_argument("specification", type=Path)
+     sat.add_argument("--seconds", type=float, default=30)
+     sat.add_argument("--checkpoint", type=Path)
++    rv = sub.add_parser("rows", help="verify multi-output explicit-row circuit")
++    rv.add_argument("specification",type=Path)
++    rv.add_argument("witness",type=Path)
++    rs = sub.add_parser("row-search",help="bounded multi-output explicit-row SAT/CEGIS")
++    rs.add_argument("specification",type=Path)
++    rs.add_argument("--seconds",type=float,default=30)
++    rs.add_argument("--checkpoint",type=Path)
++    bk = sub.add_parser("bank",help="generate exact monotone bipartite neighborhood-bank row constraints")
++    bk.add_argument("specification",type=Path)
++    bk.add_argument("--output",type=Path)
+     share = sub.add_parser("share", help="snapshot a reusable Lean source for peers")
+     share.add_argument("file",type=Path)
+     share.add_argument("--message",required=True)
+     listing = sub.add_parser("fragments")
+     listing.add_argument("--all-attempts",action="store_true")
+     args = p.parse_args()
++    from .. import tools
++    tools.record("proofs-"+args.command)
++    if args.command in ("rows","row-search","bank"):
++        try:
++            raw=json.loads(args.specification.read_text())
++            if args.command=="rows":
++                result=rows.verify(raw,json.loads(args.witness.read_text()))
++            elif args.command=="row-search":
++                result=rows.solve(raw,args.seconds,args.checkpoint)
++            else:
++                result=bank.generate(raw)
++                if args.output:
++                    with args.output.open("x") as f:json.dump(result,f,indent=2)
++        except (OSError,ValueError) as exc:
++            p.error(str(exc))
++        print(json.dumps(result,ensure_ascii=False,indent=2))
++        return
+     if args.command in ("share","fragments"):
+         try:
+             result = (fragments.share(args.file,args.message) if args.command=="share"
+diff --git a/missions/pnp/proofs/bank.py b/missions/pnp/proofs/bank.py
+new file mode 100644
+index 00000000..dffcf9fc
+--- /dev/null
++++ b/missions/pnp/proofs/bank.py
+@@ -0,0 +1,46 @@
++"""Exact monotone bipartite neighborhood-bank row reduction.
++
++For each nonisolated left vertex p, require output true on every incident
++pair {p,l}, false on every independent input containing p. Every independent
++input extends to a maximal independent set; monotonicity then gives the
++negative condition from maximal rows. For an exact OR output, its singleton
++positives and maximal false complement suffice. The optional group demands
++that at least one incident line singleton is rejected by its point output.
++"""
++from . import rows
++
++def generate(raw):
++    if not isinstance(raw,dict) or set(raw)-{"n","left","edges","gates","or_output","require_masked_edge"}:
++        raise ValueError("invalid bank specification")
++    n=raw.get("n");left=raw.get("left")
++    if type(n) is not int or not 1<=n<=64 or not rows._indices(left,n) or len(set(left))!=len(left) or len(left)>16:
++        raise ValueError("left side must have at most 16 distinct vertices")
++    right=set(range(n))-set(left); left=sorted(left);L=set(left)
++    edges=raw.get("edges")
++    if not isinstance(edges,list) or any(not rows._indices(e,n) or len(e)!=2 or e[0] not in L or e[1] not in right for e in edges):
++        raise ValueError("edges must be [left,right]")
++    N={p:set() for p in left}
++    for p,l in edges:N[p].add(l)
++    # For every subset S of L, take all R not adjacent to S, then close L.
++    # This is a maximal independent set. All maximal independent sets occur.
++    maximal=set()
++    for m in range(1<<len(left)):
++        selected={p for i,p in enumerate(left) if m>>i&1}
++        free=right-set().union(*(N[p] for p in selected))
++        closed={p for p in left if not (N[p]&free)}
++        maximal.add(sum(1<<v for v in closed|free))
++    outputs=[];group=[]
++    for p in left:
++        if not N[p]:continue
++        j=len(outputs)
++        outputs.append({"name":"point_"+str(p),"ones":[(1<<p)|(1<<l) for l in sorted(N[p])],
++                        "zeros":[r for r in sorted(maximal) if r>>p&1]})
++        group.extend([j,1<<l,0] for l in sorted(N[p]))
++    if "or_output" in raw:
++        xs=raw["or_output"]
++        if not rows._indices(xs,n) or not xs:raise ValueError("nonempty OR output required")
++        xs=set(xs)
++        outputs.append({"name":"exact_or","ones":[1<<x for x in sorted(xs)],
++                        "zeros":[((1<<n)-1)^sum(1<<x for x in xs)]})
++    return rows.spec({"n":n,"gates":raw["gates"],"ops":["and","or"],"outputs":outputs,
++                      "groups":[group] if raw.get("require_masked_edge") is True else []})
+diff --git a/missions/pnp/proofs/rows.py b/missions/pnp/proofs/rows.py
+new file mode 100644
+index 00000000..4c05d80a
+--- /dev/null
++++ b/missions/pnp/proofs/rows.py
+@@ -0,0 +1,217 @@
++"""Explicit-row, multi-output circuit verification and SAT synthesis.
++
++Only listed rows and disjunctive groups are checked. A caller must prove any
++reduction from a quantified statement to those rows. The graph-bank generator
++has such a monotonicity argument; arbitrary row specifications do not.
++"""
++import hashlib
++import json
++from pathlib import Path
++import time
++
++from .. import state
++
++def _indices(xs, n):
++    return isinstance(xs,list) and all(type(x) is int and 0<=x<n for x in xs)
++
++def spec(raw):
++    if not isinstance(raw,dict) or set(raw)-{"n","gates","ops","extra","fixed","outputs","groups"}:
++        raise ValueError("unknown specification field")
++    n,budget=raw.get("n"),raw.get("gates")
++    if type(n) is not int or not 1<=n<=64 or type(budget) is not int or not 0<=budget<=96:
++        raise ValueError("supported bounds: 1..64 inputs, 0..96 gates")
++    ops=raw.get("ops",["and","or"])
++    if not isinstance(ops,list) or not ops or any(x not in ("and","or","not") for x in ops) or len(ops)!=len(set(ops)):
++        raise ValueError("invalid operations")
++    extra=raw.get("extra",[])
++    if not isinstance(extra,list) or len(extra)>16 or any(not _indices(x,n) for x in extra):
++        raise ValueError("extra inputs must be ORs of base inputs")
++    ni=n+len(extra)
++    fixed=raw.get("fixed",[])
++    if not isinstance(fixed,list) or len(fixed)>budget:
++        raise ValueError("invalid prefix")
++    for i,g in enumerate(fixed):
++        if not isinstance(g,list) or not g or g[0] not in ops or len(g)!=(2 if g[0]=="not" else 3) or not _indices(g[1:],ni+i):
++            raise ValueError("invalid fixed gate")
++    outs=raw.get("outputs")
++    if not isinstance(outs,list) or not 1<=len(outs)<=64:
++        raise ValueError("1..64 outputs required")
++    outputs=[]; names=set(); allrows=set(); count=0
++    for o in outs:
++        if not isinstance(o,dict) or set(o)-{"name","ones","zeros","wire"}:
++            raise ValueError("invalid output")
++        name=o.get("name")
++        if not isinstance(name,str) or not name or len(name)>80 or name in names:
++            raise ValueError("unique output names required")
++        names.add(name)
++        one,zero=o.get("ones",[]),o.get("zeros",[])
++        if not _indices(one,1<<n) or not _indices(zero,1<<n) or set(one)&set(zero):
++            raise ValueError("invalid or inconsistent rows")
++        wire=o.get("wire")
++        if wire is not None and (type(wire) is not int or not 0<=wire<ni+budget):
++            raise ValueError("invalid fixed output wire")
++        allrows.update(one);allrows.update(zero);count+=len(one)+len(zero)
++        outputs.append({"name":name,"ones":sorted(set(one)),"zeros":sorted(set(zero)),"wire":wire})
++    groups=raw.get("groups",[])
++    if not isinstance(groups,list) or len(groups)>128:
++        raise ValueError("invalid groups")
++    normalized=[]
++    for group in groups:
++        if not isinstance(group,list) or not group:
++            raise ValueError("nonempty groups required")
++        for item in group:
++            if not isinstance(item,list) or len(item)!=3 or not _indices(item[:1],len(outputs)) or not _indices(item[1:2],1<<n) or type(item[2]) is not int or item[2] not in (0,1):
++                raise ValueError("group literals are [output index,row,value]")
++            allrows.add(item[1])
++        count+=len(group)
++        normalized.append(sorted(set(tuple(x) for x in group)))
++    if len(allrows)>8192 or count>131072:
++        raise ValueError("row budget exceeded")
++    return {"n":n,"gates":budget,"ops":sorted(ops),"extra":[sorted(set(x)) for x in extra],
++            "fixed":fixed,"outputs":outputs,"groups":[[list(x) for x in g] for g in normalized]}
++
++def rowset(s):
++    return sorted({r for o in s["outputs"] for k in ("ones","zeros") for r in o[k]}
++                  | {r for g in s["groups"] for _,r,_ in g})
++
++def signatures(s,gates,outputs,rs):
++    ni=s["n"]+len(s["extra"])
++    if not isinstance(gates,list) or len(gates)>s["gates"] or gates[:len(s["fixed"])]!=s["fixed"]:
++        raise ValueError("invalid witness gate budget or prefix")
++    if not _indices(outputs,ni+len(gates)) or len(outputs)!=len(s["outputs"]):
++        raise ValueError("invalid output wires")
++    if any(o["wire"] is not None and w!=o["wire"] for o,w in zip(s["outputs"],outputs)):
++        raise ValueError("fixed output mismatch")
++    mask=(1<<len(rs))-1
++    wires=[sum(((r>>i)&1)<<j for j,r in enumerate(rs)) for i in range(s["n"])]
++    for xs in s["extra"]:
++        v=0
++        for x in xs:v|=wires[x]
++        wires.append(v)
++    for g in gates:
++        if not isinstance(g,list) or not g or g[0] not in s["ops"] or len(g)!=(2 if g[0]=="not" else 3) or not _indices(g[1:],len(wires)):
++            raise ValueError("invalid witness gate")
++        a=wires[g[1]]
++        wires.append(mask^a if g[0]=="not" else a&wires[g[2]] if g[0]=="and" else a|wires[g[2]])
++    return [wires[w] for w in outputs]
++
++def violations(s,gates,outputs):
++    rs=rowset(s); index={r:i for i,r in enumerate(rs)}
++    sig=signatures(s,gates,outputs,rs)
++    def value(j,r):return (sig[j]>>index[r])&1
++    bad=[(j,r,v) for j,o in enumerate(s["outputs"]) for k,v in (("ones",1),("zeros",0))
++         for r in o[k] if value(j,r)!=v]
++    groups=[i for i,g in enumerate(s["groups"]) if not any(value(j,r)==v for j,r,v in g)]
++    return bad,groups
++
++def verify(raw,witness):
++    s=spec(raw)
++    if not isinstance(witness,dict):
++        raise ValueError("expected witness object")
++    bad,groups=violations(s,witness.get("gates"),witness.get("outputs"))
++    return {"verified":not bad and not groups,"rows":len(rowset(s)),"outputs":len(s["outputs"]),
++            "failed_rows":len(bad),"examples":[list(b) for b in bad[:20]],
++            "failed_groups":groups,"scope":"listed_rows_and_groups_only"}
++
++def solve(raw,seconds=30,checkpoint=None):
++    s=spec(raw)
++    if not 0<seconds<=3600:raise ValueError("seconds must be in (0,3600]")
++    try:
++        from pysat.formula import IDPool
++        from pysat.card import CardEnc,EncType
++        from pysat.solvers import Cadical195
++    except ImportError:
++        return {"result":"unavailable","reason":"python-sat with CaDiCaL195 required"}
++    digest=hashlib.sha256(json.dumps(s,sort_keys=True).encode()).hexdigest()
++    checkpoint=Path(checkpoint).resolve() if checkpoint else None
++    allrows=set(rowset(s))
++    initial={r for o in s["outputs"] for k in ("ones","zeros") for r in o[k][:1]}
++    initial.update(r for g in s["groups"] for _,r,_ in g)
++    if checkpoint and checkpoint.exists():
++        old=json.loads(checkpoint.read_text())
++        if old.get("spec")!=digest or not _indices(old.get("rows"),1<<s["n"]) or not set(old["rows"])<=allrows:
++            raise ValueError("checkpoint specification mismatch")
++        initial.update(old["rows"])
++    p=IDPool();V=p.id;cnf=[]
++    ni=s["n"]+len(s["extra"]);ng=s["gates"];ops=s["ops"];nw=ni+ng
++    def onehot(xs):cnf.extend(CardEnc.equals(xs,1,vpool=p,encoding=EncType.seqcounter).clauses)
++    def sel(i,d,w):return V(("selector",i,d,w))
++    def op(i,k):return V(("op",i,k))
++    def out(j,w):return V(("out",j,w))
++    def oval(j,r):return V(("output-value",j,r))
++    for i in range(ng):
++        onehot([op(i,k) for k in ops])
++        for d in (0,1):onehot([sel(i,d,w) for w in range(ni+i)])
++        # Only sound commutativity breaking; never require distinct inputs or used gates.
++        for a in range(ni+i):
++            for b in range(a):
++                for k in ("and","or"):
++                    if k in ops:cnf.append([-op(i,k),-sel(i,0,a),-sel(i,1,b)])
++            if "not" in ops:cnf.append([-op(i,"not"),-sel(i,0,a),sel(i,1,a)])
++        if i<len(s["fixed"]):
++            k,*args=s["fixed"][i];a,b=(args[0],args[0]) if k=="not" else sorted(args)
++            cnf.extend([[op(i,k)],[sel(i,0,a)],[sel(i,1,b)]])
++    for j,o in enumerate(s["outputs"]):
++        onehot([out(j,w) for w in range(nw)])
++        if o["wire"] is not None:cnf.append([out(j,o["wire"])])
++    required={}
++    for j,o in enumerate(s["outputs"]):
++        for k,v in (("ones",1),("zeros",0)):
++            for r in o[k]:required.setdefault(r,[]).append((j,v))
++    observed={}
++    for group in s["groups"]:
++        for j,r,_ in group:observed.setdefault(r,set()).add(j)
++    rows=set()
++    def add_row(r,solver):
++        if r in rows:return
++        rows.add(r)
++        def val(w):return V(("value",r,w))
++        def add(c):solver.add_clause(c)
++        bits=[(r>>i)&1 for i in range(s["n"])]
++        bits += [int(any(bits[i] for i in xs)) for xs in s["extra"]]
++        for w,b in enumerate(bits):add([val(w) if b else -val(w)])
++        for i in range(ng):
++            a,b,g=V(("a",r,i)),V(("b",r,i)),val(ni+i)
++            for d,z in ((0,a),(1,b)):
++                for w in range(ni+i):
++                    q=sel(i,d,w);add([-q,-z,val(w)]);add([-q,z,-val(w)])
++            for k,clauses in (("and",[[-g,a],[-g,b],[g,-a,-b]]),
++                              ("or",[[g,-a],[g,-b],[-g,a,b]]),("not",[[g,a],[-g,-a]])):
++                if k in ops:
++                    for c in clauses:add([-op(i,k),*c])
++        targets={j for j,_ in required.get(r,[])}|observed.get(r,set())
++        for j in targets:
++            z=oval(j,r)
++            for w in range(nw):
++                q=out(j,w);add([-q,-z,val(w)]);add([-q,z,-val(w)])
++        for j,v in required.get(r,[]):add([oval(j,r) if v else -oval(j,r)])
++    def save():
++        if checkpoint:state.atomic_write(str(checkpoint),json.dumps({"spec":digest,"rows":sorted(rows)})+"\n")
++    start=time.monotonic()
++    with Cadical195(bootstrap_with=cnf) as solver:
++        for r in sorted(initial):add_row(r,solver)
++        for group in s["groups"]:
++            solver.add_clause([oval(j,r) if v else -oval(j,r) for j,r,v in group])
++        save();rounds=0
++        while time.monotonic()-start<seconds:
++            solver.conf_budget(2000);result=solver.solve_limited();rounds+=1
++            if result is None:continue
++            if result is False:
++                return {"result":"unsat_encoding","formal_refutation":False,"spec":digest,"rows":len(rows),"rounds":rounds}
++            model=set(solver.get_model());gates=[]
++            for i in range(ng):
++                k=next(k for k in ops if op(i,k) in model)
++                a=next(w for w in range(ni+i) if sel(i,0,w) in model)
++                b=next(w for w in range(ni+i) if sel(i,1,w) in model)
++                gates.append([k,a] if k=="not" else [k,a,b])
++            gates[:len(s["fixed"])]=s["fixed"]
++            outputs=[next(w for w in range(nw) if out(j,w) in model) for j in range(len(s["outputs"]))]
++            bad,groups=violations(s,gates,outputs)
++            if not bad and not groups:
++                return {"result":"verified_rows","gates":gates,"outputs":outputs,"rows":len(allrows),
++                        "scope":"listed_rows_and_groups_only","spec":digest}
++            if groups or any(r in rows for _,r,_ in bad):
++                raise RuntimeError("encoding and independent verifier disagree")
++            for r in sorted({r for _,r,_ in bad})[:8]:add_row(r,solver)
++            save()
++        return {"result":"unknown","rows":len(rows),"rounds":rounds,"spec":digest}
+diff --git a/missions/pnp/staff.py b/missions/pnp/staff.py
+index a776621a..ac1bacac 100644
+--- a/missions/pnp/staff.py
++++ b/missions/pnp/staff.py
+@@ -89,7 +89,11 @@ def prompt(rec, approach, general=False):
+         "approach; communicate useful sublemmas and artifacts to the other researchers "
+         "on this same gap. No unrelated gap acquisition, no direct desk or GitHub "
+         "mutation, no agent launches. Use the local managed compiler and guard from "
+-        "your bound cwd. Use proofs find/source first and proofs search for bounded "
++        "your bound cwd. At entry run PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.tools "
++        "to discover the currently installed capabilities, applicability and examples. "
++        "Read automatic preflight results from guard; use an available generator or adapter before "
++        "reinventing its work. Recheck the tool inventory whenever guard reports a changed tools revision. "
++        "Use proofs find/source first and proofs search for bounded "
+         "finite circuit synthesis, with a durable CEGIS checkpoint. Verify any witness "
+         "on the full domain; solver UNSAT alone is not a Lean proof. Reuse peer source "
+         "fragments and previous attempts rather than restarting equivalent work. Use proofs share FILE "
+diff --git a/missions/pnp/tools.py b/missions/pnp/tools.py
+new file mode 100644
+index 00000000..11af5f5d
+--- /dev/null
++++ b/missions/pnp/tools.py
+@@ -0,0 +1,160 @@
++"""Live research capability discovery. Advisory, never an admission gate."""
++import argparse
++import hashlib
++import importlib.util
++import json
++import re
++import time
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent
++PREFIX = "PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp."
++
++
++def present(path):
++    return (ROOT / path).is_file()
++
++
++def inventory():
++    # Only advertise capabilities whose implementation exists at this revision.
++    rows = []
++    def add(path, use, purpose, when):
++        if present(path):
++            rows.append({"command": PREFIX + use, "purpose": purpose, "when": when})
++    add("brief.py", "brief", "Exact leased statement, original sketch, parent cuts and siblings",
++        "At entry; before independent mathematics.")
++    add("proofs/__main__.py", "proofs find [QUERY]", "Retrieve checked analogous proofs and structural hints",
++        "Before proving a lemma from scratch; inspect source, not just scores.")
++    add("proofs/__main__.py", "proofs source MODULE", "Retrieve checked source text",
++        "For a plausible related proof; verify hypotheses and permitted imports.")
++    add("proofs/circuit.py", "proofs circuit --output NEW.lean", "Validate prescribed finite circuit and emit candidate",
++        "Explicit circuit or finite truth-table claim.")
++    add("proofs/synthesis.py", "proofs synthesize --output NEW.lean", "Generate small graph-edge monotone circuits",
++        "Existential circuit construction; exact star cover when integrated.")
++    add("proofs/search.py", "proofs search SPEC.json --seconds 60 --checkpoint ROWS.json",
++        "Bounded SAT/CEGIS with full independent witness checks",
++        "Finite gate-budget or truth-table problem; UNSAT is not a Lean refutation.")
++    add("proofs/rows.py", "proofs rows SPEC.json WITNESS.json",
++        "Independent bitset verification of multi-output specified rows and disjunctive constraints",
++        "Large-input finite witness with prescribed rows; full correctness requires a proved row reduction.")
++    add("proofs/rows.py", "proofs row-search SPEC.json --seconds 60 --checkpoint ROWS.json",
++        "Bounded SAT/CEGIS for 64 inputs, 96 gates, multiple outputs and existential row groups",
++        "Specified finite positive/negative rows; UNSAT is encoding evidence, not a Lean verdict.")
++    add("proofs/bank.py", "proofs bank GRAPH.json --output SPEC.json",
++        "Exact monotone bipartite bank constraints using maximal independent sets",
++        "Neighborhood bank on incident pairs and independent sets, optional OR output and masked edge.")
++    add("adapter/__main__.py", "adapter detect --limit 8 --emit-candidates",
++        "Detect candidate adaptations from checked corpus",
++        "Related theorem or stronger bound; verify and compile resulting candidates.")
++    add("adapter/__main__.py", "adapter closure SOURCE.lean --target DECL --emit",
++        "Extract candidate declaration dependency closure",
++        "Large reusable mathematical proof core; inspect scope and dependencies.")
++    add("adapter/__main__.py", "adapter adapt SOURCE.lean --output NEW.lean",
++        "Adapt a related checked proof to the bound statement",
++        "Proof family with small changes; exact statement and Lean verification required.")
++    add("metrics.py", "metrics", "Observed acquisition, submission and acceptance funnel",
++        "Measure bottlenecks and credited outcomes; lease-slot hours are not compute hours.")
++    add("bench/__main__.py", "bench --json --no-results", "Retrospective generator benchmark",
++        "Engineering improvement to reusable proof production, not proof of a live claim.")
++    add("proofs/fragments.py", "proofs fragments --all-attempts", "List durable checked/unverified source fragments",
++        "Before rebuilding a helper; read status, check in the pinned context.")
++    add("proofs/fragments.py", "proofs share FILE --message RESULT", "Snapshot reusable helper for peers",
++        "When a useful intermediate Lean result exists; don't wait for full proof.")
++    add("preflight.py", "preflight", "Read automatic cheap generator results for this attempt",
++        "At entry or when guard reports a candidate; review and submit exact proof.")
++    add("compile.py", "compile --light -- lake env lean Scratch.lean",
++        "Managed scratch validation; use narrow imports if possible",
++        "Small proof iteration, explicit local file.")
++    add("compile.py", "compile -- lake build +MODULE", "Managed full build",
++        "Check exact completed candidate; avoid duplicate work.")
++    add("support.py", "support finding --evidence ARTIFACT --message RESULT",
++        "Deliver substantive evidence directly to peers",
++        "When a result, false premise or useful reusable route is found.")
++    add("cli.py", "cli guard", "Assignment validity, new tool revision and peer evidence",
++        "At natural checkpoints, especially after expensive work.")
++    add("cli.py", "cli submit GAP FILE", "Queue exact completed proof for publication",
++        "Immediately when complete; never wait for an extra review.")
++    return rows
++
++
++def snapshot():
++    rows = inventory()
++    # Hash actual relevant source bytes so that updates to existing tools are
++    # visible, not just new filenames. Do not hash the whole repository.
++    h = hashlib.sha256(json.dumps(rows,sort_keys=True).encode())
++    files = [ROOT / "tools.py", ROOT / "compile.py", ROOT / "brief.py",
++             ROOT / "preflight.py"]
++    for package in ("proofs", "adapter", "bench", "remote"):
++        files += sorted((ROOT/package).glob("*.py"))
++    for p in files:
++        try:
++            h.update(str(p.relative_to(ROOT)).encode())
++            h.update(p.read_bytes())
++        except OSError:
++            continue
++    return {"revision":h.hexdigest()[:16],"command":PREFIX+"tools",
++            "capabilities":rows,
++            "sat_dependency_available":importlib.util.find_spec("pysat") is not None,
++            "remote_build_available":False,
++            "note":"Only implemented tools are listed. Heuristic candidates and SAT results are not kernel verdicts. Use --help for exact syntax. Do not delay publication to run irrelevant tools."}
++
++
++def record(name, cwd=None):
++    """Best-effort, idempotent evidence of actual invocation, not a report/gate."""
++    from . import assignment, state, support
++    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name):
++        return
++    try:
++        bound = assignment.binding(cwd)
++        label = assignment.worker_label(cwd)
++        if not bound or not label:
++            return
++        rec = state.load(bound[0])
++        if not support.active(rec) or rec["lease"] != bound[1]:
++            return
++        path = support.directory(rec)/"tool-use"/label/(name+".json")
++        # Record the most recent invocation only. No arguments, source,
++        # credentials, or unbounded logs.
++        state.atomic_write(str(path),json.dumps(
++            {"tool":name,"at":time.time(),"attempt":support.attempt(rec)})+"\n")
++    except (OSError,ValueError,TypeError,KeyError,AttributeError):
++        pass
++
++
++def usage(rec):
++    from . import support
++    if not support.active(rec):
++        return {}
++    result = {}
++    try:
++        for path in (support.directory(rec)/"tool-use").glob("*/*.json"):
++            try:
++                obj=json.loads(path.read_text())
++                if obj.get("attempt")==support.attempt(rec) and obj.get("tool")==path.stem:
++                    result.setdefault(path.parent.name,{})[path.stem]=obj["at"]
++            except (OSError,ValueError,TypeError,KeyError,AttributeError):
++                continue
++    except OSError:
++        pass
++    return result
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--usage",action="store_true",help="Observed invocations on current live assignments")
++    args=p.parse_args()
++    if args.usage:
++        from . import state, support
++        rows={}
++        for gap in state.all_gaps():
++            rec=state.load(gap)
++            if support.active(rec):
++                rows[gap]=usage(rec)
++        print(json.dumps(rows,ensure_ascii=False,indent=2))
++    else:
++        record("inventory")
++        print(json.dumps(snapshot(),ensure_ascii=False,indent=2))
++
++
++if __name__=="__main__":
++    main()
+diff --git a/missions/pnp/validate.py b/missions/pnp/validate.py
+index 2a73364c..2afc9575 100644
+--- a/missions/pnp/validate.py
++++ b/missions/pnp/validate.py
+@@ -159,11 +159,11 @@ def validate(gap, candidate_bytes):
+             break
+         seen_imports.append(m.group(1))
+         n += 1
+-    if not seen_imports or seen_imports[0] != "Mathlib":
+-        _reject("first import must be Mathlib")
++    if not seen_imports:
++        _reject("at least one allowed import is required")
+     allowed_imports = {"Mathlib"} | set(imports)
+     for imp in seen_imports:
+-        if imp not in allowed_imports:
++        if imp not in allowed_imports and not re.fullmatch(r"Mathlib(?:\.[A-Za-z][A-Za-z0-9_]*)+", imp):
+             _reject("unapproved import: " + imp)
+     rest = "\n".join(lines[n:])
+     if re.search(r"(?<![\w.])import\b", rest):
+@@ -179,17 +179,48 @@ def validate(gap, candidate_bytes):
+     if tokens(m.group(1)) != tokens(statement):
+         _reject("theorem statement differs from the posted statement")
+ 
+-    # Helpers must live in a namespace derived from the module; no stray
+-    # declarations outside it, and the theorem must be last.
+-    namespaces = re.findall(r"(?m)^namespace\s+([A-Za-z0-9_.]+)\s*$", code)
+-    for ns in namespaces:
+-        if not (ns == module or ns == module + "_aux" or
+-                ns.startswith(module + ".")):
+-            _reject("helper namespace is not derived from the module")
+-    if namespaces:
+-        if not re.search(r"(?m)^end\s+" + re.escape(module) +
+-                         r"(?:_aux|\.[A-Za-z0-9_.]+)?\s*$", code):
+-            _reject("namespace is not closed with its name")
++    # Upstream permits relative nested namespaces, but the root must
++    # belong to the module. Lean namespace names are relative, so forcing
++    # every nested name to be fully qualified duplicates the root.
++    stack = []
++    seen_theorem = False
++    own = lambda ns: (ns == module or ns.startswith(module + ".")
++                     or ns == module + "_aux" or ns.startswith(module + "_aux."))
++    for line in lines[n:]:
++        if not line.strip():
++            continue
++        if seen_theorem:
++            if re.match(r"^\s*(namespace|section|end|mutual)\b", line):
++                _reject("scope command after theorem")
++            continue
++        scope = re.match(r"^(namespace|section|end|mutual)(?:[ \t]+([A-Za-z_][A-Za-z0-9_.]*))?[ \t]*$", line)
++        if scope:
++            kind, name = scope.groups()
++            if kind == "namespace":
++                if not name or name.startswith("_root_") or (not stack and not own(name)):
++                    _reject("helper namespace is not derived from the module")
++                stack.append((kind, name))
++            elif kind in ("section", "mutual"):
++                if not stack or (kind == "mutual" and name):
++                    _reject("scope outside helper namespace")
++                stack.append((kind, name))
++            else:
++                if not stack or stack[-1][1] != name:
++                    _reject("scope end does not match")
++                stack.pop()
++            continue
++        if re.match(r"^\s*(namespace|section|end|mutual)\b",line):
++            _reject("scope commands must stand alone at column zero")
++        if stack:
++            continue
++        if re.match(r"^theorem\s+" + re.escape(module) + r"\s*:",line):
++            seen_theorem = True
++            continue
++        if line.startswith("open ") or SET_OPTION.fullmatch(line):
++            continue
++        _reject("declaration or command outside helper namespace")
++    if stack or not seen_theorem:
++        _reject("unclosed helper scope or theorem not at top level")
+     tail = code[m.end():]
+     if re.search(r"(?<![\w.])(lemma|theorem|def|abbrev|axiom|namespace)\b",
+                  tail):
+diff --git a/tests/pnp-adapter.py b/tests/pnp-adapter.py
+new file mode 100644
+index 00000000..5a2ad6c7
+--- /dev/null
++++ b/tests/pnp-adapter.py
+@@ -0,0 +1,212 @@
++#!/usr/bin/env python3
++"""Tests for family-level proof adaptation and certificate reuse."""
++import json
++from pathlib import Path
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++import time
++from argparse import Namespace
++from unittest.mock import patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from missions.pnp import assignment, config, state, validate
++from missions.pnp.adapter.__main__ import _load_gap
++from missions.pnp.proofs import corpus
++from missions.pnp.adapter.closure import parse_source, dependency_closure
++from missions.pnp.adapter.adapt import adapt_exact_module, controlled_module_rename
++from missions.pnp.adapter.detect import detect_and_adapt
++
++MIRROR = "/var/lib/lubko/wd/viche-state/pnp/cache/fork.git"
++
++
++def git_cat(path, revision="refs/remotes/upstream/main"):
++    return subprocess.check_output(
++        ["git", "--git-dir=" + MIRROR, "cat-file", "-p", f"{revision}:{path}"],
++        text=True,
++    )
++
++
++def mirror_available():
++    return Path(MIRROR).exists()
++
++
++class AdapterClosureTests(unittest.TestCase):
++    def test_controlled_module_rename_not_global(self):
++        src = "namespace PEqualNP.Outside.L_meta_1\ndef foo := 1\nend PEqualNP.Outside.L_meta_1\ntheorem PEqualNP.Outside.L_meta_1 : True := by trivial\n"
++        out = controlled_module_rename(src, "PEqualNP.Outside.L_meta_1", "PEqualNP.Outside.L_meta_2")
++        self.assertIn("PEqualNP.Outside.L_meta_2", out)
++        self.assertNotIn("PEqualNP.Outside.L_meta_1", out)
++        # Do not touch unrelated names
++        src2 = "def L_meta_1_aux := 1\nnamespace Other.L_meta_1\nend Other.L_meta_1\n"
++        out2 = controlled_module_rename(src2, "PEqualNP.Outside.L_meta_1", "PEqualNP.Outside.L_meta_2")
++        self.assertEqual(out2, src2)
++
++    def test_dependency_closure_extracts_transitive_defs(self):
++        src = """import Mathlib
++import PEqualNP.Defs
++
++namespace PEqualNP.Outside.L_meta_9
++
++def base : Nat := 1
++def helper : Nat := base + 1
++def unused : Nat := 999
++lemma mid : helper = base + 1 := rfl
++
++end PEqualNP.Outside.L_meta_9
++
++theorem PEqualNP.Outside.L_meta_9 : True := by
++  have h := PEqualNP.Outside.L_meta_9.mid
++  trivial
++"""
++        model = parse_source(src)
++        decls = dependency_closure(model, "PEqualNP.Outside.L_meta_9")
++        names = [d.name for d in decls]
++        self.assertIn("mid", names)
++        self.assertIn("helper", names)
++        self.assertIn("base", names)
++        self.assertNotIn("unused", names)
++
++    @unittest.skipUnless(mirror_available(), "upstream mirror unavailable")
++    def test_closure_on_l_meta_2455(self):
++        src = git_cat("lean/PEqualNP/Outside/L_meta_2455.lean")
++        model = parse_source(src)
++        decls = dependency_closure(model, "PEqualNP.Outside.L_meta_2455")
++        names = {d.name for d in decls}
++        self.assertIn("theta_fifteen_gates", names)
++        self.assertIn("least_theta_five_branches", names)
++        # Should be substantial but a closure (includes the final theorem).
++        self.assertGreater(len(decls), 100)
++
++
++class AdapterAdaptTests(unittest.TestCase):
++    def test_nested_relative_namespace_preserved(self):
++        src = ("import Mathlib.Tactic.NormNum\n"
++               "namespace PEqualNP.Outside.L_meta_1\nnamespace Inner\n"
++               "lemma x : True := by trivial\nend Inner\n"
++               "end PEqualNP.Outside.L_meta_1\n"
++               "theorem PEqualNP.Outside.L_meta_1 : True := by "
++               "exact PEqualNP.Outside.L_meta_1.Inner.x\n")
++        gap={"id":"L-meta-2","file":"lean/PEqualNP/Outside/L_meta_2.lean",
++             "module":"PEqualNP.Outside.L_meta_2","statement":"True","imports":[]}
++        r=adapt_exact_module(src,gap)
++        self.assertTrue(r.ok,r.details)
++        self.assertIn("namespace Inner\n",r.candidate)
++        self.assertTrue(r.candidate.startswith("import Mathlib.Tactic.NormNum\n"))
++        self.assertNotIn("namespace PEqualNP.Outside.L_meta_2.Inner",r.candidate)
++        d=detect_and_adapt(None,gap,source_text=src)
++        self.assertTrue(d[0].ok,d[0].error)
++
++    @unittest.skipUnless(mirror_available(), "upstream mirror unavailable")
++    def test_adapt_l_meta_1152_to_self(self):
++        src = git_cat("lean/PEqualNP/Outside/L_meta_1152.lean")
++        gap = {
++            "id": "L-meta-1152",
++            "file": "lean/PEqualNP/Outside/L_meta_1152.lean",
++            "module": "PEqualNP.Outside.L_meta_1152",
++            "imports": ["PEqualNP.Defs"],
++            "statement": "∃ C : PEqualNP.CircuitLowerBounds.Circuit, PEqualNP.MetaComplexity.Monotone2 C ∧ C.size ≤ 8 ∧ ∀ x : Fin 8 → Bool, C.eval (List.ofFn x) = (fun x : Fin 8 → Bool => (x 0 && x 1) || (x 0 && x 2) || (x 0 && x 3) || (x 1 && x 4) || (x 1 && x 5) || (x 6 && x 7)) x",
++        }
++        r = adapt_exact_module(src, gap)
++        self.assertTrue(r.ok, r.details)
++        self.assertEqual(r.details["sha256"], validate.validate(gap, r.candidate.encode("utf-8")))
++
++    @unittest.skipUnless(mirror_available(), "upstream mirror unavailable")
++    def test_adapt_l_meta_1152_to_new_module(self):
++        src = git_cat("lean/PEqualNP/Outside/L_meta_1152.lean")
++        gap = {
++            "id": "L-meta-99999",
++            "file": "lean/PEqualNP/Outside/L_meta_99999.lean",
++            "module": "PEqualNP.Outside.L_meta_99999",
++            "imports": ["PEqualNP.Defs"],
++            "statement": "∃ C : PEqualNP.CircuitLowerBounds.Circuit, PEqualNP.MetaComplexity.Monotone2 C ∧ C.size ≤ 8 ∧ ∀ x : Fin 8 → Bool, C.eval (List.ofFn x) = (fun x : Fin 8 → Bool => (x 0 && x 1) || (x 0 && x 2) || (x 0 && x 3) || (x 1 && x 4) || (x 1 && x 5) || (x 6 && x 7)) x",
++        }
++        r = adapt_exact_module(src, gap)
++        self.assertTrue(r.ok, r.details)
++        self.assertIn("PEqualNP.Outside.L_meta_99999", r.candidate)
++        self.assertNotIn("PEqualNP.Outside.L_meta_1152", r.candidate)
++        validate.validate(gap, r.candidate.encode("utf-8"))
++
++
++class AdapterDetectTests(unittest.TestCase):
++    @unittest.skipUnless(mirror_available(), "upstream mirror unavailable")
++    def test_detect_family_2455_to_2457(self):
++        # Index the two family members in a temp corpus DB.
++        db = sqlite3.connect(":memory:")
++        db.execute("create table proof(path text primary key, blob text, statement text, source text, tactics text, imports text)")
++        db.execute("create table metadata(key text primary key, value text)")
++        for name in ("L_meta_2455", "L_meta_2457"):
++            path = f"lean/PEqualNP/Outside/{name}.lean"
++            src = git_cat(path)
++            stmt = corpus.statement(src)
++            imports = json.dumps(__import__("re").findall(r"(?m)^import ([A-Za-z0-9_.]+)$", src))
++            db.execute("insert into proof values(?,?,?,?,?,?)",
++                       (path, "blob", stmt, src, "[]", imports))
++        db.execute("insert into metadata values('revision','test')")
++        db.execute("insert into metadata values('index_version','2')")
++
++        target_src = git_cat("lean/PEqualNP/Outside/L_meta_2457.lean")
++        target_stmt = corpus.statement(target_src)
++        gap = {
++            "id": "L-meta-2457",
++            "file": "lean/PEqualNP/Outside/L_meta_2457.lean",
++            "module": "PEqualNP.Outside.L_meta_2457",
++            "imports": ["PEqualNP.Defs"],
++            "statement": target_stmt,
++        }
++        detections = detect_and_adapt(db, gap, limit=8)
++        self.assertTrue(detections, "no detections")
++        ok = [d for d in detections if d.ok]
++        self.assertTrue(ok, f"no successful adaptation: {[d.error for d in detections]}")
++        # The exact 2457 source should be adaptable.
++        best = ok[0]
++        validate.validate(gap, best.candidate.encode("utf-8"))
++        self.assertIn("PEqualNP.Outside.L_meta_2457", best.candidate)
++
++
++class AdapterCLITests(unittest.TestCase):
++    def test_live_assignment_uses_exact_binding(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.multiple(
++                config, STATE_ROOT=tmp, GAPS_DIR=tmp+"/gaps", CACHE_DIR=tmp+"/cache"):
++            rec=state.create("L-meta-7", state="LEASED", lease="one",
++                statement="True", module="PEqualNP.Outside.L_meta_7",
++                path="lean/PEqualNP/Outside/L_meta_7.lean",
++                imports=["PEqualNP.Defs"], lease_expires_at=time.time()+600)
++            cwd=Path(assignment.prepare("L-meta-7",checkout=False,worker="general")["cwd"])
++            args=Namespace(gap_json=None,module=None,statement=None,file=None,
++                           gap_id=None,imports=None)
++            with patch.object(Path,"cwd",return_value=cwd):
++                self.assertEqual(_load_gap(args)["id"],"L-meta-7")
++                self.assertEqual(_load_gap(args)["statement"],rec["statement"])
++                with self.assertRaises(SystemExit):
++                    _load_gap(Namespace(**{**vars(args),"gap_json":"offline.json"}))
++                state.update("L-meta-7",lease="two")
++                with self.assertRaises(SystemExit):
++                    _load_gap(args)
++
++    def test_cli_closure(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            src = Path(tmp, "x.lean")
++            src.write_text(
++                "import Mathlib\n\nnamespace M\n\ndef a : Nat := 1\ndef b : Nat := a\ndef c : Nat := 99\n\nend M\n\n"
++                "theorem M.t : True := by\n  have h := M.b\n  trivial\n",
++                encoding="utf-8",
++            )
++            proc = subprocess.run(
++                [sys.executable, "-m", "missions.pnp.adapter", "closure", str(src), "--target", "M.t"],
++                cwd=str(Path(__file__).resolve().parents[1]),
++                capture_output=True, text=True,
++            )
++            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
++            obj = json.loads(proc.stdout)
++            names = {d["name"] for d in obj["declarations"]}
++            self.assertIn("b", names)
++            self.assertIn("a", names)
++            self.assertNotIn("c", names)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+diff --git a/tests/pnp-metrics.py b/tests/pnp-metrics.py
+new file mode 100644
+index 00000000..b34e0add
+--- /dev/null
++++ b/tests/pnp-metrics.py
+@@ -0,0 +1,25 @@
++#!/usr/bin/env python3
++import sys
++from pathlib import Path
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from missions.pnp.metrics import replay
++
++def e(second, kind, **detail):
++    return {"at":f"2026-11-24T00:00:{second:02d}Z","kind":kind,"detail":detail}
++
++from missions.pnp.metrics import timestamp
++now=timestamp("2026-11-24T00:01:00Z")
++a,p,c,m=replay([
++    e(0,"acquired"),e(2,"state",to="CANDIDATE_READY"),
++    e(3,"state",to="CANDIDATE_READY"),e(5,"published",pr=7,sha="a"),
++    e(6,"published",pr=7,sha="b"),e(7,"postcheck",local_check_status="failed"),
++    e(9,"postcheck"),e(10,"state",to="ACCEPTED",sha="b"),
++    e(12,"acquired"),e(20,"state",to="STALE"),
++    e(22,"acquired"),e(23,"acquired"),e(25,"portfolio_release"),e(26,"acquired"),{"bad":True}
++],now)
++assert [x["outcome"] for x in a]==["submitted","stale","superseded","released","active"]
++assert [x["slot_seconds"] for x in a]==[5,8,1,2,34]
++assert a[0]["candidate"]-a[0]["start"]==2
++assert len(p)==1 and p[7]["accepted"]-p[7]["first"]==5
++assert c=={"failed":1,"deferred_or_unspecified":1} and m==1
++print("metrics replay: OK")
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index 8b077e3c..37a103fc 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -18,3 +18,10 @@ python3 tests/pnp-allocator.py
+ python3 tests/pnp-continuity.py
+ 
+ python3 tests/pnp-brief.py
++python3 tests/pnp-tool-discovery.py
++
++python3 tests/pnp-adapter.py
++
++python3 tests/pnp-rows.py
++
++python3 tests/pnp-metrics.py
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 14a3e1e6..39d94a68 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -176,6 +176,21 @@ class TestValidate(unittest.TestCase):
+                 with self.assertRaises(validate.InvalidCandidate):
+                     validate.validate(gap_meta(), content.encode())
+ 
++    def test_narrow_imports_and_nested_namespace(self):
++        src = GOOD.replace("import Mathlib", "import Mathlib.Tactic.NormNum")
++        src = src.replace("lemma helper", "namespace Inner\nlemma helper").replace(
++            "end "+MODULE, "end Inner\nend "+MODULE)
++        self.assertEqual(len(validate.validate(gap_meta(),src.encode())),64)
++        for bad in (
++            src.replace("namespace Inner","namespace _root_.Other"),
++            src.replace("end Inner","end Wrong"),
++            src.replace("namespace Inner\n",""),
++            src.replace("import Mathlib.Tactic.NormNum","import Evil"),
++            src.replace("namespace "+MODULE,"namespace Other"),
++        ):
++            with self.assertRaises(validate.InvalidCandidate):
++                validate.validate(gap_meta(),bad.encode())
++
+     def test_size_and_encoding(self):
+         with self.assertRaises(validate.InvalidCandidate):
+             validate.validate(gap_meta(), GOOD.encode() + b"x" * (513 * 1024))
+diff --git a/tests/pnp-rows.py b/tests/pnp-rows.py
+new file mode 100644
+index 00000000..9c23f338
+--- /dev/null
++++ b/tests/pnp-rows.py
+@@ -0,0 +1,88 @@
++"""Independent checks of explicit-row multi-output search and monotone bank coverage."""
++import itertools
++import json
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
++from missions.pnp.proofs import bank, rows
++
++class Test(unittest.TestCase):
++    def test_multi_output_and_disjunction(self):
++        raw={"n":2,"gates":2,"ops":["and","or"],
++             "outputs":[{"name":"a","ones":[3],"zeros":[0,1,2]},
++                        {"name":"b","ones":[1,2,3],"zeros":[0]}],
++             "groups":[[[0,1,0],[1,2,0]]]}
++        w={"gates":[["and",0,1],["or",0,1]],"outputs":[2,3]}
++        self.assertTrue(rows.verify(raw,w)["verified"])
++        self.assertFalse(rows.verify(raw,{**w,"outputs":[3,2]})["verified"])
++        result=rows.solve(raw,5)
++        if result["result"]=="unavailable":self.skipTest("optional solver unavailable")
++        self.assertEqual(result["result"],"verified_rows")
++        self.assertTrue(rows.verify(raw,result)["verified"])
++        raw["gates"]=1
++        self.assertEqual(rows.solve(raw,5)["result"],"unsat_encoding")
++
++    def test_group_is_not_all_literals(self):
++        raw={"n":2,"gates":0,"outputs":[{"name":"a","wire":0}],
++             "groups":[[[0,1,0],[0,2,0]]]}
++        self.assertTrue(rows.verify(raw,{"gates":[],"outputs":[0]})["verified"])
++        raw["groups"]=[[[0,1,0]]]
++        self.assertFalse(rows.verify(raw,{"gates":[],"outputs":[0]})["verified"])
++        r=rows.solve(raw,5)
++        if r["result"]=="unavailable":self.skipTest("optional solver unavailable")
++        self.assertEqual(r["result"],"unsat_encoding")
++
++    def test_bank_rows_exact_for_monotone_circuits(self):
++        raw={"n":4,"left":[0,1],"edges":[[0,2],[0,3],[1,3]],"gates":2,
++             "or_output":[2,3],"require_masked_edge":True}
++        s=bank.generate(raw)
++        E=raw["edges"]
++        def check_full(gates,outs):
++            for r in range(16):
++                w=[(r>>i)&1 for i in range(4)]
++                for k,a,b in gates:w.append(w[a]&w[b] if k=="and" else w[a]|w[b])
++                no=not any(w[p] and w[l] for p,l in E)
++                for p,l in E:
++                    if w[p] and w[l] and not w[outs[p]]:return False
++                    if no and w[p] and w[outs[p]]:return False
++                if w[outs[2]] != (w[2] or w[3]):return False
++            # Check existential condition by direct per-singleton evaluation.
++            for p,l in E:
++                w=[int(i==l) for i in range(4)]
++                for k,a,b in gates:w.append(w[a]&w[b] if k=="and" else w[a]|w[b])
++                if not w[outs[p]]:return True
++            return False
++        # All 0/1-gate circuits and all output choices; compare against
++        # independent full-domain semantics, not the row construction.
++        circuits=[[]]+[[[k,a,b]] for k in ("and","or") for a in range(4) for b in range(a,4)]
++        for gates in circuits:
++            for outs in itertools.product(range(4+len(gates)),repeat=3):
++                self.assertEqual(rows.verify(s,{"gates":gates,"outputs":list(outs)})["verified"],check_full(gates,outs))
++        witness={"gates":[["or",2,3],["and",0,4]],"outputs":[5,3,4]}
++        self.assertTrue(check_full(witness["gates"],witness["outputs"]))
++        self.assertTrue(rows.verify(s,witness)["verified"])
++        result=rows.solve(s,5)
++        if result["result"]=="unavailable":self.skipTest("optional solver unavailable")
++        self.assertEqual(result["result"],"verified_rows")
++        self.assertTrue(check_full(result["gates"],result["outputs"]))
++
++    def test_checkpoint_and_validation(self):
++        s={"n":25,"gates":1,"outputs":[{"name":"wide","ones":[1<<24],"zeros":[0]}]}
++        with tempfile.TemporaryDirectory() as tmp:
++            path=Path(tmp,"cp.json")
++            r=rows.solve(s,5,path)
++            if r["result"]=="unavailable":self.skipTest("optional solver unavailable")
++            self.assertEqual(r["result"],"verified_rows")
++            self.assertTrue(path.exists())
++            with self.assertRaises(ValueError):rows.solve(dict(s,gates=2),5,path)
++        for invalid in (
++            {"gates":[["and",-1,0]],"outputs":[0]},
++            {"gates":[],"outputs":[25]},
++            {"gates":[["not",0]],"outputs":[25]},
++        ):
++            with self.assertRaises(ValueError):rows.verify(s,invalid)
++
++if __name__=="__main__":
++    unittest.main(verbosity=2)
+diff --git a/tests/pnp-support.py b/tests/pnp-support.py
+index 64e6bd1a..07b90461 100644
+--- a/tests/pnp-support.py
++++ b/tests/pnp-support.py
+@@ -55,8 +55,9 @@ class SupportTests(unittest.TestCase):
+                 out = io.StringIO()
+                 with contextlib.redirect_stdout(out):
+                     self.assertEqual(cli.main(["guard"]), 0)
+-        self.assertEqual(json.loads(out.getvalue()),
+-                         {"decision": "continue", "research_advice": [note]})
++        result=json.loads(out.getvalue())
++        self.assertIn("missions.pnp.tools",result.pop("research_tools")["command"])
++        self.assertEqual(result,{"decision": "continue", "research_advice": [note]})
+ 
+     def test_old_attempt_and_changed_statement_rejected(self):
+         a = support.attempt(self.rec)
+diff --git a/tests/pnp-tool-discovery.py b/tests/pnp-tool-discovery.py
+new file mode 100644
+index 00000000..152a2cd6
+--- /dev/null
++++ b/tests/pnp-tool-discovery.py
+@@ -0,0 +1,73 @@
++"""Capability advertising and generator preflight remain advisory."""
++import json
++from pathlib import Path
++import sys
++import tempfile
++import time
++import unittest
++from unittest.mock import patch
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
++from missions.pnp import assignment, config, preflight, state, tools
++
++STMT = ("∃ C : PEqualNP.CircuitLowerBounds.Circuit, "
++        "PEqualNP.MetaComplexity.Monotone2 C ∧ C.size ≤ 2 ∧ "
++        "∀ x : Fin 3 → Bool, C.eval (List.ofFn x) = "
++        "(fun x : Fin 3 → Bool => (x 0 && x 1) || (x 0 && x 2)) x")
++
++class Tests(unittest.TestCase):
++    def setUp(self):
++        self.tmp=tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        root=self.tmp.name
++        p=patch.multiple(config,STATE_ROOT=root,GAPS_DIR=root+"/gaps",CACHE_DIR=root+"/cache")
++        p.start()
++        self.addCleanup(p.stop)
++        self.rec=state.create("L-meta-7",state="LEASED",lease="one",
++            statement=STMT,module="PEqualNP.Outside.L_meta_7",
++            path="lean/PEqualNP/Outside/L_meta_7.lean",imports=["PEqualNP.Defs"],
++            lease_expires_at=time.time()+600)
++    def test_generator_is_independent_of_model_and_does_not_publish(self):
++        result=preflight.run(self.rec,"v1")
++        self.assertEqual(result["result"],"candidate")
++        self.assertFalse(result["local_lean_checked"])
++        self.assertTrue(Path(result["candidate"]).is_file())
++        self.assertEqual(state.load("L-meta-7"),self.rec)
++        with patch.object(preflight.synthesis,"candidate") as generate:
++            self.assertEqual(preflight.run(self.rec,"v1"),result)
++            generate.assert_not_called()
++        Path(result["candidate"]).write_text("changed")
++        self.assertIsNone(preflight.read(self.rec))
++        self.assertEqual(preflight.run(self.rec,"v1")["result"],"candidate")
++    def test_old_lease_and_unsupported_problem(self):
++        preflight.run(self.rec,"v1")
++        newer=state.update("L-meta-7",lease="two")
++        self.assertIsNone(preflight.read(newer))
++        self.assertIsNone(preflight.run(self.rec,"v2"))
++        new=state.update("L-meta-7",statement="True")
++        self.assertEqual(preflight.run(new,"v1")["result"],"not_recognized")
++        state.update("L-meta-7",state="RELEASED")
++        self.assertEqual(preflight.scan(),[])
++    def test_tool_invocation_is_bound_to_attempt(self):
++        cwd=Path(assignment.prepare("L-meta-7",checkout=False,worker="general")["cwd"])
++        tools.record("proofs-synthesize",cwd)
++        self.assertIn("proofs-synthesize",tools.usage(self.rec)["general"])
++        newer=state.update("L-meta-7",lease="new")
++        self.assertEqual(tools.usage(newer),{})
++        tools.record("proofs-search",cwd)
++        self.assertEqual(tools.usage(newer),{})
++
++    def test_only_installed_capabilities_and_revision_changes(self):
++        with tempfile.TemporaryDirectory() as tmp, patch.object(tools,"ROOT",Path(tmp)):
++            self.assertFalse(any("adapter" in x["command"] for x in tools.inventory()))
++            a=tools.snapshot()["revision"]
++            path=Path(tmp,"adapter","__main__.py")
++            path.parent.mkdir()
++            path.write_text("pass")
++            self.assertTrue(any("adapter detect" in x["command"] for x in tools.inventory()))
++            b=tools.snapshot()["revision"]
++            self.assertNotEqual(a,b)
++            path.write_text("# changed")
++            self.assertNotEqual(b,tools.snapshot()["revision"])
++
++if __name__=="__main__":
++    unittest.main(verbosity=2)

@@ -1,0 +1,332 @@
+commit dd07ab295a042a06c1983277c33c6c664bb9d44b
+Author:     Viche Recovery Steward <recovery-steward@viche.local>
+AuthorDate: Thu Nov 12 19:32:52 2026 +0000
+Commit:     Viche Recovery Steward <recovery-steward@viche.local>
+CommitDate: Thu Nov 12 19:32:52 2026 +0000
+
+    Recognise Act 26 pre-landing records in suite compliance checker
+    
+    Accept valid act26-prelanding-record/v1 state receipts as a third
+    compliance source when the exact commit/tree/parent/main base match,
+    commands and content assertions are complete, verdict is pass with no
+    explicit failure status, board pin chronology is consistent, canonical
+    SHA-256 matches the detached digest, and Git-anchored postlanding copies
+    match the state receipt. Preserve batched lookups and wall_seconds
+    reporting.
+
+diff --git a/government/suite-compliance-check.sh b/government/suite-compliance-check.sh
+old mode 100644
+new mode 100755
+index 974628e4..4f7b3b66
+--- a/government/suite-compliance-check.sh
++++ b/government/suite-compliance-check.sh
+@@ -1,17 +1,21 @@
+ #!/bin/sh
+ # Act 21 §5: audit the exact resulting commit/tree using committed suite-status
+-# history and the pre-push receipt plus post-push publication event. The event is
+-# hash-bound to the receipt and must have a later high-resolution timestamp; a
+-# receipt alone is never chronology evidence. A suite-status record committed
+-# by the same change is not pre-change evidence. Usage: suite-compliance-check.sh [repo]
++# history, the pre-push receipt plus post-push publication event, and (Act 26)
++# the reviewer's detached pre-landing record. The event is hash-bound to the
++# receipt and must have a later high-resolution timestamp; a receipt alone is
++# never chronology evidence. A suite-status record committed by the same change
++# is not pre-change evidence. Usage: suite-compliance-check.sh [repo]
+ set -eu
+ repo=${1:-${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+ python3 - "$repo" "$state" <<'PY'
+-import datetime, glob, hashlib, json, os, re, subprocess, sys
++import datetime, glob, hashlib, json, os, re, subprocess, sys, time
+ repo,state=sys.argv[1:]
++start=time.monotonic()
++
+ def git(*args):
+     return subprocess.check_output(['git','-C',repo,*args], text=True).strip()
++
+ def recorded_result(data, expected_suite):
+     """Accept only generated records with a run matching the reported result."""
+     if (data.get('generated_by')!='government/suite-status.sh'
+@@ -40,17 +44,20 @@ def recorded_result(data, expected_suite):
+                     for run in runs)):
+         return 'red'
+     return None
++
+ def timestamp(value):
+     if not isinstance(value,str):
+         return None
+     try:
+         d=datetime.datetime.fromisoformat(value.replace('Z','+00:00'))
+-        return d.timestamp() if d.tzinfo else None
++        if d.tzinfo is None:
++            d=d.replace(tzinfo=datetime.timezone.utc)
++        return d.timestamp()
+     except ValueError:
+         return None
++
+ def valid_act26_record(path, data):
+-    """Check complete prelanding evidence; neither an agent exit nor a pin
+-    alone proves the claimed run. Require an immutable Git copy on main."""
++    """Return the board-pin epoch only if this is a complete Act 26 record."""
+     if not isinstance(data,dict) or data.get('schema')!='act26-prelanding-record/v1':
+         return None
+     mandatory=('commit','tree','parent','reviewer','independence_basis',
+@@ -62,12 +69,13 @@ def valid_act26_record(path, data):
+     if data.get('main_at_verification') != data['parent']:
+         return None
+     commands=data.get('commands')
+-    if (not isinstance(commands,list) or not commands
+-            or any(not isinstance(c,dict) or not isinstance(c.get('command'),str)
+-                   or not c['command'].strip() or
+-                   (c.get('exit') is not None and type(c['exit']) is not int)
+-                   for c in commands)):
++    if not isinstance(commands,list) or not commands:
+         return None
++    for c in commands:
++        if (not isinstance(c,dict)
++                or not isinstance(c.get('command'),str) or not c['command'].strip()
++                or (c.get('exit') is not None and type(c.get('exit')) is not int)):
++            return None
+     # An interrupted/unknown run may be preserved as exit=null, but it is
+     # NEVER a green result. A real matching full or records suite must pass.
+     if not any(c.get('exit')==0 and any(
+@@ -75,25 +83,24 @@ def valid_act26_record(path, data):
+             ('tests/run-all.sh','tests/records-smoke.sh')) for c in commands):
+         return None
+     assertions=data.get('content_assertions')
+-    if (not isinstance(assertions,list) or not assertions
+-            or any(not isinstance(a,dict) or any(
+-                not isinstance(a.get(k),str) or not a[k].strip()
+-                for k in ('expected','actual'))
+-                or not any(isinstance(a.get(k),str) and a[k].strip()
+-                    for k in ('basis','method'))
+-                for a in assertions)):
++    if not isinstance(assertions,list) or not assertions:
+         return None
++    for a in assertions:
++        if not isinstance(a,dict):
++            return None
++        if any(not isinstance(a.get(k),str) or not a[k].strip() for k in ('expected','actual')):
++            return None
++        if not any(isinstance(a.get(k),str) and a[k].strip() for k in ('basis','method')):
++            return None
+     pin=data.get('board_pin')
+-    if (not isinstance(pin,dict) or
+-            not isinstance(pin.get('message_id'),str) or not pin['message_id'].strip()):
++    if (not isinstance(pin,dict)
++            or not isinstance(pin.get('message_id'),str) or not pin['message_id'].strip()
++            or not isinstance(pin.get('server_timestamp'),str) or not pin['server_timestamp'].strip()):
+         return None
+     created=timestamp(data.get('created_at'))
+     pinned=timestamp(pin.get('server_timestamp'))
+     if created is None or pinned is None or created>pinned:
+         return None
+-    # Historical v1 included sha256 in JSON; current v1 deliberately keeps
+-    # its detached digest separate, and the board pin is added after hashing.
+-    # Accept only these two explicitly specified canonical representations.
+     embedded=data.get('sha256')
+     if embedded is not None and (
+             not isinstance(embedded,str) or re.fullmatch('[0-9a-f]{64}',embedded) is None):
+@@ -114,20 +121,52 @@ def valid_act26_record(path, data):
+             raw=f.read()
+         with open(path+'.sha256','rb') as f:
+             detached_raw=f.read()
+-        if detached != actual:
+-            return None
+-        basename=os.path.basename(path)
+-        # Git-anchored postlanding copy (Act 26) must match the current state
+-        # receipt exactly, including the separately stored detached digest.
++    except OSError:
++        return None
++    if detached != actual:
++        return None
++    basename=os.path.basename(path)
++    # Git-anchored postlanding copy (Act 26) must match the current state
++    # receipt exactly, including the separately stored detached digest.
++    try:
+         repo_copy=subprocess.check_output(['git','-C',repo,'show',
+               'main:records/investigations/'+basename],stderr=subprocess.DEVNULL)
+         digest_copy=subprocess.check_output(['git','-C',repo,'show',
+               'main:records/investigations/'+basename+'.sha256'],stderr=subprocess.DEVNULL)
+-        if raw != repo_copy or detached_raw != digest_copy:
+-            return None
+-    except (OSError,subprocess.CalledProcessError):
++    except subprocess.CalledProcessError:
++        return None
++    if raw != repo_copy or detached_raw != digest_copy:
+         return None
+     return pinned
++
++def first_parent_map():
++    """One git invocation: commit -> (parent, tree, introduced paths)."""
++    proc=subprocess.run(['git','-C',repo,'log','--first-parent','--reverse',
++        '--no-renames','--name-only','--format=COMMIT %H %P %T',main],
++        capture_output=True,text=True,check=True)
++    info={}
++    cur=None
++    want_files=False
++    for line in proc.stdout.splitlines():
++        if line.startswith('COMMIT '):
++            parts=[t for t in line.split(' ') if t!='']
++            if len(parts)>=3 and parts[0]=='COMMIT':
++                _,h,rest,t=parts[0],parts[1],parts[2:-1],parts[-1]
++                cur=h
++                info[cur]=[rest[0] if rest else None,t,[]]
++                want_files=False
++                continue
++        if line=='':
++            if cur is not None and not want_files and not info[cur][2]:
++                want_files=True
++            else:
++                cur=None
++            continue
++        if cur is not None:
++            info[cur][2].append(line)
++            want_files=True
++    return info
++
+ def git_batch_show(specs):
+     """Read '<commit>:<path>' blobs in one invocation; miss/invalid -> skip."""
+     if not specs:
+@@ -155,44 +194,7 @@ def git_batch_show(specs):
+         except ValueError:
+             continue
+     return out
+-def first_parent_map():
+-    """One git invocation: commit -> (parent, tree, introduced paths).
+ 
+-    Equivalent to per-commit `rev-parse <c>^1` plus
+-    `diff(--root|--name-only --no-renames)`, without one subprocess per commit.
+-    """
+-    proc=subprocess.run(['git','-C',repo,'log','--first-parent','--reverse',
+-        '--no-renames','--name-only','--format=COMMIT %H %P %T',main],
+-        capture_output=True,text=True,check=True)
+-    info={}
+-    cur=None
+-    want_files=False
+-    for line in proc.stdout.splitlines():
+-        if line.startswith('COMMIT '):
+-            # Header shape: COMMIT <H> <P1>..<Pn> <T> (n=0 for root, where
+-            # the slot is empty; n=2 for merges). Tree is always last.
+-            parts=[t for t in line.split(' ') if t!='']
+-            if len(parts)<3 or parts[0]!='COMMIT':
+-                pass  # pathological path that happens to start with COMMIT
+-            else:
+-                _,h,rest,t=parts[0],parts[1],parts[2:-1],parts[-1]
+-                parents=list(rest)
+-                cur=h
+-                info[cur]=[parents[0] if parents else None,t,[]]
+-                want_files=False  # the header is followed by one blank line
+-                continue
+-        if line=='':
+-            # A blank line right after the header precedes the file list;
+-            # a blank line after files (or a second blank) ends the block.
+-            if cur is not None and not want_files and not info[cur][2]:
+-                want_files=True
+-            else:
+-                cur=None
+-            continue
+-        if cur is not None:
+-            info[cur][2].append(line)
+-            want_files=True
+-    return info
+ try:
+     main=git('rev-parse','--verify','main')
+     fp=first_parent_map()
+@@ -206,16 +208,10 @@ try:
+             data=blobs[rec_commit+':records/suite-status.json']
+         except KeyError:
+             continue
+-        recorded_commit=data.get('commit')
+-        # A status entry is evidence only if that commit itself introduced or
+-        # updated the status file; subsequent history snapshots aren't new runs.
+         touched=fp[rec_commit][2]
+         if 'records/suite-status.json' in touched:
+             records.append((rec_commit,data,'git'))
+-    # reviewed-merge.sh stores an immutable receipt before publishing and emits
+-    # a bound event after a successful push. Both are outside Git; chronology is
+-    # therefore only as trustworthy as the delivery host, filesystem and writer.
+-    import glob
++
+     publications={}
+     for filename in sorted(glob.glob(os.path.join(state,'delivery','published-*.json'))):
+         try:
+@@ -235,10 +231,6 @@ try:
+             if (data.get('generated_by')=='government/suite-status.sh'
+                     and data.get('suite') in ('tests/run-all.sh','tests/records-smoke.sh')
+                     and type(data.get('recorded_at')) is int):
+-                # A pre-push receipt alone cannot establish chronology: it may
+-                # have been copied into state after main changed. Require the
+-                # post-push event emitted by reviewed-merge.sh, bound to this
+-                # exact receipt digest, and strict timestamp ordering.
+                 event=publications.get(data.get('commit'))
+                 digest=hashlib.sha256(raw).hexdigest()
+                 if (event is not None and event.get('receipt_sha256')==digest
+@@ -247,9 +239,6 @@ try:
+         except (OSError,ValueError):
+             continue
+ 
+-    # Act 26's independent state receipt is separate from the old suite-status
+-    # shape. This is a bounded, explicitly reviewed additional evidence source.
+-    # The next first-parent commit provides a conservative landing upper bound.
+     commit_times={}
+     for line in git('log','--first-parent','--format=%H %ct',main).splitlines():
+         fields=line.split()
+@@ -266,6 +255,7 @@ try:
+                 act26.append((os.path.basename(filename),record,pinned))
+         except (OSError,ValueError):
+             continue
++
+     changes=[]
+     for i,commit in enumerate(commits):
+         paths=[p for p in fp[commit][2] if p.startswith(('government/','tests/','records/'))]
+@@ -275,9 +265,6 @@ try:
+                         if all(p.startswith('records/') for p in paths)
+                         else 'tests/run-all.sh')
+         tree=trees[commit]
+-        # Require the record commit to precede the main change. The record must
+-        # name that exact commit and its tree; a matching parent is insufficient
+-        # because it does not verify the resulting merge tree.
+         prior=[]
+         for rc,r,source in records:
+             recorded=recorded_result(r,expected_suite)
+@@ -305,15 +292,15 @@ try:
+                 if recorded_result(r,expected_suite)=='green']
+         parent=fp[commit][0]
+         upper=commit_times.get(commits[i+1]) if i+1<len(commits) else None
+-        act26_matches=([name for name,r,pinned in act26
++        act26_matches=[name for name,r,pinned in act26
+             if upper is not None and pinned<upper
+             and r.get('commit')==commit and r.get('tree')==tree
+-            and r.get('parent')==parent and r.get('main_at_verification')==parent])
++            and r.get('parent')==parent and r.get('main_at_verification')==parent]
+         if reds:
+             status='violation'; reason='red suite recorded for exact commit/tree'
+         elif greens or act26_matches:
+             labels=set(source for _,_,source in greens)
+-            if act26_matches:labels.add('act26-prelanding-record')
++            if act26_matches: labels.add('act26-prelanding-record')
+             status='compliant'
+             reason='preceding green record for exact commit/tree ('+','.join(sorted(labels))+')'
+         elif any(recorded_result(r,expected_suite)=='red'
+@@ -329,12 +316,10 @@ try:
+             row['source_labels']=['act26-prelanding-record']
+         changes.append(row)
+ 
+-    # Count distinct main changes with a recorded exact red result as episodes;
+-    # repeated status-file snapshots for the same main commit do not multiply it.
+     red_events=len(set((x['commit'],x['tree']) for x in changes if x['status']=='violation'))
+     total=len(changes)
+     good=sum(x['status']=='compliant' for x in changes)
+-    print(json.dumps({'status':'measured','main_red_episodes':red_events,
++    print(json.dumps({'status':'measured','wall_seconds':round(time.monotonic()-start,3),'main_red_episodes':red_events,
+       'change_count':total,'compliant':good,
+       'unreadable':sum(x['status']=='unreadable' for x in changes),
+       'violations':sum(x['status']=='violation' for x in changes),
+@@ -344,5 +329,5 @@ try:
+       'red_chronology_unresolved_changes':[x for x in changes if x['status']=='red_chronology_unresolved'],
+       'per_change':changes},sort_keys=True))
+ except (subprocess.CalledProcessError, OSError) as err:
+-    print(json.dumps({'status':'unreadable','reason':str(err)}))
++    print(json.dumps({'status':'unreadable','reason':str(err),'wall_seconds':round(time.monotonic()-start,3)}))
+ PY

@@ -1,0 +1,213 @@
+commit df58bd0d9a6b358541a7c251168df138d6e45afe
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Wed Nov 25 00:28:17 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Wed Nov 25 00:28:17 2026 +0000
+
+    Distinguish live, expired and correction packets and measure observed uptake by exact workspace
+
+diff --git a/missions/pnp/research/README.md b/missions/pnp/research/README.md
+index 80b1a12d..f4a1c870 100644
+--- a/missions/pnp/research/README.md
++++ b/missions/pnp/research/README.md
+@@ -7,7 +7,7 @@ revision, assigned subproblem, checked/open dependencies, and relevant earlier
+ results (including released leases). The Executive dispatch helper injects a
+ short role-specific prompt automatically. For an unfamiliar command, use
+ `pnp-research guide ROLE` for executable examples or the command's `--help`.
+-Do not read every manual before doing mathematics.
++Do not read every manual before doing mathematics. A stale work packet explains\nthat the assignment ended and points only to preservation and receipt collection.\nPublished-proof corrections receive correction-specific commands.
+ 
+ Independent method/tool agents run `pnp-research start --role method` or
+ `pnp-research start --role tool`. They work on reusable mathematical families
+@@ -122,7 +122,7 @@ Benchmark implementation: `python3 -m missions.pnp.research.certificate_bench
+ - `pnp-research adoption` measures confirmed launches, discovery, substantive
+   commands, help calls before first use, and time to first successful use
+   using the actual agent environment.
+-  These are adoption measurements, not proof success or leaderboard credit.
++  The report separates confirmed launches from observed use (including interrupted\n  launch acknowledgements and older workers); exact workspace matching prevents\n  attribution across unrelated assignments. These are adoption measurements, not\n  proof success or leaderboard credit.
+ - `pnp-research yield` exposes censored historical family-level evidence,
+   shrinkage estimates, actual graph progress and competition. It is a
+   heuristic, not calibrated individual prediction or automatic release policy.
+diff --git a/missions/pnp/research/adoption.py b/missions/pnp/research/adoption.py
+index bf6d64b8..550700c2 100644
+--- a/missions/pnp/research/adoption.py
++++ b/missions/pnp/research/adoption.py
+@@ -48,8 +48,23 @@ def confirmed(did):
+     except (OSError,sqlite3.Error):pass
+ 
+ def lookup(c,agent,cwd,at):
+-    return c.execute("SELECT * FROM dispatch WHERE agent=? AND started<=? ORDER BY started DESC LIMIT 1",
+-                     (agent,at)).fetchone()
++    # A reused agent may have worked in another lease. Do not transfer its
++    # old launch identity to a new assignment or independent research front.
++    cwd=Path(cwd).resolve()
++    for row in c.execute("SELECT * FROM dispatch WHERE agent=? AND started<=? ORDER BY started DESC",(agent,at)):
++        root=Path(row["cwd"]).resolve()
++        if cwd==root or root in cwd.parents:return row
++    return None
++
++def workspace_role(cwd):
++    cwd=Path(cwd).resolve()
++    from . import playbook
++    label=assignment.worker_label(cwd)
++    if label:return playbook.role_for(label,label=="general")
++    for parent in (cwd,*cwd.parents):
++        if parent.parent.name in ("standing-support","independent") and parent.name in playbook.ROLES:
++            return parent.name
++    return None
+ 
+ def current_role():
+     agent=os.environ.get("ANTONINA_AGENT_ID")
+@@ -57,7 +72,7 @@ def current_role():
+     try:
+         with closing(db()) as c:
+             row=lookup(c,agent,Path.cwd(),time.time())
+-            return row["role"] if row else None
++            return row["role"] if row else workspace_role(Path.cwd())
+     except (OSError,sqlite3.Error):return None
+ 
+ def record(command,started,code):
+@@ -108,11 +123,29 @@ def report(hours=24):
+         role["launches"]+=1
+         for key in ("discovered","used","successful_use"):role[key]+=int(d[key])
+         del d["cwd"]
++    # A planned steer may lack a synchronous confirmation (e.g. interruption
++    # while reading the response). A real start command proves use, but does
++    # not retrospectively claim that the launch itself was confirmed.
++    observed={}
++    planned_unconfirmed=set()
++    with closing(db()) as c:
++        planned_unconfirmed={r[0] for r in c.execute("SELECT id FROM dispatch WHERE confirmed=0 AND started>=?",(now-hours*3600,))}
++    by_agent={}
++    for u in uses:
++        if not u["role"]:continue
++        key=(u["agent"],u["role"],u["dispatch"] or "unmatched")
++        events=by_agent.setdefault(key,[]);events.append(u)
++    for (agent,role,dispatch),events in by_agent.items():
++        row=observed.setdefault(role,{"agent_dispatches":0,"opened_packet":0,"successful_use":0,"unconfirmed_dispatches":0})
++        row["agent_dispatches"]+=1
++        row["opened_packet"]+=int(any(e["command"]=="start" and e["exit"]==0 for e in events))
++        row["successful_use"]+=int(any(meaningful(e["command"]) and e["exit"]==0 for e in events))
++        row["unconfirmed_dispatches"]+=int(dispatch in planned_unconfirmed)
+     commands={}
+     for u in uses:
+         row=commands.setdefault(u["command"],{"calls":0,"successful":0})
+         row["calls"]+=1;row["successful"]+=int(u["exit"]==0)
+-    return {"hours":hours,"roles":by,"commands":commands,"launches":launches[:40],
++    return {"hours":hours,"roles":by,"observed_usage":observed,"commands":commands,"launches":launches[:40],
+             "unmatched_agent_calls":sum(u["dispatch"] is None for u in uses),
+             "note":"Agent environment attribution; successful command is not a proof or credited contribution."}
+ 
+diff --git a/missions/pnp/research/playbook.py b/missions/pnp/research/playbook.py
+index 4651c71c..adb8aacd 100644
+--- a/missions/pnp/research/playbook.py
++++ b/missions/pnp/research/playbook.py
+@@ -4,7 +4,7 @@ import json
+ import os
+ import subprocess
+ 
+-from .. import assignment, config, state, support
++from .. import assignment, config, focus, state, support
+ from . import knowledge
+ 
+ P = "PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp."
+@@ -172,6 +172,20 @@ def packet(role, cwd=None):
+     if not rec and role in METHOD:base=compatible_public_base(latest)
+     out={"role":role,"base":base,"instructions":guide(role)}
+     if latest!=base:out["latest_public_base"]=latest
++    if role in BOUND:
++        if not rec or not focus.eligible(rec):
++            out["gap"]=b[0] if b else None
++            out["assignment_current"]=False
++            out["instructions"]="YOUR ROLE: "+role+". This is not a live research assignment.\nFIRST: preserve existing artifacts.\nDo not run bound proof checks, edit a new lease, or submit. If a check was already submitted, collect its immutable receipt. Notify Executive and finish this invocation.\nOnly Executive may assign independent method work.\nNo onboarding gate."
++            out["next_commands"]=["pnp-research obligations pending","pnp-research knowledge find QUERY"]
++            return out
++        if focus.correction(rec):
++            out["gap"]=rec["gap_id"]
++            out["assignment_current"]=True
++            out["correction"]=True
++            out["instructions"]="YOUR ROLE: "+role+". Repair the exact published proof.\nFIRST: inspect guard and checker diagnostics.\nUse the existing correction workspace, the remote scratch compiler when available, and checked reusable evidence. Do not request lease-only obligations for a published correction. Submit the corrected exact proof through the normal publisher immediately.\nNo onboarding gate."
++            out["next_commands"]=[P+"cli guard","pnp-remote-check --availability","pnp-research knowledge find QUERY"]
++            return out
+     if rec:
+         out["gap"]=rec["gap_id"]
+         out["assignment_current"]=support.active(rec)
+@@ -227,7 +241,7 @@ def main():
+         print("CURRENT WORK PACKET — "+role)
+         print("Purpose:",ROLES[role][0])
+         print("\n".join(data["instructions"].splitlines()[2:-1]))
+-        for key in ("gap","family","base","latest_public_base","assignment_current","assigned_obligation"):
++        for key in ("gap","family","base","latest_public_base","assignment_current","correction","assigned_obligation"):
+             if key in data:print(key+":",data[key])
+         context=data.get("cumulative_research") or {}
+         if context.get("obligations"):
+diff --git a/missions/pnp/research/roles.py b/missions/pnp/research/roles.py
+index e1cfd582..30bc7469 100644
+--- a/missions/pnp/research/roles.py
++++ b/missions/pnp/research/roles.py
+@@ -19,11 +19,13 @@ def main():
+     did=adoption.planned(a.agent,a.cwd,a.role,text)
+     result=subprocess.run(["antonina","agent","run","--id",a.agent,"--cwd",str(a.cwd.resolve()),
+                             "--prompt",text,"--detach","--json"]+(["--steer"] if a.steer else []),capture_output=True,text=True)
+-    print(result.stdout,end="")
+-    if result.stderr:print(result.stderr,end="",file=__import__("sys").stderr)
+     if result.returncode==0:
+         try:
+             if __import__("json").loads(result.stdout).get("state")=="running":adoption.confirmed(did)
+         except ValueError:pass
++    # Record acknowledgement before writing to a potentially closed output
++    # pipe, e.g. an Executive capturing the first few output lines.
++    print(result.stdout,end="")
++    if result.stderr:print(result.stderr,end="",file=__import__("sys").stderr)
+     return result.returncode
+ if __name__=="__main__":raise SystemExit(main())
+diff --git a/tests/pnp-research.py b/tests/pnp-research.py
+index 47481c73..fdfc2dd6 100644
+--- a/tests/pnp-research.py
++++ b/tests/pnp-research.py
+@@ -84,12 +84,42 @@ class Research(unittest.TestCase):
+             self.assertIn("YOUR ROLE: general",prompt[prompt.index("--prompt")+1])
+             self.assertIn("pnp-research start",prompt[prompt.index("--prompt")+1])
+         with patch.dict(os.environ,{"ANTONINA_AGENT_ID":"agent-fixture","ANTONINA_INVOCATION_ID":"turn"}):
+-            self.assertEqual(adoption.current_role(),"general")
+-            adoption.record("start",__import__("time").time(),0)
+-            adoption.record("knowledge find",__import__("time").time(),0)
++            oldcwd=Path.cwd()
++            try:
++                os.chdir(p)
++                self.assertEqual(adoption.current_role(),"general")
++                adoption.record("start",__import__("time").time(),0)
++                adoption.record("knowledge find",__import__("time").time(),0)
++            finally:os.chdir(oldcwd)
+         result=adoption.report()
+         self.assertEqual(result["roles"]["general"]["discovered"],1)
+         self.assertEqual(result["roles"]["general"]["successful_use"],1)
++    def test_expired_packet_and_workspace_attribution(self):
++        rec=state.create("L-meta-8",state="LEASED",lease="fixture",statement="True",
++                         lease_expires_at=__import__("time").time()+600)
++        p=Path(assignment.prepare(rec["gap_id"],checkout=False,worker="general")["cwd"])
++        p.mkdir(parents=True)
++        with patch.object(playbook,"pinned_base",return_value=self.base):
++            data=playbook.packet("general",p)
++            self.assertTrue(data["assignment_current"])
++            state.transition(rec["gap_id"],"RELEASED",failure_reason="fixture")
++            data=playbook.packet("general",p)
++            self.assertFalse(data["assignment_current"])
++            self.assertNotIn("pnp-research obligations ready --current",data["next_commands"])
++        did=adoption.planned("agent-fixture",p,"general","fixture")
++        with __import__("contextlib").closing(adoption.db()) as c:
++            self.assertIsNotNone(adoption.lookup(c,"agent-fixture",p,__import__("time").time()))
++            self.assertIsNone(adoption.lookup(c,"agent-fixture",Path(config.STATE_ROOT),__import__("time").time()))
++        with patch.dict(os.environ,{"ANTONINA_AGENT_ID":"agent-fixture"}):
++            old=Path.cwd()
++            try:
++                os.chdir(p)
++                adoption.record("start",__import__("time").time(),0)
++            finally:os.chdir(old)
++        report=adoption.report()
++        self.assertNotIn("general",report["roles"])
++        self.assertEqual(report["observed_usage"]["general"]["opened_packet"],1)
++        self.assertEqual(report["observed_usage"]["general"]["unconfirmed_dispatches"],1)
+     def test_independent_roles_and_obligation_fronts(self):
+         rec=state.create("L-meta-9",state="LEASED",lease="fixture",statement="True",
+                          lease_expires_at=__import__("time").time()+600)

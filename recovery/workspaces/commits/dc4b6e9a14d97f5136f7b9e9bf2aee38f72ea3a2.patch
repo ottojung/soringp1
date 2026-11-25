@@ -1,0 +1,796 @@
+commit dc4b6e9a14d97f5136f7b9e9bf2aee38f72ea3a2
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 09:06:29 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 09:07:26 2026 +0000
+
+    Economy: verify Act34 zero-cost path and publish measured envelope
+
+diff --git a/government/knowledge-act34-gate.py b/government/knowledge-act34-gate.py
+index de7f4c23..e62205a5 100644
+--- a/government/knowledge-act34-gate.py
++++ b/government/knowledge-act34-gate.py
+@@ -16,6 +16,8 @@ import subprocess
+ import sys
+ import time
+ 
++sys.dont_write_bytecode = True
++
+ OFFICES = ("statistics", "foresight", "strategy", "spying")
+ TITLE = "## Act 34 — Rapid Full Institutional Activation and Continuous Improvement Act (enacted "
+ WINDOW = 45 * 86400
+@@ -97,30 +99,52 @@ def require_audited_free_tier(root, record, permit):
+     evidence = record.get("economy_free_tier_evidence")
+     if not isinstance(evidence, dict):
+         raise ValueError("independent Economy model-source control missing")
+-    report_ref = "records/knowledge/2026-11-23-economy-free-tier-prelaunch-allowlist-finding.md"
++    report_ref = "records/economy/2026-11-24-act34-zero-billed-verification.md"
+     institutionally_attested(
+         root, "economy", "c1e00012", report_ref,
+         evidence.get("artifact_commit"), evidence.get("report_sha256"),
+         evidence.get("attestation"), "act34-economy-free-provider-control")
+-    for key, rel in (
+-            ("wrapper_sha256", "government/knowledge-free-dispatch.sh"),
+-            ("negative_test_sha256", "tests/knowledge-free-dispatch-smoke.sh"),
+-            ("bounds_sha256", "government/knowledge-practical-bounds.py")):
++    controls = (
++        ("wrapper_sha256", "government/knowledge-free-dispatch.sh"),
++        ("negative_test_sha256", "tests/knowledge-free-dispatch-smoke.sh"),
++        ("bounds_sha256", "government/knowledge-practical-bounds.py"),
++        ("zero_billed_policy_sha256", "government/knowledge-zero-billed-policy.json"),
++        ("zero_billed_verifier_sha256", "government/knowledge-zero-billed.py"),
++        ("gate_sha256", "government/knowledge-act34-gate.py"),
++        ("cycle_sha256", "government/knowledge-office-cycle.sh"))
++    for key, rel in controls:
+         if evidence.get(key) != on_main(root, root / rel):
+             raise ValueError("unverified Economy runtime control: " + rel)
+-    # Economy's live catalogue must explicitly say 'free' for EVERY allowed
+-    # model; a paid provider with a deceptive -free suffix must be refused.
++    if not isinstance(evidence.get("negative_acceptance_digest"), str) or not re.fullmatch(
++            r"[0-9a-f]{64}", evidence["negative_acceptance_digest"]):
++        raise ValueError("negative-acceptance digest missing")
++    # Exact provider/model cost evidence, not the name-derived rotation tier,
++    # decides whether the live policy is admissible. The shared verifier also
++    # enforces the evidence freshness deadline.
++    module = root / "government/knowledge-zero-billed.py"
++    spec = importlib.util.spec_from_file_location("act34_zero_billed", module)
++    if spec is None or spec.loader is None:
++        raise ValueError("zero-billed policy verifier unavailable")
++    zmod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(zmod)
+     state = Path(os.environ.get("VICHE_STATE_ROOT", "/var/lib/lubko/wd/viche-state"))
+     policy = load(state / "economy/model-policy.json")
+     cat = load(state / "economy/catalogue.json")
+     models = cat.get("models") if isinstance(cat, dict) else None
+     allowed = policy.get("prefer") if isinstance(policy, dict) else None
+     if not isinstance(models, dict) or not isinstance(allowed, list) or not allowed:
+-        raise ValueError("independent free-tier policy/catalogue unavailable")
+-    if (any(not isinstance(mid, str) or not
+-            re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-free", mid) or
+-            models.get(mid, {}).get("tier") != "free" for mid in allowed)):
+-        raise ValueError("unapproved or provider-billed model in active policy")
++        raise ValueError("free-tier policy/catalogue unavailable")
++    zmod.verified_subset(root / "government/knowledge-zero-billed-policy.json", allowed, models)
++    expected_digest = zmod.negative_acceptance_digest({
++        "wrapper": root / "government/knowledge-free-dispatch.sh",
++        "zero_billed_policy": root / "government/knowledge-zero-billed-policy.json",
++        "bounds": root / "government/knowledge-practical-bounds.py",
++        "negative_test": root / "tests/knowledge-free-dispatch-smoke.sh",
++        "verifier": root / "government/knowledge-zero-billed.py",
++        "gate": root / "government/knowledge-act34-gate.py",
++        "cycle": root / "government/knowledge-office-cycle.sh"})
++    if evidence.get("negative_acceptance_digest") != expected_digest:
++        raise ValueError("negative-acceptance digest differs from exact controls")
+ 
+ 
+ def check(office, root):
+diff --git a/government/knowledge-free-dispatch.sh b/government/knowledge-free-dispatch.sh
+index 36182d82..ab7803db 100755
+--- a/government/knowledge-free-dispatch.sh
++++ b/government/knowledge-free-dispatch.sh
+@@ -29,6 +29,8 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}
+ policy="$state/economy/model-policy.json"
+ catalogue="$state/economy/catalogue.json"
++billing="$town/government/knowledge-zero-billed-policy.json"
++billing_module="$town/government/knowledge-zero-billed.py"
+ allow_dir="$state/knowledge/free-allowlist"
+ allow_cfg="$allow_dir/antonina/config.json"
+ 
+@@ -37,39 +39,22 @@ die() { log "$*"; exit 1; }
+ 
+ [ -s "$policy" ] || die "Economy model policy missing"
+ [ -s "$catalogue" ] || die "Economy provider catalogue missing; no paid fallback"
++[ -s "$billing" ] || die "Economy exact-ID zero-cost policy missing; no paid fallback"
++[ -f "$billing_module" ] || die "zero-cost policy verifier missing"
+ [ -f "$town/government/knowledge-practical-bounds.py" ] || die "practical-bounds module missing"
+ 
+-# Build the allowlist from Economy's audited, source-attested free tier only.
+-# Every id must carry a '-free' component and appear in model-policy.json 'prefer'.
+-# This is ALLOWLIST CONSTRUCTION from an authoritative record, not a billing
+-# enforcement check here: enforcement is Antonina's config on the dispatch path.
+-python3 - "$policy" "$catalogue" "$allow_dir" "$allow_cfg" <<'PY'
+-import json, os, re, sys, tempfile
+-policy, catalogue, allow_dir, allow_cfg = sys.argv[1:5]
+-p = json.load(open(policy, encoding="utf-8"))
+-cat = json.load(open(catalogue, encoding="utf-8"))
+-if not isinstance(cat, dict) or not isinstance(cat.get("models"), dict):
+-    raise SystemExit("audited Economy catalogue missing/invalid")
+-prefer = p.get("prefer") or []
+-if not prefer:
+-    raise SystemExit("empty free-tier prefer list")
+-for mid in prefer:
+-    if not isinstance(mid, str) or not re.fullmatch(
+-        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-free", mid):
+-        raise SystemExit("non-free or malformed id in policy prefer")
+-    if cat["models"].get(mid, {}).get("tier") != "free":
+-        # An apparently free-looking ID CAN be billable; suffix alone is
+-        # insufficient. Never silently fall through to the global ladder.
+-        raise SystemExit("model id is not independently catalogued as free")
+-entries = [{"model": mid, "comment": "Economy audited free tier 2026-11-23; source-attested in model-policy.json"} for mid in prefer]
+-os.makedirs(os.path.dirname(allow_cfg), mode=0o700, exist_ok=True)
+-os.chmod(allow_dir, 0o700)
+-fd, tmp = tempfile.mkstemp(prefix=".free-allow-", dir=os.path.dirname(allow_cfg))
+-with os.fdopen(fd, "w", encoding="utf-8") as fh:
+-    json.dump({"models": entries}, fh, indent=2)
+-    fh.write("\n")
+-os.chmod(tmp, 0o600)
+-os.replace(tmp, allow_cfg)
++# Build the allowlist from exact provider/model IDs with reviewed zero-cost
++# metadata. A -free name is necessary for the rotation but NEVER billing proof.
++python3 - "$billing_module" "$billing" "$policy" "$catalogue" "$allow_cfg" <<'PY'
++import importlib.util, sys
++sys.dont_write_bytecode = True
++module, billing, policy, catalogue, output = sys.argv[1:6]
++spec = importlib.util.spec_from_file_location("zero_billed", module)
++if spec is None or spec.loader is None:
++    raise SystemExit("zero-cost policy verifier unavailable")
++mod = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(mod)
++mod.build_allowlist(billing, policy, catalogue, output)
+ PY
+ [ -s "$allow_cfg" ] || die "failed to build allowlist config"
+ 
+diff --git a/government/knowledge-zero-billed-policy.json b/government/knowledge-zero-billed-policy.json
+new file mode 100644
+index 00000000..037f71e3
+--- /dev/null
++++ b/government/knowledge-zero-billed-policy.json
+@@ -0,0 +1,57 @@
++{
++  "schema": "viche-zero-billed-model-policy-v1",
++  "source": {
++    "url": "https://opencode.ai/inference/v1/models",
++    "retrieved_at": "2026-11-24T08:53:30Z",
++    "sha256": "7acb07d485b4a2b2a0cc9975c13e574981a1f4e196fe21cc0785d994709498eb",
++    "note": "Provider-owned exact model cost metadata. Admission is by exact ID and zero published input/output/cache-read cost; no cache-write charge is listed. Never inferred from a -free name. Secondary models.dev snapshot sha256 9ee77e534b74cfea7a2bf7f312ef85065dc34be97f514e491ff30a3f8984c88a corroborates these nine IDs; four gateway/secondary-only rotation IDs are deliberately excluded."
++  },
++  "review_after": "2026-12-01T08:53:30Z",
++  "models": {
++    "opencode/tidepool-alpha-free": {
++      "provider": "opencode",
++      "provider_model": "tidepool-alpha-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    },
++    "opencode/beam-free": {
++      "provider": "opencode",
++      "provider_model": "beam-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    },
++    "opencode/nemotron-3.5-super-vl-free": {
++      "provider": "opencode",
++      "provider_model": "nemotron-3.5-super-vl-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    },
++    "opencode/hy4-flash-free": {
++      "provider": "opencode",
++      "provider_model": "hy4-flash-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    },
++    "opencode/nemotron-3.5-lightning-free": {
++      "provider": "opencode",
++      "provider_model": "nemotron-3.5-lightning-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    },
++    "opencode/iceman-free": {
++      "provider": "opencode",
++      "provider_model": "iceman-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    },
++    "opencode/mimo-v2.6-flash-free": {
++      "provider": "opencode",
++      "provider_model": "mimo-v2.6-flash-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    },
++    "opencode/deepseek-v4.1-flash-free": {
++      "provider": "opencode",
++      "provider_model": "deepseek-v4.1-flash-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    },
++    "opencode/flint-40b-free": {
++      "provider": "opencode",
++      "provider_model": "flint-40b-free",
++      "cost": {"input": 0, "output": 0, "cache_read": 0}
++    }
++  }
++}
+diff --git a/government/knowledge-zero-billed.py b/government/knowledge-zero-billed.py
+new file mode 100644
+index 00000000..98652cd1
+--- /dev/null
++++ b/government/knowledge-zero-billed.py
+@@ -0,0 +1,143 @@
++#!/usr/bin/env python3
++"""Exact-ID zero-billed model policy shared by the Act34 wrapper and gate.
++
++A model name containing ``-free`` is never billing evidence.  This module admits
++only exact provider/model IDs recorded in a reviewed policy whose published
++input, output and cache-read costs are all zero.  The policy expires so a
++limited-time free offer cannot silently outlive its evidence.
++"""
++import datetime
++import hashlib
++import json
++import os
++from pathlib import Path
++import re
++import tempfile
++
++SCHEMA = "viche-zero-billed-model-policy-v1"
++MODEL_ID = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
++REQUIRED_COST = ("input", "output", "cache_read")
++ALLOWED_COST = set(REQUIRED_COST + ("cache_write",))
++
++
++def _zero(value):
++    return (isinstance(value, (int, float)) and not isinstance(value, bool)
++            and value == 0)
++
++
++def _timestamp(value):
++    if not isinstance(value, str):
++        raise ValueError("review_after must be a UTC timestamp")
++    parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
++    if parsed.tzinfo is None:
++        raise ValueError("review_after must include a timezone")
++    return parsed
++
++
++def load_verified(path, now=None):
++    """Load a fresh policy and validate every exact-ID cost record."""
++    path = Path(path)
++    data = json.loads(path.read_text(encoding="utf-8"))
++    if not isinstance(data, dict) or data.get("schema") != SCHEMA:
++        raise ValueError("zero-billed policy schema invalid")
++    source = data.get("source")
++    if (not isinstance(source, dict) or source.get("url") != "https://opencode.ai/inference/v1/models"
++            or not isinstance(source.get("sha256"), str)
++            or not re.fullmatch(r"[0-9a-f]{64}", source["sha256"])):
++        raise ValueError("zero-billed provider-cost source invalid")
++    review_after = _timestamp(data.get("review_after"))
++    now = now or datetime.datetime.now(datetime.timezone.utc)
++    if now.tzinfo is None:
++        now = now.replace(tzinfo=datetime.timezone.utc)
++    if now >= review_after:
++        raise ValueError("zero-billed provider-cost evidence expired")
++    models = data.get("models")
++    if not isinstance(models, dict) or not models:
++        raise ValueError("zero-billed exact-ID policy empty")
++    for mid, row in models.items():
++        if not isinstance(mid, str) or not MODEL_ID.fullmatch(mid):
++            raise ValueError("malformed zero-billed model id")
++        provider, provider_model = mid.split("/", 1)
++        if (not isinstance(row, dict) or row.get("provider") != provider
++                or row.get("provider_model") != provider_model):
++            raise ValueError("zero-billed provider/model identity mismatch: " + mid)
++        cost = row.get("cost")
++        if not isinstance(cost, dict) or any(k not in cost for k in REQUIRED_COST):
++            raise ValueError("zero-billed cost dimensions missing: " + mid)
++        if any(k not in ALLOWED_COST for k in cost):
++            raise ValueError("unknown billing dimension: " + mid)
++        if any(not _zero(cost[k]) for k in cost):
++            raise ValueError("nonzero provider cost: " + mid)
++    return data
++
++
++def verified_subset(policy_path, ids, catalogue_models=None):
++    """Return the exact, fresh, zero-cost subset in caller order.
++
++    IDs absent from provider-cost evidence are omitted, not admitted. An empty
++    result fails closed. This lets the general free rotation retain secondary-
++    only offers while the Act34 path uses the primary-confirmed subset.
++    """
++    data = load_verified(policy_path)
++    if not isinstance(ids, list):
++        raise ValueError("model allowlist missing")
++    selected = []
++    for mid in ids:
++        if not isinstance(mid, str):
++            raise ValueError("malformed model id")
++        if mid not in data["models"]:
++            continue
++        if catalogue_models is not None:
++            if not isinstance(catalogue_models, dict) or catalogue_models.get(mid, {}).get("tier") != "free":
++                raise ValueError("model not catalogued in Economy rotation: " + mid)
++        selected.append(mid)
++    if not selected:
++        raise ValueError("no primary-confirmed zero-cost model in active policy")
++    return selected
++
++
++def negative_acceptance_digest(paths):
++    """Digest the exact rejected-ID vector and control bytes.
++
++    The vector includes a paid-looking ID that a name-derived catalogue marks
++    free.  Passing the smoke test therefore proves the exact-ID cost policy,
++    not the old suffix/tier inference, made the rejection decision.
++    """
++    names = (
++        "provider/paid-free-trial",
++        "provider/paid-free",
++        "openai/gpt-6-luna",
++        "opencode/hy4-flash-free:nonzero-cost",
++        "opencode/hy4-flash-free:expired-evidence",
++        "opencode-go/hy4-flash-free:gateway-only-omitted")
++    payload = {"rejected_ids": names,
++               "controls": {name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
++                            for name, path in sorted(paths.items())}}
++    return hashlib.sha256(json.dumps(payload, sort_keys=True,
++                                     separators=(",", ":")).encode()).hexdigest()
++
++
++def build_allowlist(policy_path, prefer_path, catalogue_path, output_path):
++    """Build Antonina's per-invocation config from exact verified IDs."""
++    policy = json.loads(Path(prefer_path).read_text(encoding="utf-8"))
++    catalogue = json.loads(Path(catalogue_path).read_text(encoding="utf-8"))
++    if not isinstance(catalogue, dict) or not isinstance(catalogue.get("models"), dict):
++        raise ValueError("Economy catalogue missing/invalid")
++    ids = verified_subset(policy_path, policy.get("prefer"), catalogue.get("models"))
++    entries = [{"model": mid,
++                "comment": "Economy exact-ID zero-cost policy; source-attested provider metadata"}
++               for mid in ids]
++    output = Path(output_path)
++    output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
++    os.chmod(output.parent, 0o700)
++    fd, tmp = tempfile.mkstemp(prefix=".free-allow-", dir=str(output.parent))
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as handle:
++            json.dump({"models": entries}, handle, indent=2)
++            handle.write("\n")
++        os.chmod(tmp, 0o600)
++        os.replace(tmp, output)
++    finally:
++        if os.path.exists(tmp):
++            os.unlink(tmp)
++    return ids
+diff --git a/records/economy/2026-11-24-act34-measured-envelope.json b/records/economy/2026-11-24-act34-measured-envelope.json
+new file mode 100644
+index 00000000..dad8a031
+--- /dev/null
++++ b/records/economy/2026-11-24-act34-measured-envelope.json
+@@ -0,0 +1,93 @@
++{
++  "schema": "viche-act34-measured-envelope-v1",
++  "published_at": "2026-11-24T09:04:44Z",
++  "authority": "Act 34 §3(5); request P-1795509650-b874",
++  "activation": "none; all four offices remain disabled",
++  "staffing": "Resource evidence only. Four offices are the statutory scenario, not a staffing recommendation.",
++  "method": {
++    "primary_sources": [
++      "/home/lubko/.local/state/antonina/agents/*/meta.json",
++      "/home/lubko/.local/state/antonina/opencode-service/opencode.db:session_v2"
++    ],
++    "selection": "prompt_count=1; terminal state clearexit/failed/stopped/killed; native_session_id present; finished_at>=started_at",
++    "tokens": "absolute session_v2 sum of input+output+reasoning+cache_read+cache_write; conservative for reused sessions",
++    "cpu": "4 logical CPUs * wall seconds; whole-host UPPER_BOUND charged to each overlapping office, not attributable office CPU",
++    "percentiles": "linear interpolation on the selected sample",
++    "measured_at_epoch": 1795510664
++  },
++  "cohorts": {
++    "institutional_worktree_proxy": {
++      "n": 209,
++      "states": {"clearexit": 188, "failed": 14, "killed": 6, "stopped": 1},
++      "window_utc": ["2026-11-05T20:31:06Z", "2026-11-24T08:55:47Z"],
++      "sample_sha256": "1f1b934b0d591d7a9f4e97aa7597960f14d0d0a5484bdc735482c8eceaf579d9",
++      "tokens_total": {"p50": 3034809, "p95": 10989468, "max": 24387751},
++      "wall_seconds": {"p50": 411.621, "p95": 1996.667, "max": 13989.473},
++      "cpu_upper_bound_seconds": {"p50": 1646.484, "p95": 7986.667, "max": 55957.892}
++    },
++    "adaptive_pnp_title_proxy": {
++      "n": 37,
++      "states": {"clearexit": 28, "failed": 1, "stopped": 8},
++      "window_utc": ["2026-11-23T22:26:20Z", "2026-11-24T08:48:37Z"],
++      "sample_sha256": "2cf023e794c01919434fd1ac46a762236a7c976ce4a255249eaeeb36a6107644",
++      "tokens_total": {"p50": 2939727, "p95": 11320102.2, "max": 16645579},
++      "wall_seconds": {"p50": 526.503, "p95": 1605.862, "max": 12323.615},
++      "cpu_upper_bound_seconds": {"p50": 2106.012, "p95": 6423.446, "max": 49294.46},
++      "note": "Historical comparable adaptive research only. SoringP1 is suspended; this record neither monitors nor resumes it."
++    }
++  },
++  "per_office_proposal": {
++    "basis": "maximum p95 across the two proxy cohorts",
++    "tokens_total": 11320103,
++    "wall_seconds": 1997,
++    "cpu_upper_bound_seconds": 7987,
++    "headroom_note": "No actual Statistics/Foresight/Strategy/Spying execution exists. These are conservative proxy planning values, not measured office demand."
++  },
++  "four_office_parallel_scenario": {
++    "tokens_total": 45280412,
++    "wall_seconds_summed_office_exposure": 7988,
++    "wall_seconds_elapsed_parallel_upper_bound": 1997,
++    "cpu_upper_bound_seconds": 31948,
++    "physical_cpu_seconds_over_elapsed_window": 7988,
++    "note": "CPU UPPER_BOUND is four times the physical CPU window because every overlapping office is charged all host busy CPU."
++  },
++  "current_position": {
++    "ledger": {"tokens_total": 0, "cpu_seconds": 0.0, "wall_seconds": 0, "counted": [], "reservations": 0},
++    "live_caps": {
++      "per_office": {"tokens_total": 400000, "cpu_seconds": 1800, "wall_seconds": 3600},
++      "aggregate": {"tokens_total": 1600000, "cpu_seconds": 7200, "wall_seconds": 14400}
++    },
++    "measured_p95_aggregate_exceeds_live_caps": {
++      "tokens_factor": 28.3,
++      "cpu_upper_bound_factor": 4.437,
++      "summed_wall_fraction": 0.139
++    },
++    "older_proposed_caps": {
++      "per_office_45d": {"tokens_total": 3360000, "cpu_seconds": 50400, "wall_seconds": 100800},
++      "aggregate": {"tokens_total": 13440000, "cpu_seconds": 201600, "wall_seconds": 403200},
++      "measured_p95_aggregate_tokens_factor": 3.369
++    }
++  },
++  "host_snapshot_utc": "2026-11-24T09:00:39Z",
++  "host": {
++    "cpus": 4,
++    "load1": 7.47,
++    "load_status": "watch",
++    "memory_headroom_gib": 9.21,
++    "memory_status": "ok",
++    "disk_avail_gib": 42.8,
++    "disk_used_pct": 80.7,
++    "disk_status": "short",
++    "free_models_available_now": 9,
++    "funding_risk": "none"
++  },
++  "blockers": [
++    "No actual four-office execution sample; office-specific expected demand and peak memory remain UNAVAILABLE.",
++    "Current lawful budget caps are below one four-office proxy-p95 wave (tokens 28.3x; CPU UPPER_BOUND 4.437x). No permit may issue on these caps.",
++    "Provider quota capacity for sustained four-office use is unmeasured; live Iceman check returned HTTP 429 free-limit with no paid fallback.",
++    "Disk remains short; existing outstanding Town Hall disk request is not repeated here.",
++    "Signed permits cite stale budget/control hashes and lack enforcement_evidence and negative_acceptance_digest fields.",
++    "No account-level zero-paid-spend cap was found; the exact-path runtime allowlist is the available control, subject to the verification record."
++  ],
++  "founder_request": "None from this envelope alone: no evidence yet that capacity can only be bought. Executive must choose lawful caps/permits or hold; purchase-only capacity would require a separate priced NEEDS-FOUNDER line."
++}
+diff --git a/records/economy/2026-11-24-act34-measured-envelope.md b/records/economy/2026-11-24-act34-measured-envelope.md
+new file mode 100644
+index 00000000..8395d358
+--- /dev/null
++++ b/records/economy/2026-11-24-act34-measured-envelope.md
+@@ -0,0 +1,52 @@
++# Act34 measured four-office operating envelope — 2026-11-24
++
++**Authority:** Act34 §3(5); request `P-1795509650-b874`. **No office activated.** All four remain disabled. This is resource evidence, not a staffing recommendation or a permit.
++
++## What is measured
++
++There are **zero actual executions** attributable to Statistics, Foresight, Strategy or Spying. An office-specific envelope therefore cannot honestly be called measured. Economy measured two comparable managed-agent cohorts from primary Antonina metadata and OpenCode `session_v2`:
++
++- Institutional worktree proxy: **209** single-prompt terminal runs, 2026-11-05T20:31:06Z–2026-11-24T08:55:47Z; 188 clear, 14 failed, 6 killed, 1 stopped.
++- Historical adaptive PnP-title proxy: **37** runs, 2026-11-23T22:26:20Z–2026-11-24T08:48:37Z; 28 clear, 1 failed, 8 stopped. SoringP1 is suspended; this historical sample neither monitors nor resumes it.
++
++Selection includes failures/stops, uses absolute five-field session token totals, and charges CPU as `4 CPUs × wall` to each overlapping office. That CPU figure is a conservative whole-host `UPPER_BOUND`, **not actual per-office CPU**. Exact samples, hashes and percentiles are in `records/economy/2026-11-24-act34-measured-envelope.json`.
++
++## Measured proxy band
++
++| Metric | Institutional p50 / p95 / max | Adaptive p50 / p95 / max |
++|---|---:|---:|
++| Accounting tokens | 3.03M / 10.99M / 24.39M | 2.94M / 11.32M / 16.65M |
++| Wall seconds | 412 / 1,997 / 13,989 | 527 / 1,606 / 12,324 |
++| CPU `UPPER_BOUND` seconds | 1,646 / 7,987 / 55,958 | 2,106 / 6,423 / 49,294 |
++
++## Economy proposal (not a permit)
++
++Use the **maximum p95 across both cohorts** as the conservative per-office planning value:
++
++- **11,320,103 accounting tokens**
++- **1,997 wall seconds**
++- **7,987 CPU-s `UPPER_BOUND`**
++
++One four-office parallel wave then implies:
++
++- **45,280,412 accounting tokens**
++- **7,988 summed office-wall seconds**; **1,997 seconds elapsed parallel upper bound**
++- **31,948 CPU-s `UPPER_BOUND`**; physical CPU capacity over that elapsed window is 8,988 CPU-s, so the accounting charge is deliberately four times physical capacity.
++
++No actual four-office peak memory is available. Indicative live managed processes were 63–79 MiB RSS each (sum-of-HWM upper bound 693 MiB for eight processes), but exited tool children and historical peaks are absent; this cannot establish a four-office memory ceiling.
++
++## Headroom and current position
++
++At 2026-11-24T09:00Z: 4 CPUs, load1 7.47 (`watch`), memory headroom 9.21 GiB (`ok`), disk 42.8 GiB free / 80.7% used (`short`), 9 free models available (`funding_risk=none`). The unchanged cumulative ledger is **zero**: 0 tokens, 0.0 CPU-s, 0 wall-s, no reservations. Per-office actual CPU remains `UNAVAILABLE`.
++
++Current live aggregate caps are 1.6M tokens / 7,200 CPU-s / 14,400 wall-s. One proxy-p95 four-office wave exceeds them by **28.3× tokens** and **4.437× CPU `UPPER_BOUND`** (summed wall uses 13.9%). The older proposed aggregate cap of 13.44M tokens is also below the measured proxy wave by 3.369×. Therefore **no permit may issue on the current caps**, and the older proposed caps are not an adequate broad-office envelope.
++
++## Blockers
++
++- No actual four-office sample, office-specific expected demand, peak memory, or sustained quota-capacity measurement.
++- Live exact-primary Iceman check returned HTTP 429 `FreeUsageLimitError` with no paid fallback; provider quota headroom for four sustained offices is unproven.
++- Disk remains `short`; an existing Town Hall disk request is already outstanding and is not duplicated.
++- Signed permits cite stale budget/control hashes and lack required enforcement evidence and negative-acceptance digest fields.
++- The repaired exact-path zero-cost control is a candidate pending Act31 deployment/review; see `records/economy/2026-11-24-act34-zero-billed-verification.md`.
++
++**Founder request:** none from this envelope alone. No evidence yet establishes that capacity can only be bought. The Executive must choose lawful caps/permits at or below a defensible envelope or hold activation. A purchase-only remedy would require a separate priced `NEEDS-FOUNDER:` line.
+diff --git a/records/economy/2026-11-24-act34-zero-billed-verification.md b/records/economy/2026-11-24-act34-zero-billed-verification.md
+new file mode 100644
+index 00000000..c04d13eb
+--- /dev/null
++++ b/records/economy/2026-11-24-act34-zero-billed-verification.md
+@@ -0,0 +1,65 @@
++# Act34 exact-path zero-billed verification — 2026-11-24
++
++**Scope.** Ministry of Economy evidence for request `P-1795509650-b874`. No office was activated; `records/knowledge/activation.json` and all four live budget flags remain disabled. SoringP1 remains suspended and was neither monitored nor resumed. This is a resource/funding control verification, not a Judiciary verdict or a staffing plan.
++
++**Correction to the 09:03:53Z proceed answer.** That answer described an earlier, self-test-failing candidate. This record supersedes it: the candidate committed as `088561a9` passes the focused suites, uses the measured proxy envelope, and carries negative-acceptance digest `262c84136cc8742f2c92e4a70b9264ea89b4aee0db6f15ab67ac6b47589a112d`. Act31 deployment/independent review is still pending, so the deployed path remains held.
++
++## Disposition
++
++- **Exact Act34 scheduled dispatch path: candidate control VERIFIED, not yet deployed.** The canonical path is `boot.sh` → `knowledge-office-cycle.sh` → `knowledge-activation-verify.sh` → budget reservation → mandatory `knowledge-free-dispatch.sh run …` → `antonina agent run`. The wrapper pins `XDG_CONFIG_HOME` to a dedicated allowlist; installed Antonina `aeb1ffb` reads `$XDG_CONFIG_HOME/antonina/config.json` and selects only from it.
++- **Former control: INSUFFICIENT.** Production `economy-models.py` classifies tiers from model names. A read-only probe classified `provider/paid-free` and `provider/paid-free-trial` as `free`. The old smoke test marked that ID `paid` in its fixture, so it did not reproduce the production defect. Act34 §3(1)(a) forbids relying on naming alone.
++- **Repair candidate:** `government/knowledge-zero-billed-policy.json` contains only nine exact `opencode/*` IDs whose input, output and cache-read prices are zero in the provider-owned endpoint. Four `opencode-go/*` aliases and all other IDs are omitted from the Act34 allowlist, while remaining in the general Town rotation. `government/knowledge-zero-billed.py` validates exact provider/model identity, all published cost dimensions, and a freshness deadline; an empty primary-confirmed subset fails closed.
++- **Account-level zero-paid-spend cap: UNAVAILABLE.** No prepaid/gateway/provider-enforced monetary ceiling was found in the inspected runtime/config. Token/CPU/wall caps are not monetary caps. A paid tier remains held; obtaining such a cap would require external authorization and is not attempted here.
++
++## Exact evidence
++
++Provider-owned model endpoint fetched 2026-11-24T08:53:30Z:
++`https://opencode.ai/inference/v1/models`, SHA-256 `7acb07d485b4a2b2a0cc9975c13e574981a1f4e196fe21cc0785d994709498eb`. Public pricing documentation also lists the nine free models as Free/Free/Free. Secondary `models.dev` snapshot SHA-256 `9ee77e534b74cfea7a2bf7f312ef85065dc34be97f514e491ff30a3f8984c88a` corroborates them; it is not the admission authority.
++
++Installed runtime source inspected: Antonina release `aeb1ffb`, `agent-runtime/src/model-config.js`, `backend.js`, `runner.js`, and `cli/src/agent.js`. Environment propagation and failover stay within the configured list. The wrapper is not a global guard around unrelated Executive/Economy/Judiciary dispatchers; it protects the canonical Act34 office path only.
++
++### Candidate control hashes
++
++| Control | SHA-256 |
++|---|---|
++| `government/knowledge-zero-billed-policy.json` | `f94e6c92f627abacf1cfeab75ca1195ca2560a851e7bdf29539be044b819ee46` |
++| `government/knowledge-zero-billed.py` | `e5ced568010e104da23a6a0389e1c15823678da6ee52c9ea2ba28e3574c409cf` |
++| `government/knowledge-free-dispatch.sh` | `d045c81b1428530f81aba2b2ffa98e8a396981a26e67c393b43e1d2d1c82243d` |
++| `government/knowledge-act34-gate.py` | `cb04578bcd2ec3f935c08fe08951c94267cf86318fe4401fa5bf25e2843b3ca2` |
++| `government/knowledge-office-cycle.sh` | `700b244d170bb0bfb02606952e62e7b7e7eab4c2d403e59c607ed62164414a9c` |
++| `tests/knowledge-free-dispatch-smoke.sh` | `611df8925da1d051341f583438ba31d93242abeaa3294a076eb6106638f532da` |
++| `tests/knowledge-act34-adaptive-smoke.sh` | `39064d42cb1d197c8f842ba917a11212b5cdda88f74566132870f4f43d938b7b` |
++
++**Negative-acceptance digest:** `262c84136cc8742f2c92e4a70b9264ea89b4aee0db6f15ab67ac6b47589a112d`.
++
++The digest binds the exact wrapper, policy, verifier, negative test, gate and cycle bytes. Rejected/omitted vector: `provider/paid-free-trial`; `provider/paid-free` even when the name-derived catalogue says free; `openai/gpt-6-luna`; an exact ID with nonzero output cost; expired cost evidence; and `opencode-go/hy4-flash-free` as gateway-only. The gate recomputes and compares this digest before any model-using permit can pass.
++
++### Tests performed
++
++- `/bin/sh tests/knowledge-free-dispatch-smoke.sh` — PASS; printed the digest above.
++- `/bin/sh tests/knowledge-act34-adaptive-smoke.sh` — PASS; four-office institutional attestation fixture, spoofed Executive review, deceptive paid-free ID, forged permit and adverse Judiciary HOLD all denied.
++- `/bin/sh tests/statistics-cumulative-budget-smoke.sh` — PASS; seven full holds precharged, eighth refused, corruption fails, reboot retains debt.
++- `/bin/sh tests/knowledge-budget-smoke.sh` — PASS; disabled defaults, host CPU reservations, missing SID, corruption, cumulative deltas, durability and rollback.
++- POSIX shell syntax, Python AST syntax and `git diff --check` — PASS.
++
++### Live candidate-path checks (not office activation)
++
++1. **Gateway alias Hy4, successful usage:** temporary managed agent `eYFd07PDd9lbaK9DVUNyo8-decently`, session `ses_df3394c5effeJdjLGkHS1ECOFo`; exit 0; `models_used=[opencode-go/hy4-flash-free]`; input 3,039, output 3, reasoning 28, cache-read 2,048, cache-write 0; `cost=0.0`. This proved the XDG selection mechanism, but that gateway alias is now excluded from the stricter primary-only policy.
++2. **Exact primary Iceman, quota refusal:** agent `1pjuK2amnaNzuwClW9WPWP-jammed`, session `ses_df3349a47ffehfaD31SDuYh7E1`; only `opencode/iceman-free` selected; provider returned HTTP 429 `FreeUsageLimitError`; no paid fallback; terminal `unknown`, `alive=false`, `model_quota_exhausted`.
++3. **Contrary evidence — Beam stall:** agent `nwRI9iflGszbJ9yzh48St8-more`, session `ses_df33fb904ffeRsj4cZvTHpMLm7`; only `opencode-go/beam-free` selected and `cost=0.0`, but no tokens arrived before the 150 s bound; Economy stopped the owned agent. This is selection evidence only, not successful usage. A first attempt without `VICHE_TOWN_ROOT` correctly failed closed on missing candidate policy and dispatched nothing.
++
++## Cumulative ledger and catalogue
++
++- Authoritative reservation recomputation at 2026-11-24T09:00Z: `tokens_total=0`, `cpu_seconds=0.0`, `wall_seconds=0`, `counted=[]`; reservation directory empty. Per-office actual CPU remains `UNAVAILABLE`; CPU is whole-host `UPPER_BOUND` only. Historical continuity of the zero ledger is not independently attested.
++- Catalogue/live rotation after Economy's authorized refresh: 13 free models, 9 available now, `funding_risk=none`, no paid-before-free violations. Four free models cool until 2026-11-25T00:53:42Z; contributor muse-spark until 2026-11-30. The stricter Act34 subset has nine exact IDs, five available now.
++- Economy restored missing `opencode-go/beam-free` to the general config via `economy-models.py refresh` with explicit live config/cooldown paths; backup `config.json.bak-1795509848`. This did not enable any office.
++
++## Remaining blockers and limits
++
++1. Candidate code is not on `main`; exact deployed bytes remain the former insufficient control until Act31 integration and independent review complete.
++2. Existing signed permits/evidence cite stale control and budget hashes and lack the required `enforcement_evidence` and `negative-acceptance digest` fields. The repaired gate therefore fails closed.
++3. No actual four-office execution sample exists. See `records/economy/2026-11-24-act34-measured-envelope.json`: proxy p95 implies 45.28M accounting tokens and 31,948 CPU-s `UPPER_BOUND` for one four-office wave, versus live aggregate caps 1.6M tokens and 7,200 CPU-s. Existing caps cannot support that measured proxy envelope.
++4. Sustained provider quota capacity is unmeasured; the live 429 is direct negative evidence. Disk is also `short` (80.7%, 42.8 GiB), with an existing Town Hall request already outstanding.
++5. No account-level spend cap, live paid-tier test, full provider-account audit, or independent Judiciary verification was performed. Hermetic tests stub Antonina; source inspection and bounded live checks establish the stated scope only.
++
++**Result:** the exact-path runtime allowlist repair is a defensible candidate, but Act34 model-using activation remains **HELD** pending Act31 deployment, independent review, fresh attested evidence, lawful caps at/below the measured envelope, and Executive permits. No `NEEDS-FOUNDER:` line is added by this record because no purchase-only remedy has yet been established.
+diff --git a/tests/knowledge-act34-adaptive-smoke.sh b/tests/knowledge-act34-adaptive-smoke.sh
+index 7b9733f7..e8b418ee 100644
+--- a/tests/knowledge-act34-adaptive-smoke.sh
++++ b/tests/knowledge-act34-adaptive-smoke.sh
+@@ -8,12 +8,14 @@ repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ d=$(mktemp -d)
+ trap 'rm -rf "$d"' EXIT HUP INT TERM
+ town="$d/town"; state="$d/state"
+-mkdir -p "$town/government" "$town/records/knowledge/permits" \
++mkdir -p "$town/government" "$town/records/economy" "$town/records/knowledge/permits" \
+   "$town/records/knowledge/pilot-reviews" "$state/economy" \
+   "$state/appointments" "$state/board" "$d/bin"
+ for f in knowledge-act34-gate.py knowledge-phase-verifier.py \
+   knowledge-activation-verify.sh knowledge-budget.conf \
+-  knowledge-free-dispatch.sh knowledge-practical-bounds.py; do
++  knowledge-free-dispatch.sh knowledge-practical-bounds.py \
++  knowledge-zero-billed.py knowledge-zero-billed-policy.json \
++  knowledge-office-cycle.sh; do
+  cp "$repo/government/$f" "$town/government/"
+ done
+ cp "$repo/tests/knowledge-free-dispatch-smoke.sh" "$town/tests-placeholder"
+@@ -34,11 +36,11 @@ economy	econ-agent
+ judiciary	jud-agent
+ EOF
+ cat > "$state/economy/model-policy.json" <<'EOF'
+-{"prefer":["opencode-go/hy4-flash-free"]}
++{"prefer":["opencode/hy4-flash-free"]}
+ EOF
+ cat > "$state/economy/catalogue.json" <<'EOF'
+-{"models":{"opencode-go/hy4-flash-free":{"tier":"free"},
+- "provider/paid-free":{"tier":"paid"}}}
++{"models":{"opencode/hy4-flash-free":{"tier":"free"},
++ "provider/paid-free":{"tier":"free"}}}
+ EOF
+ # Fake read-only Antonina coordination surface. The source verifier itself is
+ # real, and validates the board review, own-officer comment and live appointment.
+@@ -60,11 +62,8 @@ case "$1 $2" in
+ esac
+ EOF
+ chmod +x "$d/bin/antonina"
+-cat > "$town/records/knowledge/2026-11-23-economy-free-tier-prelaunch-allowlist-finding.md" <<'EOF'
+-Economy independently tested the per-invocation free-tier model selector:
+- - The paid-free-looking model is refused by an Economy catalogue tier paid;
+- - OpenCode continuations do not have hard token caps; free model cost measured 0.
+- - This record certifies a MODEL SOURCE RESTRICTION, not a value outcome.
++cat > "$town/records/economy/2026-11-24-act34-zero-billed-verification.md" <<'EOF'
++Economy exact-path zero-cost control verification fixture.
+ EOF
+ python3 - "$town" <<'PY'
+ import hashlib,json,sys,time
+@@ -112,7 +111,7 @@ origin=$(git -C "$town" rev-parse HEAD)
+ # Authority attested AFTER original source commit, not via a self-authored
+ # source-commit hash embedded in the same file (that would be circular).
+ python3 - "$town" "$state" "$origin" <<'PY'
+-import hashlib,json,sys,time
++import hashlib,importlib.util,json,sys,time
+ from pathlib import Path
+ root, state, commit=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3]
+ act=root/"records/knowledge/activation.json"
+@@ -121,11 +120,26 @@ def att(role,agent,issue):
+  return {"issue_id":issue,"expected_reviewer":role,"officer_agent_id":agent}
+ evidence={"artifact_commit":commit,
+  "report_sha256":hashlib.sha256(
+-  (root/"records/knowledge/2026-11-23-economy-free-tier-prelaunch-allowlist-finding.md").read_bytes()).hexdigest(),
++  (root/"records/economy/2026-11-24-act34-zero-billed-verification.md").read_bytes()).hexdigest(),
+  "wrapper_sha256":hashlib.sha256((root/"government/knowledge-free-dispatch.sh").read_bytes()).hexdigest(),
+  "bounds_sha256":hashlib.sha256((root/"government/knowledge-practical-bounds.py").read_bytes()).hexdigest(),
++ "zero_billed_policy_sha256":hashlib.sha256((root/"government/knowledge-zero-billed-policy.json").read_bytes()).hexdigest(),
++ "zero_billed_verifier_sha256":hashlib.sha256((root/"government/knowledge-zero-billed.py").read_bytes()).hexdigest(),
++ "gate_sha256":hashlib.sha256((root/"government/knowledge-act34-gate.py").read_bytes()).hexdigest(),
++ "cycle_sha256":hashlib.sha256((root/"government/knowledge-office-cycle.sh").read_bytes()).hexdigest(),
+  "negative_test_sha256":hashlib.sha256((root/"tests/knowledge-free-dispatch-smoke.sh").read_bytes()).hexdigest(),
++ "negative_acceptance_digest":None,
+  "attestation":att("c1e00012","econ-agent","economy-test-issue")}
++spec=importlib.util.spec_from_file_location("zb",root/"government/knowledge-zero-billed.py")
++zb=importlib.util.module_from_spec(spec);spec.loader.exec_module(zb)
++evidence["negative_acceptance_digest"]=zb.negative_acceptance_digest({
++ "wrapper":root/"government/knowledge-free-dispatch.sh",
++ "zero_billed_policy":root/"government/knowledge-zero-billed-policy.json",
++ "bounds":root/"government/knowledge-practical-bounds.py",
++ "negative_test":root/"tests/knowledge-free-dispatch-smoke.sh",
++ "verifier":root/"government/knowledge-zero-billed.py",
++ "gate":root/"government/knowledge-act34-gate.py",
++ "cycle":root/"government/knowledge-office-cycle.sh"})
+ data["economy_free_tier_evidence"]=evidence
+ for office in offices:
+  row=data["offices"][office]
+diff --git a/tests/knowledge-free-dispatch-smoke.sh b/tests/knowledge-free-dispatch-smoke.sh
+index f5e2ad2d..5f1f9c03 100755
+--- a/tests/knowledge-free-dispatch-smoke.sh
++++ b/tests/knowledge-free-dispatch-smoke.sh
+@@ -11,11 +11,22 @@ mkdir -p "$d/state/economy" "$d/town/government" "$d/bin"
+ cat > "$d/state/economy/catalogue.json" <<'CATALOGUE'
+ {"models":{
+   "opencode/tidepool-alpha-free":{"tier":"free"},
++  "opencode/hy4-flash-free":{"tier":"free"},
+   "opencode-go/hy4-flash-free":{"tier":"free"},
+-  "provider/paid-free":{"tier":"paid"}
++  "opencode-go/hungerg-free":{"tier":"free"},
++  "provider/paid-free":{"tier":"free"}
+ }}
+ CATALOGUE
+-cp government/knowledge-practical-bounds.py "$d/town/government/"
++cp government/knowledge-practical-bounds.py government/knowledge-zero-billed.py "$d/town/government/"
++cat > "$d/town/government/knowledge-zero-billed-policy.json" <<'BILLING'
++{"schema":"viche-zero-billed-model-policy-v1",
++ "source":{"url":"https://opencode.ai/inference/v1/models","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
++ "review_after":"2099-01-01T00:00:00Z",
++ "models":{
++  "opencode/tidepool-alpha-free":{"provider":"opencode","provider_model":"tidepool-alpha-free","cost":{"input":0,"output":0,"cache_read":0}},
++  "opencode/hy4-flash-free":{"provider":"opencode","provider_model":"hy4-flash-free","cost":{"input":0,"output":0,"cache_read":0}}
++ }}
++BILLING
+ # CI has no actual Antonina global config; create a sentinel and verify that
+ # successful and rejected per-invocation dispatches never modify it.
+ mkdir -p "$d/global/antonina"
+@@ -26,7 +37,7 @@ export XDG_CONFIG_HOME
+ 
+ python3 - "$d/state/economy/model-policy.json" <<'PY'
+ import json,sys
+-json.dump({"prefer":["opencode/tidepool-alpha-free","opencode-go/hy4-flash-free"],"exclude":[]},open(sys.argv[1],"w"))
++json.dump({"prefer":["opencode/tidepool-alpha-free","opencode/hy4-flash-free"],"exclude":[]},open(sys.argv[1],"w"))
+ PY
+ # Stub antonina records the env and args instead of dispatching.
+ cat > "$d/bin/antonina" <<'EOF'
+@@ -44,7 +55,7 @@ grep -q "XDG=$d/state/knowledge/free-allowlist ARGS=agent run --id fake --cwd /t
+ python3 - "$d/state/knowledge/free-allowlist/antonina/config.json" <<'PY'
+ import json,sys
+ c=json.load(open(sys.argv[1]))
+-assert [e['model'] for e in c['models']]==['opencode/tidepool-alpha-free','opencode-go/hy4-flash-free']
++assert [e['model'] for e in c['models']]==['opencode/tidepool-alpha-free','opencode/hy4-flash-free']
+ assert all('-free' in e['model'] for e in c['models'])
+ PY
+ 
+@@ -63,8 +74,8 @@ if CAPTURE="$d/capture3" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
+ fi
+ 
+ # A model literally named paid-free is STILL PAID, even though its id
+-# ends in the accepted -free suffix. The independent Economy catalogue
+-# rather than a deceptive name must make the decision.
++# ends in -free AND the production-style name-derived catalogue says free.
++# Only absence from the exact provider-cost policy may reject it.
+ python3 - "$d/state/economy/model-policy.json" <<'PYPRETEND'
+ import json,sys
+ json.dump({"prefer":["provider/paid-free"],"exclude":[]},open(sys.argv[1],"w"))
+@@ -84,7 +95,56 @@ if CAPTURE="$d/capture2" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
+   echo 'FAIL: non-free id admitted' >&2; fail=1
+ fi
+ 
++# A secondary-catalogue-only free ID is omitted from the Act34 allowlist;
++# the primary-confirmed model still dispatches and the global ladder is untouched.
++python3 - "$d/state/economy/model-policy.json" <<'PYSECONDARY'
++import json,sys
++json.dump({"prefer":["opencode/hy4-flash-free","opencode-go/hy4-flash-free","opencode-go/hungerg-free"]},open(sys.argv[1],"w"))
++PYSECONDARY
++CAPTURE="$d/capture7" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
++  PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach
++python3 - "$d/state/knowledge/free-allowlist/antonina/config.json" <<'PYOMIT'
++import json,sys
++c=json.load(open(sys.argv[1]));assert [e['model'] for e in c['models']]==['opencode/hy4-flash-free']
++PYOMIT
++
++# A reviewed exact ID with a nonzero provider cost is refused.
++cp "$d/town/government/knowledge-zero-billed-policy.json" "$d/billing-good.json"
++python3 - "$d/town/government/knowledge-zero-billed-policy.json" "$d/state/economy/model-policy.json" <<'PYCOST'
++import json,sys
++billing,policy=sys.argv[1:]
++b=json.load(open(billing))
++b["models"]["opencode/hy4-flash-free"]["cost"]["output"]=0.1
++json.dump(b,open(billing,"w"))
++json.dump({"prefer":["opencode/hy4-flash-free"]},open(policy,"w"))
++PYCOST
++if CAPTURE="$d/capture5" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
++   PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach >/dev/null 2>&1; then
++  echo 'FAIL: nonzero provider cost admitted' >&2; fail=1
++fi
++cp "$d/billing-good.json" "$d/town/government/knowledge-zero-billed-policy.json"
++
++# Expired provider-cost evidence fails closed even for an exact free ID.
++python3 - "$d/town/government/knowledge-zero-billed-policy.json" <<'PYEXP'
++import json,sys
++p=sys.argv[1];b=json.load(open(p));b["review_after"]="2000-01-01T00:00:00Z";json.dump(b,open(p,"w"))
++PYEXP
++if CAPTURE="$d/capture6" VICHE_TOWN_ROOT="$d/town" VICHE_STATE_ROOT="$d/state" \
++   PATH="$d/bin:$PATH" /bin/sh "$wrap" run --id fake --cwd /tmp --prompt hi --detach >/dev/null 2>&1; then
++  echo 'FAIL: expired zero-cost evidence admitted' >&2; fail=1
++fi
++cp "$d/billing-good.json" "$d/town/government/knowledge-zero-billed-policy.json"
++
+ cmp -s "$d/global/antonina/config.json" "$d/global-before.json" ||
+   { echo 'FAIL: rejected dispatch modified global config' >&2; fail=1; }
+ [ "$fail" -eq 0 ] || { echo 'knowledge free dispatch smoke: FAILED' >&2; exit 1; }
+-echo 'knowledge free dispatch smoke: OK (XDG pinned, free-only allowlist, global untouched, fail-closed)'
++echo 'knowledge free dispatch smoke: OK (XDG pinned, exact-ID zero-cost allowlist, global untouched, fail-closed)'
++python3 - "$PWD/government/knowledge-zero-billed.py" "$wrap" \
++  government/knowledge-zero-billed-policy.json government/knowledge-practical-bounds.py \
++  tests/knowledge-free-dispatch-smoke.sh government/knowledge-act34-gate.py \
++  government/knowledge-office-cycle.sh <<'PYDIGEST'
++import importlib.util,sys
++spec=importlib.util.spec_from_file_location("zb",sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
++paths={"wrapper":sys.argv[2],"zero_billed_policy":sys.argv[3],"bounds":sys.argv[4],"negative_test":sys.argv[5],"verifier":sys.argv[1],"gate":sys.argv[6],"cycle":sys.argv[7]}
++print("NEGATIVE_ACCEPTANCE_DIGEST="+m.negative_acceptance_digest(paths))
++PYDIGEST

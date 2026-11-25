@@ -1,0 +1,265 @@
+commit dc37cfbaaf88ba42a4bb207fcaaf93fcef2ae9fb
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Sat Nov 21 13:29:42 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Sat Nov 21 13:29:42 2026 +0000
+
+    Repair audit dispatch E2BIG: persist bulky evidence, pass bounded prompt
+
+diff --git a/government/audit-cycle.sh b/government/audit-cycle.sh
+index c5733bf0..454a600f 100644
+--- a/government/audit-cycle.sh
++++ b/government/audit-cycle.sh
+@@ -48,9 +48,30 @@ if [ -s "$root/last-audit-dispatch" ]; then last=$(cat "$root/last-audit-dispatc
+ case "$last" in ''|*[!0-9]*) last=0;; esac
+ [ $((now-last)) -ge "$cadence" ] || exit 0
+ 
+-evidence='No ordinary incident.'
+-[ ! -s "$root/incident.json" ] || evidence=$(cat "$root/incident.json")
+-[ ! -s "$root/random/incident.json" ] || evidence="$evidence $(cat "$root/random/incident.json")"
++# Operational repair (recovery-steward, 2026-11-21): the incident and frozen
++# sample reports can grow to tens of KB. Inlining them verbatim into the single
++# --prompt argument once exceeded the kernel per-argument limit ("antonina:
++# Argument list too long", E2BIG), so EVERY audit dispatch failed even after
++# the backend recovered. Persist the full evidence and the sampled cohort to
++# durable files and pass the agent only bounded pointers; the agent reads the
++# complete artifacts with its own tools. This changes no audit criterion.
++evidence_file="$root/audit-evidence.txt"
++{
++  printf '=== deterministic watchdog evidence ===\n'
++  if [ -s "$root/incident.json" ]; then
++    printf '\n--- oversight/incident.json ---\n'
++    cat "$root/incident.json"
++  else
++    printf '\n(oversight/incident.json absent)\n'
++  fi
++  if [ -s "$root/random/incident.json" ]; then
++    printf '\n--- oversight/random/incident.json ---\n'
++    cat "$root/random/incident.json"
++  else
++    printf '\n(oversight/random/incident.json absent)\n'
++  fi
++} > "$evidence_file.tmp" && mv "$evidence_file.tmp" "$evidence_file"
++evidence_ref="Full deterministic watchdog evidence (oversight incident and frozen-sample reports) is preserved at $evidence_file. Read that file with your tools before adjudicating; the inline copy is intentionally a bounded pointer so the dispatch argument cannot exceed the kernel limit."
+ selection='Test-only no sample'
+ if [ "${VICHE_AUDIT_SELECTION:-1}" = 1 ]; then
+   # The audit cycle belongs to a FROZEN randomized draw, not each repeat
+@@ -86,6 +107,11 @@ payload={"at":v["at"],"seed_after_snapshot":v["seed_after_snapshot"],
+ print(hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()[:32])
+ ') || exit 1
+ fi
++# Persist the frozen sampled cohort too (same bounded-pointer repair). The
++# full JSON is durable; the agent reads it rather than receiving it inline.
++selection_file="$root/audit-selection-$cycle_id.json"
++printf '%s\n' "$selection" > "$selection_file.tmp" && mv "$selection_file.tmp" "$selection_file"
++selection_ref="The frozen sampled case cohort is preserved at $selection_file. Read that file with your tools."
+ 
+ prompt=$(cat <<EOF
+ You are the independent Viche Judiciary under Act 4, accountable to
+@@ -116,7 +142,7 @@ A later independent sample is a new cycle. This is not a retroactive
+ adjudication of historical cycles or the contested PR #32 corrections.
+ 
+ Current deterministic watchdog evidence:
+-$evidence
++$evidence_ref
+ MANDATORY CROSS-BRANCH CORRECTIVE CASES:
+ $cases
+ These are health observations, NOT verdicts or legislative authorizations.
+@@ -163,7 +189,7 @@ successor_agent exactly from its reconciliation receipt, and a specific
+ independent evidence_ref. A successful agent exit is NOT sufficient.
+ If uncertain, retain the open case and report why.
+ Randomized audit cases (bounded deep review):
+-$selection
++$selection_ref
+ 
+ For each sampled open issue, verify actual host assignment from its description
+ and latest Founder comments, then investigate unjustified neglect if assigned.
+diff --git a/records/investigations/recovery-steward-audit-dispatch-e2big-20261121T1323Z.md b/records/investigations/recovery-steward-audit-dispatch-e2big-20261121T1323Z.md
+new file mode 100644
+index 00000000..64accbe1
+--- /dev/null
++++ b/records/investigations/recovery-steward-audit-dispatch-e2big-20261121T1323Z.md
+@@ -0,0 +1,92 @@
++# Recovery Steward assessment — 2026-11-21T13:23Z
++
++Office: recovery-steward. Fresh session after predecessor retirement. Read the
++authoritative Founder Constitution, current `government/LAWS.md` and durable
++state first. No prior side effect was replayed: my worktree was clean at
++`5206a9bd` and the judiciary appointee has `prompts=0`, empty `output.log` and
++no `started_at`, so none of the failed launches started an agent.
++
++## Verdict
++
++Two distinct causes were conflated by one symptom (`launch_failed_or_ambiguous`).
++The transient backend failure is over; a second, persistent architectural
++defect — an oversized audit `--prompt` argument — was still killing every
++Judiciary audit dispatch after the backend recovered. I repaired that defect
++under existing operational authority and verified it with a hermetic regression
++that reproduces the original failure. No law, ballot, vote, oversight criterion,
++case closure or Founder escalation was performed.
++
++## Independently verified this pass
++
++- `liveness/unsafe-holds/`: zero nonempty files. No continuity hold.
++- Observability runtime fresh and executable: Python 3.12.13;
++  `institutional-outcomes/latest.json` observed_at 1795267403 (13:23:23Z);
++  collector logging normally; `institutional-cases/index.json` `active=[]` with
++  all corrective cases `verified_closed`/`auto_closed`; `agent-error.log` and
++  `board-error.log` empty.
++- Backend recovered: Executive appointee `9HnPVao…hayes` running since 13:20:07Z
++  on `opencode-go/beam-free`, no `backend_error`; this steward and the SoringP1
++  curator also running. `main` at `5876cb72` with live commits.
++- No new Founder message (`Vitalik`) on Town Hall; founder-inbox cursors current;
++  Post inbox `[]`; no proceed request addressed to recovery-steward; no live
++  obligation under `obligation-expiry.py`.
++- Predecessor's delivered board-trail timeout fix is genuinely deployed:
++  `22b9cfe0` integrates `board-trail-timeout-budget-20261120`. Not re-done.
++
++## Root cause of the recurring audit-dispatch failure
++
++`oversight/audit-dispatches.tsv` recorded six `launch_failed_or_ambiguous`
++events (10:10:27Z through 12:51:09Z) for frozen cycle `e691992d5…`. Those were
++consistent with the announced backend outage and were recorded, not replayed.
++
++A seventh failure at **13:23:27Z**, after backend recovery, had a different
++cause. The current cycle log
++(`branches/judiciary-cycle.log`) showed verbatim:
++
++```
++audit-cycle.sh: 248: antonina: Argument list too long
++Judiciary: audit launch failed or ambiguous, preserving cycle identity
++```
++
++Line 248 is `antonina agent run … --prompt "$prompt"`. `government/audit-cycle.sh`
++inlined the entire deterministic watchdog evidence into that single argument:
++`oversight/random/incident.json` is 89,540 bytes (464 cases, 78 findings) and
++`oversight/random/latest.json` is 14,495 bytes, plus the Constitution, the 14.6KB
++reporting policy, handover and Post brief. The total reached ~131KB, against the
++Linux per-argument ceiling of 131,072 bytes (E2BIG). The failure was therefore
++persistent and would recur on every dispatch until the incident shrank — a
++deadlock, because the audit is what resolves the incident. It is not a symptom
++of the backend outage and no existing watchdog named it.
++
++## Repair delivered
++
++`government/audit-cycle.sh`: persist the full evidence to
++`oversight/audit-evidence.txt` and the frozen sampled cohort to
++`oversight/audit-selection-<cycle>.json`, then pass the agent only bounded
++pointer strings in the prompt, which it reads with its own tools. No audit
++criterion, selection rule, cycle identity, correction token or gate behavior
++changed. The dispatch gate still hashes the incident files directly, so no
++dispatch is silently skipped.
++
++`tests/audit-prompt-budget-smoke.sh` (new, auto-discovered by `run-all.sh`):
++fixtures a 200KB incident report, makes a mock `antonina` reject any `--prompt`
++over 120KB and fail if the full incident leaks inline. The test passes with the
++repair and **reproduces the original `Argument list too long` failure** against
++the unmodified `origin/main` script. Also verified: `audit-cycle-identity-smoke`,
++`audit-correction-smoke`, `randomized-audit-smoke`, and the complete
++`tests/run-all.sh` all pass ("All Viche tests passed").
++
++## Safety, authority and remaining verification
++
++- New appointment, not replay: no agent was ever started by the failed
++  launches; the next successful dispatch is the first run of the current
++  judiciary appointee. No conflicting writer on the judiciary worktree.
++- Operational repair to existing machinery, not a legal change; the Judiciary
++  remains independent and an independent reviewer checks the delivery (Act 21).
++  Reporting to the Judiciary mailbox would duplicate the delivery review, so
++  none was filed.
++- **Not claimed complete yet:** landing is the integrator's responsibility. The
++  repair is verified when a fresh dispatch after deployment writes
++  `accepted_not_verified` and the judiciary appointee actually runs (`prompts>0`)
++  with a bounded prompt. The Clerk/Judiciary own any case disposition; this
++  office closes no case.
+diff --git a/tests/audit-prompt-budget-smoke.sh b/tests/audit-prompt-budget-smoke.sh
+new file mode 100644
+index 00000000..7064c7b3
+--- /dev/null
++++ b/tests/audit-prompt-budget-smoke.sh
+@@ -0,0 +1,85 @@
++#!/bin/sh
++# The audit --prompt must stay under the kernel per-argument limit even when
++# the deterministic incident evidence is very large. The full evidence is
++# preserved in a durable file that the agent reads, not inlined into argv.
++set -eu
++repo=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
++d=$(mktemp -d)
++trap 'rm -rf "$d"' EXIT HUP INT TERM
++mkdir -p "$d/town/government" "$d/state/oversight/random" "$d/seats/branches/judiciary" "$d/bin"
++cp "$repo/government/audit-cycle.sh" "$d/town/government/audit-cycle.sh"
++cp "$repo/government/agent-state.sh" "$d/town/government/agent-state.sh"
++cp "$repo/government/AGENT-REPORTING-POLICY.md" "$d/town/government/AGENT-REPORTING-POLICY.md"
++printf 'Charter\n' > "$d/charter"
++printf 'observation\n' > "$d/state/oversight/observations.tsv"
++printf 'incident\n' > "$d/state/oversight/incident.json"
++cat > "$d/town/government/appointments.sh" <<'APPOINT'
++#!/bin/sh
++printf 'judicial-fixture-agent\n'
++APPOINT
++cat > "$d/town/government/audit-selection.py" <<'SAMPLE'
++import json,os,pathlib
++now=int(os.environ['VICHE_OVERSIGHT_NOW'])
++r=pathlib.Path(os.environ['VICHE_STATE_ROOT'])/'oversight/random'
++v={'at':now,'seed_after_snapshot':'b'*64,
++   'cases':[{'case_id':'0123456789abcdef01'}]}
++(r/'latest.json').write_text(json.dumps(v)+'\n')
++print(json.dumps(v))
++SAMPLE
++# A large frozen incident report with a distinctive inline marker.
++python3 - "$d/state/oversight/random/incident.json" <<'PY'
++import json,sys
++marker='E2BIG_INLINE_MARKER_9f3c'
++obj={'at':1,'cases_total':464,
++     'signals':[{'case_id':'x','blob':marker + 'z'*200000}]}
++open(sys.argv[1],'w').write(json.dumps(obj))
++PY
++# Mock Antonina: emulate the E2BIG argv ceiling and detect leaked evidence.
++cat > "$d/bin/antonina" <<'ANTONINA'
++#!/bin/sh
++case "$1 $2" in
++ 'agent status') printf '{"state":"idle"}\n' ;;
++ 'agent run')
++    prompt=
++    prev=
++    for a in "$@"; do
++      [ "$prev" = '--prompt' ] && prompt=$a
++      prev=$a
++    done
++    plen=${#prompt}
++    if [ "$plen" -gt 120000 ]; then
++      echo "mock E2BIG: prompt length $plen exceeds argv budget" >&2
++      exit 7
++    fi
++    case "$prompt" in
++      *E2BIG_INLINE_MARKER_9f3c*)
++        echo 'full incident evidence leaked inline into prompt' >&2
++        exit 8 ;;
++      *audit-evidence.txt*) : ;;
++      *) echo 'prompt missing durable evidence pointer' >&2; exit 9 ;;
++    esac
++    printf '%s\n' "$plen" >> "$MOCK_PROMPT_SIZES"
++    printf 'run\n' >> "$MOCK_RUNS" ;;
++ *) echo "Unexpected Antonina: $*" >&2; exit 2 ;;
++esac
++ANTONINA
++chmod +x "$d/town/government/appointments.sh" "$d/bin/antonina"
++base=2000000000
++export VICHE_STATE_ROOT="$d/state" VICHE_TOWN_ROOT="$d/town" \
++ VICHE_SEATS_ROOT="$d/seats" VICHE_CONSTITUTION="$d/charter" \
++ VICHE_OVERSIGHT_NOW="$base" VICHE_AUDIT_CHECKS=0 VICHE_AUDIT_SELECTION=1 \
++ MOCK_RUNS="$d/runs" MOCK_PROMPT_SIZES="$d/sizes" PATH="$d/bin:$PATH"
++
++/bin/sh "$d/town/government/audit-cycle.sh"
++
++[ "$(wc -l < "$MOCK_RUNS")" -eq 1 ] || { echo 'audit dispatch did not launch' >&2; exit 1; }
++# The bounded --prompt stays well below the ceiling.
++[ "$(cat "$MOCK_PROMPT_SIZES")" -le 120000 ] || exit 1
++# Full evidence is preserved durably, not dropped.
++grep -q 'E2BIG_INLINE_MARKER_9f3c' "$d/state/oversight/audit-evidence.txt" ||
++  { echo 'durable evidence file lost the incident report' >&2; exit 1; }
++# The frozen sampled cohort is preserved too.
++cycle=$(cat "$d/state/oversight/current-audit-cycle")
++[ -s "$d/state/oversight/audit-selection-$cycle.json" ] ||
++  { echo 'sampled cohort not preserved' >&2; exit 1; }
++echo 'Audit prompt argv budget and durable evidence pointer passed'

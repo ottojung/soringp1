@@ -1,0 +1,75 @@
+commit daa1792e5769eba824ba216c0f5033153dabc545
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Wed Nov 4 00:44:39 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Thu Nov 5 17:00:46 2026 +0000
+
+    recovery-steward: Act19 reset archives stale unsafe hold (office lockout fix)
+
+diff --git a/government/branch-bootstrap.sh b/government/branch-bootstrap.sh
+index 46a02dcd..777fc55e 100755
+--- a/government/branch-bootstrap.sh
++++ b/government/branch-bootstrap.sh
+@@ -61,10 +61,19 @@ if [ "$reset_due" = true ]; then
+   antonina agent log --id "$id" --lines 200 > "$snapshot/log.txt" 2>&1 || :
+   git -C "$cwd" status --short > "$snapshot/worktree.txt"
+   oc_quiesce_for_reset "$id" || exit 1
++  oc_old_id=$id
+   id=$(/bin/sh "$town/government/appointments.sh" replace "$branch" "$id" branch-bootstrap act19_failure_threshold 'Act 19 threshold reset after durable failure evidence and quiescence')
+   printf '%s\n' "$now" > "$liv/last-reset-$branch"
+   meta=$(antonina agent status --id "$id" --json)
+   oc_clear_failures "$liv" "$branch"
++  # The hold belongs to the OLD unsafe invocation, which the reset replaced
++  # with a fresh reconciliatory appointment. Archive it like
++  # terminal-continuity.sh does; never silently block the office forever.
++  oc_hold=$state/liveness/unsafe-holds/$branch
++  if [ -s "$oc_hold" ] && grep -Fq "$oc_old_id" "$oc_hold"; then
++    mkdir -p "$liv/archived-unsafe-holds"
++    mv "$oc_hold" "$liv/archived-unsafe-holds/$branch-$oc_old_id-act19-reset" || :
++  fi
+   printf '%s branch=%s session_reset=failure_count threshold=%s window=%s cooldown=%s evidence=%s\n' \
+     "$(date -u +%FT%TZ)" "$branch" "$oc_threshold" "$oc_window" "$oc_cooldown" "$snapshot" \
+     >> "$liv/recoveries.log"
+diff --git a/tests/appointment-recovery-integration-smoke.sh b/tests/appointment-recovery-integration-smoke.sh
+index 11b1c71d..c5eded06 100644
+--- a/tests/appointment-recovery-integration-smoke.sh
++++ b/tests/appointment-recovery-integration-smoke.sh
+@@ -192,6 +192,38 @@ set_status failed 105 safe-run-2 upstream_endpoint_unavailable true true safe-id
+ test "$(wc -l < "$MOCK_ROOT/runs")" -eq 1 ||
+   { echo 'retry-safe terminal agent cannot execute a distinct new prompt' >&2; exit 1; }
+ 
++# Three distinct retry-unsafe transient failures threshold-reset the office,
++# and that Act19 reset ARCHIVES the stale unsafe hold (like a terminal
++# continuity recovery would) instead of leaving the office blocked forever.
++mkdir -p "$d/hold/town/government" "$d/hold/seats/branches/executive" "$d/hold/state/appointments"
++printf 'c1a00001\tClerk\tintake\n' > "$d/hold/town/government/seats.tsv"
++cp "$repo/government/appointments.sh" "$repo/government/branch-bootstrap.sh" \
++  "$repo/government/office-continuity.sh" "$repo/government/terminal-appointment-evidence.sh" \
++  "$d/hold/town/government/"
++git -C "$d/hold/seats/branches/executive" init -q
++git -C "$d/hold/seats/branches/executive" -c user.name=test -c user.email=test@example.test commit --allow-empty -qm baseline
++printf 'executive\thold-id\n' > "$d/hold/state/appointments/appointments.tsv"
++run_hold() {
++  VICHE_STATE_ROOT="$d/hold/state" VICHE_TOWN_ROOT="$d/hold/town" \
++    VICHE_SEATS_ROOT="$d/hold/seats" /bin/sh \
++    "$d/hold/town/government/branch-bootstrap.sh" executive
++}
++set_status failed "$((base+10))" hold-inv-1 upstream_endpoint_unavailable true false hold-id
++run_hold
++test -s "$d/hold/state/liveness/unsafe-holds/executive"
++set_status failed "$((base+11))" hold-inv-2 upstream_endpoint_unavailable true false hold-id
++run_hold
++set_status failed "$((base+12))" hold-inv-3 upstream_endpoint_unavailable true false hold-id
++run_hold
++hold_after=$(/bin/sh "$d/hold/town/government/appointments.sh" resolve executive)
++test "$hold_after" != hold-id ||
++  { echo 'Act19 reset did not replace the unsafe failing executive appointee' >&2; exit 1; }
++test ! -e "$d/hold/state/liveness/unsafe-holds/executive" ||
++  { echo 'Act19 reset left the office permanently blocked on a stale hold' >&2; exit 1; }
++test -s "$d/hold/state/liveness/archived-unsafe-holds/executive-hold-id-act19-reset" ||
++  { echo 'Act19 reset did not durably archive the unsafe hold evidence' >&2; exit 1; }
++
++
+ # The actual Clerk gate/liveness path exercises the same real appointment record.
+ export VICHE_TOWN_ROOT="$d/town" VICHE_SEATS_ROOT="$d/seats" VICHE_STATE_ROOT="$d/state"
+ clerk=$(/bin/sh "$VICHE_TOWN_ROOT/government/appointments.sh" ensure c1a00001)

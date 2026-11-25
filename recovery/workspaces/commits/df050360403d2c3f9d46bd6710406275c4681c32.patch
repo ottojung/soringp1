@@ -1,0 +1,1028 @@
+commit df050360403d2c3f9d46bd6710406275c4681c32
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 07:59:28 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 07:59:28 2026 +0000
+
+    Maintain five desk leases and concentrate research on one gap
+
+diff --git a/missions/pnp/PROTOCOL.md b/missions/pnp/PROTOCOL.md
+index 5149c397..da6286fc 100644
+--- a/missions/pnp/PROTOCOL.md
++++ b/missions/pnp/PROTOCOL.md
+@@ -34,8 +34,8 @@ Define the stable operator interface:
+ The exact file structure can vary only if the commands and behaviors remain equally clear and tested.
+ 
+ ## Responsibilities (do not conflate)
+-1. **Viche Executive/research coordinator** chooses whether to invest effort and dispatches independently chosen mathematical approaches to Antonina-managed workers. It can ask the desk for ordinary or --hard gaps. No numeric cap on researchers except the desk's active lease limit and actual resource constraints.
+-2. **Desk broker** exclusively owns desk claims/lease renewals/release/reconciliation for the ottojung handle. Research agents do not independently consume leases. Max five active leases under the current desk rule; individual leased gap may have several researchers. Re-read desk docs on startup, rather than trusting old pnp.sh comments.
++1. **Viche Executive/research coordinator** chooses whether to invest effort and dispatches independently chosen mathematical approaches to Antonina-managed workers. The automatic allocator requests ordinary gaps first, then hard gaps to fill all available lease slots. No numeric cap on researchers except the desk's active lease limit and actual resource constraints.
++2. **Desk broker** exclusively owns desk claims/lease renewals/release/reconciliation for the ottojung handle. Research agents do not independently consume leases. Max five active leases under the current desk rule; one selected gap receives the parallel researchers; other leases are reserves. Re-read desk docs on startup, rather than trusting old pnp.sh comments.
+ 3. **Research workers** produce Lean candidate files, mathematical arguments, and negative results. They never call authenticated GitHub mutating operations as part of their task. They may read public repositories, use Lean, and communicate with the coordinator. A candidate is input data, not an approved Git commit.
+ 4. **Publisher** is a deterministic program, not a reasoning agent. It is the only *supported workflow* for authenticated repository mutations. Its parameters are only gap ID and local candidate filename. It never accepts a repository, URL, PR target, author, committer, signing key, shell command, or branch from the worker. It signs and constructs the commit itself.
+ 5. **Reconciler** monitors the desk, local state, fork Git objects, upstream PRs, and checker verdicts; schedules corrections and recoveries without duplicating submissions. It does not mistake a good PR checker result for mathematical novelty.
+diff --git a/missions/pnp/allocator.py b/missions/pnp/allocator.py
+new file mode 100644
+index 00000000..c55cf81f
+--- /dev/null
++++ b/missions/pnp/allocator.py
+@@ -0,0 +1,238 @@
++"""Work-conserving desk broker. Never starts or stops research agents."""
++import json
++import os
++import re
++from pathlib import Path
++import sys
++import time
++from types import SimpleNamespace
++
++from . import assignment, cli, config, desk, frontier, focus, jobs, state, status
++
++POLL_SECONDS = 30
++NULL_RETRY_SECONDS = 120
++ABANDONED_GRACE = 5 * 60
++HARD_MIN_AGE = 20 * 60
++
++
++def memory_path():
++    return os.path.join(config.STATE_ROOT, "allocator.json")
++
++
++def read_memory():
++    try:
++        with open(memory_path(), encoding="utf-8") as f:
++            data = json.load(f)
++        if isinstance(data, dict):
++            return data
++    except (OSError, ValueError):
++        pass
++    return {}
++
++
++def bound_roster():
++    """Use immutable workspace bindings, not mutable agent titles."""
++    roster = status.workers()
++    if roster["coverage"] != "complete":
++        return None
++    bindings = set()
++    uncertain = set()
++    for agent in roster["agents"]:
++        cwd = agent.get("cwd")
++        if not cwd:
++            return None
++        path = Path(cwd)
++        bound = assignment.binding(path)
++        if bound:
++            bindings.add(bound)
++        elif (workspace := assignment.workspace(path)):
++            uncertain.add(workspace[0])
++        elif (match := re.search(r"\bL-[a-z0-9]+(?:-[a-z0-9]+)+\b", agent.get("title") or "")):
++            # A researcher temporarily outside its bound cwd is not proof
++            # of abandonment. Only protect; never use a title as ownership.
++            uncertain.add(match.group(0))
++    # A detached experiment (SAT, Lean or another process) can outlive
++    # its researcher. Protect every same-UID live process in a bound cwd.
++    try:
++        for p in Path("/proc").iterdir():
++            if not p.name.isdigit():
++                continue
++            try:
++                if p.stat().st_uid != os.getuid():
++                    continue
++                cwd = (p / "cwd").resolve(strict=True)
++                bound = assignment.binding(cwd)
++                if bound:
++                    bindings.add(bound)
++                elif (workspace := assignment.workspace(cwd)):
++                    uncertain.add(workspace[0])
++            except FileNotFoundError:
++                continue
++            except PermissionError:
++                continue  # unrelated system processes
++            except OSError:
++                return None
++    except OSError:
++        return None
++    return bindings, uncertain
++
++
++def abandonable(rec, now, absent, staffed):
++    if rec["state"] not in ("LEASED", "RESEARCHING") or rec.get("queued_lease"):
++        return False
++    if rec.get("intent") and rec["intent"].get("what") != "allocator_release":
++        return False
++    acquired = rec.get("lease_obtained_at")
++    if not isinstance(acquired, (int, float)):
++        return False
++    # A never-staffed reserve is intentional, not abandoned.
++    return staffed and now - acquired >= HARD_MIN_AGE and now - absent >= ABANDONED_GRACE
++
++
++def release_abandoned(rec, d, now, absent, staffed):
++    gap, lease = rec["gap_id"], rec["lease"]
++    # Exclude a publisher or a candidate being queued concurrently.
++    fd = jobs.claim(gap)
++    if fd is None:
++        return False
++    try:
++        with state.lock(gap):
++            latest = state.load(gap)
++            if not latest or latest.get("lease") != lease or not abandonable(latest, now, absent, staffed):
++                return False
++            roster = bound_roster()
++            if roster is None or (gap, lease) in roster[0] or gap in roster[1]:
++                return False
++            latest["intent"] = {"what": "allocator_release", "payload": {"lease": lease, "reason": "other"}}
++            state.save(latest)
++            d.release(lease, "other")
++            latest.update(state="RELEASED", failure_reason="other", intent=None)
++            state.save(latest)
++            state.event(gap, "state", {"to": "RELEASED", "fields": {"failure_reason": "other", "allocator": True}})
++            return True
++    finally:
++        os.close(fd)
++
++
++def retire(d, mem, now, roster):
++    if roster is None:
++        # An observation failure cannot count towards an absence.
++        for old in mem.get("observations", {}).values():
++            old.pop("absent_since", None)
++        return []
++    bound, uncertain = roster
++    observations = mem.setdefault("observations", {})
++    next_obs = {}
++    released = []
++    for rec in cli.held_records():
++        gap, lease = rec["gap_id"], rec["lease"]
++        if rec["state"] not in ("LEASED", "RESEARCHING"):
++            continue
++        old = observations.get(gap, {})
++        if old.get("lease") != lease:
++            old = {"lease": lease}
++        if (gap, lease) in bound:
++            next_obs[gap] = {"lease": lease, "staffed": True}
++            continue
++        if gap in uncertain:
++            next_obs[gap] = {"lease": lease, "staffed": bool(old.get("staffed"))}
++            continue
++        absent = old.get("absent_since", now)
++        staffed = bool(old.get("staffed"))
++        next_obs[gap] = {"lease": lease, "absent_since": absent, "staffed": staffed}
++        if abandonable(rec, now, absent, staffed):
++            try:
++                if release_abandoned(rec, d, now, absent, staffed):
++                    released.append(gap)
++                    next_obs.pop(gap, None)
++            except Exception as exc:
++                print("abandoned release deferred:", gap, exc, flush=True)
++    mem["observations"] = next_obs
++    return released
++
++
++def fill(d, mem, now, snapshot):
++    """Ordinary first, hard fallback, only documented allocator requests."""
++    ordinary = snapshot.get("ordinary")
++    total = snapshot.get("offerable")
++    revision = snapshot.get("source_updated_at")
++    hard_count = total - ordinary if type(total) is int and type(ordinary) is int else None
++    # Status is advisory; even a snapshot saying zero cannot suppress the
++    # periodic probe forever. A new positive ordinary signal can wake us early.
++    old_ordinary = mem.get("ordinary")
++    old_hard = mem.get("hard_count")
++    mem["ordinary"] = ordinary
++    mem["hard_count"] = hard_count
++    signals = {False: ordinary, True: hard_count}
++    previous = {False: old_ordinary, True: old_hard}
++    acquired = []
++    with cli.acquisition_lock():
++        while len(cli.held_records()) < config.MAX_LEASES:
++            held = len(cli.held_records())
++            for hard in (False, True):
++                key = "last_null_hard" if hard else "last_null_ordinary"
++                signal_key = "last_signal_hard" if hard else "last_signal_ordinary"
++                count = signals[hard]
++                early = (type(count) is int and count > 0 and
++                         (previous[hard] in (None, 0) or
++                          (revision and mem.get(signal_key) != revision)))
++                if not early and now - mem.get(key, 0) < NULL_RETRY_SECONDS:
++                    continue
++                # A positive hard count is not proof of eligibility, and a
++                # negative one may be stale. Probe both modes periodically.
++                before = {r["gap_id"] for r in cli.held_records()}
++                if revision:
++                    mem[signal_key] = revision
++                previous[hard] = count
++                result = cli.acquire(SimpleNamespace(hard=hard, another=bool(held)), d, report=False)
++                after = {r["gap_id"] for r in cli.held_records()}
++                if result == 0 and after - before:
++                    acquired.extend(sorted(after - before))
++                    mem.pop(key, None)
++                    break
++                mem[key] = now
++                if result == 2:
++                    return acquired
++            else:
++                break
++    return acquired
++
++
++def tick(d=None, now=None):
++    d = d or desk.Desk()
++    now = time.time() if now is None else now
++    mem = read_memory()
++    # A daemon restart or long sampling outage is not evidence of absence.
++    if now - mem.get("observed_at", 0) > POLL_SECONDS * 3:
++        for old in mem.get("observations", {}).values():
++            old.pop("absent_since", None)
++    mem["observed_at"] = now
++    try:
++        roster = bound_roster()
++        released = retire(d, mem, now, roster)
++        if released:
++            print("released abandoned", released, flush=True)
++        # Read the cheap snapshot ourselves, independent of slow Executive.
++        try:
++            snapshot = frontier.refresh()
++        except Exception as exc:
++            snapshot = {}
++            print("allocator frontier unavailable:", exc, flush=True)
++        acquired = fill(d, mem, now, snapshot)
++        if acquired:
++            print("new assignments:", acquired, flush=True)
++        records = cli.held_records()
++        selected = focus.choose([state.load(g) for g in state.all_gaps()], mem.get("focus"), roster[0] if roster else (), now)
++        mem["focus"] = list(focus.key(selected)) if selected else None
++        return {"released": released, "acquired": acquired,
++                "held": len(records), "focus": selected["gap_id"] if selected else None}
++    finally:
++        state.atomic_write(memory_path(), json.dumps(mem, sort_keys=True)+"\n")
++
++
++if __name__ == "__main__":
++    try:
++        print(json.dumps(tick()), flush=True)
++    except Exception as exc:
++        print("allocator tick deferred:", exc, file=sys.stderr, flush=True)
++        sys.exit(1)
+diff --git a/missions/pnp/allocator.sh b/missions/pnp/allocator.sh
+new file mode 100644
+index 00000000..01b7f871
+--- /dev/null
++++ b/missions/pnp/allocator.sh
+@@ -0,0 +1,16 @@
++#!/bin/sh
++# A single persistent, cheap allocator, including when no lease exists.
++set -eu
++town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
++state=${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}
++export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
++cd "$town"
++mkdir -p "$state"
++exec 9>"$state/allocator-loop.lock"
++flock -n 9 || exit 0
++while [ -f missions/pnp/allocator.py ]; do
++    # Each desk request has bounded I/O; never kill a claim between receipt
++    # and durable recording just because a tick took longer than expected.
++    python3 -m missions.pnp.allocator || :
++    sleep 30
++done
+diff --git a/missions/pnp/assignment.py b/missions/pnp/assignment.py
+index 3901fe06..af256230 100644
+--- a/missions/pnp/assignment.py
++++ b/missions/pnp/assignment.py
+@@ -1,6 +1,7 @@
+ """Immutable workspace-to-lease bindings. Researchers never type lease IDs."""
+ import hashlib
+ import json
++import re
+ from pathlib import Path
+ 
+ from . import config, state
+@@ -20,6 +21,11 @@ def workspace(cwd):
+     root = Path(state.gap_dir(parts[0]))
+     if len(parts) >= 2 and parts[1] == "path":
+         return parts[0], root / "path", root / "research-assignment.json"
++    if len(parts) >= 6 and parts[1] == "attempts" and parts[3] == "workers" and parts[5] == "path":
++        if not re.fullmatch(r"[0-9a-f]{24}", parts[2]) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", parts[4]):
++            return None
++        parent = root / "attempts" / parts[2] / "workers" / parts[4]
++        return parts[0], parent / "path", parent / "assignment.json"
+     if len(parts) >= 4 and parts[1] == "attempts" and parts[3] == "path":
+         if len(parts[2]) != 24 or any(c not in "0123456789abcdef" for c in parts[2]):
+             return None
+@@ -37,8 +43,10 @@ def binding(cwd=None):
+         obj = json.loads(marker.read_text())
+         if obj.get("gap") != gap or not isinstance(obj.get("lease"), str):
+             return None
+-        if marker.name == "assignment.json" and marker.parent.name != attempt_id(obj["lease"]):
+-            return None
++        if marker.name == "assignment.json":
++            attempt = marker.parent.parent.parent.name if marker.parent.parent.name == "workers" else marker.parent.name
++            if attempt != attempt_id(obj["lease"]):
++                return None
+         return gap, obj["lease"]
+     except (OSError, ValueError, AttributeError):
+         return None
+@@ -54,7 +62,7 @@ def first_attempt(gap):
+         return False
+ 
+ 
+-def prepare(gap, checkout=True):
++def prepare(gap, checkout=True, worker=None):
+     """Executive calls once per assignment. Never relabel an old checkout."""
+     from . import gitctl
+     if not isinstance(gap, str) or not config.GAP_ID_RE.fullmatch(gap):
+@@ -67,7 +75,12 @@ def prepare(gap, checkout=True):
+         root = Path(state.gap_dir(gap))
+         old = root / "path"
+         legacy = root / "research-assignment.json"
+-        if old.is_dir() and first_attempt(gap) and not legacy.exists():
++        if worker is not None:
++            if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", worker):
++                raise ValueError("invalid worker workspace label")
++            parent = root / "attempts" / attempt_id(lease) / "workers" / worker
++            path, marker = parent / "path", parent / "assignment.json"
++        elif old.is_dir() and first_attempt(gap) and not legacy.exists():
+             path, marker = old, legacy
+         elif binding(old) == (gap, lease):
+             path, marker = old, legacy
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index bcb26084..810d28f7 100755
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -9,6 +9,8 @@
+     python3 missions/pnp/cli.py reconcile
+ """
+ import argparse
++import contextlib
++import fcntl
+ import json
+ import os
+ from pathlib import Path
+@@ -51,13 +53,41 @@ def cmd_status(args):
+     })
+ 
+ 
++@contextlib.contextmanager
++def acquisition_lock():
++    os.makedirs(config.STATE_ROOT, exist_ok=True)
++    fd = os.open(os.path.join(config.STATE_ROOT, "acquisition.lock"),
++                 os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX)
++        yield
++    finally:
++        os.close(fd)
++
++
++def held_records():
++    # Signed/pushed candidates and unpublished faults still occupy a lease.
++    # Submitted PRs do not; the remote desk independently enforces its cap.
++    result = []
++    for gid in state.all_gaps():
++        rec = state.load(gid)
++        if rec and rec.get("lease") and rec["state"] not in (
++                "RELEASED", "STALE", "ACCEPTED", "PR_OPEN", "REJECTED"):
++            if rec["state"] == "FAULT" and (rec.get("lease_expires_at") or 0) <= time.time():
++                continue
++            result.append(rec)
++    return result
++
++
+ def cmd_acquire(args):
+-    d = desk_mod.Desk()
+-    d.docs(refresh=True)                       # live rules on startup
+-    held = sum(1 for g in state.all_gaps()
+-               if state.load(g).get("lease") and
+-               state.load(g)["state"] not in
+-               ("RELEASED", "STALE", "ACCEPTED"))
++    with acquisition_lock():
++        return acquire(args, desk_mod.Desk())
++
++
++def acquire(args, d, report=True):
++    """Caller holds acquisition_lock; both CLI and daemon use this path."""
++    d.docs()
++    held = len(held_records())
+     if held >= config.MAX_LEASES:
+         print("refusing to exceed the desk's %d active leases" %
+               config.MAX_LEASES, file=sys.stderr)
+@@ -75,6 +105,10 @@ def cmd_acquire(args):
+     if not isinstance(gid, str) or not config.GAP_ID_RE.match(gid):
+         print("desk returned a gap id failing the grammar", file=sys.stderr)
+         return 2
++    if not all(isinstance(gap.get(k), str) and gap[k].strip()
++               for k in ("statement", "module", "file")):
++        print("desk returned incomplete assignment metadata", file=sys.stderr)
++        return 2
+     prior = state.load(gid)
+     if prior is not None:
+         # The desk granted a fresh lease for a gap we have seen before.  The
+@@ -90,15 +124,17 @@ def cmd_acquire(args):
+                 imports=gap.get("imports") or [],
+                 gap_title=gap.get("title"),
+                 context=gap.get("context"), dead=gap.get("dead"),
++                acquisition_hard=bool(args.hard), acquisition_prs=gap.get("pr_open"),
+                 lease=lease, lease_obtained_at=time.time(),
+                 lease_expires_at=time.time() +
+                 config.LEASE_TTL_SECONDS)
+             state.event(gid, "acquired", {"hard": bool(args.hard),
+                                           "another": bool(args.another),
+                                           "reacquired": True})
+-            _printer({"gap": gid, "file": rec["path"],
+-                      "module": rec["module"], "lease": lease,
+-                      "reacquired": True, "headline": config.HEADER})
++            if report:
++                _printer({"gap": gid, "file": rec["path"],
++                          "module": rec["module"], "lease": lease,
++                          "reacquired": True, "headline": config.HEADER})
+             return 0
+         # Genuine duplicate: an active lease/PR already exists.  Never
+         # release the spare lease with 'other'/'out_of_time': that triggers
+@@ -107,20 +143,21 @@ def cmd_acquire(args):
+               "lease (it will expire) - never release it as 'other'",
+               file=sys.stderr)
+         return 1
+-    rec = state.create(gid, state="DISCOVERED",
++    rec = state.create(gid, state="LEASED",
+                        statement=gap.get("statement"),
+                        module=gap.get("module"), path=gap.get("file"),
+                        imports=gap.get("imports") or [],
+                        gap_title=gap.get("title"),
+                        context=gap.get("context"), dead=gap.get("dead"),
++                       acquisition_hard=bool(args.hard), acquisition_prs=gap.get("pr_open"),
+                        lease=lease, lease_obtained_at=time.time(),
+                        lease_expires_at=time.time() +
+                        config.LEASE_TTL_SECONDS)
+-    state.transition(gid, "LEASED")
+     state.event(gid, "acquired", {"hard": bool(args.hard),
+                                   "another": bool(args.another)})
+-    _printer({"gap": gid, "file": rec["path"], "module": rec["module"],
+-              "lease": lease, "headline": config.HEADER})
++    if report:
++        _printer({"gap": gid, "file": rec["path"], "module": rec["module"],
++                  "lease": lease, "headline": config.HEADER})
+     return 0
+ 
+ 
+@@ -195,7 +232,7 @@ def cmd_guard(args):
+ 
+ def cmd_assignment(args):
+     try:
+-        _printer(assignment.prepare(args.gap))
++        _printer(assignment.prepare(args.gap, worker=getattr(args, "worker", None)))
+         return 0
+     except (OSError, ValueError, RuntimeError) as exc:
+         print("assignment unavailable: " + str(exc), file=sys.stderr)
+@@ -227,6 +264,7 @@ def main(argv=None):
+     guard.set_defaults(fn=cmd_guard)
+     bind = sub.add_parser("assignment")
+     bind.add_argument("gap")
++    bind.add_argument("--worker", help="distinct parallel research workspace label")
+     bind.set_defaults(fn=cmd_assignment)
+     sub.add_parser("reconcile").set_defaults(fn=cmd_reconcile)
+     args = parser.parse_args(argv)
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 19dfbdd8..19ff8fe6 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -6,6 +6,10 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
+ [ -r "$town/missions/pnp/cli.py" ] || exit 0
+ cd "$town"
++# Start the work-conserving allocator before optional slow network work.
++mkdir -p "${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}"
++nohup setsid /bin/sh "$town/missions/pnp/allocator.sh" </dev/null \
++    >>"${PNP_STATE_ROOT:-/var/lib/lubko/wd/viche-state/pnp}/allocator.log" 2>&1 &
+ # Start independent local resource reclamation before any network I/O.
+ python3 -m missions.pnp.watchdog || :
+ # Independent checked-proof scout. A slow fetch/index never blocks leasing,
+diff --git a/missions/pnp/focus.py b/missions/pnp/focus.py
+new file mode 100644
+index 00000000..14271f9c
+--- /dev/null
++++ b/missions/pnp/focus.py
+@@ -0,0 +1,63 @@
++"""One stable research target; all other held gaps are intentional reserves."""
++import json
++import os
++import time
++
++from . import config, state
++
++
++def correction(rec):
++    return bool(rec and rec.get("pr_number") and not rec.get("queued_lease")
++                and rec.get("external_verdict") != "ACCEPTED"
++                and (rec.get("state") == "REJECTED" or
++                     (rec.get("state") == "PR_OPEN" and rec.get("local_check_status") == "failed")))
++
++
++def eligible(rec, now=None):
++    if correction(rec):
++        return True
++    return bool(rec and rec.get("state") in ("LEASED", "RESEARCHING")
++                and rec.get("lease") and not rec.get("queued_lease")
++                and isinstance(rec.get("lease_expires_at"), (int, float))
++                and rec["lease_expires_at"] > (time.time() if now is None else now))
++
++
++def key(rec):
++    return rec["gap_id"], rec["lease"]
++
++
++def priority(rec):
++    context = (rec.get("context") or "").lower()
++    concrete = any(s in context for s in ("data row", "explicit object", "witness to formalize",
++                                          "closes in", "by decide"))
++    # An ordinary lease and concrete checked witness are useful signals, not
++    # predictions of success. Never preempt a live focus on this heuristic.
++    return (not correction(rec), not concrete, rec.get("acquisition_hard") is not False,
++            rec.get("acquisition_prs") if type(rec.get("acquisition_prs")) is int else 999,
++            len(rec.get("statement") or ""),
++            rec.get("lease_obtained_at") or 0, rec["gap_id"])
++
++
++def choose(records, previous=None, staffed=(), now=None):
++    candidates = [r for r in records if eligible(r, now)]
++    for rec in candidates:
++        if previous and key(rec) == tuple(previous):
++            return rec
++    if not candidates:
++        return None
++    return min(candidates, key=lambda r: (key(r) not in staffed, priority(r)))
++
++
++def current():
++    try:
++        with open(os.path.join(config.STATE_ROOT, "allocator.json"), encoding="utf-8") as f:
++            selected = json.load(f).get("focus")
++        if isinstance(selected, list) and len(selected) == 2:
++            rec = state.load(selected[0])
++            if eligible(rec) and key(rec) == tuple(selected):
++                return rec
++    except (OSError, ValueError, TypeError, AttributeError):
++        pass
++    # Before the first allocator tick, or during a rotation, report a useful
++    # provisional focus. Only the allocator persists a choice.
++    return choose([state.load(g) for g in state.all_gaps()])
+diff --git a/missions/pnp/frontier.py b/missions/pnp/frontier.py
+index 4ad6a8fc..90a7494e 100644
+--- a/missions/pnp/frontier.py
++++ b/missions/pnp/frontier.py
+@@ -41,7 +41,7 @@ def normalize(raw, now):
+                      "parallel": count(item.get("parallel")),
+                      "title": item.get("title", "")[:300] if isinstance(item.get("title"), str) else ""}
+     total = count(raw.get("open_gaps"))
+-    return {"observed": now, "complete": total == len(rows),
++    return {"observed": now, "source_updated_at": raw.get("updated_at"), "complete": total == len(rows),
+             "open_gaps": total, "offerable": count(raw.get("offerable_now")),
+             "ordinary": count(raw.get("offerable_now_ordinary")),
+             "held": count(raw.get("held_now")), "gaps": rows}
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 7f555266..39670fb3 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -44,12 +44,11 @@ Record the Executive's decisions and worker assignments durably.
+ For every Executive cycle:
+ - Inspect the exact public rank/score, the #1 and #2 totals, gap, and changes
+   since earlier measurements, plus desk leases, research experiments and PRs.
+-- Dispatch and replenish **multiple genuinely independent mathematical
+-  fronts** (Lean formalization, counterexample searching, proof reasoning,
+-  desk gap claims and PR corrections as appropriate), allocating concurrency
+-  by marginal verified contributions, host resource availability and current
+-  independent tasks. ONE researcher is not a satisfactory steady state while
+-  multiple valuable fronts are available. Do not hard-cap worker count or
++- Concentrate parallel mathematical work on the SINGLE research_focus from
++  mission status. Keep the other leases as reserves. Delegate genuinely
++  independent approaches (construction, refutation, sublemmas, Lean
++  formalization and proof reuse) on that same gap. Allocate as much useful
++  concurrency as resources permit; do not duplicate expensive builds or
+   spawn redundant agents just to increase a counter.
+ - Take over the preexisting managed agents/worktrees under the roster
+   /var/lib/lubko/wd/viche-state/pnp/swarm/agents.json if useful, or retire them
+@@ -93,9 +92,8 @@ never end this assignment.
+ 
+ ## Race-critical work (Founder priority)
+ 
+-Choose expected accepted steps per resource-hour. Ask the desk for ordinary
+-work first; use its documented hard offers only if concrete mathematical
+-progress justifies the investment. The desk chooses the lease; do not churn
++Choose expected accepted steps per resource-hour. The deterministic lease allocator
++asks for ordinary work first and fills remaining capacity with hard offers. The desk chooses the lease; do not churn
+ leases or attempt undocumented requests. Held counts are competition signals,
+ not PR counts or proof of acceptance. A rival PR alone does not invalidate a
+ promising proof. Reassess remaining work using actual progress, competition,
+@@ -180,17 +178,16 @@ Prefer incremental formalization and explicit reductions to known theorems.
+ Before investing in an open-ended lower bound, identify a concrete proof
+ route, its nearest checked lemma, and the missing inference or certificate.
+ Reuse the previous research notes for the same or related problem rather
+-than repeating failed SAT encodings. If no ordinary lease is available,
+-prepare independent small derivations for published open problems or
+-identify a concrete hard-gap route; do not burn hours on an unpromising
+-hard lease just to occupy capacity. The desk alone chooses claimable gaps.
++than repeating failed SAT encodings. The allocator fills capacity with hard gaps when ordinary work is unavailable.
++The Executive identifies the best proof route for each assignment and stops
++work that has genuinely been abandoned. The desk alone chooses claimable gaps.
+ Do not churn leases or release on a speculative difficulty judgment.
+ Reassess work at natural evidence checkpoints, not arbitrary deadlines:
+ a successful sublemma, a failed reduction, new rival evidence, a search
+ budget exhausted, or a candidate. Keep the highest-yield route moving.
+ 
+-The Executive first addresses unstaffed active gaps, obsolete assignments,
+-and newly claimable ordinary work. After these allocation decisions,
++The Executive first addresses an unstaffed research focus and obsolete
++assignments. Reserve gaps require no researchers. After these allocation decisions,
+ delegate substantive investigations rather than waiting in the coordinator
+ session; finish the pass promptly so the next state change can trigger it.
+ No polling sleep inside Executive reasoning. No new review or reporting gate.
+@@ -259,7 +256,7 @@ Cancel obsolete work, not merely old work.
+ 
+ Optimize accepted contributions per elapsed and resource hour. Keep the
+ primary proof/construction owner working independently while other agents
+-continually seek actionable evidence across the live portfolio. Do not make
++continually seek actionable evidence for the single research focus. Do not make
+ the Executive search proofs, debug algorithms, or review every submission.
+ 
+ Executive: staff and replenish useful independent support fronts as well as
+@@ -322,3 +319,39 @@ approval. Executive delivers urgent coordination findings promptly; preempt
+ only when confirmed material benefit outweighs interruption and preserve
+ ongoing useful computations. Never dispatch, restart or steer an agent from
+ a support agent. Executive retains sole lifecycle authority.
++
++## Continuous lease allocation (Founder priority)
++
++The mission allocator, not model turns, maintains up to five distinct leases.
++It prefers ordinary assignments, falls back to documented hard assignments,
++and keeps polling even with no work. The desk chooses exact gaps; do not
++attempt arbitrary ID claims. The allocator selects one stable research focus, preferring concrete,
++ordinary and low-competition work among held gaps. Do not staff reserve
++gaps. The Executive owns research strategy and agent starts/stops; do not
++duplicate allocator polling. A formerly staffed gap is released only after
++confirmed sustained absence, not because a reserve has no workers.
++Incomplete roster observations, active compilers, queued candidates and
++publication are protected. Preserve work artifacts. Explicit honest release is still possible
++when the Executive decides a route is exhausted. No active proof is cancelled
++just to make room for a more attractive offer.
++
++## Single-gap parallel research (Founder priority, supersedes portfolio staffing)
++
++Strive to maintain five live leases, including four intentional reserves.
++Work on the single research_focus reported by mission status. Parallelize
++that gap as much as useful: appoint a proof integrator and independent
++researchers pursuing distinct sublemmas, proof strategies or counterexamples.
++For independent writable checkouts run
++`python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py assignment GAP --worker LABEL`
++with a distinct short label per researcher. Each checkout is bound to the
++same exact lease and has independent mutable build state; no competing PRs.
++Share useful evidence and partial proofs directly, not the writable checkout.
++The first complete valid candidate goes straight to the publisher. When
++publication owns the candidate, the allocator rotates focus to the best
++remaining reserve and fills the vacant lease slot after submission.
++An existing PR requiring correction is eligible as the next focus; do not
++split ongoing research across two gaps just to fix a pending correction.
++If the Executive abandons a focus, release it honestly and move to the next.
++Do not rotate simply because another promising gap arrives; never leave
++all reserves unattended until their leases expire. The automated heartbeat
++renews the whole pool.
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index c0e71544..db13b17f 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -161,7 +161,7 @@ def reacquire(gap_id, **fields):
+         previous = rec["state"]
+         lease_fields = ("lease", "lease_obtained_at", "lease_expires_at")
+         meta_fields = ("statement", "module", "path", "imports", "gap_title",
+-                       "context", "dead")
++                       "context", "dead", "acquisition_hard", "acquisition_prs")
+         for key in lease_fields + meta_fields:
+             if key in fields:
+                 rec[key] = fields[key]
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index a8a05209..4dbee985 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -12,9 +12,9 @@ import sys
+ 
+ if __package__ in (None, ""):
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from missions.pnp import leaderboard, frontier, assignment, support
++    from missions.pnp import leaderboard, frontier, assignment, support, focus
+ else:
+-    from . import leaderboard, frontier, assignment, support
++    from . import leaderboard, frontier, assignment, support, focus
+ 
+ STATE = Path(os.environ.get("VICHE_STATE_ROOT",
+                             "/var/lib/lubko/wd/viche-state"))
+@@ -31,7 +31,8 @@ def workers():
+         if not isinstance(agents, list):
+             raise ValueError("unreadable agent roster")
+         filtered = [a for a in agents if
+-                    (a.get("title") or "").startswith("Viche P vs NP:")]
++                    (a.get("title") or "").startswith("Viche P vs NP:") or
++                    (a.get("cwd") and assignment.workspace(Path(a["cwd"])))]
+         coverage = ("partial" if len(agents) >= 100 or data.get("unreadable")
+                     else "complete")
+         scouts = [{"id": a.get("id"), "title": a.get("title"), "roles": support.roles(a),
+@@ -97,8 +98,15 @@ def snapshot():
+     active = [r["gap"] for r in rows if r["state"] in frontier.ACTIVE
+               and type(r["lease_expires_at"]) in (int, float)
+               and r["lease_expires_at"] > time.time() and isinstance(r["gap"], str)]
++    selected = focus.current()
++    focus_gap = selected["gap_id"] if selected else None
+     staffed = {a["gap"] for a in w["agents"] if a["lease_current"] is not False}
+-    unstaffed = sorted(set(active) - staffed) if w["coverage"] == "complete" else []
++    reserves = sorted(r["gap"] for r in rows if r["gap"] in active and r["gap"] != focus_gap
++                      and r["state"] in ("LEASED", "RESEARCHING"))
++    focus_workers = [a["id"] for a in w["agents"] if focus_gap and a["gap"] == focus_gap
++                     and a["lease_current"] is not False]
++    unstaffed = [focus_gap] if focus_gap and focus_gap not in staffed and w["coverage"] == "complete" else []
++    off_focus = sorted(a["id"] for a in w["agents"] if focus_gap and a["gap"] and a["gap"] != focus_gap and (a["gap_state"] in ("LEASED", "RESEARCHING") or a["gap"] in corrections))
+     ordinary = observed.get("ordinary")
+     # These are useful opportunities, not automatic staffing instructions.
+     # Desk status only exposes title/competition, not individually offerable IDs.
+@@ -109,7 +117,8 @@ def snapshot():
+             related.append({"gap": gid, "title": item.get("title"), "held": held, "parallel": parallel})
+     related.sort(key=lambda x: (x["held"], x["gap"]))
+     coordination_due = bool(w["coverage"] == "complete" and (
+-        stale_workers or unstaffed or corrections or (ordinary is not None and ordinary > 0)))
++        stale_workers or unstaffed or off_focus or
++        (focus_gap and len(focus_workers) < 2)))
+     # Support agents are never counted as leased researchers. Coverage is
+     # a coordination signal, not an agent-number quota or a proof gate.
+     scouts = w.pop("support", [])
+@@ -139,6 +148,8 @@ def snapshot():
+                              "action": "Executive owns staffing and material steering; support findings are advisory and arrive directly in worker guards."},
+         "frontier": {k: observed.get(k) for k in ("offerable", "ordinary", "open_gaps", "held")},
+         "frontier_fresh": bool(observed), "active_lease_gaps": active,
++        "research_focus": focus_gap, "focus_workers": focus_workers, "reserve_gaps": reserves,
++        "off_focus_workers": off_focus,
+         "unstaffed_active_gaps": unstaffed, "active_lease_age_minutes": age,
+         "potential_fronts": related[:12],
+         "coordination_due": coordination_due, "correction_needed": corrections,
+@@ -149,14 +160,14 @@ def snapshot():
+         "workers_on_terminal_gaps": stale_workers,
+         "owned_by": "Viche Executive; other operators do not launch agents",
+         "action": (
+-            "Executive: finish or reassign confirmed terminal-gap workers cooperatively; preserve their proof work. Acquire ordinary gaps promptly when offered."
++            "Executive: retire obsolete workers cooperatively and concentrate useful research on research_focus. Preserve artifacts; reserve gaps need no workers."
+             if stale_workers else
+-            "Executive must restore multiple independent P vs NP researchers "
+-            "and coordinate desk acquisition and submissions."
+-            if w["count"] == 0 else
+-            "Executive must replenish independent P vs NP research fronts; "
+-            "one worker is not a steady-state research program."
+-            if w["count"] == 1 else
++            "Executive must concentrate independent P vs NP researchers on research_focus "
++            "and coordinate submissions; reserve gaps intentionally have no workers."
++            if not focus_workers else
++            "Executive must parallelize distinct proof approaches on research_focus, "
++            "not distribute researchers across reserve gaps."
++            if len(focus_workers) == 1 else
+             "Executive must restore visibility of the actual worker roster."
+             if w["count"] is None else
+             "Executive must increase the verified checked-step lead over #2 "
+@@ -171,7 +182,8 @@ def snapshot():
+                             (score.get("leader") or {}).get("steps"),
+                             (score.get("runner_up") or {}).get("steps")],
+             "workers": w["count"], "coverage": w["coverage"],
+-            "gaps": by_state, "active": sorted(active),
++            "gaps": by_state, "active": sorted(active), "focus": focus_gap,
++            "off_focus": off_focus,
+             "assignments": sorted((str(a["id"]), a["gap"] or "", a["gap_state"] or "") for a in w["agents"]),
+             "ordinary_available": (observed.get("ordinary") or 0) > 0 if observed else None,
+             "hard_available": (observed.get("offerable") or 0) > (observed.get("ordinary") or 0) if observed else None,
+diff --git a/missions/pnp/support.py b/missions/pnp/support.py
+index 6fb7626b..58196341 100644
+--- a/missions/pnp/support.py
++++ b/missions/pnp/support.py
+@@ -6,7 +6,7 @@ from pathlib import Path
+ import re
+ import time
+ 
+-from . import assignment, config, gitctl, state
++from . import assignment, config, focus, gitctl, state
+ from .proofs import corpus
+ 
+ ROLES = ("knowledge", "methods", "flow")
+@@ -73,9 +73,11 @@ def advise(gap, expected, kind, evidence, message, coordinate=False):
+         return obj
+ 
+ 
+-def targets():
++def targets(all_held=False):
+     out = []
+-    for gap in state.all_gaps():
++    selected = focus.current()
++    gaps = state.all_gaps() if all_held else ([selected["gap_id"]] if selected else [])
++    for gap in gaps:
+         try:
+             rec = state.load(gap)
+             if active(rec):
+@@ -130,7 +132,7 @@ def matches(db, statement):
+ def scan(refresh=False):
+     # The scanner is independent of the Executive and publication. No
+     # cancellation, desk release, agent commands, or publication mutation.
+-    work = targets()
++    work = targets(all_held=True)
+     if not work:
+         return {"active": 0, "matches": 0}
+     if refresh:
+diff --git a/tests/pnp-allocator.py b/tests/pnp-allocator.py
+new file mode 100644
+index 00000000..7a01c60a
+--- /dev/null
++++ b/tests/pnp-allocator.py
+@@ -0,0 +1,181 @@
++#!/usr/bin/env python3
++"""Offline lease allocation policy, no external mutations."""
++import os
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from missions.pnp import allocator, assignment, cli, config, focus, state
++
++NOW = 10000
++
++
++class Desk:
++    def __init__(self, offers=()):
++        self.offers = list(offers)
++        self.calls = []
++        self.releases = []
++
++    def docs(self):
++        return "fixture"
++
++    def next_gap(self, hard=False, another=False):
++        self.calls.append((hard, another))
++        if not self.offers:
++            return None
++        expected, result = self.offers.pop(0)
++        assert expected == hard, (expected, hard)
++        if result is None:
++            return None
++        return {"gap":{"id":result, "statement":"True", "module":"PEqualNP.Outside."+result.replace("-","_"),
++                       "file":"lean/PEqualNP/Outside/"+result.replace("-","_")+".lean"},
++                "lease":"lease-"+result}
++
++    def release(self, lease, reason):
++        self.releases.append((lease,reason))
++        return {}
++
++
++class Tests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        root = self.tmp.name
++        self.patch = patch.multiple(config, STATE_ROOT=root, GAPS_DIR=root+"/gaps", CACHE_DIR=root+"/cache")
++        self.patch.start()
++        self.addCleanup(self.patch.stop)
++        self.addCleanup(self.tmp.cleanup)
++
++    def add(self, gap="L-meta-1", **extra):
++        fields = dict(state="LEASED", lease="lease-"+gap, lease_obtained_at=NOW-1800,
++                      lease_expires_at=NOW+1200, statement="True")
++        fields.update(extra)
++        return state.create(gap, **fields)
++
++    def test_prefer_ordinary_fill_hard_cap(self):
++        d = Desk([(False,"L-meta-1"),(False,None)]+[(True,"L-meta-"+str(i)) for i in range(2,6)])
++        mem = {}
++        self.assertEqual(len(allocator.fill(d,mem,NOW,{"ordinary":1,"offerable":3})),5)
++        self.assertEqual(len(cli.held_records()),5)
++        self.assertEqual(d.calls[:3],[(False,False),(False,True),(True,True)])
++        self.assertEqual(len(d.calls),6)
++        self.assertEqual(allocator.fill(d,mem,NOW+30,{}),[])
++        self.assertEqual(len(d.calls),6)
++
++    def test_null_backoff_and_new_ordinary_signal(self):
++        d = Desk()
++        mem = {}
++        allocator.fill(d,mem,NOW,{"ordinary":0})
++        self.assertEqual(d.calls,[(False,False),(True,False)])
++        allocator.fill(d,mem,NOW+30,{"ordinary":0})
++        self.assertEqual(len(d.calls),2)
++        allocator.fill(d,mem,NOW+60,{"ordinary":1})
++        self.assertEqual(d.calls[-1],(False,False))
++        self.assertEqual(len(d.calls),3)
++        allocator.fill(d,mem,NOW+121,{})
++        self.assertEqual(d.calls[-1],(True,False))
++
++    def test_publication_does_not_occupy_slots(self):
++        self.add(state="PR_OPEN",pr_number=42)
++        self.add("L-meta-2",state="REJECTED",pr_number=43)
++        self.add("L-meta-3",state="SIGNED")
++        self.assertEqual([r["gap_id"] for r in cli.held_records()],["L-meta-3"])
++
++    def test_release_only_after_confirmed_absence(self):
++        rec=self.add()
++        d=Desk()
++        mem={}
++        live={(rec["gap_id"],rec["lease"])}
++        allocator.retire(d,mem,NOW,(live,set()))
++        allocator.retire(d,mem,NOW+30,(set(),set()))
++        self.assertEqual(allocator.retire(d,mem,NOW+200,(set(),set())),[])
++        with patch.object(allocator,"bound_roster",return_value=(set(),set())):
++            self.assertEqual(allocator.retire(d,mem,NOW+331,(set(),set())),["L-meta-1"])
++        self.assertEqual(d.releases,[(rec["lease"],"other")])
++        self.assertEqual(state.load(rec["gap_id"])["state"],"RELEASED")
++
++    def test_unknown_roster_resets_absence(self):
++        self.add()
++        d=Desk()
++        mem={}
++        allocator.retire(d,mem,NOW,(set(),set()))
++        allocator.retire(d,mem,NOW+100,None)
++        allocator.retire(d,mem,NOW+1300,(set(),set()))
++        self.assertFalse(d.releases)
++
++    def test_new_or_queued_not_released(self):
++        self.add(lease_obtained_at=NOW)
++        self.add("L-meta-2",state="CANDIDATE_READY",queued_lease="lease-L-meta-2")
++        self.add("L-meta-3",state="RESEARCHING",queued_lease="lease-L-meta-3")
++        mem={}
++        d=Desk()
++        allocator.retire(d,mem,NOW,(set(),set()))
++        allocator.retire(d,mem,NOW+600,(set(),set()))
++        self.assertFalse(d.releases)
++
++    def test_roster_rechecked_before_release(self):
++        rec=self.add()
++        d=Desk()
++        with patch.object(allocator,"bound_roster",return_value=({(rec["gap_id"],rec["lease"])},set())):
++            self.assertFalse(allocator.release_abandoned(rec,d,NOW,NOW-1500,True))
++        self.assertFalse(d.releases)
++
++    def test_reserves_never_released_for_idle_roster(self):
++        for i in range(1,6):
++            self.add("L-meta-"+str(i))
++        d = Desk()
++        mem = {}
++        allocator.retire(d,mem,NOW,(set(),set()))
++        allocator.retire(d,mem,NOW+7200,(set(),set()))
++        self.assertEqual(d.releases,[])
++        self.assertEqual(len(cli.held_records()),5)
++
++    def test_single_stable_focus_and_rotation(self):
++        hard = self.add(acquisition_hard=True)
++        ordinary = self.add("L-meta-2",acquisition_hard=False)
++        self.assertEqual(focus.choose([hard,ordinary],now=NOW),ordinary)
++        self.assertEqual(focus.choose([hard,ordinary],focus.key(hard),now=NOW),hard)
++        hard["queued_lease"]=hard["lease"]
++        self.assertEqual(focus.choose([hard,ordinary],focus.key(hard),now=NOW),ordinary)
++        correction = self.add("L-meta-3",state="PR_OPEN",pr_number=42,local_check_status="failed")
++        self.assertEqual(focus.choose([hard,ordinary,correction],now=NOW),correction)
++        self.assertEqual(focus.choose([hard,ordinary,correction],focus.key(ordinary),now=NOW),ordinary)
++
++    def test_independent_parallel_workspaces_same_exact_lease(self):
++        rec = self.add()
++        a = Path(assignment.prepare(rec["gap_id"],checkout=False,worker="construction")["cwd"])
++        b = Path(assignment.prepare(rec["gap_id"],checkout=False,worker="formalization")["cwd"])
++        self.assertNotEqual(a,b)
++        self.assertEqual(assignment.binding(a/"lean"),focus.key(rec))
++        self.assertEqual(assignment.binding(b),focus.key(rec))
++        state.transition(rec["gap_id"],"STALE")
++        state.reacquire(rec["gap_id"],lease="fresh")
++        c = Path(assignment.prepare(rec["gap_id"],checkout=False,worker="construction")["cwd"])
++        self.assertNotEqual(a,c)
++        self.assertEqual(assignment.binding(c),(rec["gap_id"],"fresh"))
++        self.assertEqual(assignment.binding(a),focus.key(rec))
++        with self.assertRaises(ValueError):
++            assignment.prepare(rec["gap_id"],checkout=False,worker="../other")
++
++    def test_new_positive_frontier_revision_wakes_acquisition(self):
++        d=Desk()
++        mem={}
++        allocator.fill(d,mem,NOW,{"ordinary":1,"offerable":1,"source_updated_at":"a"})
++        allocator.fill(d,mem,NOW+30,{"ordinary":1,"offerable":1,"source_updated_at":"a"})
++        self.assertEqual(len(d.calls),2)
++        allocator.fill(d,mem,NOW+60,{"ordinary":1,"offerable":1,"source_updated_at":"b"})
++        self.assertEqual(d.calls[-1],(False,False))
++        self.assertEqual(len(d.calls),3)
++
++    def test_duplicate_never_churns(self):
++        self.add()
++        d=Desk([(False,"L-meta-1"),(True,None)])
++        self.assertEqual(allocator.fill(d,{},NOW,{}),[])
++        self.assertFalse(d.releases)
++        self.assertEqual(len(cli.held_records()),1)
++
++
++if __name__=="__main__":
++    unittest.main(verbosity=2)
+diff --git a/tests/pnp-pipeline-smoke.sh b/tests/pnp-pipeline-smoke.sh
+index 45a381b5..8b7e0075 100644
+--- a/tests/pnp-pipeline-smoke.sh
++++ b/tests/pnp-pipeline-smoke.sh
+@@ -9,3 +9,5 @@ python3 tests/pnp-watchdog-smoke.py
+ python3 tests/pnp-proof-tools.py
+ 
+ python3 tests/pnp-support.py
++
++python3 tests/pnp-allocator.py

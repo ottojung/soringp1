@@ -1,0 +1,346 @@
+commit d5b9b6e5377ddec42efa68e65aeb2bd13897fdcb
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 17:49:32 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 17:49:32 2026 +0000
+
+    Preserve model authorization across discovery; isolate test refreshes and stop routine allocation deliveries
+
+diff --git a/government/MINISTRY-OF-ECONOMY.md b/government/MINISTRY-OF-ECONOMY.md
+index 10507dc1..6ad1f8f9 100644
+--- a/government/MINISTRY-OF-ECONOMY.md
++++ b/government/MINISTRY-OF-ECONOMY.md
+@@ -19,12 +19,12 @@ Antonina tries the models in `~/.config/antonina/config.json` in order. That ord
+ 
+ Every configured model must request the low reasoning variant. A model that rejects low is not retried at a higher or unspecified effort.
+ 
+-`government/economy-models.py` enforces this deterministically each refresh: whatever order anyone proposes, a paid or Luna model is never placed above a free one, a missing free model may be dropped, but an explicitly configured contributor, paid or Luna fallback is never deleted by a catalogue omission, free-tier policy or list-length cap, and an unprobed free model is not added. Catalogue discovery and free probes use the same authenticated OpenCode service as Antonina. An absent provider is not evidence that authorized fallback funding has been revoked. Only the Founder removes configured nonfree models. You do not hand-edit the config; you steer through `state/economy/model-policy.json` and the script writes it.
++`government/economy-models.py` enforces this deterministically each refresh: whatever order anyone proposes, a paid or Luna model is never placed above a free one, no previously configured model of any tier may be removed by catalogue omissions, probe results, temporary policy or list-length caps, and an unprobed free model is not added. Catalogue discovery and free probes use the same authenticated OpenCode service as Antonina. An absent provider is not evidence that authorized fallback funding has been revoked. Only an explicit authorized operator decision removes configured models. Temporary health and cooldowns are not authorization. You do not hand-edit the config; you steer through `state/economy/model-policy.json` and the script writes it.
+ 
+ **What you do, with judgment the script cannot supply:**
+ 
+ - **Research the free models that exist now.** Read the latest `state/economy/report.json` and `catalogue.json` (what `opencode models` lists, what is newly free, what disappeared), then use the documentation and web access your tools provide to learn each free model's real limits: rate limits, daily or monthly quota, context size, capability, and whether the free offer is time-limited. Record what you found, with sources and dates, in `state/economy/research/`. A model that merely answers "OK" to the free probe is not yet proven fit for Town work.
+-- **Rank within the free tier by usefulness**, with evidence: stronger, steadier, higher-quota models first. Express it in `model-policy.json` as `{"prefer": ["provider/model", ...], "exclude": [{"model": "...", "until": EPOCH, "reason": "..."}], "notes": "..."}`. `prefer` only reorders within a tier. `exclude` is temporary (an `until` is required) so a bad week does not banish a model forever.
++- **Rank within the free tier by usefulness**, with evidence: stronger, steadier, higher-quota models first. Express it in `model-policy.json` as `{"prefer": ["provider/model", ...], "exclude": [{"model": "...", "until": EPOCH, "reason": "..."}], "notes": "..."}`. `prefer` only reorders within a tier. `exclude` is temporary (an `until` is required); it deprioritizes existing models and excludes new candidates, never revoking existing authorization.
+ - **Keep headroom.** Keep at least two free models available at all times (`free_available_now` in the report). When it falls below two, `funding_risk` is `elevated` or `high`: research further free options, tell the Executive coordinator the same day, and if the Town would genuinely stop, state it on Town Hall as a line beginning `NEEDS-FOUNDER:` (the daily digest surfaces those lines).
+ - **Read the quota facts.** `report.json` lists models cooling down and when they return. A free model on a multi-day cooldown is out of the rotation for that time; plan around it instead of discovering it at 3 a.m.
+ 
+diff --git a/government/economy-models.py b/government/economy-models.py
+index a6990d0c..29ef5a6e 100644
+--- a/government/economy-models.py
++++ b/government/economy-models.py
+@@ -34,6 +34,7 @@ Environment
+ """
+ import argparse
+ import datetime
++import fcntl
+ import json
+ import os
+ import pathlib
+@@ -55,6 +56,8 @@ COOLDOWNS = pathlib.Path(os.environ.get(
+     "VICHE_ANTONINA_COOLDOWNS",
+     str(pathlib.Path(os.environ.get("ANTONINA_HOST_XDG_STATE_HOME",
+         os.environ.get("XDG_STATE_HOME", str(HOME / ".local" / "state")))) / "antonina" / "model-cooldowns")))
++LIVE_TOWN = pathlib.Path("/var/lib/lubko/wd/viche")
++LIVE_STATE = pathlib.Path("/var/lib/lubko/wd/viche-state")
+ MAX_MODELS = int(os.environ.get("VICHE_ECONOMY_MAX_MODELS", "32"))
+ PROBE_FRESH_SECONDS = 14 * 86400
+ PROBE_TIMEOUT = int(os.environ.get("VICHE_ECONOMY_PROBE_TIMEOUT", "120"))
+@@ -213,10 +216,9 @@ def plan_order(cfg, catalogue_ids, probes, pol, current):
+             return
+         seen.add(model)
+         tier = tier_of(model)
+-        # Catalogue omissions and temporary free-tier policy must never
+-        # revoke an explicitly configured fallback. Only the operator can
+-        # remove that authorization. Runtime cooldowns still apply.
+-        if grandfathered and tier != 0:
++        # Authorization is durable. Discovery, failed probes, temporary policy
++        # and capacity limits may never remove any configured model.
++        if grandfathered:
+             wanted[tier].append(model)
+             return
+         if model not in in_catalogue:
+@@ -230,7 +232,7 @@ def plan_order(cfg, catalogue_ids, probes, pol, current):
+             if result is not None and not result.get("ok") and current - result.get("at", 0) < PROBE_FRESH_SECONDS:
+                 dropped.append((model, "probe failed: " + str(result.get("detail", ""))))
+                 return
+-            if result is None and not grandfathered:
++            if not result or not result.get("ok"):
+                 return  # unprobed newcomers wait for their probe
+         elif not grandfathered:
+             return  # contributor/paid/luna models are only ever kept, never auto-added
+@@ -246,11 +248,14 @@ def plan_order(cfg, catalogue_ids, probes, pol, current):
+         prefer = pol["prefer"]
+         p = prefer.index(model) if model in prefer else len(prefer)
+         c = configured.index(model) if model in configured else len(configured)
+-        return (p, c, model)
++        return (model in pol["exclude"], p, c, model)
+ 
+     fallback = [m for tier in (1, 2, 3) for m in sorted(wanted[tier], key=rank)]
+-    # Limit discovered free models, never evict an authorized fallback.
+-    final = sorted(wanted[0], key=rank)[:max(0, MAX_MODELS - len(fallback))] + fallback
++    # The size limit applies to additions, never existing authorization.
++    existing_free = [m for m in wanted[0] if m in configured]
++    additions = [m for m in wanted[0] if m not in configured]
++    room = max(0, MAX_MODELS - len(existing_free) - len(fallback))
++    final = sorted(existing_free + sorted(additions, key=rank)[:room], key=rank) + fallback
+     if not final:
+         raise SystemExit("plan would leave Antonina with no models; refusing")
+     return configured, final, dropped
+@@ -274,18 +279,30 @@ def apply_order(cfg, final, probes, dropped, current):
+         new_entries.append({**entry, "variant": "low"})
+     updated = dict(cfg)
+     updated["models"] = new_entries
+-    backup = CONFIG.with_name(CONFIG.name + ".bak-" + str(current))
+-    shutil.copy2(CONFIG, backup)
+-    atomic_write(CONFIG, json.dumps(updated, indent=2) + "\n")
+-    os.chmod(CONFIG, 0o600)
+-    try:
+-        listed = subprocess.run(["antonina", "agent", "model", "select"], capture_output=True, text=True, timeout=60)
+-        ok = listed.returncode == 0 and final[0] in listed.stdout
+-    except (OSError, subprocess.TimeoutExpired):
+-        ok = os.environ.get("VICHE_ECONOMY_SKIP_VALIDATE") == "1"
+-    if not ok and os.environ.get("VICHE_ECONOMY_SKIP_VALIDATE") != "1":
+-        shutil.copy2(backup, CONFIG)
+-        raise SystemExit("Antonina rejected the new model list; previous config restored from " + str(backup))
++    if not set(existing).issubset(final):
++        raise SystemExit("Refusing to revoke an authorized model")
++    # Validate a candidate outside the live configuration. A failed or hung
++    # validator must never transiently publish a candidate or restore stale bytes.
++    with tempfile.TemporaryDirectory(prefix=".model-candidate-", dir=CONFIG.parent) as scratch:
++        candidate = pathlib.Path(scratch) / "antonina" / "config.json"
++        atomic_write(candidate, json.dumps(updated, indent=2) + "\n")
++        env = dict(os.environ, VICHE_ANTONINA_CONFIG=str(candidate),
++                   XDG_CONFIG_HOME=scratch, ANTONINA_HOST_XDG_CONFIG_HOME=scratch)
++        try:
++            listed = subprocess.run(["antonina", "agent", "model", "select"],
++                                    capture_output=True, text=True, timeout=60, env=env)
++            ok = listed.returncode == 0 and final[0] in listed.stdout.splitlines()
++        except (OSError, subprocess.TimeoutExpired):
++            ok = False
++        if not ok and os.environ.get("VICHE_ECONOMY_SKIP_VALIDATE") != "1":
++            raise SystemExit("Antonina rejected candidate; live config untouched")
++    with CONFIG.with_name(CONFIG.name + ".write.lock").open("a") as lock:
++        fcntl.flock(lock, fcntl.LOCK_EX)
++        if read_config() != cfg:
++            raise SystemExit("Configuration changed during discovery; live config untouched")
++        backup = CONFIG.with_name(CONFIG.name + ".bak-" + str(time.time_ns()))
++        shutil.copy2(CONFIG, backup)
++        atomic_write(CONFIG, json.dumps(updated, indent=2) + "\n")
+     return str(backup)
+ 
+ 
+@@ -303,7 +320,7 @@ def cooldown_state(models, current):
+ def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, current, catalogue_ids):
+     cooling = cooldown_state(set(final), current)
+     free = [m for m in final if tier_of(m) == 0]
+-    free_available = [m for m in free if m not in cooling]
++    free_available = [m for m in free if m in catalogue_ids and m not in cooling]
+     fallback_eligible = [m for m in final if tier_of(m) != 0 and m in catalogue_ids and m not in cooling]
+     missing_fallback = [m for m in final if tier_of(m) != 0 and m not in catalogue_ids]
+     returns = sorted(v["until"] for m, v in cooling.items() if m in free)
+@@ -311,6 +328,7 @@ def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, cur
+         "at": datetime.datetime.fromtimestamp(current, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "order": [{"model": m, "tier": TIER_NAMES[tier_of(m)]} for m in final],
+         "free_models": len(free),
++        "free_missing_from_catalogue": [m for m in free if m not in catalogue_ids],
+         "free_available_now": len(free_available),
+         "fallback_eligible_now": len(fallback_eligible),
+         "fallback_eligible_models": fallback_eligible,
+@@ -330,6 +348,21 @@ def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, cur
+ 
+ 
+ def refresh(args):
++    # Smoke tests and temporary checkouts must never probe or rewrite the
++    # production Antonina service, even when inherited HOME is real.
++    canonical = (pathlib.Path(__file__).resolve().parent.parent == LIVE_TOWN
++                 and STATE.resolve() == LIVE_STATE
++                 and pathlib.Path(os.environ.get("VICHE_TOWN_ROOT", str(LIVE_TOWN))).resolve() == LIVE_TOWN)
++    if not canonical:
++        fixture = all(os.environ.get(k) for k in (
++            "VICHE_ANTONINA_CONFIG", "VICHE_ANTONINA_COOLDOWNS", "VICHE_OPENCODE_MODELS"))
++        live_config = pathlib.Path.home() / ".config/antonina/config.json"
++        live_cooldowns = pathlib.Path.home() / ".local/state/antonina/model-cooldowns"
++        if (not fixture or CONFIG.resolve() == live_config.resolve()
++                or COOLDOWNS.resolve() == live_cooldowns.resolve()
++                or STATE.resolve() == LIVE_STATE):
++            print("economy: noncanonical refresh skipped before discovery or writes", file=sys.stderr)
++            return 1
+     current = now()
+     ROOT.mkdir(parents=True, exist_ok=True)
+     cfg = read_config()
+@@ -349,7 +382,9 @@ def refresh(args):
+     backup = None
+     if changed and not args.no_apply:
+         backup = apply_order(cfg, final, probes, dropped, current)
+-    report = build_report(final, before, dropped, new_free, ran, changed and not args.no_apply, backup, current, ids)
++    report = build_report(before if args.no_apply else final, before, dropped, new_free, ran, changed and not args.no_apply, backup, current, ids)
++    if args.no_apply:
++        report["proposed_order"] = final
+     atomic_write(ROOT / "report.json", json.dumps(report, sort_keys=True, indent=1) + "\n")
+     print(json.dumps({"changed": report["changed"], "free_available_now": report["free_available_now"],
+                       "funding_risk": report["funding_risk"]}, sort_keys=True))
+diff --git a/government/executive-agenda.md b/government/executive-agenda.md
+index 09e415cc..5fc761a4 100644
+--- a/government/executive-agenda.md
++++ b/government/executive-agenda.md
+@@ -103,8 +103,15 @@ among fronts, resolve shared constraints and dependencies, arrange required
+ verification, and integrate verified findings. Challenge a dead end when
+ evidence changes the allocation decision; delegate the mathematical or
+ technical investigation rather than doing it yourself.
+-Log concise evidence-bearing progress into that mission's issue and records
+-ONLY when material information has changed. Work with versatile research agents:
++Ordinary staffing, focus switches, lease replenishment, support coverage and
++resource allocation are operational decisions, not Git deliverables. Their
++authoritative durable mission state, assignment metadata and existing logs
++already provide the audit trail. Record a concise timestamped reason alongside
++a decision if the reason is not already in those artifacts. Never write a
++dated allocation report, create a delivery branch, or request integration
++solely to repeat those facts. Submit actual code/law changes, verified material
++outcomes and consequential orders through the applicable ordinary procedure.
++Publish material changes only; no duplicate record for state already durable. Work with versatile research agents:
+ give them ownership of a hard question, freedom to investigate and pivot,
+ and an objective acceptance criterion rather than a fixed procedural script.
+ 
+diff --git a/government/executive-cycle.sh b/government/executive-cycle.sh
+index 63bf6852..5a32e0c2 100644
+--- a/government/executive-cycle.sh
++++ b/government/executive-cycle.sh
+@@ -173,6 +173,11 @@ Reconcile actionable allocation gaps and deliver useful handoffs first.
+ Workers own their methods and experiments. Delegate substantive investigations;
+ never sleep or poll worker computations in the Executive session. Make the
+ coordination decisions, then finish the pass without waiting for their effects.
++Do not make a Git delivery or dated report for routine staffing, focus, resource
++allocation or replenishment. Existing mission state, assignment and operational
++logs are the durable record. Record a concise new rationale there when needed.
++Deliver only material outcomes, actual software/law changes and consequential
++orders; no separate integration to attest a routine operation.
+ Do not infer successful mission outcomes from a diagnostic, agent exit, or
+ depleted queue. Check live assignments and pursue new useful work when any
+ Founder's standing objective is still open.
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index b8a533fd..1ce5d3fa 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -56,7 +56,13 @@ specify objectives and inspect the system without seeding worker sessions.
+ Do not infer Executive staffing effectiveness from agents started by an
+ external operator. Require evidence that Executive independently recognizes
+ zero/insufficient useful staffing and replenishes it through Antonina.
+-Record the Executive's decisions and worker assignments durably.
++Record the Executive's decisions and worker assignments durably in existing
++mission state and operational logs. Routine allocation, replenishment and
++focus decisions do not need a new records/research report, Git commit, delivery,
++integration, or review; preserve the evidence and decision reason in the
++mission's existing durable state instead. Only material outcomes, consequential
++orders and actual changes to the software or law require the usual delivery
++process. No duplicate records or artificial approval gates.
+ 
+ For every Executive cycle:
+ - Inspect the exact public rank/score, the #1 and #2 totals, gap, and changes
+diff --git a/tests/economy-models-smoke.sh b/tests/economy-models-smoke.sh
+index 665965fe..2f628e88 100644
+--- a/tests/economy-models-smoke.sh
++++ b/tests/economy-models-smoke.sh
+@@ -20,6 +20,13 @@ MOCK
+ cat > "$d/bin/antonina" <<'MOCK'
+ #!/bin/sh
+ [ "$1 $2 $3" = 'agent model select' ] || exit 9
++if [ -n "${MOCK_LIVE_CONFIG:-}" ]; then
++  [ "$VICHE_ANTONINA_CONFIG" != "$MOCK_LIVE_CONFIG" ] || exit 8
++  cmp "$MOCK_LIVE_CONFIG" "$MOCK_EXPECTED_LIVE" || exit 8
++  if [ "${MOCK_CONCURRENT_EDIT:-0}" = 1 ]; then
++    printf '%s\n' '{"models":[{"model":"openai/gpt-6-luna","variant":"low"}],"concurrent":true}' > "$MOCK_LIVE_CONFIG"
++  fi
++fi
+ [ "${MOCK_ANTONINA_REJECT:-0}" = 0 ] || exit 1
+ jq -r '.models[].model' "$VICHE_ANTONINA_CONFIG"
+ MOCK
+@@ -73,15 +80,15 @@ test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$before"
+ # Refresh: free first (alpha, then probed-OK beta), contributor, Luna, paid LAST.
+ $eco refresh --probe-limit 10 > "$d/refresh.out"
+ jq -e '.changed == true and .funding_risk == "none" and .free_available_now == 2' "$d/refresh.out" >/dev/null
+-test "$(order)" = 'opencode/alpha-free,opencode/beta-free,opencode-go/glm-contributor,openai/gpt-6-luna,openai/gpt-6'
++test "$(order)" = 'opencode/alpha-free,opencode/vanished-free,opencode/beta-free,opencode-go/glm-contributor,openai/gpt-6-luna,openai/gpt-6'
+ jq -e '.keep_me == "yes"' "$VICHE_ANTONINA_CONFIG" >/dev/null                 # unrelated config keys survive
+ jq -e '.models[0].comment == "free"' "$VICHE_ANTONINA_CONFIG" >/dev/null       # existing comments survive
+-jq -e '.models[1].comment | test("Ministry of Economy")' "$VICHE_ANTONINA_CONFIG" >/dev/null
++jq -e '.models[2].comment | test("Ministry of Economy")' "$VICHE_ANTONINA_CONFIG" >/dev/null
+ $eco check
+ ls "$VICHE_ANTONINA_CONFIG".bak-* >/dev/null
+ 
+ # Never auto-added: paid, contributor and Luna models from the catalogue; probe failures; excluded; stale entries dropped.
+-for m in anthropic/claude-x opencode/zeta opencode/eta opencode/theta opencode/gamma-free opencode/delta-free opencode/vanished-free; do
++for m in anthropic/claude-x opencode/zeta opencode/eta opencode/theta opencode/gamma-free opencode/delta-free; do
+   case ",$(order)," in *",$m,"*) echo "unexpected model $m" >&2; exit 1 ;; esac
+ done
+ # Probes ran only for free, non-excluded candidates; none for paid or excluded models.
+@@ -89,7 +96,7 @@ grep -q 'alpha-free' "$d/probes.log"; grep -q 'beta-free' "$d/probes.log"; grep
+ if grep -q 'delta-free\|gpt-6\|claude-x' "$d/probes.log"; then echo 'probed a model it must not' >&2; exit 1; fi
+ r=$d/state/economy/report.json
+ jq -e '.order[0].tier == "free" and .order[-1].tier == "paid" and (.paid_before_free_violations | length) == 0' "$r" >/dev/null
+-jq -e '[.dropped[] | select(.model == "opencode/vanished-free" and .why == "not in catalogue")] | length == 1' "$r" >/dev/null
++jq -e '.free_missing_from_catalogue == ["opencode/vanished-free"]' "$r" >/dev/null
+ jq -e '[.dropped[] | select(.model == "opencode/gamma-free" and (.why | startswith("probe failed")))] | length == 1' "$r" >/dev/null
+ jq -e '[.dropped[] | select(.model == "opencode/delta-free" and (.why | startswith("excluded by policy")))] | length == 1' "$r" >/dev/null
+ 
+@@ -103,7 +110,7 @@ test "$(ls "$VICHE_ANTONINA_CONFIG".bak-* | wc -l)" -eq "$n_bak"
+ # Policy preference reorders within a tier but never across tiers.
+ printf '{"prefer":["opencode/beta-free","openai/gpt-6-luna","openai/gpt-6"],"exclude":[{"model":"opencode/delta-free","reason":"rate limit 5/day","until":9999999999}]}\n' > "$d/state/economy/model-policy.json"
+ VICHE_ECONOMY_NOW=1794837600 $eco refresh | jq -e '.changed == true' >/dev/null
+-test "$(order)" = 'opencode/beta-free,opencode/alpha-free,opencode-go/glm-contributor,openai/gpt-6-luna,openai/gpt-6'
++test "$(order)" = 'opencode/beta-free,opencode/alpha-free,opencode/vanished-free,opencode-go/glm-contributor,openai/gpt-6-luna,openai/gpt-6'
+ $eco check
+ 
+ # Funding risk follows live cooldowns: one free model cooling = elevated, both = high, and the report says when one returns.
+@@ -124,12 +131,18 @@ test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$snapshot"
+ jq -e 'has("error")' "$r" >/dev/null
+ 
+ # Antonina rejecting the new list restores the previous config.
+-printf '{"exclude":[{"model":"opencode/beta-free","reason":"test","until":9999999999}]}\n' > "$d/state/economy/model-policy.json"
+-rc=0; MOCK_ANTONINA_REJECT=1 $eco refresh 2>/dev/null || rc=$?
++printf '{"prefer":["opencode/vanished-free"],"exclude":[{"model":"opencode/beta-free","reason":"test","until":9999999999}]}\n' > "$d/state/economy/model-policy.json"
++cp "$VICHE_ANTONINA_CONFIG" "$d/live-before.json"
++rc=0; MOCK_LIVE_CONFIG="$VICHE_ANTONINA_CONFIG" MOCK_EXPECTED_LIVE="$d/live-before.json" MOCK_ANTONINA_REJECT=1 $eco refresh 2>/dev/null || rc=$?
+ test "$rc" -ne 0
+ test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$snapshot"
+ 
+-# Without any usable model the Ministry refuses to write an empty list.
++# Validation is outside live config; a concurrent authorized change is not lost.
++rc=0; MOCK_LIVE_CONFIG="$VICHE_ANTONINA_CONFIG" MOCK_EXPECTED_LIVE="$d/live-before.json" MOCK_CONCURRENT_EDIT=1 $eco refresh 2>/dev/null || rc=$?
++test "$rc" -ne 0
++jq -e '.concurrent == true and (.models|length)==1' "$VICHE_ANTONINA_CONFIG" >/dev/null
++
++# Without any catalogued model the existing authorized model is still preserved.
+ cat > "$d/catalogue2.txt" <<'EOF'
+ opencode/gamma-free
+ openai/gpt-7
+@@ -145,8 +158,8 @@ EOF
+ printf '{"models":[{"model":"opencode/gone-free"}]}\n' > "$VICHE_ANTONINA_CONFIG"
+ snapshot=$(cat "$VICHE_ANTONINA_CONFIG")
+ rc=0; VICHE_OPENCODE_MODELS="$d/catalogue2.txt" $eco refresh 2>/dev/null || rc=$?
+-test "$rc" -ne 0
+-test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$snapshot"
++test "$rc" -eq 0
++test "$(order)" = opencode/gone-free
+ 
+ # A config whose models are bare strings is understood.
+ printf '{"models":["openai/gpt-6-luna","opencode/alpha-free","openai/gpt-6"]}\n' > "$VICHE_ANTONINA_CONFIG"
+@@ -159,7 +172,7 @@ test "$(jq -r '[.models[] | (.model // .)] | join(",")' "$VICHE_ANTONINA_CONFIG"
+ grep -vE '^(openai/|opencode-go/)' "$d/catalogue.txt" > "$d/partial.txt"
+ printf '%s\n' opencode/a opencode/b opencode/c >> "$d/partial.txt"
+ VICHE_OPENCODE_MODELS="$d/partial.txt" VICHE_ECONOMY_MAX_MODELS=3 $eco refresh --probe-limit 0 >/dev/null
+-test "$(order)" = 'opencode/alpha-free,openai/gpt-6-luna,openai/gpt-6'
++test "$(order)" = 'opencode/alpha-free,opencode/beta-free,opencode/delta-free,openai/gpt-6-luna,openai/gpt-6'
+ jq -e '.fallback_eligible_now == 0 and (.fallback_missing_from_catalogue|length)==2' "$r" >/dev/null
+ # When authenticated catalogue returns, eligibility recovers without manual re-add.
+ $eco refresh --probe-limit 0 >/dev/null
+@@ -182,4 +195,9 @@ jq 'del(.models[0].variant)' "$VICHE_ANTONINA_CONFIG" > "$d/without-low"
+ mv "$d/without-low" "$VICHE_ANTONINA_CONFIG"
+ $eco refresh --probe-limit 0 | jq -e '.changed == true' >/dev/null
+ jq -e 'all(.models[]; .variant == "low")' "$VICHE_ANTONINA_CONFIG" >/dev/null
++# A copied checkout with inherited HOME and no fixture overrides cannot
++# execute discovery or modify any config.
++before=$(cat "$VICHE_ANTONINA_CONFIG")
++(unset VICHE_OPENCODE_MODELS; $eco refresh) && exit 1
++test "$(cat "$VICHE_ANTONINA_CONFIG")" = "$before"
+ echo 'economy models smoke passed'

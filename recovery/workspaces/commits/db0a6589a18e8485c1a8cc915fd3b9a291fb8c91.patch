@@ -1,0 +1,128 @@
+commit db0a6589a18e8485c1a8cc915fd3b9a291fb8c91
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 07:30:44 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 07:30:44 2026 +0000
+
+    Remove wall-clock deadlines from managed Lean compilation
+
+diff --git a/missions/pnp/compile.py b/missions/pnp/compile.py
+index 908f2126..d414f30c 100644
+--- a/missions/pnp/compile.py
++++ b/missions/pnp/compile.py
+@@ -5,7 +5,6 @@ from pathlib import Path
+ import signal
+ import subprocess
+ import sys
+-import time
+ 
+ from . import build_control as control, watchdog, state, assignment, evidence
+ 
+@@ -23,7 +22,7 @@ def command(args):
+     return [os.path.join(os.path.expanduser("~/.elan/bin"), tool)] + args[1:]
+ 
+ 
+-def run(args, cwd=None, heavy=True, publication=False, timeout=600,
++def run(args, cwd=None, heavy=True, publication=False,
+         output=None, inherited=()):
+     argv = command(args)
+     # Avoid inheriting a researcher's custom path/options in publication.
+@@ -33,14 +32,14 @@ def run(args, cwd=None, heavy=True, publication=False, timeout=600,
+     env.update(PNP_MANAGED_COMPILER="1", LEAN_NUM_THREADS="1", LAKE_ARTIFACT_CACHE="true",
+                LAKE_RESTORE_ARTIFACTS="true",
+                LAKE_CACHE_DIR=os.path.expanduser("~/.pequalnp/lake-cache"))
+-    wait = timeout if publication else min(15, timeout)
++    # Admission is bounded; once admitted, a useful build has no wall-clock deadline.
++    wait = 600 if publication else 15
+     with control.slot(timeout=wait, heavy=heavy, publication=publication) as fds:
+         initial = control.headroom()
+         oom = control.oom_count()
+         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=output,
+                                 stderr=output, start_new_session=True,
+                                 pass_fds=inherited + fds)
+-        deadline = time.monotonic() + timeout
+         try:
+             while True:
+                 if control.obsolete():
+@@ -49,11 +48,8 @@ def run(args, cwd=None, heavy=True, publication=False, timeout=600,
+                 if reason:
+                     required = (initial or control.HEAVY_MIN + control.RESERVE) + control.GIB // 2
+                     raise control.MemoryDeferred(reason, required)
+-                remaining = deadline - time.monotonic()
+-                if remaining <= 0:
+-                    raise control.BuildDeferred("Lean compilation timed out")
+                 try:
+-                    code = proc.wait(timeout=min(0.25, remaining))
++                    code = proc.wait(timeout=0.25)
+                 except subprocess.TimeoutExpired:
+                     continue
+                 after = control.oom_count()
+@@ -77,7 +73,6 @@ def main(argv=None):
+     p.add_argument("--light", action="store_true")
+     p.add_argument("--gap")
+     p.add_argument("--lease")
+-    p.add_argument("--timeout", type=int, default=600)
+     p.add_argument("args", nargs=argparse.REMAINDER)
+     ns = p.parse_args(argv)
+     local = assignment.workspace(Path.cwd())
+@@ -102,7 +97,7 @@ def main(argv=None):
+         before = evidence.snapshot(rec, Path.cwd(), args) if rec and not ns.light else None
+         if before:
+             os.environ["PNP_EVIDENCE_BUILD"] = "1"
+-        code = run(args, heavy=not ns.light, timeout=max(1, min(ns.timeout, 1800)))
++        code = run(args, heavy=not ns.light)
+         if code == 0 and before:
+             try:
+                 evidence.record(rec, before, evidence.snapshot(rec, Path.cwd(), args))
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index 0f0c676f..77e90a48 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -243,3 +243,13 @@ For small existential monotone edge-function circuits use the same command with
+ expressions, independently checks every Boolean input, enforces the gate
+ budget, and emits a self-contained candidate. A failed search is not evidence
+ of nonexistence. No generator claims a lease or publishes a proof.
++
++## Compilation duration
++
++Managed Lean compilation has no elapsed-time deadline. A build may continue
++as long as its assignment or exact published revision remains relevant and
++memory is safe. The short resource-admission wait is not a compilation
++deadline. Do not wrap useful builds in wall-clock timeout commands or use
++the removed compiler timeout option. For long compilations, use a managed
++detached process with a durable log rather than blocking an agent tool call.
++Cancel obsolete work, not merely old work.
+diff --git a/tests/pnp-real-smoke.py b/tests/pnp-real-smoke.py
+index f2d30920..7a6125a9 100644
+--- a/tests/pnp-real-smoke.py
++++ b/tests/pnp-real-smoke.py
+@@ -232,7 +232,7 @@ class FullPathSmoke(unittest.TestCase):
+             return proc
+         with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=10 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]), patch.object(build_control, "memory_reason", return_value="simulated pressure"), patch.object(compiler, "command", return_value=[sys.executable, "-c", "import time; time.sleep(30)"]), patch.object(compiler.subprocess, "Popen", side_effect=spawn):
+             with self.assertRaises(build_control.MemoryDeferred):
+-                compiler.run(["lean", "scratch.lean"], timeout=3)
++                compiler.run(["lean", "scratch.lean"])
+             self.assertEqual(len(children), 1)
+             self.assertIsNotNone(children[0].poll())
+             self.assertFalse(build_control.busy())
+@@ -240,7 +240,19 @@ class FullPathSmoke(unittest.TestCase):
+     def test_compiler_supervisor_success(self):
+         from missions.pnp import compile as compiler
+         with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=10 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]), patch.object(compiler, "command", return_value=[sys.executable, "-c", "pass"]):
+-            self.assertEqual(compiler.run(["lean", "scratch.lean"], timeout=3), 0)
++            self.assertEqual(compiler.run(["lean", "scratch.lean"]), 0)
++            self.assertFalse(build_control.busy())
++
++    def test_compilation_has_no_elapsed_time_limit(self):
++        from missions.pnp import compile as compiler
++        from unittest.mock import MagicMock
++        proc = MagicMock()
++        proc.pid = 123456
++        proc.wait.side_effect = [subprocess.TimeoutExpired("lean", 0.25)] * 2500 + [0]
++        with tempfile.TemporaryDirectory() as tmp, patch.object(config, "CACHE_DIR", tmp), patch.object(build_control, "headroom", return_value=10 * build_control.GIB), patch.object(build_control, "legacy_compilers", return_value=[]), patch.object(build_control, "memory_reason", return_value=None), patch.object(compiler.subprocess, "Popen", return_value=proc):
++            self.assertEqual(compiler.run(["lean", "scratch.lean"]), 0)
++            self.assertEqual(proc.wait.call_count, 2501)
++            self.assertTrue(all(call.kwargs == {"timeout": 0.25} for call in proc.wait.call_args_list))
+             self.assertFalse(build_control.busy())
+ 
+     def test_resource_blocked_waits_for_more_headroom(self):

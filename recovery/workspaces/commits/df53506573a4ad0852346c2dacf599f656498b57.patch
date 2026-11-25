@@ -1,0 +1,199 @@
+commit df53506573a4ad0852346c2dacf599f656498b57
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 17:21:13 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 17:21:13 2026 +0000
+
+    Preserve authorized model fallbacks and query the authenticated service
+
+diff --git a/government/MINISTRY-OF-ECONOMY.md b/government/MINISTRY-OF-ECONOMY.md
+index dc895382..69451b69 100644
+--- a/government/MINISTRY-OF-ECONOMY.md
++++ b/government/MINISTRY-OF-ECONOMY.md
+@@ -17,7 +17,7 @@ Antonina tries the models in `~/.config/antonina/config.json` in order. That ord
+ 3. **Paid models after that**: kept as a fallback, never auto-added, never ahead of a free model.
+ 4. **Luna models last of all** (`openai/gpt-6-luna` and every other `luna` id): paid, and always at the very bottom, after every other paid model. Luna is a last resort, never a default.
+ 
+-`government/economy-models.py` enforces this deterministically each refresh: whatever order anyone proposes, a paid or Luna model is never placed above a free one, a model missing from the live catalogue is dropped, and an unprobed free model is not added. You do not hand-edit the config; you steer through `state/economy/model-policy.json` and the script writes it.
++`government/economy-models.py` enforces this deterministically each refresh: whatever order anyone proposes, a paid or Luna model is never placed above a free one, a missing free model may be dropped, but an explicitly configured contributor, paid or Luna fallback is never deleted by a catalogue omission, free-tier policy or list-length cap, and an unprobed free model is not added. Catalogue discovery and free probes use the same authenticated OpenCode service as Antonina. An absent provider is not evidence that authorized fallback funding has been revoked. Only the Founder removes configured nonfree models. You do not hand-edit the config; you steer through `state/economy/model-policy.json` and the script writes it.
+ 
+ **What you do, with judgment the script cannot supply:**
+ 
+diff --git a/government/economy-models.py b/government/economy-models.py
+index 5d5e23e6..591d2389 100644
+--- a/government/economy-models.py
++++ b/government/economy-models.py
+@@ -108,12 +108,23 @@ def entry_model(entry):
+     return entry if isinstance(entry, str) else entry.get("model", "")
+ 
+ 
++def service_env():
++    """Use Antonina's authenticated v2 service, never a second CLI server."""
++    env = dict(os.environ)
++    root = COOLDOWNS.parent / "opencode-service"
++    for variable, name in (("XDG_CONFIG_HOME", "config"),
++                           ("XDG_DATA_HOME", "data"),
++                           ("XDG_STATE_HOME", "state")):
++        env[variable] = str(root / name)
++    return env
++
++
+ def fetch_catalogue():
+     override = os.environ.get("VICHE_OPENCODE_MODELS")
+     if override:
+         text = pathlib.Path(override).read_text()
+     else:
+-        done = subprocess.run(["opencode", "models"], capture_output=True, text=True, timeout=90)
++        done = subprocess.run(["opencode", "models"], capture_output=True, text=True, timeout=90, env=service_env())
+         if done.returncode != 0:
+             raise RuntimeError("opencode models failed: " + done.stderr.strip()[:200])
+         text = done.stdout
+@@ -144,7 +155,7 @@ def probe(model):
+     prompt = "Reply with the single word OK and nothing else."
+     try:
+         done = subprocess.run(["opencode", "run", "-m", model, "--format", "json", prompt],
+-                              capture_output=True, text=True, timeout=PROBE_TIMEOUT, cwd="/tmp")
++                              capture_output=True, text=True, timeout=PROBE_TIMEOUT, cwd="/tmp", env=service_env())
+     except subprocess.TimeoutExpired:
+         return False, "timeout after %ds" % PROBE_TIMEOUT
+     out = done.stdout
+@@ -202,6 +213,12 @@ def plan_order(cfg, catalogue_ids, probes, pol, current):
+             return
+         seen.add(model)
+         tier = tier_of(model)
++        # Catalogue omissions and temporary free-tier policy must never
++        # revoke an explicitly configured fallback. Only the operator can
++        # remove that authorization. Runtime cooldowns still apply.
++        if grandfathered and tier != 0:
++            wanted[tier].append(model)
++            return
+         if model not in in_catalogue:
+             dropped.append((model, "not in catalogue"))
+             return
+@@ -231,10 +248,9 @@ def plan_order(cfg, catalogue_ids, probes, pol, current):
+         c = configured.index(model) if model in configured else len(configured)
+         return (p, c, model)
+ 
+-    final = []
+-    for tier in range(4):
+-        final.extend(sorted(wanted[tier], key=rank))
+-    final = final[:MAX_MODELS]
++    fallback = [m for tier in (1, 2, 3) for m in sorted(wanted[tier], key=rank)]
++    # Limit discovered free models, never evict an authorized fallback.
++    final = sorted(wanted[0], key=rank)[:max(0, MAX_MODELS - len(fallback))] + fallback
+     if not final:
+         raise SystemExit("plan would leave Antonina with no models; refusing")
+     return configured, final, dropped
+@@ -284,16 +300,22 @@ def cooldown_state(models, current):
+     return out
+ 
+ 
+-def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, current):
++def build_report(final, cfg_before, dropped, new_free, ran, changed, backup, current, catalogue_ids):
+     cooling = cooldown_state(set(final), current)
+     free = [m for m in final if tier_of(m) == 0]
+     free_available = [m for m in free if m not in cooling]
++    fallback_eligible = [m for m in final if tier_of(m) != 0 and m in catalogue_ids and m not in cooling]
++    missing_fallback = [m for m in final if tier_of(m) != 0 and m not in catalogue_ids]
+     returns = sorted(v["until"] for m, v in cooling.items() if m in free)
+     return {
+         "at": datetime.datetime.fromtimestamp(current, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "order": [{"model": m, "tier": TIER_NAMES[tier_of(m)]} for m in final],
+         "free_models": len(free),
+         "free_available_now": len(free_available),
++        "fallback_eligible_now": len(fallback_eligible),
++        "fallback_eligible_models": fallback_eligible,
++        "fallback_missing_from_catalogue": missing_fallback,
++        "model_eligibility_note": "Catalogue presence and no known cooldown are not proof of a successful invocation.",
+         "next_free_returns_at": returns[0] if (returns and not free_available) else None,
+         "cooling": cooling,
+         "changed": changed,
+@@ -327,7 +349,7 @@ def refresh(args):
+     backup = None
+     if changed and not args.no_apply:
+         backup = apply_order(cfg, final, probes, dropped, current)
+-    report = build_report(final, before, dropped, new_free, ran, changed and not args.no_apply, backup, current)
++    report = build_report(final, before, dropped, new_free, ran, changed and not args.no_apply, backup, current, ids)
+     atomic_write(ROOT / "report.json", json.dumps(report, sort_keys=True, indent=1) + "\n")
+     print(json.dumps({"changed": report["changed"], "free_available_now": report["free_available_now"],
+                       "funding_risk": report["funding_risk"]}, sort_keys=True))
+diff --git a/government/economy-resources.py b/government/economy-resources.py
+index 751250e7..2c9e6042 100644
+--- a/government/economy-resources.py
++++ b/government/economy-resources.py
+@@ -267,7 +267,8 @@ def capacity_assessment(resources, counter, previous, current, pol):
+     if resources.get("load", {}).get("status") in ("short", "critical"):
+         reasons.append("load pressure")
+     free = funding.get("free_available_now")
+-    if not isinstance(free, int) or free < 1 or funding.get("status") == "critical":
++    fallback = funding.get("fallback_eligible_now")
++    if not isinstance(free, int) or free < 1:
+         reasons.append("free model availability")
+     if reasons:
+         status = "constrained"
+@@ -285,8 +286,10 @@ def capacity_assessment(resources, counter, previous, current, pol):
+     memory_state = ("unknown" if spare_mem is None else
+                     "pressure" if new_oom or mem.get("status") != "ok" else
+                     "spare" if spare_mem >= 2.0 else "limited")
+-    funding_state = ("unknown" if not isinstance(free, int) else
+-                     "unavailable" if free < 1 else "available")
++    funding_state = ("available" if isinstance(free, int) and free > 0 else
++                     "fallback_eligible" if isinstance(fallback, int) and fallback > 0 else
++                     "unavailable" if isinstance(free, int) and free == 0 and fallback == 0 else
++                     "unknown")
+     stalls = pressure()
+     dimensions = {"cpu": cpu_state, "memory": memory_state,
+                   "disk": disk_mode, "model_funding": funding_state}
+@@ -445,7 +448,8 @@ def evaluate(pol, fs, mem, load_avg, funding, rows, current):
+     risk = funding.get("funding_risk") if isinstance(funding, dict) else None
+     resources["model_funding"] = {"status": {"none": "ok", "elevated": "watch", "high": "critical"}.get(risk, "ok"),
+                                   "funding_risk": risk or "unknown",
+-                                  "free_available_now": (funding or {}).get("free_available_now")}
++                                  "free_available_now": (funding or {}).get("free_available_now"),
++                                  "fallback_eligible_now": (funding or {}).get("fallback_eligible_now")}
+     return resources
+ 
+ 
+@@ -516,7 +520,10 @@ def needs_founder(resources, taken, previous):
+             lines.append("NEEDS-FOUNDER: memory headroom is %.2f GiB (critical, Act 13); more memory or fewer concurrent seats."
+                          % r["headroom_gib"])
+         elif key == "model_funding" and r["status"] == "critical":
+-            lines.append("NEEDS-FOUNDER: no free model is available now; the Town would fall back to paid models.")
++            if (r.get("fallback_eligible_now") or 0) > 0:
++                lines.append("NEEDS-FOUNDER: no free model is available now; previously authorized fallback models are eligible (invocation not verified).")
++            else:
++                lines.append("NEEDS-FOUNDER: no free model is available now and no eligible fallback is confirmed.")
+     return lines
+ 
+ 
+diff --git a/tests/economy-models-smoke.sh b/tests/economy-models-smoke.sh
+index 0fffb1de..354c7753 100644
+--- a/tests/economy-models-smoke.sh
++++ b/tests/economy-models-smoke.sh
+@@ -154,4 +154,26 @@ printf '{}\n' > "$d/state/economy/model-policy.json"
+ VICHE_ECONOMY_NOW=1794837700 $eco refresh >/dev/null
+ test "$(jq -r '[.models[] | (.model // .)] | join(",")' "$VICHE_ANTONINA_CONFIG")" = 'opencode/alpha-free,opencode/beta-free,opencode/delta-free,openai/gpt-6,openai/gpt-6-luna'   # delta is free again once the exclusion is lifted
+ 
++# A partial or unauthenticated catalogue must never erase authorized fallbacks.
++# Even a small configured list cap must reserve their slots.
++grep -vE '^(openai/|opencode-go/)' "$d/catalogue.txt" > "$d/partial.txt"
++printf '%s\n' opencode/a opencode/b opencode/c >> "$d/partial.txt"
++VICHE_OPENCODE_MODELS="$d/partial.txt" VICHE_ECONOMY_MAX_MODELS=3 $eco refresh --probe-limit 0 >/dev/null
++test "$(order)" = 'opencode/alpha-free,openai/gpt-6,openai/gpt-6-luna'
++jq -e '.fallback_eligible_now == 0 and (.fallback_missing_from_catalogue|length)==2' "$r" >/dev/null
++# When authenticated catalogue returns, eligibility recovers without manual re-add.
++$eco refresh --probe-limit 0 >/dev/null
++jq -e '.fallback_eligible_now == 2 and (.fallback_missing_from_catalogue|length)==0' "$r" >/dev/null
++test "$(order)" = 'opencode/alpha-free,opencode/beta-free,opencode/delta-free,openai/gpt-6,openai/gpt-6-luna'
++# Service discovery and free probes share Antonina's isolated XDG roots.
++python3 - "$repo" <<'PYTEST'
++import importlib.util, pathlib, sys
++spec=importlib.util.spec_from_file_location("eco", pathlib.Path(sys.argv[1])/"government/economy-models.py")
++m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
++e=m.service_env()
++root=m.COOLDOWNS.parent/"opencode-service"
++assert e["XDG_CONFIG_HOME"]==str(root/"config")
++assert e["XDG_DATA_HOME"]==str(root/"data")
++assert e["XDG_STATE_HOME"]==str(root/"state")
++PYTEST
+ echo 'economy models smoke passed'

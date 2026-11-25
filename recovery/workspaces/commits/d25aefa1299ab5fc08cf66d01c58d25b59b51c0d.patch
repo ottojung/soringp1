@@ -1,0 +1,1678 @@
+commit d25aefa1299ab5fc08cf66d01c58d25b59b51c0d
+Author:     c1a00001 (Clerk) <clerk@viche.local>
+AuthorDate: Tue Nov 24 23:52:20 2026 +0000
+Commit:     c1a00001 (Clerk) <clerk@viche.local>
+CommitDate: Tue Nov 24 23:52:20 2026 +0000
+
+    Inject role playbooks at Executive dispatch; make checked research asynchronous and reusable
+
+diff --git a/missions/pnp/continuity.py b/missions/pnp/continuity.py
+index 9f0738bb..36ae2e94 100644
+--- a/missions/pnp/continuity.py
++++ b/missions/pnp/continuity.py
+@@ -12,6 +12,8 @@ SUPPORT = {
+     "methods": "Independently attack the focused claim. Derive a concrete sublemma, construction, refutation or identify a precise false premise. Use full-function checks; never duplicate an existing search.",
+     "flow": "Investigate actual idle time, duplicated computation, correction and publication delay. Deliver concrete improvements that increase checked contributions; do not monitor tool calls.",
+     "portfolio": "Use portfolio inspect and compare all live leases using their researchers' findings and actual artifacts. Make the evidence-based switch decision directly with portfolio switch if justified.",
++    "method": "Independent mathematical method research: develop graph-circuit normalization, read-once/ownership arguments and dense incidence bounds across families. Work on a general lemma with exact hypotheses, prove it on a cached public base, test at least two distinct applications, preserve failed generalizations. Continue the durable backlog in this workspace across lease changes.",
++    "tool": "Independent tool research: extend the existing symbolic star-cover and Lean certificate generator, verified proof adaptation and benchmark holdouts. Produce runnable code and checked output, measure time and success. Continue the durable backlog in this workspace across lease changes.",
+     "lease-evaluation": "Use portfolio inspect. Investigate actual mathematical blockers and alternatives. Decide justified releases through portfolio release; never release because of vacancies, age alone or temporary compiler contention.",
+ }
+ FRONTS = (
+@@ -26,6 +28,12 @@ def live():
+ 
+ 
+ def signature(role, records, selected):
++    if role in support.FAMILY_ROLES:
++        # These standing fronts survive lease changes and continue on their
++        # own durable work. A bounded cadence allows a new useful pass even
++        # when no lease is available. Do not hash their own output.
++        from .research import playbook
++        return hashlib.sha256((role+"|"+playbook.guide(role)+"|"+str(int(time.time())//600)).encode()).hexdigest()
+     scope = records if role in support.DECISION_ROLES else (
+         [selected] if selected and support.active(selected) else records)
+     # Only changes in assignments or primary mathematical evidence warrant a
+@@ -35,8 +43,12 @@ def signature(role, records, selected):
+     return hashlib.sha256(json.dumps(sorted(data)).encode()).hexdigest()
+ 
+ 
++def support_path(role):
++    return Path(config.STATE_ROOT,"swarm","independent" if role in support.FAMILY_ROLES else "standing-support",role)
++
++
+ def support_pass(role, records, selected, agents):
+-    path = Path(config.STATE_ROOT, "swarm", "standing-support", role)
++    path = support_path(role)
+     path.mkdir(parents=True, exist_ok=True)
+     receipt = path / "dispatch.json"
+     sig = signature(role, records, selected)
+@@ -66,13 +78,17 @@ def support_pass(role, records, selected, agents):
+         {"signature": sig, "agent": aid, "at": time.time()}) + "\n")
+     prompt = (
+         "You are performing a bounded Executive-delegated research support pass. "
+-        "Read /var/lib/lubko/wd/viche/missions/pnp/mandate.md. "
+         "Use PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.support targets "
+         "and python3 -m missions.pnp.portfolio inspect. "
+         "Deliver substantive evidence directly via support advise (or portfolio decisions). "
+         "Do not launch/steer agents, acquire leases, edit other workspaces, or open PRs. "
+         "Finish when no further useful distinct work remains. "
+         "Do not repeat the previous pass without a material reason.\n" + SUPPORT[role])
++    if role in support.FAMILY_ROLES:
++        prompt=("You are an independent, persistent mathematical-family research front. "
++                "Read your own durable backlog, choose a concrete next result and deliver usable artifacts. "
++                "No lease acquisition, publication, or agent launches. Do not work on another worker's claimed node. "
++                "Do not repeat a failed approach without new evidence. " + SUPPORT[role])
+     answer = json.loads(staff.antonina("run", "--id", aid, "--cwd", str(path),
+                                      "--prompt", prompt, "--detach", "--json"))
+     if answer.get("state") != "running":
+@@ -83,16 +99,15 @@ def support_pass(role, records, selected, agents):
+ 
+ 
+ def required_support(records):
+-    return (list(support.ROLES) + ["lease-evaluation"] +
+-            (["portfolio"] if len(records) > 1 else [])) if records else []
++    active=(list(support.ROLES)+["lease-evaluation"]+(["portfolio"] if len(records)>1 else [])) if records else []
++    return active+list(support.FAMILY_ROLES)
+ 
+ 
+ def completed_roles(records, selected):
+     done = set()
+     for role in required_support(records):
+         try:
+-            receipt = json.loads(Path(config.STATE_ROOT, "swarm", "standing-support",
+-                                      role, "dispatch.json").read_text())
++            receipt = json.loads((support_path(role)/"dispatch.json").read_text())
+             if receipt.get("completed") and receipt.get("signature") == signature(role, records, selected):
+                 done.add(role)
+         except (OSError, ValueError, AttributeError):
+@@ -113,8 +128,31 @@ def focus_plans(selected, agents):
+     if focus.correction(selected):
+         return [] if labels else [("correction", "Repair exact published source using checker diagnostics.")]
+     has_integrator = any("integrat" in label.lower() for label in labels)
+-    has_alternative = any("integrat" not in label.lower() for label in labels)
+-    return [p for p in FRONTS if not (has_integrator if p[0]=="integrator" else has_alternative)]
++    has_alternative = any("integrat" not in label.lower() and not label.startswith("ob-") for label in labels)
++    plans=[p for p in FRONTS if not (has_integrator if p[0]=="integrator" else has_alternative)]
++    try:
++        from .research import knowledge, obligations
++        from contextlib import closing
++        if not (Path(config.STATE_ROOT)/"research/knowledge.sqlite").exists():return plans
++        with closing(knowledge.db()) as c:
++            scope=selected["gap_id"]+" / "
++            nodes=[n for n in obligations.ready(c) if n["status"]=="ready"
++                   and knowledge.belongs(c,n["id"],scope)]
++            existing={l for l in labels if l.startswith("ob-")}
++            # At most two additional complementary obligations, independent of
++            # the alternative approach. No duplicate assignment of the same ID.
++            for n in nodes:
++                label="ob-"+n["id"]
++                if label in existing:continue
++                if any(x["attempt"]==support.attempt(selected) and x["worker"] in labels for x in n["assignments"]):continue
++                if len(existing)>=2:break
++                plans.append((label,"Solve exact proof obligation "+n["id"]+
++                    ". Run pnp-research obligations show "+n["id"]+
++                    "; supply a complete Lean proof body via obligations solve "+n["id"]+
++                    " BODY --async; collect its check. Preserve precise blockers and smaller obligations."))
++                existing.add(label)
++    except (OSError,ValueError,KeyError,AttributeError):pass
++    return plans
+ 
+ 
+ def already_covered(records, selected, observed):
+@@ -139,8 +177,6 @@ def already_covered(records, selected, observed):
+ def execute():
+     records = live()
+     selected = focus.current()
+-    if not records and not selected:
+-        return {"status": "no research"}
+     observed = status.workers()
+     if observed["coverage"] != "complete":
+         return {"status": "worker coverage unknown"}
+diff --git a/missions/pnp/research/adoption.py b/missions/pnp/research/adoption.py
+new file mode 100644
+index 00000000..42b483a3
+--- /dev/null
++++ b/missions/pnp/research/adoption.py
+@@ -0,0 +1,117 @@
++"""Measure prompt delivery and actual agent tool use without collecting proof text."""
++import argparse
++from contextlib import closing
++import json
++import os
++from pathlib import Path
++import sqlite3
++import time
++import uuid
++
++from .. import config, assignment
++
++def db():
++    p=Path(config.STATE_ROOT)/"research"
++    p.mkdir(parents=True,exist_ok=True,mode=0o700)
++    c=sqlite3.connect(p/"adoption.sqlite",timeout=1)
++    c.row_factory=sqlite3.Row
++    c.executescript("""
++    CREATE TABLE IF NOT EXISTS dispatch(
++      id TEXT PRIMARY KEY, agent TEXT, cwd TEXT, role TEXT, prompt_hash TEXT,
++      started REAL, confirmed INTEGER DEFAULT 0
++    );
++    CREATE INDEX IF NOT EXISTS dispatch_agent ON dispatch(agent,started);
++    CREATE TABLE IF NOT EXISTS use_event(
++      id TEXT PRIMARY KEY, dispatch TEXT, agent TEXT, invocation TEXT,
++      role TEXT, command TEXT, started REAL, elapsed REAL, exit INTEGER
++    );
++    CREATE INDEX IF NOT EXISTS use_dispatch ON use_event(dispatch,started);
++    """)
++    return c
++
++def planned(agent,cwd,role,prompt):
++    """Before invoking Antonina; evidence does not gate dispatch."""
++    import hashlib
++    did=uuid.uuid4().hex
++    try:
++        with closing(db()) as c,c:
++            c.execute("INSERT INTO dispatch VALUES(?,?,?,?,?,?,0)",
++                      (did,agent,str(Path(cwd).resolve()),role,
++                       hashlib.sha256(prompt.encode()).hexdigest(),time.time()))
++        return did
++    except (OSError,sqlite3.Error):return None
++
++def confirmed(did):
++    if not did:return
++    try:
++        with closing(db()) as c,c:c.execute("UPDATE dispatch SET confirmed=1 WHERE id=?",(did,))
++    except (OSError,sqlite3.Error):pass
++
++def lookup(c,agent,cwd,at):
++    return c.execute("SELECT * FROM dispatch WHERE agent=? AND started<=? ORDER BY started DESC LIMIT 1",
++                     (agent,at)).fetchone()
++
++def current_role():
++    agent=os.environ.get("ANTONINA_AGENT_ID")
++    if not agent:return None
++    try:
++        with closing(db()) as c:
++            row=lookup(c,agent,Path.cwd(),time.time())
++            return row["role"] if row else None
++    except (OSError,sqlite3.Error):return None
++
++def record(command,started,code):
++    agent=os.environ.get("ANTONINA_AGENT_ID")
++    # Operator smoke tests are not agent adoption. No command args, source,
++    # credentials or prompt content are stored.
++    if not agent:return
++    try:
++        with closing(db()) as c,c:
++            row=lookup(c,agent,Path.cwd(),started)
++            c.execute("INSERT INTO use_event VALUES(?,?,?,?,?,?,?,?,?)",
++              (uuid.uuid4().hex,row["id"] if row else None,agent,
++               os.environ.get("ANTONINA_INVOCATION_ID"),row["role"] if row else None,
++               command,started,max(0,time.time()-started),code))
++    except (OSError,sqlite3.Error):pass
++
++def command_name(argv):
++    if len(argv)<2:return "help"
++    group=argv[1]
++    if "--help" in argv or "-h" in argv:return group+" help"
++    if group in ("knowledge","obligations"):
++        return group+" "+(argv[2] if len(argv)>2 else "help")
++    return group if group in ("start","guide","star","yield","adoption","dispatch","certificate") else "unknown"
++
++def meaningful(command):
++    return command not in {"start","guide","help","adoption","dispatch","knowledge stats"} and not command.endswith(" help")
++
++def report(hours=24):
++    now=time.time()
++    with closing(db()) as c:
++        launches=[dict(r) for r in c.execute("SELECT * FROM dispatch WHERE confirmed=1 AND started>=? ORDER BY started DESC",(now-hours*3600,))]
++        uses=[dict(r) for r in c.execute("SELECT * FROM use_event WHERE started>=?",(now-hours*3600,))]
++    by={}
++    for d in launches:
++        events=[u for u in uses if u["dispatch"]==d["id"]]
++        actual=[u for u in events if meaningful(u["command"])]
++        d["discovered"]=any(u["command"]=="start" for u in events)
++        d["used"]=bool(actual)
++        d["successful_use"]=any(u["exit"]==0 for u in actual)
++        d["first_use_seconds"]=round(min(u["started"] for u in actual)-d["started"],2) if actual else None
++        d["commands"]=sorted(set(u["command"] for u in events))
++        role=by.setdefault(d["role"],{"launches":0,"discovered":0,"used":0,"successful_use":0})
++        role["launches"]+=1
++        for key in ("discovered","used","successful_use"):role[key]+=int(d[key])
++        del d["cwd"]
++    commands={}
++    for u in uses:
++        row=commands.setdefault(u["command"],{"calls":0,"successful":0})
++        row["calls"]+=1;row["successful"]+=int(u["exit"]==0)
++    return {"hours":hours,"roles":by,"commands":commands,"launches":launches[:40],
++            "unmatched_agent_calls":sum(u["dispatch"] is None for u in uses),
++            "note":"Agent environment attribution; successful command is not a proof or credited contribution."}
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__);p.add_argument("--hours",type=float,default=24)
++    a=p.parse_args();print(json.dumps(report(a.hours),indent=2));return 0
++if __name__=="__main__":raise SystemExit(main())
+diff --git a/missions/pnp/research/async_check.py b/missions/pnp/research/async_check.py
+new file mode 100644
+index 00000000..92d48b17
+--- /dev/null
++++ b/missions/pnp/research/async_check.py
+@@ -0,0 +1,190 @@
++"""Durable, asynchronous exact-graph Lean checks; collect without rebuilding."""
++from contextlib import closing
++import base64
++import hashlib
++import json
++import os
++from pathlib import Path
++import re
++import subprocess
++import tempfile
++import time
++
++from . import knowledge as k
++from .. import support
++
++RELAY = str(Path.home()/".local/bin/marceline-request")
++ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
++
++def table(c):
++    c.execute("""CREATE TABLE IF NOT EXISTS pending_check(
++        id TEXT PRIMARY KEY, node TEXT REFERENCES object(id), base TEXT,
++        body TEXT, source TEXT, identity TEXT, request TEXT, at REAL,
++        state TEXT, result TEXT
++    )""")
++    c.commit()
++
++def identity(base,toolchain,attempt,source,wall=600,rss=8192):
++    raw=source.encode("utf-8")
++    if not raw or len(raw)>512*1024:
++        raise ValueError("proof closure empty or exceeds 512 KiB")
++    if not 1<=wall<=1200 or not 256<=rss<=16384:
++        raise ValueError("remote resource bounds invalid")
++    job={"version":1,"mode":"scratch","base":base,"toolchain":toolchain,
++         "attempt":attempt,"wall_seconds":wall,"rss_mib":rss,
++         "source_sha256":k.digest(raw),"source_b64":base64.b64encode(raw).decode("ascii")}
++    job["job"]=k.digest(k.canon(job).encode())
++    return job
++
++def make(c,oid,path,method,wall,rss):
++    from . import obligations as o
++    obj=k.get(c,oid)
++    if obj["kind"]!="obligation":raise ValueError("not an obligation")
++    if method:
++        base=obj["base"];toolchain=o.public_toolchain(base)
++        h=k.digest(("method:"+oid).encode());attempt=h[:24]+"-"+h[24:40]
++        origin={"gap":None,"attempt":"method-research"}
++    else:
++        rec,work,base=o.binding()
++        toolchain=(work/"lean/lean-toolchain").read_text().strip()
++        attempt=support.attempt(rec)
++        origin={"gap":rec["gap_id"],"attempt":attempt}
++    if obj["base"]!=base:raise ValueError("obligation requires another exact base")
++    body=k.store_artifact(path)
++    text=k.artifact(body).read_text();o.clean_body(text)
++    src=o.build(c,oid,text)
++    k.store_bytes(src.encode())
++    origin["submit_agent"]=os.environ.get("ANTONINA_AGENT_ID")
++    job=identity(base,toolchain,attempt,src,wall,rss)
++    ident={x:job[x] for x in ("job","base","toolchain","attempt","source_sha256")}
++    ident["origin"]=origin
++    return body,job,ident
++
++def snapshot(c,check):
++    table(c)
++    row=c.execute("SELECT * FROM pending_check WHERE id=? OR request=?",(check,check)).fetchone()
++    if not row:raise ValueError("unknown check ID "+check)
++    return dict(row)
++
++def recover_request(job):
++    # The transport durably writes its request before enqueue, so a client
++    # interrupted between enqueue and receipt can resume rather than repeat.
++    root=Path.home()/".local/state/marceline-relay/requests"
++    for p in root.glob("*.json"):
++        try:
++            if p.stat().st_size>4*1024*1024:continue
++            d=json.loads(p.read_text())
++            if d.get("payload",{}).get("job")==job and ID.fullmatch(d.get("id","")):
++                return d["id"]
++        except (OSError,ValueError,AttributeError):continue
++    return None
++
++def submit(c,oid,path,method=False,wall=600,rss=8192):
++    table(c)
++    body,job,ident=make(c,oid,path,method,wall,rss)
++    cid=job["job"]
++    # Return an existing identical in-flight/completed check, not a duplicate.
++    with c:
++        cursor=c.execute("INSERT OR IGNORE INTO pending_check VALUES(?,?,?,?,?,?,NULL,?,'submitting',NULL)",
++                        (cid,oid,job["base"],body,job["source_sha256"],k.canon(ident),time.time()))
++        new=cursor.rowcount==1
++    if not new:
++        old=snapshot(c,cid)
++        if old["state"]=="submitting" and not old["request"]:
++            request=recover_request(cid)
++            if request:
++                with c:c.execute("UPDATE pending_check SET request=?,state='queued' WHERE id=?",(request,cid))
++                old=snapshot(c,cid)
++        return {"check":cid,"node":oid,"state":old["state"],"request":old["request"],"reused":True,"collect":"pnp-research obligations collect "+cid}
++    try:
++        with tempfile.NamedTemporaryFile(mode="w",suffix=".json") as f:
++            f.write(k.canon(job));f.flush()
++            proc=subprocess.run([RELAY,"submit","lean-check",f.name],capture_output=True,text=True,timeout=30)
++        request=proc.stdout.strip()
++        if not ID.fullmatch(request):
++            m=re.search(r"request ("+ID.pattern+r")",proc.stderr)
++            request=m[1] if m else recover_request(cid)
++        if not request:
++            with c:c.execute("UPDATE pending_check SET state='transport_failed',result=? WHERE id=?",
++                             (k.canon({"error":proc.stderr[-1000:]}),cid))
++            raise ValueError("relay did not create a request; use a new resource budget or local check")
++    except (OSError,subprocess.SubprocessError) as exc:
++        request=recover_request(cid)
++        if not request:
++            with c:c.execute("UPDATE pending_check SET state='transport_failed',result=? WHERE id=?",
++                             (k.canon({"error":str(exc)}),cid))
++            raise ValueError("relay submission failed") from exc
++    with c:c.execute("UPDATE pending_check SET request=?,state='queued' WHERE id=?",(request,cid))
++    return {"check":cid,"node":oid,"state":"queued","request":request,
++            "collect":"pnp-research obligations collect "+cid}
++
++def proof_result(c,row,result,stderr=""):
++    from . import obligations as o
++    ident=json.loads(row["identity"])
++    expected={x:ident[x] for x in ("job","base","toolchain","attempt","source_sha256")}
++    valid=all(result.get(x)==v for x,v in expected.items())
++    ok=(valid and result.get("status")=="elaborated" and result.get("exit_code")==0
++        and o.verify_output(result.get("diagnostic",""),row["node"]))
++    out={"status":"kernel_checked" if ok else "not_verified","compiler":result if valid else {},
++         "stderr":stderr[-1000:],**ident["origin"],"collect_agent":os.environ.get("ANTONINA_AGENT_ID")}
++    # A later failed retry must not erase a valid proof of identical body/base.
++    with c:
++        prev=c.execute("SELECT result FROM proof WHERE node=? AND base=? AND artifact=?",
++                       (row["node"],row["base"],row["body"])).fetchone()
++        if ok or not prev or json.loads(prev[0]).get("status")!="kernel_checked":
++            c.execute("INSERT OR REPLACE INTO proof VALUES(?,?,?,?,?,?)",
++                      (row["node"],row["base"],row["body"],row["source"],k.canon(out),time.time()))
++        c.execute("UPDATE pending_check SET state='done',result=? WHERE id=?",(k.canon(out),row["id"]))
++    return out
++
++def collect(c,check,seconds=1100):
++    row=snapshot(c,check)
++    if row["state"]=="done":return json.loads(row["result"])
++    if row["state"]=="transport_failed":
++        return {"status":"transport_failed","check":row["id"],"detail":json.loads(row["result"] or "{}")}
++    request=row["request"] or recover_request(row["id"])
++    if not request:return {"status":"submitting","check":row["id"]}
++    if not 1<=seconds<=1800:raise ValueError("wait must be 1–1800 seconds")
++    proc=subprocess.run([RELAY,"wait",request,str(seconds)],capture_output=True,text=True,timeout=seconds+30)
++    try:
++        receipt=json.loads(proc.stdout);result=receipt["result"]
++        if not isinstance(result,dict):raise ValueError("invalid compiler result")
++    except (ValueError,KeyError,TypeError):
++        # A short poll is not a failed proof. Leave the check recoverable.
++        if time.time()-row["at"]>24*3600:
++            with c:c.execute("UPDATE pending_check SET state='transport_failed',result=? WHERE id=?",
++                             (k.canon({"error":"remote receipt expired"}),row["id"]))
++            return {"status":"transport_failed","check":row["id"]}
++        return {"status":"pending","check":row["id"],"request":request,"detail":proc.stderr[-500:]}
++    return proof_result(c,row,result,proc.stderr)
++
++def pending(c):
++    table(c)
++    return [dict(r) for r in c.execute("SELECT id,node,base,request,at,state FROM pending_check ORDER BY at DESC LIMIT 100")]
++
++
++def reconcile(c):
++    """One status fetch, then collect at most four completed checks.
++
++    The original agent can die or lose its lease; exact mathematical results
++    still become durable. This never starts an agent or acquires a lease.
++    """
++    table(c)
++    rows=[dict(x) for x in c.execute("SELECT * FROM pending_check WHERE state IN ('submitting','queued') ORDER BY at")]
++    if not rows:return {"pending":0,"collected":[]}
++    try:
++        status=json.loads(subprocess.check_output([RELAY,"status"],text=True,timeout=10))
++        finished={x["id"] for x in status.get("entries",[]) if x.get("state") in ("done","error")}
++    except (OSError,ValueError,subprocess.SubprocessError):return {"pending":len(rows),"collected":[],"status":"relay unavailable"}
++    out=[]
++    for row in rows:
++        if len(out)>=4:break
++        request=row["request"] or recover_request(row["id"])
++        local=Path.home()/".local/state/marceline-relay/receipts"/((request or "")+".json")
++        if request in finished or local.is_file():
++            r=collect(c,row["id"],3)
++            out.append({"id":row["id"],"node":row["node"],"status":r["status"]})
++        elif time.time()-row["at"]>24*3600:
++            with c:c.execute("UPDATE pending_check SET state='transport_failed',result=? WHERE id=?",
++                             (k.canon({"error":"remote receipt expired"}),row["id"]))
++    return {"pending":len(rows),"collected":out}
+diff --git a/missions/pnp/research/certificate.py b/missions/pnp/research/certificate.py
+new file mode 100644
+index 00000000..c9abbb78
+--- /dev/null
++++ b/missions/pnp/research/certificate.py
+@@ -0,0 +1,131 @@
++"""Lean proof certificates for edge-owned star constructions.
++
++Semantic checking uses exact symbolic antichains. Lean proof generation
++uses a permutation of concrete edges instead of an exponential truth table.
++"""
++import argparse
++import json
++from pathlib import Path
++import re
++
++from . import star
++from .. import validate
++from ..proofs import synthesis
++
++NS="PEqualNP.CircuitLowerBounds."
++PERM_BODY="""by
++  intro α L R p h
++  induction h with
++  | nil => rfl
++  | cons a h ih => simp only [List.any_cons, ih]
++  | swap a b l => simp only [List.any_cons]; cases p a <;> cases p b <;> rfl
++  | trans h1 h2 ih1 ih2 => exact ih1.trans ih2"""
++PERM_TYPE="∀ (α : Type) (L R : List α) (p : α → Bool), L.Perm R → L.any p = R.any p"
++
++def dnf(z):
++    """Exact ordered DNF of the star circuit; no absorption/reordering."""
++    w=[[(i,)] for i in range(z["n"])]
++    for op,a,b in z["gates"]:
++        if op=="or":w.append(w[a]+w[b])
++        else:
++            if len(w[a])*len(w[b])>10000:raise ValueError("DNF expansion too large")
++            w.append([u+v for u in w[a] for v in w[b]])
++    result=w[z["output"]]
++    if any(len(t)!=2 for t in result):raise ValueError("not an edge-owned star construction")
++    return result
++
++def lean_list(edges):
++    return "["+", ".join("("+str(a)+", "+str(b)+")" for a,b in edges)+"]"
++
++def expr(edges):
++    return " || ".join(f"(x {a} && x {b})" for a,b in edges)
++
++def eval_body(z,ordered,permutation="any_perm"):
++    n=z["n"];D=dnf(z)
++    L=[tuple(sorted(e)) for e in D];R=[tuple(sorted(e)) for e in ordered]
++    if sorted(L)!=sorted(R):
++        raise ValueError("certificate requires each target edge exactly once")
++    swaps=", ".join(f"Bool.and_comm (x {u}) (x {v})" for u,v in D if u>v)
++    reverse=", ".join(f"Bool.and_comm (x {u}) (x {v})" for u,v in ordered if u>v)
++    left_extra=", "+swaps if swaps else ""
++    right_extra=", "+reverse if reverse else ""
++    return f"""by
++  intro x
++  let L : List (Fin {n} × Fin {n}) := {lean_list(L)}
++  let R : List (Fin {n} × Fin {n}) := {lean_list(R)}
++  have hp : L.Perm R := by decide
++  calc
++    _ = L.any (fun e => x e.1 && x e.2) := by
++      simp [witness, L, {NS}Circuit.eval, {NS}Circuit.wires,
++        {NS}GateOp.eval, List.ofFn_succ, Bool.and_or_distrib_left,
++        Bool.and_or_distrib_right, Bool.or_assoc{left_extra}]
++    _ = R.any (fun e => x e.1 && x e.2) := {permutation} _ L R _ hp
++    _ = _ := by simp [R, Bool.or_assoc{right_extra}]
++"""
++
++def parse(statement):
++    m=synthesis.SHAPE.fullmatch(statement.strip())
++    if not m:return None
++    n,bound,rhs=int(m[2]),int(m[1]),m[3]
++    if not 2<=n<=256:return None
++    E=synthesis.EDGE
++    if not re.fullmatch(r"[()\s]*"+E.pattern+r"(?:[()\s]*\|\|[()\s]*"+E.pattern+r")*[()\s]*",rhs):return None
++    ordered=[(int(a),int(b)) for a,b in E.findall(rhs)]
++    try:edges=star.normalize(n,ordered)
++    except ValueError:return None
++    if len(edges)!=len(ordered):return None
++    return n,bound,ordered,edges,rhs
++
++def render(meta,seconds=5):
++    parsed=parse(meta["statement"])
++    if not parsed:return {"status":"unsupported"}
++    n,bound,ordered,edges,rhs=parsed
++    z=star.synthesize(n,edges,seconds)
++    ver=star.verify(n,edges,z["gates"],z["output"])
++    info={"status":"generated","n":n,"gates":len(z["gates"]),"bound":bound,"verification":ver,"certificate":z}
++    if ver["status"]!="verified" or len(z["gates"])>bound:
++        return dict(info,status="no_witness_within_bound")
++    mod=meta["module"];aux=mod+"_aux"
++    imports=["Mathlib"]+[m for m in meta["imports"] if m!="Mathlib"]
++    gs=", ".join("⟨"+NS+"GateOp."+op+", ["+str(a)+", "+str(b)+"]⟩" for op,a,b in z["gates"])
++    code="\n".join("import "+m for m in imports)+"\n\nnamespace "+aux+"\n\n"
++    code+="lemma any_perm : "+PERM_TYPE+" := "+PERM_BODY+"\n\n"
++    code+="def witness : "+NS+"Circuit := ⟨["+gs+"], "+str(z["output"])+"⟩\n\n"
++    code+="set_option maxHeartbeats 4000000 in\nset_option maxRecDepth 10000 in\n"
++    code+="lemma eval_witness : ∀ x : Fin "+str(n)+" → Bool, witness.eval (List.ofFn x) = ("+rhs+") :=\n"
++    code+=eval_body(z,ordered)+"\n"
++    code+="lemma wf : PEqualNP.MetaComplexity.Monotone2 witness := by\n"
++    code+="  intro g hg\n  simp only [witness, List.mem_cons, List.not_mem_nil, or_false] at hg\n"
++    code+="  rcases hg with "+" | ".join("rfl" for _ in z["gates"])+" <;> simp\n"
++    code+="\nend "+aux+"\n\ntheorem "+mod+" : "+meta["statement"]+" := by\n"
++    code+="  exact ⟨"+aux+".witness, "+aux+".wf, by decide, "+aux+".eval_witness⟩\n"
++    validate.validate(meta,code.encode())
++    return dict(info,candidate=code)
++
++def graph_meta(graph,module="PEqualNP.Outside.VicheStarCertificate"):
++    n=graph["n"];edges=sorted(star.normalize(n,graph["edges"]))
++    bound=graph.get("bound",len(edges)+n-1)
++    statement=f"∃ C : {NS}Circuit, PEqualNP.MetaComplexity.Monotone2 C ∧ C.size ≤ {bound} ∧ ∀ x : Fin {n} → Bool, C.eval (List.ofFn x) = (fun x : Fin {n} → Bool => {expr(edges)}) x"
++    return {"id":"L-meta-0","module":module,"file":"lean/"+module.replace(".","/")+".lean",
++            "statement":statement,"imports":["PEqualNP.Defs"]}
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument("graph",nargs="?",help="graph JSON; omit in a bound workspace for exact lease")
++    p.add_argument("--output",required=True)
++    p.add_argument("--seconds",type=float,default=5)
++    a=p.parse_args()
++    if a.graph:
++        meta=graph_meta(json.loads(Path(a.graph).read_text()))
++    else:
++        from .obligations import binding
++        r,w,b=binding()
++        meta={"id":r["gap_id"],"module":r["module"],"file":r["path"],"statement":r["statement"],"imports":r["imports"]}
++    out=render(meta,a.seconds)
++    candidate=out.pop("candidate",None)
++    if candidate:
++        with Path(a.output).open("x") as f:f.write(candidate)
++        out["path"]=str(Path(a.output).resolve())
++    print(json.dumps(out,indent=2))
++    return 0 if candidate else 1
++if __name__=="__main__":raise SystemExit(main())
+diff --git a/missions/pnp/research/certificate_bench.py b/missions/pnp/research/certificate_bench.py
+new file mode 100644
+index 00000000..740c242e
+--- /dev/null
++++ b/missions/pnp/research/certificate_bench.py
+@@ -0,0 +1,77 @@
++"""Reproducible remote kernel-check benchmark of the new certificate generator."""
++import argparse
++from contextlib import closing
++import json
++import os
++from pathlib import Path
++import re
++import sqlite3
++import subprocess
++import time
++
++from . import certificate, knowledge, obligations
++from .. import config
++
++def rows():
++    with closing(sqlite3.connect("file:"+str(Path(config.CACHE_DIR)/"proof-corpus.sqlite")+"?mode=ro",uri=True)) as db:
++        revision=db.execute("SELECT value FROM metadata WHERE key='revision'").fetchone()[0]
++        result=[]
++        for path,stmt,imports in db.execute("SELECT path,statement,imports FROM proof ORDER BY path"):
++            if not certificate.parse(stmt):continue
++            module=path.removeprefix("lean/").removesuffix(".lean").replace("/",".")
++            stem=Path(path).stem
++            gid=stem.replace("_","-")
++            if not config.GAP_ID_RE.fullmatch(gid):continue
++            result.append({"id":gid,"file":path,"module":module,"statement":stmt,"imports":json.loads(imports)})
++    return revision,result
++
++def acceptable(log,name):
++    if re.search(r"'"+re.escape(name)+r"' does not depend on any axioms",log):return True
++    m=re.search(r"'"+re.escape(name)+r"' depends on axioms: \[([^\]]*)\]",log)
++    return bool(m and {x.strip() for x in m[1].split(",") if x.strip()}<={"propext","Classical.choice","Quot.sound"})
++
++def run(base,output,limit=None):
++    revision,items=rows()
++    if limit:items=items[:limit]
++    output=Path(output)
++    output.parent.mkdir(parents=True,exist_ok=True)
++    seen={}
++    if output.exists():
++        for line in output.read_text().splitlines():
++            try:
++                row=json.loads(line);seen[row["id"]]=row
++            except (ValueError,KeyError):continue
++    for meta in items:
++        z=certificate.render(meta)
++        source=z.get("candidate")
++        digest=knowledge.digest(source.encode()) if source else None
++        old=seen.get(meta["id"])
++        if old and old.get("base")==base and old.get("source_digest")==digest and old.get("status")=="kernel_checked":continue
++        start=time.monotonic()
++        row={"id":meta["id"],"base":base,"corpus":revision,"source_digest":digest,
++             "gates":z.get("gates"),"bound":z.get("bound"),"status":z["status"]}
++        if source:
++            try:
++                proc,r=obligations.method_check(base,"benchmark:"+meta["id"]+":"+digest,
++                                             source+"\n#print axioms "+meta["module"]+"\n")
++                row["compiler_status"]=r.get("status")
++                row["lean_ms"]=r.get("elapsed_ms")
++                row["status"]="kernel_checked" if proc.returncode==0 and r.get("status")=="elaborated" and acceptable(r.get("diagnostic",""),meta["module"]) else "not_verified"
++                if row["status"]!="kernel_checked":
++                    row["diagnostic"]=r.get("diagnostic",proc.stderr)[-1500:]
++            except (OSError,ValueError,subprocess.SubprocessError) as exc:
++                row.update(status="infrastructure",diagnostic=str(exc)[:1000])
++        row["wall_ms"]=round(1000*(time.monotonic()-start))
++        with output.open("a") as f:
++            f.write(json.dumps(row,ensure_ascii=False)+"\n");f.flush();os.fsync(f.fileno())
++        seen[meta["id"]]=row
++        print(meta["id"],row["status"],row.get("lean_ms"),row["wall_ms"],flush=True)
++    checked=sum(seen.get(m["id"],{}).get("status")=="kernel_checked" for m in items)
++    print(json.dumps({"total":len(items),"kernel_checked":checked,"base":base,"corpus":revision,"output":str(output)}),flush=True)
++    return int(checked!=len(items))
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--base",required=True);p.add_argument("--output",required=True);p.add_argument("--limit",type=int)
++    a=p.parse_args();return run(a.base,a.output,a.limit)
++if __name__=="__main__":raise SystemExit(main())
+diff --git a/missions/pnp/research/entry.py b/missions/pnp/research/entry.py
+index 483fdb88..b53e479b 100644
+--- a/missions/pnp/research/entry.py
++++ b/missions/pnp/research/entry.py
+@@ -1,6 +1,7 @@
+ """Installed agent command; prefer canonical code when integration lands."""
+ import importlib
+ import sys
++import time
+ from pathlib import Path
+ def main():
+     root=Path("/var/lib/lubko/wd/viche")
+@@ -8,14 +9,27 @@ def main():
+     import missions.pnp
+     if not (root/"missions/pnp/research/knowledge.py").is_file():
+         missions.pnp.__path__.append(str(Path(__file__).resolve().parent.parent))
+-    commands={"knowledge":"knowledge","obligations":"obligations","yield":"yield_model","star":"star","dispatch":"roles"}
++    commands={"knowledge":"knowledge","obligations":"obligations","yield":"yield_model","star":"star","dispatch":"roles","start":"playbook","adoption":"adoption","guide":"playbook","certificate":"certificate"}
+     if len(sys.argv)<2 or sys.argv[1] not in commands:
+-        print("pnp-research knowledge|obligations|yield|star|dispatch --help")
++        print("pnp-research start|guide|knowledge|obligations|yield|star|certificate|adoption|dispatch --help")
+         return 0 if len(sys.argv)==1 or sys.argv[1]=="--help" else 2
++    from missions.pnp.research import adoption
++    action=adoption.command_name(sys.argv);started=time.time();code=1
+     command=commands[sys.argv.pop(1)]
+-    if command=="yield_model":
+-        import json
+-        print(json.dumps(importlib.import_module("missions.pnp.research."+command).view(),indent=2))
+-        return 0
+-    return importlib.import_module("missions.pnp.research."+command).main()
++    try:
++        if command=="yield_model":
++            import json
++            print(json.dumps(importlib.import_module("missions.pnp.research."+command).view(),indent=2))
++            code=0
++        elif action in ("guide","guide help"):
++            code=importlib.import_module("missions.pnp.research.playbook").guide_main() or 0
++        else:code=importlib.import_module("missions.pnp.research."+command).main() or 0
++        return code
++    except (OSError,ValueError,KeyError) as exc:
++        print("pnp-research:",str(exc),file=sys.stderr);code=2;return code
++    except SystemExit as exc:
++        code=exc.code if isinstance(exc.code,int) else 1
++        raise
++    finally:
++        adoption.record(action,started,code)
+ if __name__=="__main__":raise SystemExit(main())
+diff --git a/missions/pnp/research/knowledge.py b/missions/pnp/research/knowledge.py
+index adea5fa1..b1d596d1 100644
+--- a/missions/pnp/research/knowledge.py
++++ b/missions/pnp/research/knowledge.py
+@@ -50,11 +50,50 @@ def db():
+       node TEXT REFERENCES object(id), attempt TEXT, worker TEXT, at REAL,
+       PRIMARY KEY(node,attempt)
+     );
++    CREATE TABLE IF NOT EXISTS origin(
++      node TEXT REFERENCES object(id), family TEXT, provenance TEXT,
++      PRIMARY KEY(node,family,provenance)
++    );
++    CREATE TABLE IF NOT EXISTS obligation_key(
++      key TEXT PRIMARY KEY, node TEXT REFERENCES object(id)
++    );
++    CREATE TABLE IF NOT EXISTS migration(name TEXT PRIMARY KEY);
++    CREATE INDEX IF NOT EXISTS origin_family ON origin(family,node);
++    CREATE INDEX IF NOT EXISTS origin_provenance ON origin(provenance);
+     CREATE INDEX IF NOT EXISTS object_family ON object(family,kind);
+     CREATE INDEX IF NOT EXISTS edge_target ON edge(target);
+     """)
++    migrate(c)
+     return c
+ 
++def obligation_identity(statement,detail,base,deps):
++    try:meta=json.loads(detail)
++    except (ValueError,TypeError):meta=detail
++    return digest(canon([statement,meta,base,sorted(set(deps))]).encode())
++
++def migrate(c):
++    # Preserve existing node IDs and receipts. New exact obligations reuse
++    # the first canonical node independent of their origin or family.
++    if not c.execute("SELECT 1 FROM migration WHERE name='origin-v1'").fetchone():
++        with c:
++            c.execute("INSERT OR IGNORE INTO origin SELECT id,family,provenance FROM object")
++            rows=c.execute("SELECT id,statement,detail,base FROM object WHERE kind='obligation' ORDER BY created,id").fetchall()
++            for row in rows:
++                deps=[r[0] for r in c.execute("SELECT target FROM edge WHERE source=? AND relation='requires'",(row["id"],))]
++                key=obligation_identity(row["statement"],row["detail"],row["base"],deps)
++                c.execute("INSERT OR IGNORE INTO obligation_key VALUES(?,?)",(key,row["id"]))
++            c.execute("INSERT OR IGNORE INTO migration VALUES('origin-v1')")
++    if not c.execute("SELECT 1 FROM migration WHERE name='fts-v1'").fetchone():
++        try:
++            with c:
++                c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS object_fts USING fts5(id UNINDEXED, statement, detail, provenance, family)")
++                c.execute("DELETE FROM object_fts")
++                c.execute("INSERT INTO object_fts SELECT id,statement,detail,provenance,family FROM object")
++                c.execute("""CREATE TRIGGER IF NOT EXISTS object_fts_add AFTER INSERT ON object BEGIN
++                    INSERT INTO object_fts VALUES(new.id,new.statement,new.detail,new.provenance,new.family); END""")
++                c.execute("INSERT OR IGNORE INTO migration VALUES('fts-v1')")
++        except sqlite3.OperationalError:pass
++
+ def family(text):
+     s = text.lower()
+     for label, patterns in (
+@@ -73,6 +112,11 @@ def store_artifact(path):
+     p = Path(path)
+     with p.open("rb") as f:
+         data = f.read(MAX_ARTIFACT+1)
++    if not data or len(data)>MAX_ARTIFACT:
++        raise ValueError("artifact empty or exceeds 512 KiB")
++    return store_bytes(data)
++
++def store_bytes(data):
+     if not data or len(data)>MAX_ARTIFACT:
+         raise ValueError("artifact empty or exceeds 512 KiB")
+     h = digest(data)
+@@ -116,19 +160,37 @@ def add(c, kind, fam, statement, detail, provenance, file=None, base=None, deps=
+             if not row:raise ValueError("unknown dependency "+dep)
+             if kind=="obligation" and (row["kind"]!="obligation" or row["base"]!=base):
+                 raise ValueError("Lean obligations require same-base obligation dependencies")
++        key=obligation_identity(statement,detail,base,deps) if kind=="obligation" else None
++        if key:
++            canonical=c.execute("SELECT node FROM obligation_key WHERE key=?",(key,)).fetchone()
++            if canonical:
++                oid=canonical[0]
++                c.execute("INSERT OR IGNORE INTO origin VALUES(?,?,?)",(oid,fam,provenance))
++                return oid
++            # Concurrent independent requests for the same exact theorem
++            # must not manufacture orphan nodes when the key races.
++            oid=key[:32]
+         c.execute("INSERT OR IGNORE INTO object VALUES(?,?,?,?,?,?,?,?,?)",
+                   (oid,kind,fam,statement,detail,provenance,h,base,time.time()))
+         for dep in deps:
+             c.execute("INSERT OR IGNORE INTO edge VALUES(?,?,?)",(oid,dep,"requires"))
++        if key:
++            c.execute("INSERT OR IGNORE INTO obligation_key VALUES(?,?)",(key,oid))
++            oid=c.execute("SELECT node FROM obligation_key WHERE key=?",(key,)).fetchone()[0]
++        c.execute("INSERT OR IGNORE INTO origin VALUES(?,?,?)",(oid,fam,provenance))
+     return oid
+ 
+ def get(c, oid):
+     row=c.execute("SELECT * FROM object WHERE id=?",(oid,)).fetchone()
+     if not row:raise ValueError("unknown object "+oid)
+     obj=dict(row)
++    obj["origins"]=[dict(r) for r in c.execute("SELECT family,provenance FROM origin WHERE node=? ORDER BY family,provenance",(oid,))]
+     obj["dependencies"]=[r[0] for r in c.execute("SELECT target FROM edge WHERE source=? AND relation='requires' ORDER BY target",(oid,))]
+     obj["links"]=[dict(r) for r in c.execute("SELECT source,target,relation FROM edge WHERE source=? OR target=?",(oid,oid))]
+-    obj["checks"]=[dict(r) for r in c.execute("SELECT base,artifact,source_digest,result,checked FROM proof WHERE node=?",(oid,))]
++    obj["checks"]=[dict(r) for r in c.execute("SELECT base,artifact,source_digest,result,checked FROM proof WHERE node=? ORDER BY checked DESC",(oid,))]
++    for check in obj["checks"]:
++        p=root()/"artifacts"/check["source_digest"]
++        if p.is_file():check["source_path"]=str(p)
+     obj["assignments"]=[dict(r) for r in c.execute("SELECT attempt,worker,at FROM assignment WHERE node=?",(oid,))]
+     if obj["artifact"]:obj["artifact_path"]=str(artifact(obj["artifact"]))
+     return obj
+@@ -137,17 +199,36 @@ def words(s):
+     return set(re.findall(r"[a-z0-9_]+",s.lower()))
+ 
+ def search(c, query="", fam=None, kinds=None, limit=12):
+-    q=words(query)
++    q=words(query);args=[];where=[]
++    if fam:
++        where.append("EXISTS(SELECT 1 FROM origin o WHERE o.node=object.id AND o.family=?)")
++        args.append(fam)
++    if kinds:
++        where.append("object.kind IN ("+",".join("?" for _ in kinds)+")")
++        args.extend(kinds)
++    cond=(" AND "+" AND ".join(where)) if where else ""
++    fields="object.id,object.kind,object.family,object.statement,object.detail,object.provenance,object.created"
++    # FTS shortlist; exact token overlap is still used for final reranking.
++    candidates=None
++    if q:
++        try:
++            terms=" OR ".join('"'+x+'"' for x in sorted(q)[:64])
++            candidates=c.execute("SELECT "+fields+" FROM object_fts JOIN object ON object.id=object_fts.id "
++                "WHERE object_fts MATCH ?"+cond+" ORDER BY bm25(object_fts,0.0,4.0,1.0,0.5,0.5) LIMIT ?",
++                [terms]+args+[max(100,limit*10)]).fetchall()
++        except sqlite3.OperationalError:pass
++    if candidates is None:
++        candidates=c.execute("SELECT "+fields+" FROM object WHERE 1=1"+cond,args).fetchall()
+     rows=[]
+-    for row in c.execute("SELECT id,kind,family,statement,detail,provenance,created FROM object"):
+-        if fam and row["family"]!=fam:continue
+-        if kinds and row["kind"] not in kinds:continue
++    typed={"lemma","technique","obstruction","counterexample","reduction","certificate","obligation"}
++    for row in candidates:
+         overlap=q & words(" ".join(str(row[k]) for k in ("statement","detail","provenance","family")))
+         if q and not overlap:continue
+         score=len(overlap)/(len(q) or 1)
+-        rows.append((score,row["created"],dict(row)))
+-    rows.sort(key=lambda x:(x[0],x[1]),reverse=True)
+-    return [dict(row,score=round(score,3)) for score,_,row in rows[:limit]]
++        rows.append((score,row["kind"] in typed,row["created"],dict(row)))
++    rows.sort(key=lambda x:(x[0],x[1],x[2]),reverse=True)
++    return [dict(row,score=round(score,3)) for score,_,__,row in rows[:limit]]
++
+ 
+ def record_finding(rec, d):
+     fam=family((rec.get("gap_title") or "")+" "+(rec.get("statement") or ""))
+@@ -161,24 +242,37 @@ def record_fragment(rec, info, path):
+         return add(c,"fragment",fam,info["message"],"Imported fragment: reported status only; independently recheck.",
+                    f"{rec['gap_id']} / {info.get('attempt')} / {info['digest']}",path,info.get("base"))
+ 
++def belongs(c,oid,prefix):
++    return any(row[0].startswith(prefix) for row in c.execute("SELECT provenance FROM origin WHERE node=?",(oid,)))
++
+ def relevant(rec):
+-    # Cheap bounded advisory output, no corpus refresh or compiler work.
++    # Prioritize exact-gap findings even when family classifiers disagree.
+     if not (Path(config.STATE_ROOT)/"research/knowledge.sqlite").exists():return {}
+     fam=family((rec.get("gap_title") or "")+" "+(rec.get("statement") or ""))
+     with closing(db()) as c:
+-        rows=search(c,rec.get("gap_title") or rec.get("statement") or "",fam,limit=6)
+-        result=[{"id":r["id"],"kind":r["kind"],"statement":r["statement"][:500]} for r in rows]
+-        # Exact-target obligations plus family knowledge are separately visible.
+-        nodes=[dict(r) for r in c.execute("SELECT id,statement,base FROM object WHERE kind='obligation' AND provenance LIKE ?",
+-                                        (rec["gap_id"]+" / %",))]
+-        for node in nodes:
+-            node["statement"]=node["statement"][:600]
+-            node["verified"] = any(json.loads(x[0]).get("status")=="kernel_checked" for x in
+-                                    c.execute("SELECT result FROM proof WHERE node=?",(node["id"],)))
+-        return {"family":fam,"knowledge":result,"obligations":nodes[:20],
++        prefix=rec["gap_id"]+" / "
++        exact=c.execute("""SELECT DISTINCT object.id,object.kind,object.statement,object.created
++           FROM object JOIN origin ON origin.node=object.id
++           WHERE origin.provenance LIKE ? AND object.kind NOT IN ('finding','fragment','obligation')
++           ORDER BY object.created DESC LIMIT 6""",(prefix+"%",)).fetchall()
++        typed=("lemma","technique","obstruction","counterexample","reduction","certificate")
++        related=search(c,rec.get("gap_title") or rec.get("statement") or "",fam,typed,limit=4)
++        raw=search(c,rec.get("gap_title") or rec.get("statement") or "",fam,("finding","fragment"),limit=3)
++        result=[];seen=set()
++        for r in [*exact,*related,*raw]:
++            if r["id"] in seen:continue
++            seen.add(r["id"]);result.append({"id":r["id"],"kind":r["kind"],"statement":r["statement"][:500]})
++        from . import obligations
++        nodes=[]
++        for node in obligations.ready(c):
++            if not belongs(c,node["id"],prefix):continue
++            nodes.append({"id":node["id"],"statement":node["statement"][:600],"base":node["base"],
++                          "verified":node["status"]=="checked","status":node["status"],"dependencies":node["dependencies"]})
++        return {"family":fam,"knowledge":result[:10],"obligations":nodes[:20],
+                 "command":"pnp-research knowledge find --family "+fam,
+                 "obligation_command":"pnp-research obligations ready --family "+fam}
+ 
++
+ def link(c, source, target, relation):
+     if relation not in ("supports","blocks","counterexample_to","instantiates","reduces_to"):
+         raise ValueError("invalid relationship")
+@@ -241,7 +335,7 @@ def main():
+     a.add_argument("--provenance",required=True);a.add_argument("--file");a.add_argument("--base")
+     a.add_argument("--requires",action="append",default=[])
+     a=sub.add_parser("find");a.add_argument("query",nargs="?",default="");a.add_argument("--family")
+-    a.add_argument("--kind",action="append",choices=KINDS);a.add_argument("--limit",type=int,default=12)
++    a.add_argument("--kind",action="append",choices=KINDS);a.add_argument("--limit",type=int,default=12);a.add_argument("--full",action="store_true")
+     a=sub.add_parser("show");a.add_argument("id")
+     a=sub.add_parser("link");a.add_argument("source");a.add_argument("target");a.add_argument("relation")
+     sub.add_parser("ingest");sub.add_parser("stats")
+@@ -249,7 +343,10 @@ def main():
+     with closing(db()) as c:
+         if args.cmd=="add":
+             out={"id":add(c,args.kind,args.family,args.statement,args.detail,args.provenance,args.file,args.base,args.requires)}
+-        elif args.cmd=="find":out=search(c,args.query,args.family,args.kind,max(1,min(100,args.limit)))
++        elif args.cmd=="find":
++            out=search(c,args.query,args.family,args.kind,max(1,min(100,args.limit)))
++            if not args.full:
++                out=[{**r,"statement":r["statement"][:500],"detail":r["detail"][:350]} for r in out]
+         elif args.cmd=="show":out=get(c,args.id)
+         elif args.cmd=="link":out=link(c,args.source,args.target,args.relation)
+         elif args.cmd=="ingest":out=ingest(c)
+diff --git a/missions/pnp/research/obligations.py b/missions/pnp/research/obligations.py
+index 040f1762..a991b118 100644
+--- a/missions/pnp/research/obligations.py
++++ b/missions/pnp/research/obligations.py
+@@ -2,6 +2,7 @@
+ import argparse
+ from contextlib import closing
+ import hashlib
++import os
+ import base64
+ import json
+ from pathlib import Path
+@@ -76,6 +77,15 @@ def checked_body(c,node,base):
+         if d.get("status")=="kernel_checked":return k.artifact(row["artifact"]).read_text()
+     raise ValueError("unresolved dependency "+node)
+ 
++def declaration_options(meta):
++    opts=meta.get("options",{})
++    if not isinstance(opts,dict) or set(opts)-{"maxHeartbeats","maxRecDepth","synthInstance.maxSize","synthInstance.maxHeartbeats"}:
++        raise ValueError("invalid Lean options")
++    if any(type(v) is not int or v<0 or v>10_000_000 for v in opts.values()):
++        raise ValueError("invalid Lean option value")
++    return "".join(f"set_option {k} {v} in\n" for k,v in sorted(opts.items()))
++
++
+ def build(c,oid,body=None):
+     nodes=plan(c,oid); base=nodes[-1]["base"]
+     imports=set(); lines=[]
+@@ -83,7 +93,7 @@ def build(c,oid,body=None):
+         meta=json.loads(o["detail"])
+         imports.update(meta["imports"])
+         text=body if o["id"]==oid and body is not None else checked_body(c,o["id"],base)
+-        lines.append(f"theorem {symbol(o['id'])} : {o['statement']} :=\n{text}\n")
++        lines.append(declaration_options(meta)+f"theorem {symbol(o['id'])} : {o['statement']} :=\n{text}\n")
+     src="\n".join("import "+x for x in sorted(imports))+"\n\n"+"\n".join(lines)
+     return src+"\n#print axioms "+symbol(oid)+"\n"
+ 
+@@ -95,7 +105,7 @@ def candidate(c,oid,rec,base):
+     module=rec["module"];namespace=module+"_aux"
+     for node in nodes:
+         imports.update(json.loads(node["detail"])["imports"])
+-        lines.append(f"lemma {symbol(node['id'])} : {node['statement']} :=\n{checked_body(c,node['id'],base)}\n")
++        lines.append(declaration_options(json.loads(node["detail"]))+f"lemma {symbol(node['id'])} : {node['statement']} :=\n{checked_body(c,node['id'],base)}\n")
+     src="\n".join("import "+x for x in sorted(imports,key=lambda x:(x!="Mathlib",x)))
+     src+="\n\nnamespace "+namespace+"\n"+"\n".join(lines)+"\nend "+namespace+"\n\n"
+     src+=f"theorem {module} : {rec['statement']} := by\n  exact {namespace}.{symbol(oid)}\n"
+@@ -128,7 +138,7 @@ def solve(c,oid,path,local=False,method=False):
+     if obj["base"]!=base:raise ValueError("obligation requires another exact base")
+     bodyhash=k.store_artifact(path)
+     raw=k.artifact(bodyhash).read_text();clean_body(raw)
+-    src=build(c,oid,raw);sourcehash=hashlib.sha256(src.encode()).hexdigest()
++    src=build(c,oid,raw);sourcehash=k.store_bytes(src.encode())
+     if method:
+         proc,result=method_check(base,oid,src)
+     else:
+@@ -154,29 +164,35 @@ def solve(c,oid,path,local=False,method=False):
+         and verify_output(result.get("diagnostic",""),oid))
+     result={"status":"kernel_checked" if ok else "not_verified","compiler":result,
+             "stderr":proc.stderr[-1000:],"gap":rec["gap_id"] if rec else None,
+-            "attempt":support.attempt(rec) if rec else "method-research"}
++            "attempt":support.attempt(rec) if rec else "method-research",
++            "submit_agent":os.environ.get("ANTONINA_AGENT_ID"),"collect_agent":os.environ.get("ANTONINA_AGENT_ID")}
+     with c:
+-        c.execute("INSERT OR REPLACE INTO proof VALUES(?,?,?,?,?,?)",
+-                  (oid,base,bodyhash,sourcehash,k.canon(result),time.time()))
++        prev=c.execute("SELECT result FROM proof WHERE node=? AND base=? AND artifact=?",(oid,base,bodyhash)).fetchone()
++        if ok or not prev or json.loads(prev[0]).get("status")!="kernel_checked":
++            c.execute("INSERT OR REPLACE INTO proof VALUES(?,?,?,?,?,?)",
++                      (oid,base,bodyhash,sourcehash,k.canon(result),time.time()))
+     return result
+ 
+ def ready(c,base=None,family=None):
+-    rows=[]
+-    for row in c.execute("SELECT id FROM object WHERE kind='obligation' ORDER BY created"):
+-        obj=k.get(c,row["id"])
+-        if base and obj["base"]!=base or family and obj["family"]!=family:continue
+-        try:
+-            checked_body(c,obj["id"],obj["base"]); status="checked"
+-        except ValueError:
+-            try:
+-                for dep in obj["dependencies"]:checked_body(c,dep,obj["base"])
+-                status="ready"
+-            except ValueError:status="blocked"
+-        rows.append({"id":obj["id"],"symbol":symbol(obj["id"]),"statement":obj["statement"],
+-                     "family":obj["family"],"base":obj["base"],"status":status,
+-                     "dependencies":obj["dependencies"],"assignments":obj["assignments"]})
++    rows=[];checked=set()
++    try:
++        verified=c.execute("SELECT node,base,artifact FROM proof WHERE json_extract(result,'$.status')='kernel_checked'").fetchall()
++    except Exception:
++        verified=[row for row in c.execute("SELECT node,base,artifact,result FROM proof")
++                  if json.loads(row["result"]).get("status")=="kernel_checked"]
++    for row in verified:
++        if (k.root()/"artifacts"/row["artifact"]).is_file():checked.add((row["node"],row["base"]))
++    for row in c.execute("SELECT id,statement,family,base FROM object WHERE kind='obligation' ORDER BY created"):
++        obj=dict(row)
++        if base and obj["base"]!=base:continue
++        if family and not c.execute("SELECT 1 FROM origin WHERE node=? AND family=?",(obj["id"],family)).fetchone():continue
++        deps=[r[0] for r in c.execute("SELECT target FROM edge WHERE source=? AND relation='requires' ORDER BY target",(obj["id"],))]
++        status="checked" if (obj["id"],obj["base"]) in checked else "ready" if all((d,obj["base"]) in checked for d in deps) else "blocked"
++        rows.append({**obj,"symbol":symbol(obj["id"]),"status":status,"dependencies":deps,
++                     "assignments":[dict(r) for r in c.execute("SELECT attempt,worker,at FROM assignment WHERE node=?",(obj["id"],))]})
+     return rows
+ 
++
+ def fork(c, oid, base):
+     mapping={}
+     for old in plan(c,oid):
+@@ -185,7 +201,7 @@ def fork(c, oid, base):
+         for a,b in mapping.items():stmt=stmt.replace(symbol(a),symbol(b))
+         new=k.add(c,"obligation",old["family"],stmt,old["detail"],old["provenance"]+" / rebased from "+old["id"],
+                   base=base,deps=deps)
+-        k.link(c,new,old["id"],"instantiates")
++        if new!=old["id"]:k.link(c,new,old["id"],"instantiates")
+         mapping[old["id"]]=new
+     return mapping
+ 
+@@ -202,13 +218,17 @@ def main():
+     a=sub.add_parser("request");a.add_argument("--statement",required=True);a.add_argument("--family")
+     a.add_argument("--requires",action="append",default=[]);a.add_argument("--import",dest="imports",action="append",default=[])
+     a.add_argument("--base",help="independent method research on an exact public upstream revision");a.add_argument("--provenance")
+-    a=sub.add_parser("ready");a.add_argument("--family");a.add_argument("--base")
++    a=sub.add_parser("ready");a.add_argument("--family");a.add_argument("--base");a.add_argument("--current",action="store_true");a.add_argument("--full",action="store_true")
+     a=sub.add_parser("fork");a.add_argument("id")
+-    a=sub.add_parser("body");a.add_argument("id");a.add_argument("--output",required=True)
++    a=sub.add_parser("body");a.add_argument("id");a.add_argument("--output",required=True);a.add_argument("--for-node")
+     a=sub.add_parser("assign");a.add_argument("id");a.add_argument("worker")
+     a=sub.add_parser("solve");a.add_argument("id");a.add_argument("body");a.add_argument("--local",action="store_true");a.add_argument("--method",action="store_true")
++    a.add_argument("--async",dest="asynchronous",action="store_true");a.add_argument("--wall",type=int,default=600);a.add_argument("--rss-mib",type=int,default=8192)
++    a=sub.add_parser("collect");a.add_argument("id");a.add_argument("--poll",action="store_true");a.add_argument("--timeout",type=int,default=1100)
++    sub.add_parser("pending");sub.add_parser("reconcile")
++    a=sub.add_parser("reuse");a.add_argument("old");a.add_argument("new");a.add_argument("--method",action="store_true");a.add_argument("--async",dest="asynchronous",action="store_true")
+     a=sub.add_parser("assemble");a.add_argument("id");a.add_argument("--output",required=True);a.add_argument("--candidate",action="store_true")
+-    a=sub.add_parser("show");a.add_argument("id")
++    a=sub.add_parser("show");a.add_argument("id");a.add_argument("--full",action="store_true")
+     a=p.parse_args()
+     with closing(k.db()) as c:
+         if a.cmd=="request":
+@@ -224,15 +244,35 @@ def main():
+             oid=k.add(c,"obligation",fam,a.statement,k.canon({"imports":sorted(set(imports))}),
+                       prov,base=b,deps=a.requires)
+             out={"id":oid,"symbol":symbol(oid),"statement":a.statement}
+-        elif a.cmd=="ready":out=ready(c,a.base,a.family)
+-        elif a.cmd=="show":out=k.get(c,a.id)
++        elif a.cmd=="ready":
++            out=ready(c,a.base,a.family)
++            if a.current:
++                r,w,b=binding();out=[dict(x,same_base=x["base"]==b) for x in out if k.belongs(c,x["id"],r["gap_id"]+" / ")]
++            if not a.full:out=[dict(x,statement=x["statement"][:450]) for x in out]
++        elif a.cmd=="show":
++            out=k.get(c,a.id)
++            if not a.full:
++                for check in out["checks"]:
++                    r=json.loads(check["result"]);compiler=r.get("compiler") or {}
++                    check["result"]={"status":r.get("status"),"compiler_status":compiler.get("status"),
++                        "elapsed_ms":compiler.get("elapsed_ms"),"diagnostic":compiler.get("diagnostic","")[-1500:],
++                        "submit_agent":r.get("submit_agent")}
++
+         elif a.cmd=="fork":
+             r,w,b=binding();out=fork(c,a.id,b)
+         elif a.cmd=="body":
+             obj=k.get(c,a.id)
+             text=checked_body(c,a.id,obj["base"])
++            if a.for_node:
++                mapping={}
++                for new in plan(c,a.for_node):
++                    for link in new["links"]:
++                        if link["source"]==new["id"] and link["relation"]=="instantiates":
++                            mapping[link["target"]]=new["id"]
++                if mapping.get(a.id)!=a.for_node:raise ValueError("target is not a fork of this node")
++                for old,new in mapping.items():text=text.replace(symbol(old),symbol(new))
+             with Path(a.output).open("x") as f:f.write(text)
+-            out={"path":a.output,"base":obj["base"]}
++            out={"path":a.output,"base":obj["base"],"recheck":bool(a.for_node)}
+         elif a.cmd=="assign":
+             r,w,b=binding();o=k.get(c,a.id)
+             if o["base"]!=b:raise ValueError("base mismatch")
+@@ -241,7 +281,35 @@ def main():
+                 owner=c.execute("SELECT worker FROM assignment WHERE node=? AND attempt=?",(a.id,support.attempt(r))).fetchone()[0]
+                 if owner!=a.worker:raise ValueError("already assigned to "+owner+"; coordinate with Executive")
+             out={"assigned":a.id,"worker":a.worker}
+-        elif a.cmd=="solve":out=solve(c,a.id,a.body,a.local,a.method)
++        elif a.cmd=="solve":
++            if a.asynchronous:
++                from . import async_check
++                if a.local:raise ValueError("async uses remote Lean")
++                out=async_check.submit(c,a.id,a.body,a.method,a.wall,a.rss_mib)
++            else:out=solve(c,a.id,a.body,a.local,a.method)
++        elif a.cmd=="collect":
++            from . import async_check
++            out=async_check.collect(c,a.id,1 if a.poll else a.timeout)
++        elif a.cmd=="pending":
++            from . import async_check
++            out=async_check.pending(c)
++        elif a.cmd=="reconcile":
++            from . import async_check
++            out=async_check.reconcile(c)
++        elif a.cmd=="reuse":
++            old=k.get(c,a.old);text=checked_body(c,a.old,old["base"])
++            mapping={}
++            for new in plan(c,a.new):
++                for link in new["links"]:
++                    if link["source"]==new["id"] and link["relation"]=="instantiates":mapping[link["target"]]=new["id"]
++            if a.old!=a.new and mapping.get(a.old)!=a.new:raise ValueError("new node is not a fork of old")
++            for src,dst in mapping.items():text=text.replace(symbol(src),symbol(dst))
++            with tempfile.NamedTemporaryFile(mode="w",suffix=".body") as f:
++                f.write(text);f.flush()
++                if a.asynchronous:
++                    from . import async_check
++                    out=async_check.submit(c,a.new,f.name,a.method)
++                else:out=solve(c,a.new,f.name,method=a.method)
+         else:
+             if a.candidate:
+                 r,w,b=binding();text=candidate(c,a.id,r,b)
+@@ -250,6 +318,8 @@ def main():
+             with p.open("x") as f:f.write(text)
+             out={"path":str(p),"sha256":k.digest(text.encode()),"note":"Final candidate needs the normal submit/check pipeline; graph verification is not upstream acceptance."}
+     print(json.dumps(out,ensure_ascii=False,indent=2))
+-    return 1 if a.cmd=="solve" and out["status"]!="kernel_checked" else 0
++    if a.cmd=="collect":return 0 if out["status"]=="kernel_checked" else 75 if out["status"] in ("pending","submitting") else 1
++    if a.cmd in ("solve","reuse") and not a.asynchronous:return 0 if out["status"]=="kernel_checked" else 1
++    return 0
+ 
+ if __name__=="__main__":raise SystemExit(main())
+diff --git a/missions/pnp/research/playbook.py b/missions/pnp/research/playbook.py
+new file mode 100644
+index 00000000..0f9b335c
+--- /dev/null
++++ b/missions/pnp/research/playbook.py
+@@ -0,0 +1,243 @@
++"""One source of truth for short, executable role onboarding."""
++from pathlib import Path
++import json
++import os
++import subprocess
++
++from .. import assignment, config, state, support
++from . import knowledge
++
++P = "PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp."
++CLI = "pnp-research"
++ROLES = {
++    "general": ("Own the exact leased theorem; explore promising routes, reuse knowledge and share concrete results.",
++        "Use the existing checked corpus before inventing a proof. For compatible graph constructions run pnp-research certificate --output Candidate.lean from the bound workspace. Verify generated candidates through the normal pipeline. Preserve your results when focus changes."),
++    "integrator": ("Own the proof dependency graph and eventual exact submission, not another independent full-theorem search.",
++        "Request exact missing types, assign through Executive, reuse checked bodies. When the root is complete, assemble --candidate and submit immediately."),
++    "specialist": ("Solve the assigned distinct approach or exact obligation, not every part of the theorem.",
++        "Publish a checked helper or a precise counterexample; do not duplicate another worker's assigned node."),
++    "knowledge": ("Make mathematical results cumulative across attempts.",
++        "Search exact sources; promote findings into typed knowledge objects and link their dependencies. A worker report is not a kernel receipt."),
++    "methods": ("Find new reusable mathematical arguments applicable to the focus.",
++        "Look for reductions, transferable techniques, finite witnesses and false premises. Deliver concrete evidence to the focus workers."),
++    "method": ("Prove a reusable theorem for a family, independently of any desk lease.",
++        "Use a cached public revision and exact mathematical hypotheses; test multiple applications. Record checked lemmas and failed generalizations."),
++    "tool": ("Turn mathematical techniques into reusable proof-generating software.",
++        "Use the existing star/circuit search and corpus tools. Benchmark holdout families, independently verify certificates, and check Lean proof output. Work in your own workspace."),
++    "flow": ("Eliminate measurable bottlenecks in actual proof production.",
++        "Use adoption evidence, queue latency and outcomes; propose concrete corrections rather than reports or extra gates."),
++    "portfolio": ("Choose the best focus using actual remaining mathematical work and expected yield.",
++        "Compare worker evidence, checked/ready/blocked obligations, compatible techniques and current competition. Use the existing portfolio switch if justified."),
++    "lease-evaluation": ("Evaluate whether to continue or release a live lease.",
++        "Use concrete remaining dependencies and competing opportunities, not age, temporary compile contention or raw family scores. Preserve reusable knowledge."),
++    "transport": ("Keep remote compilation fast, reliable and cache-compatible.",
++        "Inspect relay status and real check times; improve throughput without duplicating caches."),
++    "adapter": ("Automate application of checked proof families to new statements.",
++        "Prefer exact source transformations, validate final statements, and test independent holdouts."),
++    "benchmark": ("Measure mathematical throughput, verified outputs and resource use.",
++        "Do not substitute invocation counts for checked proof output or credited results."),
++}
++BOUND = {"general", "integrator", "specialist"}
++DECISIONS = {"portfolio", "lease-evaluation"}
++METHOD = {"method", "tool", "adapter", "benchmark"}
++
++def role_for(label, general=False):
++    return "general" if general else "integrator" if label and "integrat" in label.lower() else "specialist"
++
++def guide(role):
++    if role not in ROLES:
++        raise ValueError("unknown role")
++    purpose, guidance = ROLES[role]
++    lines = [f"YOUR ROLE: {role}. {purpose}",
++             "FIRST: run ~/.local/bin/pnp-research start --role " + role +
++             " (a small current work packet, not a documentation reading task).",
++             guidance]
++    if role in BOUND:
++        lines += [
++          "In your workspace, pnp-research obligations ready --current shows open dependencies; obligations show ID gives the exact type. Request with obligations request --statement TYPE --requires ID; solve with obligations solve ID BODY --async, collect with obligations collect ID. BODY is a Lean term beginning with by.",
++          "Use pnp-remote-check --scratch --async FILE.lean for experimental Lean; pnp-remote-check --wait ID retrieves the result. Use managed local Lean if remote unavailable. Do not build the same file twice.",
++          "Use pnp-research knowledge find QUERY; knowledge show ID retrieves artifacts. Share findings through the existing support channel. Complete exact proof: use the normal submit command immediately."
++        ]
++    elif role in METHOD:
++        lines += [
++          "Use pnp-research obligations request --base SHA --family FAMILY --provenance SOURCE --statement TYPE; obligations solve ID BODY --method --async; obligations collect ID. The work packet supplies an exact public base. No desk lease is needed.",
++          "Run pnp-research knowledge find QUERY; store exact reusable objects with knowledge add. Use pnp-research certificate GRAPH.json --output Candidate.lean for a Lean-rendered graph-circuit certificate; star GRAPH.json returns its computational witness."
++        ]
++    elif role in DECISIONS:
++        lines += ["Use pnp-research yield (empirical baseline; not calibrated) and " + P + "portfolio inspect. Read current proof artifacts before deciding."]
++    elif role in {"knowledge","methods"}:
++        lines += ["Use pnp-research knowledge find QUERY and knowledge show ID; knowledge add KIND --family FAMILY --statement TEXT --provenance SOURCE --file FILE. Deliver actionable evidence via support advise."]
++    elif role in {"flow","transport"}:
++        lines += ["Use pnp-research adoption; marceline-request status; inspect actual outcomes and timings, not merely reports."]
++    lines += ["Detailed examples on demand: pnp-research guide " + role + ". No separate onboarding gate."]
++    return "\n".join(lines)
++
++def pinned_base(cwd):
++    w = assignment.workspace(cwd)
++    if w:
++        path = w[1]
++        try:
++            return subprocess.check_output(["git","-C",str(path),"rev-parse","HEAD"],text=True,timeout=3).strip()
++        except (OSError,subprocess.SubprocessError):return None
++    from .. import gitctl
++    try:
++        return subprocess.check_output(["git","--git-dir="+gitctl.MIRROR,"rev-parse","refs/remotes/upstream/main"],text=True,timeout=3).strip()
++    except (OSError,subprocess.SubprocessError):return None
++
++def compatible_public_base(latest):
++    from .. import gitctl
++    try:
++        raw=subprocess.check_output([str(Path.home()/".local/bin/marceline-request"),"status"],text=True,timeout=10)
++        status=json.loads(raw)
++        if status.get("age_seconds") is None or status["age_seconds"]>180:return latest
++        cached=set((status.get("capabilities") or {}).get("lean_bases",[]))
++        recent=subprocess.check_output(["git","--git-dir="+gitctl.MIRROR,"rev-list","--first-parent","--max-count=220","refs/remotes/upstream/main"],
++                                       text=True,timeout=5).splitlines()
++        return next((b for b in recent if b in cached),latest)
++    except (OSError,ValueError,subprocess.SubprocessError):return latest
++
++def details(role):
++    text=guide(role)
++    if role in BOUND:
++        return text+"""
++EXACT WORKFLOW (run from the bound workspace):
++  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.cli guard
++  pnp-research start
++  pnp-research knowledge find 'specific mathematical terms'
++  pnp-research obligations ready --current
++  pnp-research obligations show NODE_ID
++  pnp-research obligations request --statement '∀ n : Nat, n + 0 = n' --import Mathlib
++  # write a file proof.body containing: by intro n; exact Nat.add_zero n
++  pnp-research obligations solve NODE_ID proof.body --async
++  # output contains CHECK_ID; keep working, then:
++  pnp-research obligations collect CHECK_ID --poll
++  # exit 75 means pending, not failure; later collect CHECK_ID (blocking).
++  pnp-research obligations assemble ROOT_ID --candidate --output Candidate.lean
++  # submit through the ordinary exact-lease command; no extra approval gate.
++For a different exact base: obligations fork NODE_ID; use obligations body OLD_ID
++--for-node NEW_ID --output proof.body, then recheck each dependency in order.
++A ready node is mathematically OPEN; a checked node has an exact kernel receipt.
++"""
++    if role in METHOD:
++        return text+"""
++INDEPENDENT METHOD WORKFLOW:
++  pnp-research start --role """+role+"""
++  pnp-research knowledge find --kind technique
++  # BASE is the exact public revision printed in the work packet.
++  pnp-research obligations request --base BASE --family graph-circuit \
++    --provenance 'exact general Boolean identity' --import Mathlib \
++    --statement '∀ a b : Bool, a && b = b && a'
++  # proof.body: by intro a b; exact Bool.and_comm a b
++  pnp-research obligations solve NODE_ID proof.body --method --async
++  pnp-research obligations collect CHECK_ID
++  pnp-research certificate GRAPH.json --output Candidate.lean
++Keep reusable lemmas and counterexamples in the graph, not only in your transcript.
++"""
++    if role in {"knowledge","methods"}:
++        return text+"""
++  pnp-research knowledge find 'obstruction cross tree'
++  pnp-research knowledge show OBJECT_ID
++  pnp-research knowledge add counterexample --family graph-circuit \
++    --statement 'exact failed inference' --detail 'why it fails' \
++    --provenance 'source and revision' --file witness.json
++  pnp-research knowledge link COUNTEREXAMPLE_ID OBSTRUCTION_ID counterexample_to
++Use actual precise evidence, not generic summaries. Link typed objects to the
++proof graph; only kernel receipts justify checked status.
++"""
++    if role in DECISIONS:
++        return text+"""
++  pnp-research yield
++  PYTHONPATH=/var/lib/lubko/wd/viche python3 -m missions.pnp.portfolio inspect
++Compare family-level empirical baseline with the actual proof graph and current
++competition. A submitted PR is not a credited step. An unresolved obligation
++is not proof that the whole theorem is false. Use only the existing allocator
++decision mechanism; record your concrete rationale.
++"""
++    return text+"\nInspect pnp-research adoption and the actual mathematical artifacts.\n"
++
++def guide_main():
++    import argparse
++    p=argparse.ArgumentParser(description="Detailed role-specific commands")
++    p.add_argument("role",choices=sorted(ROLES))
++    a=p.parse_args();print(details(a.role));return 0
++
++
++def packet(role, cwd=None):
++    cwd=Path(cwd or Path.cwd()).resolve()
++    b=assignment.binding(cwd)
++    rec=state.load(b[0]) if b else None
++    if not rec or rec.get("lease")!=b[1]:rec=None
++    base=pinned_base(cwd)
++    latest=base
++    if not rec and role in METHOD:base=compatible_public_base(latest)
++    out={"role":role,"base":base,"instructions":guide(role)}
++    if latest!=base:out["latest_public_base"]=latest
++    if rec:
++        out["gap"]=rec["gap_id"]
++        out["assignment_current"]=support.active(rec)
++        out["attempt"]=support.attempt(rec)
++        out["family"]=knowledge.family((rec.get("gap_title") or "")+" "+rec.get("statement",""))
++        out["cumulative_research"]=knowledge.relevant(rec)
++        label=assignment.worker_label(cwd)
++        if label and label.startswith("ob-"):
++            out["assigned_obligation"]=label[3:]
++        out["next_commands"]=[
++            "pnp-research obligations ready --current",
++            "pnp-research knowledge find --family "+out["family"],
++            "pnp-remote-check --availability",
++        ]
++    elif role in METHOD:
++        out["next_commands"]=["pnp-research knowledge find --kind technique",
++            "pnp-research obligations ready --base "+base if base else "pnp-research obligations ready",
++            "marceline-request status "+base if base else "marceline-request status"]
++        if role=="tool":
++            out["next_commands"].insert(0,"pnp-research certificate GRAPH.json --output Candidate.lean")
++            out["source_locations"]=["missions/pnp/research/certificate.py","missions/pnp/research/star.py",
++                                     "missions/pnp/research/certificate_bench.py","missions/pnp/proofs/"]
++        with knowledge.db() as c:
++            from . import obligations
++            out["open_method_nodes"]=[{"id":x["id"],"family":x["family"],"base":x["base"],"statement":x["statement"][:250]}
++                for x in obligations.ready(c) if x["status"]=="ready" and not x["assignments"]][:6]
++        c.close()
++    elif role in DECISIONS:
++        out["next_commands"]=["pnp-research yield",P+"portfolio inspect"]
++    else:
++        out["next_commands"]=["pnp-research knowledge stats",P+"support targets"]
++    return out
++
++def main():
++    import argparse
++    from . import adoption
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--role",choices=sorted(ROLES))
++    p.add_argument("--json",action="store_true")
++    a=p.parse_args()
++    role=a.role or adoption.current_role() or role_for(assignment.worker_label(),assignment.general())
++    data=packet(role)
++    if a.json:
++        print(json.dumps(data,ensure_ascii=False,indent=2))
++    else:
++        print("CURRENT WORK PACKET — "+role)
++        print("Purpose:",ROLES[role][0])
++        for key in ("gap","family","base","latest_public_base","assignment_current","assigned_obligation"):
++            if key in data:print(key+":",data[key])
++        context=data.get("cumulative_research") or {}
++        if context.get("obligations"):
++            print("\nCurrent exact obligations (show ID for full statement):")
++            for o in context["obligations"]:
++                print(o["id"],"CHECKED" if o.get("verified") else o.get("status","OPEN"),o["statement"][:220].replace("\n"," "))
++        if context.get("knowledge"):
++            print("\nRelevant knowledge:")
++            for x in context["knowledge"]:
++                print(x["id"],x["kind"],x["statement"][:200].replace("\n"," "))
++        if data.get("open_method_nodes"):
++            print("\nOpen mathematical methods (coordinate ownership before reuse):")
++            for x in data["open_method_nodes"]:print(x["id"],x["family"],x["statement"].replace("\n"," "))
++        if data.get("source_locations"):print("Sources:",", ".join(data["source_locations"]))
++        print("\nUseful next commands:")
++        if data.get("assigned_obligation"):print("pnp-research obligations show "+data["assigned_obligation"])
++        print("\n".join(data["next_commands"]))
++        print("Detailed examples: pnp-research guide "+role)
++    return 0
++
++if __name__=="__main__":raise SystemExit(main())
+diff --git a/missions/pnp/research/roles.py b/missions/pnp/research/roles.py
+index cbf11f12..4e3aaa34 100644
+--- a/missions/pnp/research/roles.py
++++ b/missions/pnp/research/roles.py
+@@ -3,24 +3,26 @@ import argparse
+ import subprocess
+ from pathlib import Path
+ 
+-ROLES = {
+- "method": "Develop a mathematical technique that solves a FAMILY of problems; not a single lease. Search pnp-research knowledge find and checked upstream proofs; formulate exact general lemmas. Use pnp-research obligations request --base SHA --family FAMILY --provenance SOURCE --statement TYPE; solve ID BODY --method independently of desk leases. Preserve exact hypotheses, failed generalizations and counterexamples. Demonstrate transfer to multiple distinct instances. No desk acquisition or direct PRs.",
+- "tool": "Turn a validated mathematical method into a deterministic reusable tool with independent verification. Run pnp-research star GRAPH.json for monotone graph circuits; output a certificate and benchmark distinct held-out families. Use pnp-research obligations for the Lean semantics. Measure actual kernel checks and accepted contributions, not just tool invocations. Integrate with existing proof tools; no duplicate tool stack.",
+- "knowledge": "Index durable evidence using pnp-research knowledge ingest; query by family and exact terms; promote important results into lemma, technique, obstruction, counterexample, reduction and certificate objects with exact evidence and dependency IDs. Do not label reported proofs kernel-checked.",
+- "portfolio": "Run pnp-research yield. Combine observed family baseline, exact open/checked obligations, applicable techniques and current competition with first-hand worker evidence. Small samples and censored history limit calibration. Do not release solely on numerical score.",
+- "lease-evaluation": "Run pnp-research yield; compare realistic remaining obligations and evidence of feasibility. Preserve reusable knowledge before release. Do not release due to age, a single failed tactic, or raw family rate.",
+- "integrator": "Use pnp-research obligations ready and show ID to turn the current proof outline into exact dependencies. Request exact types, assign complementary tasks via Executive, reuse checked bodies and assemble --candidate only when the root is checked. If base differs, fork and independently recheck. Submit the exact complete candidate immediately."
+-}
++from .playbook import ROLES, guide
++from . import adoption
+ 
+ def main():
+     p=argparse.ArgumentParser(description=__doc__)
+     p.add_argument("role",choices=sorted(ROLES));p.add_argument("--task",default="")
+     p.add_argument("--agent");p.add_argument("--cwd",type=Path)
+-    a=p.parse_args();text=ROLES[a.role]+("\nAssigned task: "+a.task if a.task else "")
++    a=p.parse_args();text=guide(a.role)+("\nAssigned task: "+a.task if a.task else "")
+     if not a.agent:
+         print(text);return 0
+     if not a.cwd or not a.cwd.is_dir() or not a.task:p.error("explicit task and existing cwd required")
+     # Existing agents are created and selected only by Executive.
+-    return subprocess.call(["antonina","agent","run","--id",a.agent,"--cwd",str(a.cwd.resolve()),
+-                            "--prompt",text,"--detach","--json"])
++    did=adoption.planned(a.agent,a.cwd,a.role,text)
++    result=subprocess.run(["antonina","agent","run","--id",a.agent,"--cwd",str(a.cwd.resolve()),
++                            "--prompt",text,"--detach","--json"],capture_output=True,text=True)
++    print(result.stdout,end="")
++    if result.stderr:print(result.stderr,end="",file=__import__("sys").stderr)
++    if result.returncode==0:
++        try:
++            if __import__("json").loads(result.stdout).get("state")=="running":adoption.confirmed(did)
++        except ValueError:pass
++    return result.returncode
+ if __name__=="__main__":raise SystemExit(main())
+diff --git a/missions/pnp/staff.py b/missions/pnp/staff.py
+index 9bef2ae2..525dc14a 100644
+--- a/missions/pnp/staff.py
++++ b/missions/pnp/staff.py
+@@ -28,8 +28,27 @@ _REUSABLE = frozenset(("idle", "clearexit", "stopped", "killed", "failed"))
+ 
+ 
+ def antonina(*args):
++    # All deterministic Executive dispatch paths use this wire. Inject exactly
++    # one short role playbook at the actual invocation, including restarts.
++    args=list(args);did=None
++    if args[:1]==["run"] and all(x in args for x in ("--id","--cwd","--prompt")):
++        from .research import playbook, adoption
++        path=Path(args[args.index("--cwd")+1])
++        label=assignment.worker_label(path)
++        role=playbook.role_for(label,label=="general") if label else None
++        if path.parent.name in ("standing-support","independent") and path.name in playbook.ROLES:
++            role=path.name
++        if role:
++            i=args.index("--prompt")+1
++            if not args[i].startswith("YOUR ROLE:"):
++                args[i]=playbook.guide(role)+"\n\n"+args[i]
++            did=adoption.planned(args[args.index("--id")+1],path,role,args[i])
+     result = subprocess.run(["antonina", "agent", *args], capture_output=True,
+                             text=True, timeout=30, check=True)
++    if did:
++        try:
++            if json.loads(result.stdout).get("state")=="running":adoption.confirmed(did)
++        except (ValueError,AttributeError):pass
+     return result.stdout.strip()
+ 
+ 
+@@ -122,11 +141,6 @@ def prompt(rec, approach, general=False):
+            f"and local diagnostic {rec.get('local_check_log', '')[-2000:]}. Correct the same "
+            "PR through submit; no new PR. Use the saved candidate in the gap state directory. "
+            if focus.correction(rec) else "")
+-        + " Cumulative research: run pnp-research knowledge find --family FAMILY (or query exact terms); "
+-          "use pnp-research obligations ready and show ID for exact Lean dependencies. "
+-          "A reusable method, failed route or checked fragment should be recorded with its evidence, not lost when the lease ends. "
+-          "Request exact Lean lemmas via pnp-research obligations request --statement TYPE; "
+-          "solve ID BODY checks it and all dependencies. Coordinate assignments through Executive; don't duplicate a claimed node. "
+         + f"Assigned approach: {approach}"
+     )
+ 
+@@ -195,12 +209,23 @@ def dispatch(gap, plans, agents=None, locked=False):
+                     # lemmas on the same base. Do not reset existing worktrees.
+                     general_path = (Path(state.gap_dir(gap)) / "attempts" /
+                                     assignment.attempt_id(rec["lease"]) / "workers/general/path")
+-                    if label != "general" and (general_path / ".git").exists():
++                    if label.startswith("ob-"):
++                        from .research import knowledge
++                        from contextlib import closing
++                        with closing(knowledge.db()) as c:
++                            base=knowledge.get(c,label[3:])["base"]
++                    elif label != "general" and (general_path / ".git").exists():
+                         base = subprocess.check_output(["git","-C",str(general_path),"rev-parse","HEAD"],
+                                                        text=True,timeout=5).strip()
+                     else:
+                         base = gitctl.ensure_mirror()
+-                assignment.prepare(gap, worker=label, base=base)
++                chosen_base=base
++                if label.startswith("ob-"):
++                    from .research import knowledge
++                    from contextlib import closing
++                    with closing(knowledge.db()) as c:
++                        chosen_base=knowledge.get(c,label[3:])["base"]
++                assignment.prepare(gap, worker=label, base=chosen_base)
+                 if not current_matches(rec, label == "general"):
+                     break
+                 reusable = next((a for a in existing if a.get("state") in ("idle", "clearexit")), None)
+@@ -218,6 +243,16 @@ def dispatch(gap, plans, agents=None, locked=False):
+                 if answer.get("state") != "running":
+                     raise ValueError("agent launch not confirmed")
+                 results.append({"worker": label, "status": "started", "id": agent_id})
++                if label.startswith("ob-"):
++                    try:
++                        from .research import knowledge
++                        from contextlib import closing
++                        import time
++                        with closing(knowledge.db()) as c,c:
++                            c.execute("INSERT OR REPLACE INTO assignment VALUES(?,?,?,?)",
++                                      (label[3:],support.attempt(rec),label,time.time()))
++                    except Exception:pass
++
+             except (OSError, ValueError, subprocess.SubprocessError, gitctl.GitError) as exc:
+                 results.append({"worker": label, "status": "deferred", "detail": str(exc)[:300]})
+         # A staffing/replenishment decision is routine, not a Git delivery.
+diff --git a/missions/pnp/status.py b/missions/pnp/status.py
+index 4532232c..a92d2d28 100755
+--- a/missions/pnp/status.py
++++ b/missions/pnp/status.py
+@@ -136,7 +136,7 @@ def snapshot():
+     scouts = w.pop("support", [])
+     covered = {role for agent in scouts for role in agent["roles"]}
+     useful = bool(active or corrections or w["count"] or ordinary or observed.get("offerable"))
+-    needed = set(support.ROLES) if useful else set()
++    needed = (set(support.ROLES) if useful else set()) | set(support.FAMILY_ROLES)
+     if active:
+         needed.add("lease-evaluation")
+     if len(active) > 1:
+diff --git a/missions/pnp/support.py b/missions/pnp/support.py
+index bd637f29..f90af196 100644
+--- a/missions/pnp/support.py
++++ b/missions/pnp/support.py
+@@ -11,6 +11,7 @@ from .proofs import corpus
+ 
+ ROLES = ("knowledge", "methods", "flow")
+ DECISION_ROLES = ("portfolio", "lease-evaluation")
++FAMILY_ROLES = ("method", "tool")
+ PREFIX = "Viche P vs NP support:"
+ KINDS = (*ROLES, "checked")
+ LIVE = ("LEASED", "RESEARCHING")
+@@ -223,10 +224,16 @@ def scan(refresh=False):
+ 
+ 
+ def roles(agent):
++    try:
++        cwd=Path(agent.get("cwd") or "").resolve()
++        for role in FAMILY_ROLES:
++            if cwd==Path(config.STATE_ROOT,"swarm","independent",role).resolve():
++                return [role]
++    except (OSError,ValueError,TypeError):pass
+     title = agent.get("title") or ""
+     if not isinstance(title, str) or not title.startswith(PREFIX):
+         return []
+-    return sorted({part.strip() for part in title[len(PREFIX):].split(",")} & set(ROLES + DECISION_ROLES))
++    return sorted({part.strip() for part in title[len(PREFIX):].split(",")} & set(ROLES + DECISION_ROLES + FAMILY_ROLES))
+ 
+ 
+ def main():
+diff --git a/tests/pnp-continuity.py b/tests/pnp-continuity.py
+index 76a321d1..52aea89f 100644
+--- a/tests/pnp-continuity.py
++++ b/tests/pnp-continuity.py
+@@ -32,7 +32,7 @@ class Tests(unittest.TestCase):
+         baseline.assert_called_once_with([],locked=True)
+         self.assertEqual(dispatch.call_count,1)
+         self.assertEqual([p[0] for p in dispatch.call_args.args[1]],["integrator","alternative"])
+-        self.assertEqual(scout.call_count,5)
++        self.assertEqual(scout.call_count,7)
+     def test_unknown_roster_does_not_dispatch(self):
+         with patch.object(continuity.status,"workers",return_value={"coverage":"partial"}),patch.object(staff,"roster") as roster:
+             self.assertEqual(continuity.execute()["status"],"worker coverage unknown")
+diff --git a/tests/pnp-research.py b/tests/pnp-research.py
+index 746a78a5..47a0164e 100644
+--- a/tests/pnp-research.py
++++ b/tests/pnp-research.py
+@@ -9,7 +9,9 @@ from unittest.mock import patch
+ import itertools
+ import json
+ from missions.pnp import config,state
+-from missions.pnp.research import knowledge as k,obligations as o,star,yield_model as y
++from missions.pnp.research import knowledge as k,obligations as o,star,yield_model as y,adoption,async_check,certificate,playbook
++from missions.pnp import assignment,staff,continuity,support
++import os
+ 
+ class Research(unittest.TestCase):
+     def setUp(self):
+@@ -60,6 +62,68 @@ class Research(unittest.TestCase):
+             self.assertEqual(len(z["cover"]),size)
+             self.assertLessEqual(len(z["gates"]),len(E)+size-1)
+         self.assertEqual(star.verify(2,[(0,1)],[("or",0,1)],2)["status"],"counterexample")
++    def test_exact_cross_origin_dedup(self):
++        a=self.obligation("True")
++        b=k.add(self.c,"obligation","another-family","True",k.canon({"imports":["Mathlib"]}),
++                "L-meta-19 / another attempt",base=self.base)
++        self.assertEqual(a,b)
++        self.assertEqual(len(k.get(self.c,a)["origins"]),2)
++        self.assertTrue(k.belongs(self.c,a,"L-meta-19 / "))
++        self.assertEqual(o.fork(self.c,a,self.base),{a:a})
++        self.assertEqual(len(k.search(self.c,"True",fam="another-family")),1)
++    def test_role_delivery_and_adoption(self):
++        rec=state.create("L-meta-5",state="LEASED",lease="fixture",statement="True",
++                         lease_expires_at=__import__("time").time()+600)
++        p=Path(assignment.prepare(rec["gap_id"],checkout=False,worker="general")["cwd"])
++        p.mkdir(parents=True)
++        class Result:
++            stdout='{"state":"running"}'
++        with patch.object(staff.subprocess,"run",return_value=Result()) as wire:
++            staff.antonina("run","--id","agent-fixture","--cwd",str(p),"--prompt","Exact task","--detach","--json")
++            prompt=wire.call_args.args[0]
++            self.assertIn("YOUR ROLE: general",prompt[prompt.index("--prompt")+1])
++            self.assertIn("pnp-research start",prompt[prompt.index("--prompt")+1])
++        with patch.dict(os.environ,{"ANTONINA_AGENT_ID":"agent-fixture","ANTONINA_INVOCATION_ID":"turn"}):
++            self.assertEqual(adoption.current_role(),"general")
++            adoption.record("start",__import__("time").time(),0)
++            adoption.record("knowledge find",__import__("time").time(),0)
++        result=adoption.report()
++        self.assertEqual(result["roles"]["general"]["discovered"],1)
++        self.assertEqual(result["roles"]["general"]["successful_use"],1)
++    def test_independent_roles_and_obligation_fronts(self):
++        rec=state.create("L-meta-9",state="LEASED",lease="fixture",statement="True",
++                         lease_expires_at=__import__("time").time()+600)
++        oid=k.add(self.c,"obligation","test","True",k.canon({"imports":["Mathlib"]}),
++                  "L-meta-9 / prior attempt",base=self.base)
++        self.assertIn("ob-"+oid,[x[0] for x in continuity.focus_plans(rec,[])])
++        self.assertEqual(set(continuity.required_support([])),{"method","tool"})
++        self.assertEqual(support.roles({"cwd":str(Path(config.STATE_ROOT)/"swarm/independent/method"),"title":"independent worker"}),["method"])
++    def test_async_receipt_identity(self):
++        oid=self.obligation("True")
++        body=k.store_bytes(b"by trivial")
++        job=async_check.identity(self.base,"toolchain","a"*24+"-"+"b"*16,"source")
++        ident={x:job[x] for x in ("job","base","toolchain","attempt","source_sha256")}
++        ident["origin"]={"gap":None,"attempt":"method-research"}
++        async_check.table(self.c)
++        with self.c:self.c.execute("INSERT INTO pending_check VALUES(?,?,?,?,?,?,NULL,0,'queued',NULL)",
++             (job["job"],oid,self.base,body,job["source_sha256"],k.canon(ident)))
++        row=async_check.snapshot(self.c,job["job"])
++        result={**job,"status":"elaborated","exit_code":0,
++                "diagnostic":"'"+o.symbol(oid)+"' does not depend on any axioms"}
++        self.assertEqual(async_check.proof_result(self.c,row,result)["status"],"kernel_checked")
++        bad={**result,"base":"b"*40}
++        self.assertEqual(async_check.proof_result(self.c,row,bad)["status"],"not_verified")
++        self.assertEqual(o.checked_body(self.c,oid,self.base),"by trivial")
++    def test_large_certificate(self):
++        edges=[(p,13+l) for p in range(13) for l in range(13) if (p-l)%13 in (0,1,3,9)]
++        meta=certificate.graph_meta({"n":26,"edges":edges,"bound":64})
++        r=certificate.render(meta)
++        self.assertEqual(r["status"],"generated")
++        self.assertEqual(r["gates"],64)
++        self.assertIn("L.Perm R := by decide",r["candidate"])
++        self.assertNotIn("∀ b0 b1",r["candidate"])
++        # No generated proof is claimed kernel-checked before verification.
++        self.assertEqual(r["verification"]["status"],"verified")
+     def test_archive_ingest(self):
+         archive=Path(config.STATE_ROOT).parent/"quarantine"/"L-meta-2-20261124100000"
+         archive.mkdir(parents=True)

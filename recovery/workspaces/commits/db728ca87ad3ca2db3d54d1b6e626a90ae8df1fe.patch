@@ -1,0 +1,205 @@
+commit db728ca87ad3ca2db3d54d1b6e626a90ae8df1fe
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Thu Nov 19 08:52:46 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Thu Nov 19 08:52:46 2026 +0000
+
+    Serialize Post receipts and prioritize urgent correspondence
+
+diff --git a/government/RECOVERY-STEWARD.md b/government/RECOVERY-STEWARD.md
+index 236dcb12..bd2d9f55 100644
+--- a/government/RECOVERY-STEWARD.md
++++ b/government/RECOVERY-STEWARD.md
+@@ -47,9 +47,12 @@ On every assessment independently verify the observability infrastructure
+ itself: executable Python, fresh outcomes, institutional-case index, judicial
+ measurements, collector failures and their source timestamps. A clean-but-stale
+ index or a process count is negative evidence against declaring recovery.
+-Workarounds used by an agent do not fix a broken shared runtime. Check the
+-Judiciary mailbox at /var/lib/lubko/wd/viche-state/oversight/judiciary-mailbox/inbox/
+-and immediately submit your own material blockers (including those worked around).
++Workarounds used by an agent do not fix a broken shared runtime. After lawful enactment of the Institutional Knowledge and Communications Act,
++check Post using government/post.py inbox --office recovery-steward --new.
++Report material blockers through addressed mail to Judiciary. Before enactment,
++use the historical mailbox at
++/var/lib/lubko/wd/viche-state/oversight/judiciary-mailbox/inbox/.
++A Post receipt is not evidence of independent incident remediation.
+ Do not claim no actionable repairs until fresh independent evidence verifies
+ reporting, reconciled cases, actual branch work and disappearance of the original
+ failure. Prefer independent general-purpose investigation to fragile scripts.
+diff --git a/government/post.py b/government/post.py
+index 5c8f42ea..8edb229f 100644
+--- a/government/post.py
++++ b/government/post.py
+@@ -15,7 +15,7 @@ import sys
+ import time
+ import uuid
+ 
+-NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
++NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+ TOPIC = re.compile(r"^[a-z][a-z0-9/-]{0,127}$")
+ KINDS = ("letter", "request", "observation", "forecast", "scenario",
+          "strategy", "founder-inference", "finding", "report")
+@@ -179,11 +179,13 @@ def publish(db, args):
+             office,mode=item
+             # A new article never summons a model. Only explicitly urgent direct
+             # letters may do so, one causal hop at most, max four per 6h per office.
+-            count=db.execute("""SELECT COUNT(*) FROM deliveries
+-                  WHERE recipient=? AND alert=1 AND created_at>=?""",
+-                  (office,now-21600)).fetchone()[0]
+-            alert=int(channel=="mail" and args.priority=="urgent"
+-                      and depth<=1 and count<4)
++            count=db.execute("""SELECT COUNT(*) FROM deliveries d
++                  JOIN messages m ON m.id=d.message_id
++                  WHERE d.recipient=? AND d.alert=1 AND m.channel='mail'
++                  AND d.created_at>=?""",(office,now-21600)).fetchone()[0]
++            alert=int((channel=="mail" and args.priority=="urgent"
++                      and depth<=1 and count<4) or
++                      (channel=="gazette" and mode=="alert"))
+             db.execute("""INSERT INTO deliveries(message_id,recipient,status,alert,created_at)
+                           VALUES(?,?,'new',?,?)""",(mid,office,alert,now))
+             delivered+=1
+@@ -220,7 +222,11 @@ def inbox(db, args):
+     rows=db.execute("""SELECT m.*, d.status,d.alert,d.ack_at,d.resolved_at,d.resolution
+        FROM deliveries d JOIN messages m ON m.id=d.message_id
+        WHERE d.recipient=? """+statuses+"""
+-       ORDER BY m.created_at,m.id LIMIT ?""",(office,args.limit)).fetchall()
++       ORDER BY CASE
++         WHEN m.channel='mail' AND d.alert=1 AND d.status='new' THEN 0
++         WHEN m.channel='mail' AND d.status='new' THEN 1
++         WHEN d.status='new' THEN 2 ELSE 3 END,
++         m.created_at,m.id LIMIT ?""",(office,min(max(args.limit,1),200))).fetchall()
+     return [msg_dict(row) for row in rows]
+ 
+ def feed(db,args):
+@@ -231,6 +237,9 @@ def feed(db,args):
+ 
+ def transition(db,args):
+     office=valid_name(args.office)
++    # Serialize the status read with the update. Previously a late "read"
++    # could overwrite a concurrent "acknowledged" or "resolved" receipt.
++    db.execute("BEGIN IMMEDIATE")
+     row=db.execute("SELECT status FROM deliveries WHERE message_id=? AND recipient=?",
+                    (args.id,office)).fetchone()
+     if row is None:
+@@ -239,7 +248,7 @@ def transition(db,args):
+     steps=["new","read","acknowledged","resolved"]
+     requested={"read":"read","ack":"acknowledged","resolve":"resolved"}[args.command]
+     if steps.index(requested)<steps.index(status):
+-        raise ValueError("cannot roll a receipt backward")
++        return {"id":args.id,"status":status,"already_advanced":True}
+     if requested=="resolved" and not args.reason:
+         raise ValueError("resolutions require a reason; not proof of task success")
+     if requested==status:
+@@ -263,8 +272,10 @@ def transition(db,args):
+ 
+ def wake(db,args):
+     office=valid_name(args.office)
+-    rows=db.execute("""SELECT message_id FROM deliveries
+-       WHERE recipient=? AND status='new' AND alert=1 ORDER BY created_at,message_id""",
++    rows=db.execute("""SELECT d.message_id FROM deliveries d
++       JOIN messages m ON m.id=d.message_id
++       WHERE d.recipient=? AND d.status='new' AND d.alert=1
++       AND m.channel='mail' ORDER BY d.created_at,d.message_id""",
+        (office,)).fetchall()
+     mids=[r[0] for r in rows]
+     return {"office":office,"urgent_unread":len(mids),
+diff --git a/government/recovery-steward-cycle.sh b/government/recovery-steward-cycle.sh
+index 1fdaedad..dac51d96 100644
+--- a/government/recovery-steward-cycle.sh
++++ b/government/recovery-steward-cycle.sh
+@@ -65,6 +65,13 @@ for evidence in "$state"/liveness/unsafe-holds/*; do
+     break
+   fi
+ done
++# Direct urgent mail can preempt cadence; normal Gazette cannot wake models.
++post_wake=
++if grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \(enacted ' "$town/government/LAWS.md"; then
++  post_wake=$(python3 "$town/government/post.py" wake --office recovery-steward 2>/dev/null) || post_wake=post_unavailable
++  post_urgent=$(printf '%s\n' "$post_wake" | jq -r '.urgent_unread // 0' 2>/dev/null) || post_urgent=0
++  [ "$post_urgent" -eq 0 ] || interval=0
++fi
+ if [ "$fresh" != yes ] && [ "$last" -gt 0 ] && [ "$now" -ge "$last" ] &&
+    [ $((now-last)) -lt "$interval" ]; then exit 0; fi
+ charter=${VICHE_CONSTITUTION:-}
+@@ -75,7 +82,7 @@ charter=${VICHE_CONSTITUTION:-}
+ # a periodic pass.
+ if [ "$fresh" != yes ] && [ -f "$town/government/dispatch-gate.sh" ]; then
+   holds=$(find "$state/liveness/unsafe-holds" -maxdepth 1 -type f -size +0 2>/dev/null | sort || :)
+-  if { printf '%s\n' "$holds"
++  if { printf '%s\n' "$holds" "$post_wake"
+        for incident_file in "$state/branches/incident.json" "$state/oversight/random/incident.json" "$state/oversight/incident.json"; do
+          if [ -s "$incident_file" ]; then jq -cS '{first_seen,signals,id}' "$incident_file" 2>/dev/null || cat "$incident_file"; fi
+        done
+@@ -103,6 +110,10 @@ Your worktree: $cwd
+ Current UTC: $(date -u +%FT%TZ)
+ EOF
+ )
++if grep -Eq '^## Act [0-9]+ — Institutional Knowledge and Communications Act \(enacted ' "$town/government/LAWS.md"; then
++  post_mail=$(python3 "$town/government/post.py" inbox --office recovery-steward --new --limit 25) || post_mail=post_unavailable
++  prompt=$(printf '%s\n\n=== RECOVERY STEWARD POST MAIL ===\n%s\n=== END POST MAIL ===\n' "$prompt" "$post_mail")
++fi
+ policy_file="$town/government/AGENT-REPORTING-POLICY.md"
+ [ -s "$policy_file" ] || { echo "Viche: mandatory Founder agent policy missing" >&2; exit 1; }
+ if [ -f "$town/government/handover.sh" ]; then
+diff --git a/tests/test_post.py b/tests/test_post.py
+index 45eea1a8..e5b00324 100644
+--- a/tests/test_post.py
++++ b/tests/test_post.py
+@@ -57,6 +57,8 @@ class PostTest(unittest.TestCase):
+                      "--priority","urgent")
+         self.assertEqual(pub["delivered"],2)
+         self.assertEqual(self.cli("wake","--office","foresight")["urgent_unread"],0)
++        self.assertEqual(self.cli("inbox","--office","foresight")[0]["alert"],1)
++        self.assertEqual(self.cli("inbox","--office","judiciary")[0]["alert"],0)
+         self.assertEqual(len(self.cli("inbox","--office","strategy")),0)
+         self.assertEqual(len(self.cli("inbox","--office","judiciary")),1)
+         self.assertEqual(len(self.cli("feed","--topic","statistics/resources")),1)
+@@ -118,6 +120,48 @@ class PostTest(unittest.TestCase):
+             with self.assertRaises(sqlite3.DatabaseError):
+                 db.execute("UPDATE messages SET body=? WHERE id=?",("tampered",a))
+ 
++    def test_concurrent_receipts_monotonic(self):
++        # Read and acknowledgement may race across separate agent invocations.
++        # The final state cannot ever move backward.
++        for i in range(8):
++            mid=self.send("--key","receipt-"+str(i))["id"]
++            def action(cmd):
++                return subprocess.run(["python3",str(POST),cmd,
++                    "--office","judiciary","--id",mid],env=self.env,
++                    capture_output=True,text=True)
++            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
++                results=list(pool.map(action,("read","ack")))
++            self.assertTrue(all(x.returncode==0 for x in results),results)
++            status=self.cli("trace","--id",mid)["deliveries"][0]["status"]
++            self.assertEqual(status,"acknowledged")
++        older=self.cli("read","--office","judiciary","--id",mid)
++        self.assertEqual(older["status"],"acknowledged")
++        self.assertTrue(older["already_advanced"])
++
++    def test_urgent_mail_not_buried(self):
++        self.cli("subscribe","--office","judiciary","--topic","statistics/outcomes")
++        for i in range(6):
++            self.cli("publish","--sender","statistics","--topic","statistics/outcomes",
++                     "--subject","Low-priority "+str(i),"--body","Derived report")
++        urgent=self.cli("send","--sender","executive","--to","judiciary",
++                        "--subject","Real urgent letter","--body","Please investigate",
++                        "--priority","urgent")["id"]
++        first=self.cli("inbox","--office","judiciary","--new","--limit","1")[0]
++        self.assertEqual(first["id"],urgent)
++        self.assertEqual(self.cli("wake","--office","judiciary")["urgent_unread"],1)
++
++    def test_subscriber_agent_ids(self):
++        ident="Qwe2S9z-AbCd3"
++        self.cli("subscribe","--office",ident,"--topic","statistics/outcomes",
++                 "--mode","alert")
++        pub=self.cli("publish","--sender","statistics","--topic","statistics/outcomes",
++                     "--subject","Observed","--body","Collector updated",
++                     "--kind","observation","--source","collector:hash",
++                     "--condition","daily window")
++        self.assertEqual(pub["delivered"],1)
++        self.assertEqual(self.cli("inbox","--office",ident)[0]["alert"],1)
++        self.assertEqual(self.cli("wake","--office",ident)["urgent_unread"],0)
++
+     def test_atomic_concurrent_idempotency(self):
+         def action(_):
+             return self.send("--key","same-concurrent")

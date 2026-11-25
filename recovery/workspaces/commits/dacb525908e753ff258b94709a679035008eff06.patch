@@ -1,0 +1,88 @@
+commit dacb525908e753ff258b94709a679035008eff06
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 00:10:21 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 00:10:21 2026 +0000
+
+    PnP broker review fix: clear stale publish artifacts on reacquire; record staffing
+
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index 5564faca..7e3639e9 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -164,6 +164,13 @@ def reacquire(gap_id, **fields):
+         for key in lease_fields + meta_fields:
+             if key in fields:
+                 rec[key] = fields[key]
++        # A re-leased gap starts a fresh publication cycle.  Stale digest or
++        # publish artifacts from an earlier attempt would make publish()
++        # abort ("candidate digest changed since local check") or reuse an
++        # old base/branch/PR, driving the gap to FAULT instead of credited.
++        for key in ("candidate_digest", "base_sha", "branch", "worktree",
++                    "commit_sha", "pr_number", "pr_url", "external_verdict"):
++            rec[key] = None
+         rec["failure_reason"] = None
+         rec["intent"] = None
+         rec["researchers"] = []
+diff --git a/records/handoffs/H-1795477223-pnp-exec-staffing.txt b/records/handoffs/H-1795477223-pnp-exec-staffing.txt
+index 8fa4a5d8..49b76618 100644
+--- a/records/handoffs/H-1795477223-pnp-exec-staffing.txt
++++ b/records/handoffs/H-1795477223-pnp-exec-staffing.txt
+@@ -7,6 +7,26 @@
+ # Next pass: (1) confirm the fix landed, (2) acquire leases as sole broker once
+ # the rate limit clears (~23:52Z), (3) relaunch properly instructed pure-researcher
+ # agents on distinct leased gaps. Do NOT resume any worker that self-consumes leases.
++#
++# STAFFING DONE 2026-11-24T00:03Z (verified running/alive=true):
++#  - L-meta-651 lease 3698dde4-50f1-41a5-b48c-edb755455644:
++#      am872RZjB7ulzOiOp12WqN-trampled (proof/Lean, exec-lean-20261123)
++#      Ibea1ykkEmuj26gv5HOfLk-outposts (counterexample search, exec-refute-20261123)
++#  - L-pcx-104 lease 3881d263-f953-4ec8-ade5-8fd059ef536c:
++#      QGUFiYYSgBq2cJliyi5TPO-borders (computational probe, exec-lemma-20261123)
++# Roster: /var/lib/lubko/wd/viche-state/pnp/swarm/agents.json. All three are PURE
++# researchers: forbidden to call cli.py acquire/release/submit/beat or gh/gh-pequalnp.
++# Executive is sole broker/publisher. Reconcile keeps leases alive; broker fix
++# delivery pnp-broker-readopt-20261123 was 'reviewing' at 00:02:59Z.
++# Desk route: plain 'acquire' pins to current gap; use '--another' for more.
++# Public metric still 0/unranked at last poll; no credit claimed.
++# LEASE HEARTBEAT: mission-cycle.sh runs only at boot (once/24h), so the
++# Executive must run `python3 missions/pnp/cli.py reconcile` each cycle to
++# renewal-beat the two LEASED gaps (beat window opens ~9 min after acquisition,
++# ~00:09Z; leases expire ~00:19Z). This is the documented operator command,
++# not a new scheduler. Desk cooldown counter was 13 at 00:05Z; no more gaps
++# claimable for ~1h. Next cycle: re-poll leaderboard, reconcile/beat, referee
++# any candidate Lean file, publish only via deterministic publisher.
+ id: H-1795477223-pnp-exec-staffing
+ status: open
+ assigned-by: self (Executive; Founder priority update 2026-11-23T23:30:52Z, sha256:HpOiWgNjT7S1D8LwH-3AYFhlAPP6ukIebJzzvG_EdXY)
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 195f5e2f..7d235d4c 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -367,7 +367,11 @@ class TestCli(unittest.TestCase):
+             with self.subTest(previous=previous):
+                 fresh()
+                 new_state(previous, lease="old-lease",
+-                          failure_reason="out_of_time")
++                          failure_reason="out_of_time",
++                          base_sha="old-base", branch="pnp/old",
++                          worktree="/tmp/old-wt", commit_sha="old-sha",
++                          pr_number=7, pr_url="https://old/pr/7",
++                          external_verdict="REJECTED")
+                 fake = FakeDesk()
+                 fake.next_gap = lambda **kw: answer
+                 with mock.patch.object(cli.desk_mod, "Desk",
+@@ -379,6 +383,13 @@ class TestCli(unittest.TestCase):
+                 self.assertEqual(rec["state"], "LEASED")
+                 self.assertEqual(rec["lease"], "fresh-lease")
+                 self.assertIsNone(rec["failure_reason"])
++                # Reviewer finding: stale publish artifacts must be cleared so
++                # a fresh candidate can be checked and submitted without a
++                # false "candidate digest changed since local check" FAULT.
++                for stale in ("candidate_digest", "base_sha", "branch",
++                              "worktree", "commit_sha", "pr_number",
++                              "pr_url", "external_verdict"):
++                    self.assertIsNone(rec[stale], stale)
+ 
+     def test_active_lease_duplicate_is_not_released_into_cooldown(self):
+         from missions.pnp import cli

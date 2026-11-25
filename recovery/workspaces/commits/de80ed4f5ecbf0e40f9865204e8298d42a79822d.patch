@@ -1,0 +1,220 @@
+commit de80ed4f5ecbf0e40f9865204e8298d42a79822d
+Author:     Viche Research <research@viche.local>
+AuthorDate: Wed Nov 18 20:00:55 2026 +0000
+Commit:     Viche Research <research@viche.local>
+CommitDate: Wed Nov 18 20:00:55 2026 +0000
+
+    Research: adversarial stress-test of suite-compliance dedup/retention and 98% unreadable finding
+
+diff --git a/records/research/2026-11-18-suite-compliance-dedup-retention-redteam.md b/records/research/2026-11-18-suite-compliance-dedup-retention-redteam.md
+new file mode 100644
+index 00000000..ad7446e0
+--- /dev/null
++++ b/records/research/2026-11-18-suite-compliance-dedup-retention-redteam.md
+@@ -0,0 +1,206 @@
++# Adversarial research — stress-testing suite-compliance dedup/retention and the ~98% `unreadable` finding
++
++*Author: `office/retention-skeptic-20261118` (Executive Innovation Office research front). Date: 2026-11-18.*
++*Scope: **research only**. No production code, no bills, no Judiciary compliance work, no state mutation, no landing/deployment. All commands below are read-only against the canonical town checkout `/var/lib/lubko/wd/viche` and the durable state root `/var/lib/lubko/wd/viche-state`.*
++
++## 0. Bottom line up front
++
++1. **The baseline is true, with two corrections.** 8,707 → 8,708 snapshots (the writer was still running during my analysis), 2.518 GiB, 529 distinct content states, 98.709% `unreadable` are all independently reproduced below. The "~150 MB/day" figure is the **recent** rate (Nov 11–18: 130–182 MiB/day); the 26-day lifetime average is **99 MiB/day**. The rate roughly doubled across the window.
++2. **Naive dedup is not information-preserving at the level Viche's own evidence law cares about.** Stripping `observed_at`, keeping 529 content blobs, and writing a timestamp manifest is *content-lossless* but **destroys 8,178 independent filesystem write events** (every snapshot mtime is unique; 10.8–85.4 s after `observed_at`), concentrates all chronology trust in one new mutable manifest, and breaks an already-fragile hash chain: each snapshot's `details_sha256` is written **only** into the per-run summary, which is overwritten every ~221 s. There is no historical manifest. Under `LAWS.md` §5.2 ("durable, independently checkable artifacts… tamper-evident where feasible. A journal is necessary but not sufficient"), Act 12.7 (no deletion without quarantine/recovery window) and Act 29 (Ministry "gains no power to delete evidence"), a delete-by-dedup is **not safe as described**.
++3. **A properly designed dedup can be safe, but it is not the efficiency win advertised.** Content-addressed retention of 529 blobs + an *anchored, append-only* timestamp/mtime manifest + reversible quarantine would preserve auditable content. But savings are 94.35% of bytes (2.518 GiB → 0.142 GiB), and a **one-time cleanup does not stop the ~150 MB/day growth** — the generator still writes ~340 identical-prone files/day. Stopping growth requires changing `government/judiciary-measurements.py`, which is production code and outside this mandate.
++4. **The ~98.7% `unreadable` is overwhelmingly a documented evidence-*coverage* limitation, not a fixable code defect.** The checker runs cleanly (`status: measured`, exit 0); `unreadable` means "no preceding exact-commit/tree suite record," and only 76 of 1,201 first-parent main commits ever touched `records/suite-status.json` while 27 valid Act 26 pre-landing records exist for 1,183 audited changes. Prior Judiciary audit `records/AUDIT-2026-10-24-cycle-7842d14a.md:19` says the same in so many words: "The 2/468 rate is principally evidence coverage, not a defect-rate estimate." It cannot be retroactively fixed; it can only improve going forward if the Act 26/31 delivery process reliably emits pre-landing records.
++5. **Fixing `unreadable` would not reduce disk by one byte.** Status labels do not change file size or count. The "98% noise" and the "2.5 GiB disk" are **independent problems**; the efficiency framing conflates them.
++
++**Authority blocker:** any actual retention change is ordinary-law/process work (Parliament; Act 12 Janitor quarantine + independent review; Act 29 Ministry bounded by "no power to delete evidence"; Clerk/Integrator for Act 26/31 evidence generation). The Judiciary is a non-voting measurement office and — consistent with its refusal to rotate — has no authority to fix the underlying evidence gap. This office has none either. Nothing here is a proposal to implement.
++
++---
++
++## 1. Verified baseline (commands + outputs)
++
++### 1.1 Location and writer
++
++The canonical `state/branches/` inside the town checkout is almost empty; the live snapshots live under the state root selected by `suite-compliance-check.sh` (`state=${VICHE_STATE_ROOT:-/var/lib/lubko/wd/viche-state}`):
++
++```
++$ find /var/lib/lubko/wd/viche-state/branches -name 'suite-compliance-*.json' -type f | wc -l
++8708                       # was 8707 at the start of this inquiry; still growing
++$ du -sh /var/lib/lubko/wd/viche-state/branches/suite-compliance-*.json | tail -1
++2.6G   total
++$ find … | sort | head -1
++…/suite-compliance-1792821164.json      # 2026-10-24
++$ find … | sort | tail -1
++…/suite-compliance-1795031475.json      # 2026-11-18
++```
++
++`government/judiciary-measurements.py` `suite_compliance()` (lines 100–150) writes the detail file with `detail = root/'branches'/('suite-compliance-%d.json' % now)` and an atomic `tmp.replace(detail)`. `now` is the integer epoch also stored as `observed_at`; **filename epoch == `observed_at` for 100% of files** (`FILENAME_EPOCH_MISMATCH 0`). The 8,707/2.52 GiB/529/~98% baseline is confirmed.
++
++### 1.2 Single-pass analysis (`/tmp/opencode/analyze.py`)
++
++```
++FILES 8707
++TOTAL_BYTES 2703737459   GiB 2.518   GB 2.704
++OBS_MIN 1792821164  OBS_MAX 1795031475  SPAN_DAYS 25.58
++FILENAME_EPOCH_MISMATCH 0
++DISTINCT_CONTENT_STATES_IGNORING_OBSERVED_AT 529
++SINGLETON_CONTENT_STATES 359
++PER_CHANGE_LEN_MIN 466  MAX 1183
++TOTAL_PER_CHANGE_ENTRIES 7195706
++  STATUS unreadable              7102820   98.709 %
++  STATUS compliant                  89991    1.251 %
++  STATUS red_chronology_unresolved   2895    0.040 %
++SUMMARY_STATUS {'measured': 8707}
++DAYS_WITH_DATA 26
++AVG_BYTES_PER_DAY 99.17 MiB
++PER_DAY_BYTES (selected): 2026-10-24 55.9 MiB / 2026-10-31 77.0 / 2026-11-10 115.4 /
++   2026-11-11 163.1 / 2026-11-13 147.2 / 2026-11-16 182.2 / 2026-11-18 129.2
++```
++
++**Correction to baseline:** 99 MiB/day is the lifetime average; the "≈150 MB/day" claimed in the inquiry is the **recent** run-rate (Nov 11–18). Both are true at different times; the growth is accelerating because `per_change` is a cumulative list that grows with each main change (466 → 1,183 entries).
++
++### 1.3 Deduplication savings and metadata loss (`analyze2.py`)
++
++```
++TOTAL_RAW_BYTES          2704189615        (2.518 GiB)
++DEDUP_BYTES_529_COPIES    152914643        (0.142 GiB)
++SAVED_BYTES              2551274972        94.35 %
++MTIME_DISTINCT           8708 OF 8708      # EVERY snapshot has a unique sub-second mtime
++MTIME_MINUS_OBS_MIN      10.817 s
++MTIME_MINUS_OBS_MAX      85.415 s
++OBS_GAP_MIN 5 s   MEDIAN 221 s   MAX 59096 s (~16.4 h)   GAPS_GT_600s 40
++```
++
++So: ~2.36 GiB recoverable, ~94% of current bytes. But 8,178 mtimes and the exact run-cadence evidence disappear.
++
++### 1.4 The hash chain is already broken, and dedup would make it worse
++
++```
++$ python3 -c "import json;d=json.load(open(sorted(glob.glob('…/suite-compliance-*.json'))[0]));print(sorted(d['summary'].keys()))"
++['change_count','compliant','green_suite_compliance_rate','main_red_episodes',
++ 'red_chronology_unresolved','status','unreadable','violations']
++details_sha256 inside detail file?  False
++$ find /var/lib/lubko/wd/viche-state -name 'judiciary-measurements*'
++…/branches/judiciary-measurements.json       # single file, overwritten every run
++```
++
++`suite_compliance()` builds the detail `full` blob **before** it sets `data['details_sha256']`, so each file's content hash is recorded **only** in the per-run `judiciary-measurements.json`, which is atomically overwritten every ~221 s. Historical snapshots therefore have no durable external hash anchor; the Git-committed copies used by the Act 26 route only cover a handful of changes. `details_sha256` also includes `observed_at` (it is computed over the full blob), so it is unique per file — unlike the 529 "content states." **Dedup by content state is only lossless if a complete, trustworthy, externally-anchored `observed_at → hash` manifest is created and maintained; that manifest does not exist today and would become a new single point of failure.**
++
++---
++
++## 2. Strongest case AGAINST dedup / retirement
++
++### 2.1 What the content hash does and does not preserve
++
++Define state `S = full JSON − {observed_at}`. There are 529 distinct `S`. Keeping one copy of each `S` plus the multiset of `observed_at` values is **lossless with respect to the JSON content of the snapshots** — an auditor can reconstruct every field of every observation. If the only audit question is "what did the measurement report at each time," dedup is safe and the efficiency case wins.
++
++That is the strongest version *for* dedup, and I accept it. The case against rests on information that is **not in the JSON content**:
++
++### 2.2 Independent filesystem write events (mtime)
++
++All 8,708 snapshots have distinct sub-second mtimes, 10.8–85.4 s after `observed_at`. These are the only evidence that **8,708 separate file-write events actually occurred**, as opposed to one process emitting a list of timestamps. Dedup deletes 8,178 of them. The difference between "we observed N runs" and "a process claimed N observations in a manifest" is exactly the difference Viche's evidence law addresses.
++
++**Honest discount:** `observed_at` is integer-second and non-colliding here (min gap 5 s), so mtime adds little *temporal* precision. Its value is corroboration of *real writes*, not finer time. It is a modest but legitimate audit asset, not a smoking gun.
++
++### 2.3 Tamper-evidence and redundancy
++
++8,707 independent files are a redundancy-based tamper detector: rewriting history requires touching thousands of artifacts with consistent mtimes/inodes. Collapsing to 529 blobs + one manifest concentrates that trust. A manifest is a single mutable file, easier to alter than a large, organically-grown corpus.
++
++**Honest discount (steelman the other side):** these files are all produced by the same script under the same account with no external anchoring, so they are **not cryptographically independent**. An attacker with filesystem access could rewrite the whole corpus. Prior audit `AUDIT-2026-10-24-cycle-7842d14a.md:19` already warns "Receipt authority depends on the delivery host and generator and is not independently tamper-proof." The tamper-evidence gained by raw retention is real but **weak**; a properly anchored manifest (board-pinned or Git-committed) could be *stronger* than the current corpus. Our own prior efficiency/red-team research should not be used to inflate this point.
++
++### 2.4 Viche's own enacted evidence standard cuts against naive deletion
++
++- `government/LAWS.md` §5.2: "Verification requires durable, independently checkable artifacts… Evidence must be tamper-evident where feasible. **A journal is necessary but not sufficient.**" A dedup manifest is a journal.
++- Act 12.7: "Direct deletion of non-allowlist artifacts **without a quarantine/recovery window remains prohibited absent a further Act**." Act 12.3 requires classification before action; Act 12.4 evidence before action.
++- Act 29 (Founder, 2026-11-16), the efficiency mandate itself: the Ministry of Economy gets the initiative over disk, but "**gains no power to delete evidence or to bypass an independent check**" and remains bound by Acts 12/13.
++
++So even the office charged with disk economy is barred from simply deleting these audit artifacts. "Retiring repeated snapshots" as a raw delete is not lawful as described; it would have to be a reversible Act 12 quarantine with independent review, and a law or reviewed definition of what counts as a *provable* duplicate.
++
++### 2.5 Legitimate reasons to retain every raw snapshot (assessed)
++
++| Reason | Legitimate? | Weight |
++|---|---|---|
++| Detect measurement-integrity manipulation (deleted/edited/inserted snapshot, gap in cadence) | Yes — raw corpus + mtimes enable it; a bare manifest does not | Moderate; weakened by no external anchoring |
++| Prove the measurement actually ran (filesystem write evidence) | Yes — 8,708 unique mtimes are the proof; `observed_at` is self-reported | Moderate |
++| Timestamp granularity | Weak — `observed_at` seconds are non-colliding; mtime adds ~10–85 s offset, not precision | Low |
++| Per-file mtime | Yes as write-event evidence; 8,178 would be lost | Low–moderate |
++| Content reconstruction | No — fully preserved by 529 blobs + timestamp sequence | None (this is the dedup win) |
++
++### 2.6 Where the "against" case is weak (skepticism toward our own framing)
++
++- The ~98% `unreadable` label is **not** a reason to keep duplicates. Dedup does not change the fraction; every retained state still carries ~98.7% unreadable rows.
++- 359 of the 529 states are singletons; dedup's win comes from the 170 highly-repeated states (top state repeats 1,049 times). The saving is real, not an artifact.
++- A one-time dedup recovers 2.36 GiB but **does not reduce the ~150 MB/day growth**, because the generator keeps emitting ~340 files/day. Framing dedup as "solving" the growth problem is false; only changing the writer does that, and that is production code outside this mandate.
++- Disk pressure is real (state root is 15 GB; snapshots are 2.5 GiB and accelerating). The right skeptical question is not "dedup or nothing" but "dedup with what manifest, what authority, and does it change the writer."
++
++---
++
++## 3. Independent investigation of the ~98% `unreadable` status
++
++### 3.1 What the code actually says
++
++In `government/suite-compliance-check.sh`, for each first-parent main change touching `government/`, `tests/` or `records/`, the checker looks for a preceding record naming the **exact resulting commit and tree**, from three sources: Git-committed `records/suite-status.json` entries introduced by a commit, pre-push receipts bound to a later publication event with strict timestamp ordering, and validated Act 26 `act26-prelanding-record/v1` state records with a byte-identical Git-committed copy and `.sha256` sidecar. If none matches:
++
++```
++status='unreadable'; reason='no preceding exact-commit/tree suite record'
++```
++
++The `suite_compliance()` docstring and comments document this deliberately: a missing detail with unreadable status is "a clean signal, never a KeyError"; the report hard-codes `measurement_reliability='not_established'`, `false_positive_rate=None`, `false_negative_rate=None`. The Judiciary **already disclaims the instrument's calibration.**
++
++Live read-only execution confirms a clean run (not a crash):
++
++```
++$ /bin/sh government/suite-compliance-check.sh /var/lib/lubko/wd/viche
++{ "status":"measured", "change_count":1183, "compliant":19, "unreadable":1163,
++  "red_chronology_unresolved":1, "violations":0, "main_red_episodes":0, … }
++exit=0 ; stderr empty
++```
++
++All 8,707 snapshot summaries have `status: measured` — there were **zero global checker failures**. The 98.7% is per-change evidentiary absence, not a swallowed git error (contrast the separate Sentinel "git unreadable under load" artifact in `records/SENTINEL-CALIBRATION-2026-10-21-git-unreadable-under-load.md`, which is a different instrument).
++
++### 3.2 Why coverage is low — quantified
++
++```
++first-parent main commits                                   1201
++commits touching records/suite-status.json                    76
++commits introducing records/suite-status.json                  1
++delivery/*.json state records                                143
++valid Act 26 prelanding records (schema hit)                  27
++audited changes (gov/tests/records)                         1183
++  → compliant 19, unreadable 1163, red_chronology_unresolved 1
++```
++
++Act 21 (exact-commit/tree audit) was enacted 2026-10-20 and Act 26 (pre-landing ordering) 2026-11-08; the snapshots span 2026-10-24 → 2026-11-18. Even within that window, pre-landing evidence was generated for only a small minority of the 1,183 changes. `unreadable` therefore measures **absence of a specific, strict evidence artifact**, not "the suite was red" and not "the code failed." Independent confirmation: `records/AUDIT-2026-10-24-cycle-7842d14a.md:19` — "The 2/468 rate is principally evidence coverage, not a defect-rate estimate… not independently tamper-proof." The 6ff9aa7 pre-landing record's content assertions likewise state the route "cannot bless record-less history" and that "Git copy is the trust anchor."
++
++### 3.3 Is there a fixable defect?
++
++- **For history: no.** You cannot generate an exact pre-landing record for a commit that already landed. The checker is intentionally strict (a record committed *by* the same change is explicitly not pre-change evidence; tip commits are unreachable by design). Broadening it to bless record-less history would be falsifying the audit, not fixing a bug.
++- **For the future: partially.** If the Act 26/31 integration queue reliably emits a valid pre-landing record (commit, tree, parent, `main_at_verification`, exit-0 suite command, content assertions, board pin, detached digest, Git copy + sidecar) for *every* change, the compliant fraction should rise. That is a **process/law compliance issue**, not a defect in `suite-compliance-check.sh` — which by all readings is doing exactly what it was written to do.
++- **Not a measurement-integrity artifact in these data:** no global `unreadable` outputs exist, so the load-sensitive git-timeout class of failure did not contaminate the 98.7%.
++
++### 3.4 Who has authority
++
++- Parliament: ordinary law (Acts 21/26/31) defining the evidence obligation.
++- Clerk / Act 31 integrator: actually generating and pinning pre-landing records.
++- Janitor (Act 12) + independent review: any retention/reclamation action, with quarantine.
++- Ministry of Economy (Act 29): may *direct* Janitor modes but not delete evidence.
++- Judiciary: measure and report only; non-voting, no remedial authority — consistent with its documented refusal to rotate.
++- This office: research only. **Authority blocker for any implementation.**
++
++### 3.5 Would fixing `unreadable` reduce noise and disk?
++
++- **Noise: yes, eventually.** More compliant rows means a more meaningful compliance rate. The rate today (1.6%) should not be read as a 98% failure rate; it is a coverage rate.
++- **Disk: no.** Status is a string in each `per_change` row. Changing it neither removes rows nor shrinks files. Noise and disk are orthogonal; the efficiency argument that bundles "98% unreadable" with "2.5 GiB" is a category error.
++
++---
++
++## 4. Honest bottom line
++
++- **Is retention (one copy + timestamp sequence) safe?** *Content-safe, audit-risky as described.* It is lossless for JSON content but destroys 8,178 independent write events, relies on a timestamp manifest that does not currently exist, and conflicts with Viche's enacted evidence standard (§5.2, Act 12.7, Act 29) unless done as a reversible, independently-reviewed, anchored content-addressed scheme. **Naive dedup-by-deletion: not safe. Designed dedup with an anchored append-only mtime/timestamp manifest + Act 12 reversible quarantine: defensible, but it is a governance change, not a cleanup.**
++- **Does dedup deliver the claimed value?** It recovers ~2.36 GiB (94.35%) once. It does **not** stop the accelerating ~150 MB/day growth; that needs a writer change (production code, out of scope). Treat it as space recovery, not a growth fix.
++- **Is the 98.7% `unreadable` a fixable bug?** No for history (genuine evidence-coverage gap, documented in prior audit and in the instrument's own disclaimers); only gradually fixable forward through Act 26/31 process compliance. Fixing it does not reduce disk.
++- **Skepticism applied:** I did not accept the baseline's "150 MB/day" as a lifetime figure, did not accept "529 states ⇒ dedup is obviously right," did not treat weak/self-generated tamper-evidence as strong, and did not accept that a manifest journal satisfies §5.2. I also rejected the tempting conclusion that the high `unreadable` rate is a code defect — the code is doing its conservative job.
++
++---
++
++## 5. Reproduction appendix
++
++Analysis scripts were written to `/tmp/opencode/analyze.py` and `/tmp/opencode/analyze2.py` (not committed, ephemeral). Core method: read every snapshot with `open(f,'rb').read()`, parse JSON, compute `sha256(json.dumps({k:v for k,v in d.items() if k!='observed_at'}, sort_keys=True, separators=(',',':')).encode())` as the content-state key; aggregate status counts over `data['per_change']`; bucket bytes by UTC day of `observed_at`; compare `os.stat(f).st_mtime` to `observed_at`. The checker was executed read-only with `timeout 90 /bin/sh /var/lib/lubko/wd/viche/government/suite-compliance-check.sh /var/lib/lubko/wd/viche`, piping stdout through a JSON filter that removes `per_change`. No state, law, or production file was modified. The live root grew from 8,707 to 8,708 files during the inquiry, so the two analysis runs differ by one file and ~456 KB; all ratios are stable to <0.01%.

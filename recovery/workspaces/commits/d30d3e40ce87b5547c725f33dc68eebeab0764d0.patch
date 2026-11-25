@@ -1,0 +1,722 @@
+commit d30d3e40ce87b5547c725f33dc68eebeab0764d0
+Author:     Otto Jung <otto.jung@vauplace.com>
+AuthorDate: Tue Nov 24 04:30:05 2026 +0000
+Commit:     Otto Jung <otto.jung@vauplace.com>
+CommitDate: Tue Nov 24 04:30:05 2026 +0000
+
+    PnP: publish complete proofs immediately with one local build and crash-safe recovery
+
+diff --git a/missions/pnp/PROTOCOL.md b/missions/pnp/PROTOCOL.md
+index e19cd157..c073a892 100644
+--- a/missions/pnp/PROTOCOL.md
++++ b/missions/pnp/PROTOCOL.md
+@@ -75,9 +75,15 @@ native_decide, unsafe commands), and exactly one Lean proof file.
+ Use a fresh isolated Git checkout/worktree based on a pinned upstream main SHA and
+ a new branch unique to the leased gap. Never use untrusted candidate worktree Git hooks,
+ configs, pre-existing branch, or commit history as submission input.
+-Run the pinned Lean/Mathlib local build and the repository's strict checker (if executable
+-in the trusted environment). Record hash and outcome; distinguish ordinary local build
+-from authoritative upstream acceptance.
++Run the required pinned local Lean/Mathlib build once, in the publisher. Do not
++run a redundant full local authoritative checker; the PR receives that verdict
++from the upstream fleet. Record hash and outcome; distinguish the successful
++local build from authoritative upstream acceptance. A worker hands a complete
++candidate directly to the publisher via submit; no additional Executive approval
++or researcher-side full checker is needed. Snapshot the candidate and start a
++detached, per-gap locked deterministic publisher immediately. Recover interrupted
++publication via the normal mission cycle; a dead process cannot leave a held
++publisher lock. Failed source proofs can be corrected on the same live lease.
+ Stage only the independently approved exact path. Verify one added file, no other
+ changes, and exactly one new commit relative to the recorded base.
+ Set author and committer explicitly:
+diff --git a/missions/pnp/README.md b/missions/pnp/README.md
+index 53066d36..41031320 100644
+--- a/missions/pnp/README.md
++++ b/missions/pnp/README.md
+@@ -17,9 +17,17 @@ authenticated GitHub mutation commands directly.
+ 
+ `status` is read-only. `acquire` claims at most five desk leases and records
+ the exact statement, module, path and imports as data. `beat` renews a lease;
+-`release` returns it honestly. `submit` runs the deterministic publisher;
++`release` returns it honestly. `submit` snapshots and immediately starts the
++deterministic publisher; it survives the researcher exiting or a tool timeout.
+ `reconcile` recovers after interruption without duplicating submissions.
+ 
++Workers: once the candidate is complete, call `submit` directly. Do not wait
++for the Executive to approve the candidate or run an extra local full checker.
++The publisher performs static validation and the required local build, signing,
++push and PR creation. The town monitors the result in the gap state and
++`publisher.log`. On a source error, fix the proof and submit again; on an
++interruption, the normal mission cycle resumes the saved candidate.
++
+ ## Safety invariants
+ 
+ - Publisher inputs are only a gap id and a local candidate file. Remote,
+@@ -47,8 +55,8 @@ Live desk instructions are re-read into `cache/join.txt` at startup; the stale
+ 
+ `/bin/sh tests/pnp-pipeline-smoke.sh` runs both mocked tests and real local
+ Git/GPG integration tests. None claims a live desk gap, pushes, or opens a
+-real PR. Only a proof accepted by the upstream authoritative Lean checker
+-under Lean 4.36 and pinned Mathlib may be submitted.
++real PR. A proof must pass the pinned local Lean build before submission.
++The upstream PR checker is the authoritative acceptance test.
+ 
+ The Viche boot cycle runs `missions/pnp/cycle.sh` independently to renew
+ leases every nine minutes and reconcile remote results without blocking
+diff --git a/missions/pnp/cli.py b/missions/pnp/cli.py
+index 9fb6e49f..17541a74 100644
+--- a/missions/pnp/cli.py
++++ b/missions/pnp/cli.py
+@@ -20,9 +20,9 @@ if __package__ in (None, ""):
+     sys.path.insert(0, os.path.abspath(os.path.join(
+         os.path.dirname(__file__), "..", "..")))
+     from missions.pnp import (config, desk as desk_mod, publish,
+-                                reconcile, state)
++                                reconcile, state, jobs)
+ else:
+-    from . import config, desk as desk_mod, publish, reconcile, state
++    from . import config, desk as desk_mod, publish, reconcile, state, jobs
+ 
+ 
+ def _printer(data):
+@@ -152,23 +152,11 @@ def cmd_release(args):
+ 
+ 
+ def cmd_submit(args):
+-    # The research worker supplies only a candidate file, never a Git
+-    # history.  Move a leased gap to publication-ready deterministically.
+-    rec = state.load(args.gap)
+-    if not rec:
+-        print("gap must be acquired by Viche before submission", file=sys.stderr)
+-        return 2
+-    if rec["state"] == "LEASED":
+-        state.transition(args.gap, "RESEARCHING")
+-        rec = state.load(args.gap)
+-    if rec["state"] == "RESEARCHING":
+-        state.transition(args.gap, "CANDIDATE_READY")
+     try:
+-        result = publish.publish(args.gap, args.candidate)
+-    except publish.StopPublish as e:
+-        print("PUBLISH STOPPED: " + str(e), file=sys.stderr)
++        _printer(jobs.submit(args.gap, args.candidate))
++    except (publish.StopPublish, jobs.validate.InvalidCandidate, OSError) as exc:
++        print("PUBLISH STOPPED: " + str(exc), file=sys.stderr)
+         return 1
+-    _printer(result)
+     return 0
+ 
+ 
+diff --git a/missions/pnp/cycle.sh b/missions/pnp/cycle.sh
+index 9aa380ea..b140a902 100755
+--- a/missions/pnp/cycle.sh
++++ b/missions/pnp/cycle.sh
+@@ -6,8 +6,6 @@ town=${VICHE_TOWN_ROOT:-/var/lib/lubko/wd/viche}
+ export PATH=/home/lubko/.local/bin:/home/lubko/.elan/bin:/var/guix/profiles/per-user/user1/guix-profile/bin:/run/current-system/profile/bin:${PATH:-/bin}
+ [ -r "$town/missions/pnp/cli.py" ] || exit 0
+ cd "$town"
+-# The site itself, not our PR counts or agent count, decides the score.
+-# A transient network failure keeps the last verified snapshot intact.
+-python3 missions/pnp/leaderboard.py update || echo "PnP public leaderboard unavailable; retry next cycle" >&2
+-# Handle existing leases and PRs regardless of leaderboard availability.
++# Renew leases and recover queued publications before the optional score poll.
+ python3 missions/pnp/cli.py reconcile
++python3 missions/pnp/leaderboard.py update || echo "PnP public leaderboard unavailable; retry next cycle" >&2
+diff --git a/missions/pnp/gitctl.py b/missions/pnp/gitctl.py
+index a87c7c73..5614495f 100644
+--- a/missions/pnp/gitctl.py
++++ b/missions/pnp/gitctl.py
+@@ -5,6 +5,7 @@ committer and signing key are fixed in config.py; no candidate or worker
+ prompt can supply them.
+ """
+ import os
++import signal
+ import shutil
+ import subprocess
+ import tempfile
+@@ -37,7 +38,7 @@ def check_commit_fields(fmt):
+ 
+ def run(argv, cwd=None, check=True):
+     p = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
+-                       stderr=subprocess.PIPE, text=True)
++                       stderr=subprocess.PIPE, text=True, timeout=90)
+     if check and p.returncode != 0:
+         raise GitError("%s failed (%d): %s" %
+                        (" ".join(argv[:4]), p.returncode,
+@@ -116,37 +117,64 @@ def pin_candidate(worktree, path, candidate_bytes, correction=False):
+         raise GitError("unexpected additional worktree changes: %r" % other)
+ 
+ 
++def prepare_build_cache(worktree):
++    """Share pinned dependency packages, never another proof's mutable .lake."""
++    seed = os.environ.get("PNP_SHARED_LAKE",
++                          "/home/lubko/pequalnp-research-20261123/lean/.lake")
++    lean = os.path.join(worktree, "lean")
++    for name in ("lean-toolchain", "lake-manifest.json"):
++        with open(os.path.join(lean, name), "rb") as a, \
++             open(os.path.join(os.path.dirname(seed), name), "rb") as b:
++            if a.read() != b.read():
++                raise GitError("pinned dependency cache differs: " + name)
++    local = os.path.join(lean, ".lake")
++    if os.path.islink(local):
++        raise GitError("publication checkout must not share mutable build state")
++    os.makedirs(local, exist_ok=True)
++    packages = os.path.join(seed, "packages")
++    if not os.path.isdir(packages):
++        raise GitError("pinned Mathlib package cache unavailable")
++    dest = os.path.join(local, "packages")
++    if not os.path.lexists(dest):
++        os.symlink(packages, dest)
++
++
+ def build(worktree, module, statement, runner=None):
+-    """Use upstream's kernel checker, not merely a successful Lean build.
++    """One required local build; authoritative verdict comes from the PR.
+ 
+-    The checker rebuilds the proof and accepts only the exact pinned
+-    statement with permitted axioms, under the repository's verifier.
++    No local checker directory lock or second verifier build. The upstream
++    checker independently judges the exact statement and allowed axioms.
+     """
+     if runner is not None:
+         return runner(worktree, module, statement)
+     if not isinstance(statement, str) or not statement.strip():
+         return False, "missing authoritative gap statement"
+-    shared = os.environ.get(
+-        "PNP_SHARED_LAKE",
+-        "/home/lubko/pequalnp-research-20261123/lean/.lake")
+-    local = os.path.join(worktree, "lean", ".lake")
+-    if os.path.isdir(shared) and not os.path.exists(local):
+-        os.symlink(shared, local)
+-    if not os.path.exists(os.path.join(worktree, "tools", "check-lean.mjs")):
+-        return False, "upstream authoritative checker missing"
+-    fd, statement_path = tempfile.mkstemp(prefix="pnp-statement-", suffix=".lean")
+-    try:
+-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+-            f.write(statement)
+-        source = os.path.join(worktree, "lean", *module.split(".")) + ".lean"
+-        p = run(["/home/lubko/.local/bin/node", "tools/check-lean.mjs",
+-                 source, statement_path], cwd=worktree, check=False)
+-        last = p.stdout.rstrip().splitlines()[-1:]
+-        accepted = p.returncode == 0 and any(
+-            line.startswith("ACCEPTED") for line in last)
+-        return accepted, (p.stdout + p.stderr)[-2000:]
+-    finally:
+-        os.unlink(statement_path)
++    prepare_build_cache(worktree)
++    shim = os.path.join(worktree, "tools", "bin", "lake")
++    env = {k: v for k, v in os.environ.items()
++           if not (k.startswith("LEAN_") or k.startswith("LAKE_")
++                   or k in ("PEQUALNP_IN_QUEUE", "PEQUALNP_REAL_LAKE"))}
++    # Use the upstream build queue and content-addressed artifact cache.
++    # Never inherit an untrusted worker's Lake search path/options.
++    # Retain the publisher lock across an orphaned build subprocess, too.
++    lock_fd = os.environ.get("PNP_PUBLISH_LOCK_FD")
++    inherited = (int(lock_fd),) if lock_fd else ()
++    with tempfile.TemporaryFile() as output:
++        proc = subprocess.Popen([shim, "build", "+" + module],
++                                cwd=os.path.join(worktree, "lean"),
++                                env=env, stdout=output, stderr=output,
++                                start_new_session=True, pass_fds=inherited)
++        try:
++            code = proc.wait(timeout=600)
++        except subprocess.TimeoutExpired:
++            os.killpg(proc.pid, signal.SIGKILL)
++            proc.wait()
++            raise GitError("local Lean build timed out; retry without stale lock")
++        output.seek(max(0, output.tell() - 8000))
++        log = output.read().decode("utf-8", "replace")
++    if code and ("error: PEqualNP/" not in log and "error: ./PEqualNP/" not in log):
++        raise GitError("local build interrupted: " + log[-600:])
++    return code == 0, log[-2000:]
+ 
+ 
+ def signed_commit(worktree, base_sha, message, signer=None, correction=False):
+diff --git a/missions/pnp/github.py b/missions/pnp/github.py
+index c24380e6..00249ba7 100644
+--- a/missions/pnp/github.py
++++ b/missions/pnp/github.py
+@@ -16,7 +16,7 @@ class GitHubError(Exception):
+ 
+ def gh(*args):
+     p = subprocess.run([config.GH_CLI] + list(args), stdout=subprocess.PIPE,
+-                       stderr=subprocess.PIPE, text=True)
++                       stderr=subprocess.PIPE, text=True, timeout=45)
+     if p.returncode != 0:
+         raise GitHubError("gh %s failed: %s" %
+                           (args[0] if args else "?", p.stderr.strip()[:400]))
+diff --git a/missions/pnp/jobs.py b/missions/pnp/jobs.py
+new file mode 100644
+index 00000000..c157f445
+--- /dev/null
++++ b/missions/pnp/jobs.py
+@@ -0,0 +1,111 @@
++"""Durable one-command publication, independent of agent/tool timeouts."""
++import fcntl
++import os
++import subprocess
++import sys
++
++from . import config, publish, state, validate
++
++READY = ("CANDIDATE_READY", "LOCAL_CHECKED", "SIGNED", "PUSHED", "REJECTED")
++
++
++def candidate_path(gap):
++    return os.path.join(state.gap_dir(gap), "candidate.lean")
++
++
++def claim(gap):
++    fd = os.open(os.path.join(state.gap_dir(gap), ".publisher.lock"),
++                 os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        os.close(fd)
++        return None
++    return fd
++
++
++def launch(gap, fd):
++    """The child inherits the lock; death releases it, including SIGKILL."""
++    log = os.path.join(state.gap_dir(gap), "publisher.log")
++    with open(log, "ab") as out:
++        subprocess.Popen([sys.executable, "-m", "missions.pnp.jobs", gap,
++                          str(fd)], cwd=os.path.dirname(os.path.dirname(
++                              os.path.dirname(os.path.abspath(__file__)))),
++                         stdin=subprocess.DEVNULL, stdout=out, stderr=out,
++                         pass_fds=(fd,), start_new_session=True)
++
++
++def submit(gap, source):
++    rec = state.load(gap)
++    if not rec:
++        raise publish.StopPublish("no acquired gap")
++    if rec["state"] == "PR_OPEN":
++        return {"gap": gap, "pr": rec["pr_number"], "url": rec["pr_url"]}
++    fd = claim(gap)
++    if fd is None:
++        return {"gap": gap, "status": "publishing"}
++    try:
++        rec = state.load(gap)
++        if rec["state"] not in ("LEASED", "RESEARCHING") + READY:
++            raise publish.StopPublish("gap not publishable: " + rec["state"])
++        with open(source, "rb") as f:
++            data = f.read(config.MAX_FILE_BYTES + 1)
++        meta = {"id": gap, "file": rec["path"], "module": rec["module"],
++                "statement": rec["statement"], "imports": rec["imports"]}
++        digest = validate.validate(meta, data)
++        if rec["state"] in ("SIGNED", "PUSHED") and digest != rec["candidate_digest"]:
++            raise publish.StopPublish("signed proof is immutable")
++        # Snapshot before acknowledging; never depend on a researcher file
++        # that may change or vanish on agent exit.
++        state.atomic_write(candidate_path(gap), data.decode("utf-8"))
++        if rec["state"] == "LEASED":
++            state.transition(gap, "RESEARCHING")
++            rec = state.load(gap)
++        if rec["state"] == "RESEARCHING":
++            state.transition(gap, "CANDIDATE_READY", candidate_digest=digest,
++                             failure_reason=None)
++        elif rec["state"] == "CANDIDATE_READY":
++            state.update(gap, candidate_digest=digest, failure_reason=None)
++        state.update(gap, queued_lease=rec["lease"])
++        launch(gap, fd)
++        return {"gap": gap, "status": "publishing", "digest": digest}
++    finally:
++        # Do not unlock explicitly: the child owns this open description.
++        os.close(fd)
++
++
++def resume(gap):
++    rec = state.load(gap)
++    if (not rec or rec["state"] not in READY or
++            not rec.get("queued_lease") or rec["queued_lease"] != rec["lease"] or
++            not os.path.isfile(candidate_path(gap))):
++        return False
++    fd = claim(gap)
++    if fd is None:
++        return True
++    try:
++        launch(gap, fd)
++        return True
++    finally:
++        os.close(fd)
++
++
++def run(gap, fd):
++    try:
++        os.environ["PNP_PUBLISH_LOCK_FD"] = str(fd)
++        rec = state.load(gap)
++        if rec["state"] not in READY or rec.get("queued_lease") != rec["lease"]:
++            return
++        result = publish.publish(gap, candidate_path(gap))
++        print(result, flush=True)
++    except publish.StopPublish as exc:
++        print("publication stopped:", exc, flush=True)
++    except Exception as exc:
++        # Preserve the pending candidate for the ordinary recovery cycle.
++        print("publication interrupted:", exc, flush=True)
++    finally:
++        os.close(fd)
++
++
++if __name__ == "__main__":
++    run(sys.argv[1], int(sys.argv[2]))
+diff --git a/missions/pnp/mandate.md b/missions/pnp/mandate.md
+index b6f9430f..2f68fec3 100644
+--- a/missions/pnp/mandate.md
++++ b/missions/pnp/mandate.md
+@@ -82,7 +82,11 @@ by the independently nonblocking missions/pnp/cycle.sh from generic boot; the Ex
+ failed-work decisions and dispatch. Do not launch a competing scheduler.
+ The publisher hardcodes Otto Jung <otto.jung@vauplace.com>, his GPG signing
+ subkey 08AF2726387BD4A4C87DF1821BEDDF96D7B1BA2B and the exact fork and
+-upstream PR destinations. Researchers must not open PRs with generic gh.
++upstream PR destinations. Researchers must not open PRs with generic gh. They must directly invoke
++`python3 /var/lib/lubko/wd/viche/missions/pnp/cli.py submit GAP FILE` as soon as
++a complete candidate exists. No redundant local full checker, approval handoff,
++or waiting for an Executive cycle: the detached deterministic publisher checks
++the local build, signs and submits. Resume or correct failures promptly.
+ Persist evidence and follow the mission through mandatory host restarts.
+ Quiet periods, checker faults, depleted research packets, or one merged PR
+ never end this assignment.
+diff --git a/missions/pnp/publish.py b/missions/pnp/publish.py
+index 10900626..15413d11 100644
+--- a/missions/pnp/publish.py
++++ b/missions/pnp/publish.py
+@@ -32,6 +32,16 @@ def _retry_later(gap_id, reason):
+     raise StopPublish(reason)
+ 
+ 
++def _candidate_failed(gap_id, reason):
++    rec = state.load(gap_id)
++    if rec["state"] in ("CANDIDATE_READY", "LOCAL_CHECKED"):
++        state.transition(gap_id, "RESEARCHING", candidate_digest=None,
++                         queued_lease=None, failure_reason=reason)
++    else:
++        state.update(gap_id, queued_lease=None, failure_reason=reason)
++    raise StopPublish(reason)
++
++
+ def _open_gap_ids(desk):
+     data = desk.status()
+     return {g.get("id") for g in data.get("gaps", [])
+@@ -69,8 +79,15 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+         _retry_later(gap_id, "cannot re-read live desk docs: %s" % e)
+ 
+     # Fetch public metadata independently; never trust candidate metadata.
+-    if gap_id not in _open_gap_ids(desk) and not rec.get("pr_number"):
+-        _stop(gap_id, "gap is not currently posted at the desk")
++    try:
++        open_ids = _open_gap_ids(desk)
++    except Exception as e:
++        _retry_later(gap_id, "desk availability unavailable: %s" % e)
++    if gap_id not in open_ids and not rec.get("pr_number"):
++        if rec["state"] in ("CANDIDATE_READY", "LOCAL_CHECKED"):
++            state.transition(gap_id, "STALE", failure_reason="gap settled")
++            raise StopPublish("gap settled")
++        _retry_later(gap_id, "gap no longer posted; reconcile existing PR")
+     gap_meta = {
+         "id": gap_id, "file": rec.get("path"), "module": rec.get("module"),
+         "statement": rec.get("statement"), "imports": rec.get("imports"),
+@@ -79,32 +96,39 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     try:
+         digest = validate.validate(gap_meta, data)
+     except validate.InvalidCandidate as e:
+-        _stop(gap_id, "candidate validation failed: %s" % e)
++        _candidate_failed(gap_id, "candidate validation failed: %s" % e)
+     if (rec.get("candidate_digest") and
+             rec["candidate_digest"] != digest and not correction):
+-        _stop(gap_id, "candidate digest changed since local check")
++        _candidate_failed(gap_id, "candidate digest changed since local check")
+     state.update(gap_id, candidate_digest=digest)
+ 
+     # Renew the lease before submitting; 410 means someone else settled it.
+     if rec.get("lease") and not correction and not resume and not rec.get("pr_number"):
+         try:
+             if desk.beat(rec["lease"]) == 410:
+-                _stop(gap_id, "lease returned 410 at submission")
++                state.transition(gap_id, "STALE", failure_reason="lease returned 410 at submission")
++                raise StopPublish("lease returned 410 at submission")
+         except StopPublish:
+             raise
+         except Exception as e:
+-            _stop(gap_id, "lease renewal failed: %s" % e)
++            _retry_later(gap_id, "lease renewal failed: %s" % e)
+         state.update(gap_id, lease_expires_at=time.time() +
+                      config.LEASE_TTL_SECONDS)
+ 
+     branch = rec.get("branch") or config.branch_for(gap_id)
+     if not resume:
+-        latest_base = git.ensure_mirror()
+-        base_sha = (rec.get("base_sha") if correction else latest_base)
++        try:
++            latest_base = git.ensure_mirror()
++        except Exception as e:
++            _retry_later(gap_id, "upstream checkout unavailable: %s" % e)
++        base_sha = rec.get("base_sha") or latest_base
+         if not base_sha:
+             _stop(gap_id, "correction has no pinned original base")
+         state.update(gap_id, base_sha=base_sha, branch=branch)
+-        worktree = git.fresh_worktree(gap_id, base_sha, branch)
++        try:
++            worktree = git.fresh_worktree(gap_id, base_sha, branch)
++        except Exception as e:
++            _retry_later(gap_id, "publication checkout unavailable: %s" % e)
+         state.update(gap_id, worktree=worktree)
+         try:
+             if correction:
+@@ -113,10 +137,27 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+                 git.pin_candidate(worktree, rec["path"], data)
+         except Exception as e:
+             _stop(gap_id, "staging failed: %s" % e)
+-        ok, log = git.build(worktree, rec["module"], rec["statement"],
+-                            runner=build_runner)
++        try:
++            ok, log = git.build(worktree, rec["module"], rec["statement"],
++                                runner=build_runner)
++        except Exception as e:
++            _retry_later(gap_id, "local build unavailable: %s" % e)
+         if not ok:
+-            _stop(gap_id, "pinned Lean/Mathlib build failed: %s" % log[-300:])
++            _candidate_failed(gap_id, "pinned Lean build failed: %s" % log[-300:])
++        # A rival may settle the gap during a lengthy build. Renew immediately
++        # before signing/pushing, rather than publishing a known stale proof.
++        if not correction:
++            current = state.load(gap_id)
++            if current["state"] == "STALE":
++                raise StopPublish("gap settled during local build")
++            try:
++                live = desk.beat(current["lease"])
++            except Exception as e:
++                _retry_later(gap_id, "lease recheck failed: %s" % e)
++            if live == 410:
++                state.transition(gap_id, "STALE", failure_reason="lease lost during build")
++                raise StopPublish("lease lost during build")
++            state.update(gap_id, lease_expires_at=time.time() + config.LEASE_TTL_SECONDS)
+         if rec["state"] == "CANDIDATE_READY":
+             state.transition(gap_id, "LOCAL_CHECKED", candidate_digest=digest)
+         state.intent(gap_id, "signed_commit",
+@@ -215,10 +256,10 @@ def publish(gap_id, candidate_path, desk=None, git=None, gh=None,
+     if state.load(gap_id)["state"] in ("PUSHED", "SIGNED", "LOCAL_CHECKED"):
+         state.transition(gap_id, "PR_OPEN", pr_number=number,
+                          pr_url=pr.get("url"), external_verdict="pending",
+-                         failure_reason=None)
++                         queued_lease=None, failure_reason=None)
+     else:
+         state.update(gap_id, pr_number=number, pr_url=pr.get("url"),
+-                     external_verdict="pending")
++                     external_verdict="pending", queued_lease=None)
+     state.event(gap_id, "published", {"sha": sha, "pr": number,
+                                       "digest": digest})
+     return {"gap": gap_id, "sha": sha, "pr": number, "url": pr.get("url"),
+diff --git a/missions/pnp/reconcile.py b/missions/pnp/reconcile.py
+index 9ba10ab7..113480e7 100644
+--- a/missions/pnp/reconcile.py
++++ b/missions/pnp/reconcile.py
+@@ -38,14 +38,22 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None):
+     rec = state.load(gap_id)
+     if rec is None:
+         return {"gap": gap_id, "result": "no-state"}
+-    if rec["state"] in ("ACCEPTED", "REJECTED", "RELEASED", "STALE"):
++    if rec["state"] in ("ACCEPTED", "RELEASED", "STALE") or (
++            rec["state"] == "REJECTED" and not rec.get("queued_lease")):
+         return {"gap": gap_id, "result": "terminal", "state": rec["state"]}
+ 
+     _heartbeat(gap_id, rec, desk)
+     rec = state.load(gap_id)
+-    if rec["state"] in ("ACCEPTED", "REJECTED", "RELEASED", "STALE"):
++    if rec["state"] in ("ACCEPTED", "RELEASED", "STALE") or (
++            rec["state"] == "REJECTED" and not rec.get("queued_lease")):
+         return {"gap": gap_id, "result": "terminal", "state": rec["state"]}
+ 
++    # A detached deterministic publisher owns a durable candidate. Recovery
++    # never starts a competing build or holds the short reconciliation pass.
++    from . import jobs
++    if jobs.resume(gap_id):
++        return {"gap": gap_id, "result": "publishing", "state": rec["state"]}
++
+     branch = rec.get("branch") or config.branch_for(gap_id)
+     remote = (git.remote_branch_sha(branch)
+               if rec["state"] in ("SIGNED", "PUSHED", "PR_OPEN")
+@@ -101,7 +109,7 @@ def reconcile_gap(gap_id, desk=None, gh=None, git=None):
+             verdict = sorted(verdicts)[-1][1]
+             if verdict != "FAULT":
+                 state.transition(gap_id, verdict,
+-                                 external_verdict=verdict)
++                                 external_verdict=verdict, queued_lease=None)
+             else:
+                 state.update(gap_id, external_verdict="FAULT",
+                              failure_reason="upstream checker FAULT; will recheck")
+diff --git a/missions/pnp/state.py b/missions/pnp/state.py
+index 7e3639e9..cda95283 100644
+--- a/missions/pnp/state.py
++++ b/missions/pnp/state.py
+@@ -29,6 +29,7 @@ EMPTY = {
+     "lean_toolchain": config.LEAN_TOOLCHAIN,
+     "researchers": [],
+     "candidate_digest": None,
++    "queued_lease": None,
+     "branch": None,
+     "worktree": None,
+     "commit_sha": None,
+@@ -172,6 +173,7 @@ def reacquire(gap_id, **fields):
+                     "commit_sha", "pr_number", "pr_url", "external_verdict"):
+             rec[key] = None
+         rec["failure_reason"] = None
++        rec["queued_lease"] = None
+         rec["intent"] = None
+         rec["researchers"] = []
+         rec["state"] = "LEASED"
+diff --git a/tests/pnp-pipeline.py b/tests/pnp-pipeline.py
+index 7d235d4c..064f374b 100644
+--- a/tests/pnp-pipeline.py
++++ b/tests/pnp-pipeline.py
+@@ -263,7 +263,7 @@ class TestPublish(unittest.TestCase):
+         with self.assertRaises(publish.StopPublish):
+             publish.publish(GAP, self.file, desk=FakeDesk(),
+                             git=FakeGit(build_ok=False), gh=FakeGH())
+-        self.assertEqual(state.load(GAP)["state"], "FAULT")
++        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
+ 
+     def test_bad_candidate_stops_before_git(self):
+         new_state()
+@@ -272,14 +272,40 @@ class TestPublish(unittest.TestCase):
+             publish.publish(GAP, candidate_file(GOOD.replace("norm_num", "sorry")),
+                             desk=FakeDesk(), git=g, gh=FakeGH())
+         self.assertNotIn(("push", config.branch_for(GAP)), g.calls)
+-        self.assertEqual(state.load(GAP)["state"], "FAULT")
++        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
+ 
+     def test_lease_410_stops(self):
+         new_state()
+         with self.assertRaises(publish.StopPublish):
+             publish.publish(GAP, self.file, desk=FakeDesk(beat=410),
+                             git=FakeGit(), gh=FakeGH())
+-        self.assertEqual(state.load(GAP)["state"], "FAULT")
++        self.assertEqual(state.load(GAP)["state"], "STALE")
++
++    def test_failed_proof_can_be_corrected_without_losing_lease(self):
++        new_state()
++        d, g, h = FakeDesk(), FakeGit(build_ok=False), FakeGH()
++        with self.assertRaises(publish.StopPublish):
++            publish.publish(GAP, self.file, desk=d, git=g, gh=h)
++        self.assertEqual(state.load(GAP)["state"], "RESEARCHING")
++        self.assertIsNone(state.load(GAP)["candidate_digest"])
++        state.transition(GAP, "CANDIDATE_READY")
++        g.build_ok = True
++        result = publish.publish(GAP, self.file, desk=d, git=g, gh=h)
++        self.assertEqual(result["pr"], 123)
++        self.assertEqual(h.created, 1)
++
++    def test_gap_settled_during_build_never_pushes(self):
++        new_state()
++        d, g, h = FakeDesk(), FakeGit(), FakeGH()
++        def beat(lease):
++            d.beats.append(lease)
++            return 200 if len(d.beats) == 1 else 410
++        d.beat = beat
++        with self.assertRaises(publish.StopPublish):
++            publish.publish(GAP, self.file, desk=d, git=g, gh=h)
++        self.assertEqual(state.load(GAP)["state"], "STALE")
++        self.assertEqual(h.created, 0)
++        self.assertFalse(any(c[0] == "push" for c in g.calls))
+ 
+     def test_github_verification_false_means_no_pr(self):
+         new_state()
+@@ -341,17 +367,32 @@ class TestCli(unittest.TestCase):
+     def setUp(self):
+         fresh()
+ 
+-    def test_submit_transitions_lease_to_ready_without_agent_git(self):
+-        from missions.pnp import cli
++    def test_submit_snapshots_and_launches_without_agent_git(self):
++        from missions.pnp import cli, jobs
+         new_state("LEASED")
+         seen = []
+-        def submit(gap_id, candidate):
+-            seen.append((gap_id, candidate, state.load(gap_id)["state"]))
+-            return {"pr": 17}
+-        with mock.patch.object(cli.publish, "publish", side_effect=submit):
++        def launch(gap_id, fd):
++            seen.append((gap_id, state.load(gap_id)["state"]))
++        with mock.patch.object(jobs, "launch", side_effect=launch):
+             self.assertEqual(cli.cmd_submit(
+-                type("Args", (), {"gap": GAP, "candidate": "/tmp/proof"})()), 0)
+-        self.assertEqual(seen, [(GAP, "/tmp/proof", "CANDIDATE_READY")])
++                type("Args", (), {"gap": GAP, "candidate": candidate_file()})()), 0)
++            self.assertEqual(seen, [(GAP, "CANDIDATE_READY")])
++            self.assertTrue(jobs.resume(GAP))
++        with open(jobs.candidate_path(GAP)) as f:
++            self.assertEqual(f.read(), GOOD)
++        self.assertEqual(state.load(GAP)["queued_lease"], "lease-1")
++
++    def test_concurrent_publisher_lock_prevents_duplicate_launch(self):
++        from missions.pnp import jobs
++        new_state("LEASED")
++        fd = jobs.claim(GAP)
++        try:
++            with mock.patch.object(jobs, "launch") as launch:
++                self.assertEqual(jobs.submit(GAP, candidate_file())["status"],
++                                 "publishing")
++                launch.assert_not_called()
++        finally:
++            os.close(fd)
+ 
+     def test_reacquire_adopts_fresh_lease_without_releasing(self):
+         """A re-offered released/stale gap must be re-leased, not handed back.
+diff --git a/tests/pnp-real-smoke.py b/tests/pnp-real-smoke.py
+index fb83c332..d4b12f27 100644
+--- a/tests/pnp-real-smoke.py
++++ b/tests/pnp-real-smoke.py
+@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
+ TMP = tempfile.TemporaryDirectory(prefix="pnp-real-smoke-")
+ os.environ["PNP_STATE_ROOT"] = str(pathlib.Path(TMP.name) / "state")
+ 
+-from missions.pnp import cli, config, github, state, gitctl  # noqa: E402
++from missions.pnp import cli, config, github, state, gitctl, jobs  # noqa: E402
+ 
+ 
+ class FullPathSmoke(unittest.TestCase):
+@@ -63,6 +63,43 @@ class FullPathSmoke(unittest.TestCase):
+         self.assertEqual(calls[0][2:4], ("--repo", config.UPSTREAM))
+         self.assertIn("ottojung:pnp/l_meta_582", calls[0])
+ 
++    def test_publisher_lock_survives_parent_and_recovers_after_exit(self):
++        gap = "L-meta-93286"
++        state.create(gap, state="LEASED", lease="test-lease")
++        fd = jobs.claim(gap)
++        self.assertIsNotNone(fd)
++        p = subprocess.Popen([sys.executable, "-c",
++                              "import sys; sys.stdin.read()"],
++                             pass_fds=(fd,), stdin=subprocess.PIPE)
++        os.close(fd)
++        try:
++            self.assertIsNone(jobs.claim(gap))
++        finally:
++            p.kill()
++            p.wait(timeout=5)
++            p.stdin.close()
++        again = jobs.claim(gap)
++        self.assertIsNotNone(again)
++        os.close(again)
++
++    def test_dependency_cache_does_not_inherit_checker_lock(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = pathlib.Path(tmp)
++            seed = root / "seed/lean/.lake"
++            seed.mkdir(parents=True)
++            (seed / "packages").mkdir()
++            (seed / "check.lock").mkdir()
++            work = root / "work/lean"
++            work.mkdir(parents=True)
++            for name in ("lean-toolchain", "lake-manifest.json"):
++                (seed.parent / name).write_text("pinned")
++                (work / name).write_text("pinned")
++            with patch.dict(os.environ, {"PNP_SHARED_LAKE": str(seed)}):
++                gitctl.prepare_build_cache(str(work.parent))
++            self.assertFalse((work / ".lake").is_symlink())
++            self.assertTrue((work / ".lake/packages").is_symlink())
++            self.assertFalse((work / ".lake/check.lock").exists())
++
+     def test_real_signed_git_commit(self):
+         # CI environments intentionally lack Otto Jung's private signing key.
+         key = config.SIGNING_KEY.rstrip("!")

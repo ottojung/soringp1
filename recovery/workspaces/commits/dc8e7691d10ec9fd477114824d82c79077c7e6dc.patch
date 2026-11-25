@@ -1,0 +1,426 @@
+commit dc8e7691d10ec9fd477114824d82c79077c7e6dc
+Author:     c1a00002 Executive <executive@viche.local>
+AuthorDate: Sat Nov 7 14:19:39 2026 +0000
+Commit:     c1a00002 Executive <executive@viche.local>
+CommitDate: Sat Nov 7 14:19:39 2026 +0000
+
+    Require distinct producer generations and case-bound evidence for closure
+    
+    Independent reviews rejected both earlier continuity repairs: repeated probes
+    over unchanged snapshots, and content hashes of state files (including the case
+    index that reconciliation itself rewrites), do not prove independent fresh
+    observations.
+    
+    Health rows now record the evidence generation as each producer's own
+    observed_at (leg, exe, jud, out, meas, inn). Excluded: institutional-cases/
+    index.json, which this reconciler mutates, so our own bookkeeping cannot
+    manufacture a generation.
+    
+    Continuity cases additionally require their own pre-existing, Judiciary-scoped
+    reconciliation receipt and record it as closure_evidence; generic health
+    recovery alone cannot discharge a continuity obligation.
+    
+    Tests add: identical producers over two probes cannot close; a real producer
+    re-observation can; a malformed/arbitrary token cannot; index.json churn does
+    not change the generation; continuity closure cites the case-specific receipt;
+    withdrawing the receipt keeps the case open.
+
+diff --git a/government/branch-health.sh b/government/branch-health.sh
+index 70641ffa..7c7505a8 100755
+--- a/government/branch-health.sh
++++ b/government/branch-health.sh
+@@ -84,13 +84,57 @@ for observation in "outcomes:$state/institutional-outcomes/latest.json" "institu
+     signals="${signals}${signals:+,}${evidence_name}_stale"
+   fi
+ done
++# Bind each health row to the durable evidence GENERATIONS it inspected, using
++# each producer's own observation clock (key=epoch pairs). A new probe clock
++# timestamp over unchanged producer observations is another check, not a new
++# independent observation, so it must not close an institutional case.
++# Deliberately excluded: institutional-cases/index.json, which reconciliation
++# itself rewrites; including it would let our own bookkeeping manufacture a
++# "new generation" without new underlying evidence.
++if [ -z "$signals" ]; then
++  evidence_signature=$(python3 - "$state" "${innovation:-}" <<'PY'
++import pathlib
++import sys
++
++root = pathlib.Path(sys.argv[1])
++innovation_arg = sys.argv[2] if len(sys.argv) > 2 else ""
++sources = [
++    ("leg", root / "branches/legislature.json"),
++    ("exe", root / "branches/executive.json"),
++    ("jud", root / "branches/judiciary.json"),
++    ("out", root / "institutional-outcomes/latest.json"),
++    ("meas", root / "branches/judiciary-measurements.json"),
++]
++if innovation_arg:
++    sources.append(("inn", pathlib.Path(innovation_arg)))
++parts = []
++for key, path in sources:
++    try:
++        raw = path.read_bytes()
++    except OSError:
++        raise SystemExit(1)
++    import json
++    try:
++        at = json.loads(raw).get("observed_at")
++    except ValueError:
++        raise SystemExit(1)
++    if not isinstance(at, int) or at < 0:
++        raise SystemExit(1)
++    parts.append(f"{key}={at}")
++print(",".join(parts))
++PY
++) || evidence_signature=
++  case "$evidence_signature" in
++    ''|*[!a-z0-9=,]*|*,|,*) signals="${signals}${signals:+,}health_evidence_unidentifiable" ;;
++  esac
++fi
+ # Unreviewed agent impediments are unresolved adverse evidence.
+ mailbox_dir="$state/oversight/judiciary-mailbox/inbox"
+ if [ -d "$mailbox_dir" ] &&
+    [ -n "$(find "$mailbox_dir" -maxdepth 1 -type f -name '*.md' -print -quit 2>/dev/null)" ]; then
+   signals="${signals}${signals:+,}judiciary_mailbox_pending"
+ fi
+-printf '%s\t%s\n' "$now" "${signals:-clear}" >> "$root/observations.tsv"
++printf '%s\t%s\t%s\n' "$now" "${signals:-clear}" "${evidence_signature:-unavailable}" >> "$root/observations.tsv"
+ if [ -z "$signals" ]; then
+   if [ -s "$root/incident.json" ]; then
+     jq -c --argjson at "$now" '. + {cleared_at:$at,closure:"readiness_restored_not_delivery_verified"}' \
+diff --git a/government/institutional-cases.py b/government/institutional-cases.py
+index 2eecf30c..55f605ca 100644
+--- a/government/institutional-cases.py
++++ b/government/institutional-cases.py
+@@ -38,6 +38,37 @@ def atomic(path, item):
+             os.unlink(name)
+ 
+ 
++def continuity_receipt(office):
++    """Return the validated case-specific continuity binding, or None.
++
++    A continuity case may only close on evidence that belongs to THAT case: a
++    Judiciary-scoped reconciliation receipt naming the specific previous and
++    successor agents, both matching the durable reconciliation record.
++    """
++    receipt = read(ROOT / ("continuity/reconciliation-" + office + ".json"))
++    verified = read(ROOT / ("continuity/verified-" + office + ".json"))
++    if receipt.get("state") != "awaiting_reconciliation":
++        return None
++    if verified.get("previous_agent") != receipt.get("previous_agent"):
++        return None
++    if verified.get("successor_agent") != receipt.get("successor_agent"):
++        return None
++    if verified.get("verified_by") != "judiciary":
++        return None
++    if verified.get("verification_scope") != "external_effect_reconciled":
++        return None
++    ref = verified.get("evidence_ref")
++    if not isinstance(ref, str) or not ref.strip():
++        return None
++    return {
++        "previous_agent": receipt.get("previous_agent"),
++        "successor_agent": receipt.get("successor_agent"),
++        "verified_by": "judiciary",
++        "verification_scope": "external_effect_reconciled",
++        "evidence_ref": ref.strip(),
++    }
++
++
+ def collect():
+     incident = read(ROOT / "branches/incident.json")
+     signals = set(incident.get("signals", []))
+@@ -54,28 +85,48 @@ def collect():
+         signals.add("innovation_stale")
+     # A failed office may be masked by a stale or missing branch-health probe;
+     # its terminal continuity record remains an independently observable case.
++    # Offices with no reconciliation record at all are not continuity cases.
+     for office in ("executive", "judiciary", "innovation-centre", "c1a00001"):
+-        receipt = read(ROOT / ("continuity/reconciliation-" + office + ".json"))
+-        if receipt.get("state") in ("preparing", "awaiting_reconciliation"):
+-            verified = read(ROOT / ("continuity/verified-" + office + ".json"))
+-            valid = (receipt.get("state") == "awaiting_reconciliation"
+-                and verified.get("previous_agent") == receipt.get("previous_agent")
+-                and verified.get("successor_agent") == receipt.get("successor_agent")
+-                and verified.get("verified_by") == "judiciary"
+-                and verified.get("verification_scope") == "external_effect_reconciled"
+-                and isinstance(verified.get("evidence_ref"), str)
+-                and bool(verified["evidence_ref"].strip()))
+-            if not valid:
+-                signals.add("continuity_unverified_" + office)
++        declared = read(ROOT / ("continuity/reconciliation-" + office + ".json")).get("state")
++        if declared in ("preparing", "awaiting_reconciliation") and continuity_receipt(office) is None:
++            signals.add("continuity_unverified_" + office)
+     return now, signals
+ 
+ 
++MIN_SIGNATURE_SOURCES = 3
++
++
++def parse_generation(value):
++    """Parse a branch-health evidence generation ("key=epoch,...") strictly.
++
++    Anything malformed, or covering too few independent producers, is not a
++    usable observation: it cannot distinguish a fresh acquisition from a
++    re-read of unchanged evidence, and it must not close a case.
++    """
++    if not isinstance(value, str) or not value:
++        return None
++    pairs = {}
++    for part in value.split(","):
++        key, sep, at = part.partition("=")
++        if not sep or not key or not at:
++            return None
++        if not key.isalnum() or not key.islower() or not at.isdigit():
++            return None
++        if key in pairs:
++            return None
++        pairs[key] = int(at)
++    if len(pairs) < MIN_SIGNATURE_SOURCES:
++        return None
++    return tuple(sorted(pairs.items()))
++
++
+ def latest_health_observation():
+     """Return the latest branch-health sample, not this reconciliation call.
+ 
+     Reconciliation can run repeatedly against unchanged inputs. Its wall-clock
+     time is therefore not an independent health observation. The branch
+-    liveness probe appends timestamp/signal rows to this durable source.
++    liveness probe appends timestamp/signal/generation rows to this durable
++    source; a row is usable only when its generation is well formed.
+     """
+     path = ROOT / "branches/observations.tsv"
+     try:
+@@ -83,14 +134,14 @@ def latest_health_observation():
+     except OSError:
+         return None
+     for row in reversed(rows):
+-        fields = row.split("\t", 1)
+-        if len(fields) != 2:
+-            continue
++        fields = row.split("\t")
++        if len(fields) < 3:
++            return None
+         try:
+             observed_at = int(fields[0])
+         except ValueError:
+-            continue
+-        return observed_at, fields[1].strip()
++            return None
++        return observed_at, fields[1].strip(), fields[2].strip()
+     return None
+ 
+ 
+@@ -123,6 +174,7 @@ def reconcile():
+                     "id": f"{signal}:{now}", "signal": signal,
+                     "first_seen": now, "state": "open",
+                     "clear_observations": 0,
++                    "clear_generations": [],
+                     "judiciary": "independent_fact_finding_required",
+                     "legislature": "consider_evidence_and_legislation_if_needed",
+                     "executive": "investigate_and_repair_within_existing_authority",
+@@ -132,21 +184,50 @@ def reconcile():
+             case["last_seen"] = now
+             case["observations"] = case.get("observations", 0) + 1
+             case["clear_observations"] = 0
++            case["clear_generations"] = []
++            case.pop("last_clear_observation", None)
++            case.pop("last_clear_evidence_generation", None)
++            case.pop("closure_blocked", None)
+         elif case.get("state") == "open":
+             # Never count repeated reconciliations of one sample as separate
+-            # healthy observations. Require distinct durable probe rows, each
+-            # explicitly clear and later than the last time the signal held.
+-            if health_observation is None or health_observation[1] != "clear":
++            # healthy observations. Each counted observation must be a distinct
++            # later probe row, explicitly clear, carrying a well-formed durable
++            # evidence generation that has not already been counted. An
++            # alternating generation (A, B, A) is still one acquisition of A.
++            generation = (parse_generation(health_observation[2])
++                          if health_observation else None)
++            counted = case.get("clear_generations", [])
++            if not isinstance(counted, list):
++                counted = []
++            if generation is None or health_observation[1] != "clear":
+                 case["clear_observations"] = 0
++                case["clear_generations"] = []
+                 case.pop("last_clear_observation", None)
++                case.pop("last_clear_evidence_generation", None)
+             elif (health_observation[0] > case.get("last_seen", case.get("first_seen", 0))
+-                  and health_observation[0] != case.get("last_clear_observation")):
+-                case["clear_observations"] = case.get("clear_observations", 0) + 1
++                  and health_observation[0] != case.get("last_clear_observation")
++                  and health_observation[2] not in counted):
++                counted = counted + [health_observation[2]]
++                case["clear_generations"] = counted
++                case["clear_observations"] = len(counted)
+                 case["last_clear_observation"] = health_observation[0]
++                case["last_clear_evidence_generation"] = health_observation[2]
+             if case.get("clear_observations", 0) >= 2:
+-                case["state"] = "verified_closed"
+-                case["verified_at"] = now
+-                case["verification"] = "two distinct later branch-health samples explicitly clear"
++                binding = continuity_receipt(signal[len("continuity_unverified_"):]) \
++                    if signal.startswith("continuity_unverified_") else None
++                if signal.startswith("continuity_unverified_") and binding is None:
++                    # Health cleared, but the case's own reconciliation evidence
++                    # is not currently valid and case-bound: do not close.
++                    case["closure_blocked"] = (
++                        "case-specific continuity receipt not independently verified")
++                else:
++                    case["state"] = "verified_closed"
++                    case["verified_at"] = now
++                    case["verification"] = (
++                        "two distinct clear probes over distinct durable evidence "
++                        "generations")
++                    if binding is not None:
++                        case["closure_evidence"] = binding
+         elif not case:
+             continue
+         atomic(path, case)
+diff --git a/tests/branch-health-smoke.sh b/tests/branch-health-smoke.sh
+index 1c56191d..ca96551c 100755
+--- a/tests/branch-health-smoke.sh
++++ b/tests/branch-health-smoke.sh
+@@ -17,6 +17,29 @@ printf '{"observed_at":1000}\n' > "$scratch/institutional-outcomes/latest.json"
+ printf '{"observed_at":1000,"count":0}\n' > "$scratch/institutional-cases/index.json"
+ printf '{"observed_at":1000}\n' > "$scratch/branches/judiciary-measurements.json"
+ sh "$repo/government/branch-health.sh"
++first_signature=$(awk -F '\t' 'END {print $3}' "$scratch/branches/observations.tsv")
++# The generation must name the real producer observations, not a content hash.
++case "$first_signature" in
++  *leg=1000*exe=1000*out=1000*meas=1000*) : ;;
++  *) echo "unexpected evidence generation: $first_signature" >&2; exit 1 ;;
++esac
++VICHE_BRANCH_NOW=1001
++export VICHE_BRANCH_NOW
++sh "$repo/government/branch-health.sh"
++second_signature=$(awk -F '\t' 'END {print $3}' "$scratch/branches/observations.tsv")
++[ "$first_signature" = "$second_signature" ]
++# Our own reconciliation bookkeeping must not manufacture a new generation.
++jq '.observed_at=1001' "$scratch/institutional-cases/index.json" > "$scratch/idx.new"
++mv "$scratch/idx.new" "$scratch/institutional-cases/index.json"
++sh "$repo/government/branch-health.sh"
++[ "$(awk -F '\t' 'END {print $3}' "$scratch/branches/observations.tsv")" = "$second_signature" ]
++VICHE_BRANCH_NOW=1002
++export VICHE_BRANCH_NOW
++jq '.observed_at=1002' "$scratch/branches/executive.json" > "$scratch/branches/executive.new"
++mv "$scratch/branches/executive.new" "$scratch/branches/executive.json"
++sh "$repo/government/branch-health.sh"
++third_signature=$(awk -F '\t' 'END {print $3}' "$scratch/branches/observations.tsv")
++[ "$third_signature" != "$second_signature" ]
+ # Mailbox reports must be visible as unresolved health evidence.
+ mkdir -p "$scratch/oversight/judiciary-mailbox/inbox"
+ echo "blocked" > "$scratch/oversight/judiciary-mailbox/inbox/test.md"
+@@ -48,4 +71,35 @@ sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1
+ jq -e '.signals|index("legislature_stale")' "$scratch/branches/incident.json" >/dev/null
+ python3 "$repo/government/judiciary-measurements.py" >/dev/null
+ jq -e '.destination=="Legislature" and .no_proposals==true and .false_negative_rate==null' "$scratch/branches/judiciary-measurements.json" >/dev/null
++# Reviewer criterion: two healthy probes over BYTE-IDENTICAL producer
++# observations must not close an institutional case. Only a later generation
++# produced by an actual re-observation may count.
++rm -f "$scratch/branches/incident.json"
++for branch in legislature executive judiciary; do
++  printf '{"branch":"%s","observed_at":4000,"readiness":"ready"}\n' "$branch" > "$scratch/branches/$branch.json"
++done
++printf '{"observed_at":4000,"count":0}\n' > "$scratch/institutional-cases/index.json"
++printf '{"observed_at":4000}\n' > "$scratch/branches/judiciary-measurements.json"
++rm -f "$scratch/institutional-outcomes/latest.json"
++VICHE_BRANCH_NOW=4000; export VICHE_BRANCH_NOW
++sh "$repo/government/branch-health.sh" >/dev/null 2>&1 && exit 1
++VICHE_CASE_NOW=4000 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==0' "$scratch/institutional-cases/outcomes_stale.json" >/dev/null
++printf '{"observed_at":4000}\n' > "$scratch/institutional-outcomes/latest.json"
++VICHE_BRANCH_NOW=4001; export VICHE_BRANCH_NOW
++sh "$repo/government/branch-health.sh"
++VICHE_CASE_NOW=4001 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$scratch/institutional-cases/outcomes_stale.json" >/dev/null
++# Same producers, different probe clock: still one observation.
++VICHE_BRANCH_NOW=4002; export VICHE_BRANCH_NOW
++sh "$repo/government/branch-health.sh"
++VICHE_CASE_NOW=4002 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$scratch/institutional-cases/outcomes_stale.json" >/dev/null
++# A producer actually re-observed: now it is a distinct acquisition.
++jq '.observed_at=4003' "$scratch/branches/judiciary-measurements.json" > "$scratch/m.new"
++mv "$scratch/m.new" "$scratch/branches/judiciary-measurements.json"
++VICHE_BRANCH_NOW=4003; export VICHE_BRANCH_NOW
++sh "$repo/government/branch-health.sh"
++VICHE_CASE_NOW=4003 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="verified_closed" and .clear_observations==2' "$scratch/institutional-cases/outcomes_stale.json" >/dev/null
+ echo 'Three-branch liveness and Judiciary self-measurement smoke passed'
+diff --git a/tests/institutional-recovery-smoke.sh b/tests/institutional-recovery-smoke.sh
+index ba8d622b..29048ab9 100644
+--- a/tests/institutional-recovery-smoke.sh
++++ b/tests/institutional-recovery-smoke.sh
+@@ -58,25 +58,33 @@ grep -Fq 'old-agent' "$d/reconciliation-prompt"
+ 
+ # Deterministic cross-branch case survives agent/process restarts.
+ printf '{"signals":["innovation_stale"],"observed_at":1000}\n' > "$d/state/branches/incident.json"
+-printf '1000\tinnovation_stale\n' > "$d/state/branches/observations.tsv"
++printf '1000\tinnovation_stale\tfixture-incident\n' > "$d/state/branches/observations.tsv"
+ export VICHE_CASE_NOW=1000
+ python3 "$repo/government/institutional-cases.py" reconcile > "$d/cases"
+ jq -e '.open_cases | length==2' "$d/cases" >/dev/null
+ jq -e '.state=="open" and .owner=="executive"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ jq -e '.state=="open" and .owner=="executive" and .first_seen==1000' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ rm "$d/state/branches/incident.json"
+-printf '1100\tclear\n' >> "$d/state/branches/observations.tsv"
++printf '1100\tclear\tleg=1100,exe=1100,out=1100\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1100 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==1 and .last_clear_observation==1100' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ VICHE_CASE_NOW=1150 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+-printf '1175\texecutive_unhealthy\n' >> "$d/state/branches/observations.tsv"
++# Re-probing the SAME producer generations is a check, not a new observation.
++printf '1160\tclear\tleg=1100,exe=1100,out=1100\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1160 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++printf '1175\texecutive_unhealthy\tleg=1175,exe=1175,out=1175\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1175 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+-printf '1200\tclear\n' >> "$d/state/branches/observations.tsv"
++# An arbitrary evidence token is not a durable generation and cannot close.
++printf '1180\tclear\tevidence-a\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1180 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
++printf '1200\tclear\tleg=1200,exe=1200,out=1200\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1200 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+-printf '1250\tclear\n' >> "$d/state/branches/observations.tsv"
++printf '1250\tclear\tleg=1250,exe=1250,out=1250\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1250 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="verified_closed" and .clear_observations==2' "$d/state/institutional-cases/innovation_stale.json" >/dev/null
+ jq -e '.state=="open"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+@@ -85,14 +93,29 @@ jq -e '.state=="open"' "$d/state/institutional-cases/continuity_unverified_innov
+ printf '{"previous_agent":"old-agent","successor_agent":"new-agent","verified_by":"judiciary","verification_scope":"external_effect_reconciled","evidence_ref":"fixture:independent-reviewed-effects"}\n' > "$d/state/continuity/verified-innovation-centre.json"
+ VICHE_CASE_NOW=1300 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+-printf '1350\tclear\n' >> "$d/state/branches/observations.tsv"
++printf '1350\tclear\tleg=1350,exe=1350,out=1350\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1350 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ VICHE_CASE_NOW=1400 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="open" and .clear_observations==1' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+-printf '1450\tclear\n' >> "$d/state/branches/observations.tsv"
++printf '1450\tclear\tleg=1450,exe=1450,out=1450\n' >> "$d/state/branches/observations.tsv"
+ VICHE_CASE_NOW=1450 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
+ jq -e '.state=="verified_closed"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++# Closure of a continuity case must cite THAT case'"'"'s independently verified
++# reconciliation evidence, not merely generic health recovery.
++jq -e '.closure_evidence.verified_by=="judiciary" and .closure_evidence.previous_agent=="old-agent" and .closure_evidence.evidence_ref=="fixture:independent-reviewed-effects"' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
++# Withdrawing the case-specific receipt must block closure on a fresh case:
++# generic healthy probes are not sufficient evidence for a continuity
++# obligation, so the signal must reappear and the case must stay open.
++rm "$d/state/institutional-cases/continuity_unverified_innovation-centre.json"
++printf '{"signals":["continuity_unverified_innovation-centre"],"observed_at":1500}\n' > "$d/state/branches/incident.json"
++VICHE_CASE_NOW=1500 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++rm "$d/state/branches/incident.json" "$d/state/continuity/verified-innovation-centre.json"
++printf '1550\tclear\tleg=1550,exe=1550,out=1550\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1550 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++printf '1600\tclear\tleg=1600,exe=1600,out=1600\n' >> "$d/state/branches/observations.tsv"
++VICHE_CASE_NOW=1600 python3 "$repo/government/institutional-cases.py" reconcile >/dev/null
++jq -e '.state=="open" and .clear_observations==0' "$d/state/institutional-cases/continuity_unverified_innovation-centre.json" >/dev/null
+ 
+ # After a real enactment, Executive unit runs on preserved worktree, not a
+ # parliamentary summons. Mock only the branch-bootstrap and deployment.

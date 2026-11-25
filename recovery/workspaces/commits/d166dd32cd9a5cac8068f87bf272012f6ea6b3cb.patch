@@ -1,0 +1,148 @@
+commit d166dd32cd9a5cac8068f87bf272012f6ea6b3cb
+Author:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+AuthorDate: Sat Nov 21 17:12:59 2026 +0000
+Commit:     ChatGPT (Founder-instructed operator) <operator@viche.local>
+CommitDate: Sat Nov 21 17:12:59 2026 +0000
+
+    Act22/32: expose due-resolution coverage and truthful calibration gate
+
+diff --git a/government/predict-scorer.py b/government/predict-scorer.py
+index 73e0c49f..efdb1b3b 100644
+--- a/government/predict-scorer.py
++++ b/government/predict-scorer.py
+@@ -283,8 +283,14 @@ def main() -> int:
+     for au, d in sorted(per_author.items()):
+         metrics = score_group(d["scored"])
+         covered = len(d["scored"]) + d["unresolved"]
++        author_due = {e.get("id") for e in due if e.get("author") == au}
++        author_done = author_due & (scored_ids | unresolved_ids)
+         metrics.update({"author": au, "registered": d["registered"],
+                         "unresolved": d["unresolved"],
++                        "due": len(author_due),
++                        "due_resolved": len(author_done),
++                        "due_resolution_coverage": round(len(author_done)/len(author_due), 4)
++                        if author_due else None,
+                         "due_unresolved": d["due_unresolved"],
+                         "coverage": round(covered / d["registered"], 4)
+                         if d["registered"] else None,
+@@ -294,9 +300,16 @@ def main() -> int:
+                         if d["scored"] else None})
+         authors.append(metrics)
+ 
+-    # Resolution coverage counts true/false and explicitly unresolved
+-    # resolutions; due-but-not-yet-resolved entries remain uncovered.
++    # Legacy coverage counts all registrations, including those whose dates
++    # are in the future. Do not use this denominator for Act 32 §I, which
++    # specifically requires *DUE*-resolution coverage (future forecasts must
++    # not suppress the observed resolution rate).
+     coverage = (len(scored) + len(unresolved)) / len(registered) if registered else None
++    due_ids = {e.get("id") for e in due}
++    due_done_ids = due_ids & (scored_ids | unresolved_ids)
++    due_scored_ids = due_ids & scored_ids
++    due_coverage = len(due_done_ids) / len(due_ids) if due_ids else None
++    due_scored_coverage = len(due_scored_ids) / len(due_ids) if due_ids else None
+ 
+     # Act 20 §7 checkpoints live in the ledger as carried-forward statutory
+     # records but are deliberately excluded from Brier scoring.
+@@ -356,6 +369,8 @@ def main() -> int:
+             "registered": len(registered), "rejected": len(rejected),
+             "resolved_scored": n_scored, "unresolved": len(unresolved),
+             "due": len(due), "due_unresolved": len(due_unresolved),
++            "due_resolved": len(due_done_ids),
++            "due_scored": len(due_scored_ids),
+             "review_checkpoint": {
+                 "total": len(definitions),
+                 "registered": sum(1 for r in checkpoints if r.get("registered")),
+@@ -369,6 +384,17 @@ def main() -> int:
+             },
+         },
+         "coverage": (round(coverage, 4) if coverage is not None else None),
++        "due_resolution_coverage": (round(due_coverage, 4)
++                                    if due_coverage is not None else None),
++        "due_scored_coverage": (round(due_scored_coverage, 4)
++                               if due_scored_coverage is not None else None),
++        "act32_calibration_minimum_gate": {
++            "eligible": bool(due_coverage is not None and due_coverage >= 0.8
++                             and len(due_scored_ids) >= 2 and not defects),
++            "required_due_resolution_coverage": 0.8,
++            "required_scored_true_false": 2,
++            "note": "Passing numerical thresholds is not evidence of forecast independence or stable calibration."
++        },
+         "brier": {"aggregate": (round(brier_agg, 6) if brier_agg is not None else None),
+                   "per_prediction": [{"id": e.get("id"), "probability": p, "outcome": o,
+                                       "brier": round((p - o) ** 2, 6)}
+diff --git a/tests/predict-due-coverage-smoke.sh b/tests/predict-due-coverage-smoke.sh
+new file mode 100644
+index 00000000..19c5ec2a
+--- /dev/null
++++ b/tests/predict-due-coverage-smoke.sh
+@@ -0,0 +1,69 @@
++#!/bin/sh
++set -eu
++cd "$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)"
++repo=$(pwd -P)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++mkdir -p "$tmp/records/predictions" "$tmp/government"
++cp government/predict-ledger.py government/predict-scorer.py "$tmp/government/"
++export VICHE_TOWN_ROOT="$tmp" VICHE_PREDICT_LEDGER="$tmp/records/predictions/ledger.json"
++export VICHE_PREDICT_CALIBRATION="$tmp/records/predictions/calibration.json"
++VICHE_PREDICT_NOW=90 python3 "$tmp/government/predict-ledger.py" register \
++ --bill due --proposition 'An independently visible event' \
++ --probability 0.6 --resolution-date 1970-01-02 --evidence audit:event \
++ --author seat1 >/dev/null
++VICHE_PREDICT_NOW=90 python3 "$tmp/government/predict-ledger.py" register \
++ --bill later --proposition 'A future observation' \
++ --probability 0.4 --resolution-date 1970-01-04 --evidence audit:future \
++ --author seat2 >/dev/null
++VICHE_PREDICT_NOW=90000 python3 "$tmp/government/predict-ledger.py" resolve \
++ --id due-registration-1 --outcome unresolved --resolver audit \
++ --evidence audit:event#unavailable --reason 'Evidence genuinely unavailable' >/dev/null
++python3 "$tmp/government/predict-scorer.py" --now 90001 >/dev/null
++jq -e '.counts.due==1 and .counts.due_resolved==1 and
++       .counts.due_scored==0 and .coverage==0.5 and
++       .due_resolution_coverage==1.0 and .due_scored_coverage==0.0 and
++       .act32_calibration_minimum_gate.eligible==false and
++       (.per_author[]|select(.author=="seat1")|.due_resolution_coverage)==1.0' \
++ "$VICHE_PREDICT_CALIBRATION" >/dev/null
++# A second due case provides a true/false score but there is still only
++# one scored event, so a calibration claim is impossible.
++VICHE_PREDICT_NOW=90 python3 "$tmp/government/predict-ledger.py" register \
++ --bill due2 --proposition 'A second independently visible event' \
++ --probability 0.3 --resolution-date 1970-01-02 --evidence audit:event2 \
++ --author seat2 >/dev/null
++VICHE_PREDICT_NOW=90000 python3 "$tmp/government/predict-ledger.py" resolve \
++ --id due2-registration-1 --outcome false --resolver audit \
++ --evidence audit:event2#verified --evidence-at 90000 >/dev/null
++python3 "$tmp/government/predict-scorer.py" --now 90001 >/dev/null
++jq -e '.counts.due==2 and .counts.due_resolved==2 and
++       .counts.due_scored==1 and .due_resolution_coverage==1.0 and
++       .act32_calibration_minimum_gate.eligible==false' \
++ "$VICHE_PREDICT_CALIBRATION" >/dev/null
++# A third scored outcome allows the statutory minimum only if due coverage
++# is >= 0.8 and the integrity ledger is clean. It remains descriptive only.
++VICHE_PREDICT_NOW=90 python3 "$tmp/government/predict-ledger.py" register \
++ --bill due3 --proposition 'A third independently visible event' \
++ --probability 0.8 --resolution-date 1970-01-02 --evidence audit:event3 \
++ --author seat3 >/dev/null
++VICHE_PREDICT_NOW=90000 python3 "$tmp/government/predict-ledger.py" resolve \
++ --id due3-registration-1 --outcome true --resolver audit \
++ --evidence audit:event3#verified --evidence-at 90000 >/dev/null
++python3 "$tmp/government/predict-scorer.py" --now 90001 >/dev/null
++jq -e '.counts.due==3 and .counts.due_resolved==3 and
++       .counts.due_scored==2 and .due_resolution_coverage==1.0 and
++       .act32_calibration_minimum_gate.eligible==true' \
++ "$VICHE_PREDICT_CALIBRATION" >/dev/null
++# Any tampering must not generate a permitted Act32 calibration claim.
++python3 - "$VICHE_PREDICT_LEDGER" <<'PY'
++import json,sys
++p=sys.argv[1]
++d=json.load(open(p))
++d['entries'][0]['probability']=0.1
++open(p,'w').write(json.dumps(d))
++PY
++python3 "$tmp/government/predict-scorer.py" --now 90001 >/dev/null
++jq -e '.integrity.clean==false and
++       .act32_calibration_minimum_gate.eligible==false' \
++ "$VICHE_PREDICT_CALIBRATION" >/dev/null
++echo 'Act32 due-resolution coverage and two-scored integrity threshold: passed'

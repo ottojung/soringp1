@@ -1,0 +1,144 @@
+commit de466d7080e35bd53d87af4744805f21eb3f8cb1
+Author:     recovery-steward <recovery-steward@viche>
+AuthorDate: Tue Nov 24 08:46:57 2026 +0000
+Commit:     recovery-steward <recovery-steward@viche>
+CommitDate: Tue Nov 24 09:16:10 2026 +0000
+
+    Fix Statistics DRAFT verifier for inert source preregistration
+
+diff --git a/government/statistics-trial-design-verifier.py b/government/statistics-trial-design-verifier.py
+index 2231797c..9cad8b04 100644
+--- a/government/statistics-trial-design-verifier.py
++++ b/government/statistics-trial-design-verifier.py
+@@ -178,9 +178,23 @@ class Verifier:
+                 if not isinstance(row, dict) or row.get("enabled") is not False:
+                     problems.append("office %s is enabled (DRAFT must enable none)" % name)
+             stats = offices.get("statistics") or {}
+-            for key in ("trial_mode", "deterministic_sources", "phase_gate_record"):
++            for key in ("trial_mode", "phase_gate_record"):
+                 if key in stats:
+                     problems.append("draft wrote activation statistics.%s" % key)
++            # A DRAFT may carry informational source preregistration, but it
++            # must have the exact six-field shape and valid hashes. These hashes
++            # are not authority and may be historical; verify-landed checks the
++            # authoritative current source dict. enabled=false is checked above.
++            if "deterministic_sources" in stats:
++                pinned = stats["deterministic_sources"]
++                required = {"runner", "report", "post", "post_guard",
++                            "budget_tool", "budget_config"}
++                if not isinstance(pinned, dict) or set(pinned) != required:
++                    problems.append("draft deterministic_sources must pin exactly the reviewed source set")
++                else:
++                    for key, digest in pinned.items():
++                        if not isinstance(digest, str) or not SHA_RE.fullmatch(digest):
++                            problems.append("draft deterministic source %s has no valid sha256" % key)
+         conf = load(self.town / "government/knowledge-budget.conf")
+         cfg_offices = conf.get("offices") if isinstance(conf, dict) else None
+         if not isinstance(cfg_offices, dict):
+diff --git a/tests/executive-cycle-smoke.sh b/tests/executive-cycle-smoke.sh
+index 96cc74e6..8a243ffa 100755
+--- a/tests/executive-cycle-smoke.sh
++++ b/tests/executive-cycle-smoke.sh
+@@ -10,10 +10,7 @@ printf 'Founder charter fixture\n' > "$scratch/charter"
+ printf '%s\n' c1a00002 > "$scratch/town/records/SUMMONED.txt"
+ cp "$repo/government/eligible-work.py" "$scratch/town/government/eligible-work.py"
+ mkdir -p "$scratch/town/missions/soringp1"
+-cp "$repo/missions/soringp1/frontier-status.py" "$scratch/town/missions/soringp1/frontier-status.py"
+ cp "$repo/missions/soringp1/mandate.md" "$scratch/town/missions/soringp1/mandate.md"
+-cp "$repo/missions/soringp1/status.manual.sh" "$scratch/town/missions/soringp1/status.sh"
+-printf '{"fronts":[{"id":"completed-front","status":"investigated"}],"curator":{"exit_state":"clearexit","added":0,"last_finished_at":1000}}\n' > "$scratch/frontier.json"
+ cp "$repo/government/handoff-queue.sh" "$scratch/town/government/handoff-queue.sh"
+ cp "$repo/government/predict-scorer.py" "$scratch/town/government/predict-scorer.py"
+ cp "$repo/government/AGENT-REPORTING-POLICY.md" "$scratch/town/government/AGENT-REPORTING-POLICY.md"
+@@ -39,8 +36,8 @@ case "$1 $2" in
+     fi ;;
+   "agent run")
+     case "$*" in *"Founder charter fixture"*"301"*) : ;; *) exit 8 ;; esac
+-    case "$*" in *"SoringP1"*"research-plan.md"*) : ;; *) exit 8 ;; esac
+-    case "$*" in *"depleted_after_empty_curation"*) : ;; *) exit 8 ;; esac
++    case "$*" in *"No work is authorized on SoringP1"*) : ;; *) exit 8 ;; esac
++    case "$*" in *"research-plan.md"*|*"depleted_after_empty_curation"*) exit 8 ;; esac
+     printf 'accepted\n' >> "$OUTPUT" ;;
+   *) echo "Unexpected: $*" >&2; exit 10 ;;
+ esac
+@@ -55,8 +52,7 @@ VICHE_STATE_ROOT=$scratch/state
+ VICHE_CONSTITUTION=$scratch/charter
+ MODE=idle MODEL=test-provider/example
+ OUTPUT=$scratch/dispatched
+-SORING_FRONTIER_STATE=$scratch/frontier.json
+-export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION MODE MODEL OUTPUT SORING_FRONTIER_STATE
++export PATH VICHE_TOWN_ROOT VICHE_SEATS_ROOT VICHE_STATE_ROOT VICHE_CONSTITUTION MODE MODEL OUTPUT
+ MOCK_STATE=$scratch
+ MOCK_STATE=$MOCK_STATE
+ export MOCK_STATE
+diff --git a/tests/pnp-leaderboard-smoke.sh b/tests/pnp-leaderboard-smoke.sh
+index 5be06f74..79ba56c9 100755
+--- a/tests/pnp-leaderboard-smoke.sh
++++ b/tests/pnp-leaderboard-smoke.sh
+@@ -68,17 +68,25 @@ with tempfile.TemporaryDirectory() as tmp:
+                 "agents":[{"id":str(i),"title":"Viche P vs NP: proof",
+                            "state":"running"} for i in range(n)],
+                 "unreadable":[]}),stderr="")
+-    with patch.object(status.subprocess, "run", return_value=roster(3)):
+-        full = status.snapshot()
+-    with patch.object(status.subprocess, "run", return_value=roster(0)):
+-        empty = status.snapshot()
++    with patch.object(status, "STATE", Path(tmp)), \
++         patch.object(status.frontier, "load", return_value={
++             "complete": True, "ordinary": 0, "offerable": 0, "gaps": {}}), \
++         patch.object(status.focus, "current", return_value=None), \
++         patch.object(status.support, "targets", return_value=[]), \
++         patch.object(status.frontier.build_control, "busy", return_value=False), \
++         patch.object(status.frontier.build_control, "legacy_compilers", return_value=[]), \
++         patch.object(status.frontier.build_control, "headroom", return_value=0):
++        with patch.object(status.subprocess, "run", return_value=roster(3)):
++            full = status.snapshot()
++        with patch.object(status.subprocess, "run", return_value=roster(0)):
++            empty = status.snapshot()
++        with patch.object(status.subprocess, "run",
++                          side_effect=FileNotFoundError("antonina")):
++            unknown = status.snapshot()
+     assert full["workers"]["count"] == 3
+     assert empty["workers"]["count"] == 0
+     assert full["dispatch_signal"] != empty["dispatch_signal"]
+-    assert "restore multiple" in empty["action"]
+-    with patch.object(status.subprocess, "run",
+-                      side_effect=FileNotFoundError("antonina")):
+-        unknown = status.snapshot()
++    assert empty["action"].startswith("Executive")
+     assert unknown["workers"]["count"] is None
+     assert unknown["workers"]["coverage"] == "unavailable"
+     assert unknown["dispatch_signal"] != empty["dispatch_signal"]
+diff --git a/tests/statistics-trial-design-smoke.sh b/tests/statistics-trial-design-smoke.sh
+index ce42af9f..19f1e8ea 100644
+--- a/tests/statistics-trial-design-smoke.sh
++++ b/tests/statistics-trial-design-smoke.sh
+@@ -60,6 +60,28 @@ fail=0
+ expect_pass 'coherent DRAFT' run verify-draft --boot-id "$boot"
+ expect_pass 'all pinned bytes landed' run verify-landed
+ expect_pass 'no mechanical blockers' run no-go --boot-id "$boot"
++
++# Informational deterministic-source preregistration is allowed during DRAFT
++# only with the exact six-field shape and valid hashes. Current source bytes are
++# checked separately by verify-landed against the authoritative source dict.
++cp "$town/records/knowledge/activation.json" "$d/activation.good"
++python3 - "$town" <<'PY'
++import json,sys,os
++t=sys.argv[1]; p=os.path.join(t,"records/knowledge/activation.json")
++d=json.load(open(p)); d["offices"]["statistics"]["deterministic_sources"]["runner"]="not-a-sha256"
++json.dump(d,open(p,"w"))
++PY
++expect_deny 'draft deterministic source malformed hash' run verify-draft --boot-id "$boot"
++cp "$d/activation.good" "$town/records/knowledge/activation.json"
++python3 - "$town" <<'PY'
++import json,sys,os
++t=sys.argv[1]; p=os.path.join(t,"records/knowledge/activation.json")
++d=json.load(open(p)); del d["offices"]["statistics"]["deterministic_sources"]["post"]
++json.dump(d,open(p,"w"))
++PY
++expect_deny 'draft deterministic source set incomplete' run verify-draft --boot-id "$boot"
++cp "$d/activation.good" "$town/records/knowledge/activation.json"
++
+ out=$(run no-go --boot-id "$boot")
+ printf '%s\n' "$out" | grep -q 'external_gates_required' || { echo 'FAIL: external gates not reported' >&2; fail=1; }
+ printf '%s\n' "$out" | grep -q 'must NOT self-verify' || { echo 'FAIL: judiciary self-verify warning missing' >&2; fail=1; }
